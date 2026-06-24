@@ -213,6 +213,20 @@ export interface DashboardSummaryResponse {
   sales_summary: Record<string, number>
   data_completeness?: 'partial' | 'full'
   message?: string
+  version?: string
+  stale?: boolean
+  refresh_queued?: boolean
+}
+
+export interface IntelligenceVersionResponse {
+  ok: boolean
+  version: string
+  start_date?: string
+  end_date?: string
+  basis?: string
+  hot_ready?: boolean
+  deep_ready?: boolean
+  message?: string
 }
 
 export interface PoReadinessResponse {
@@ -1626,6 +1640,22 @@ export async function getIntelligenceReadiness(opts?: {
 }): Promise<IntelligenceReadinessResponse> {
   const { data } = await api.get<IntelligenceReadinessResponse>('/data/intelligence/readiness', {
     timeout: opts?.timeout ?? 90_000,
+  })
+  return data
+}
+
+export async function getIntelligenceVersion(opts: {
+  startDate: string
+  endDate: string
+  basis?: 'gross' | 'net'
+}): Promise<IntelligenceVersionResponse> {
+  const { data } = await api.get<IntelligenceVersionResponse>('/data/intelligence/version', {
+    params: {
+      start_date: opts.startDate,
+      end_date: opts.endDate,
+      basis: opts.basis ?? 'gross',
+    },
+    timeout: 15_000,
   })
   return data
 }

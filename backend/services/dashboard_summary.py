@@ -1,4 +1,4 @@
-"""Compact dashboard aggregates from Tier-3 / PostgreSQL (no session frame copy)."""
+"""Compact dashboard aggregates — prebuilt artifacts first, Tier-3 fallback only."""
 from __future__ import annotations
 
 import time
@@ -32,12 +32,12 @@ def _compact_platforms(platform_summary: list[dict]) -> dict[str, dict[str, Any]
 
 def _summary_cache_key(s: str, e: str, limit: int) -> tuple:
     try:
-        from ..services.daily_store import get_tier3_sync_token
+        from .intelligence_artifacts import intelligence_version_for_window
 
-        tok = tuple(sorted((get_tier3_sync_token() or {}).items()))
+        ver = intelligence_version_for_window(s, e)
     except Exception:
-        tok = ()
-    return (s, e, int(limit), tok)
+        ver = ""
+    return (s, e, int(limit), ver)
 
 
 def _summary_from_pg(start_date: str, end_date: str, limit: int) -> dict[str, Any] | None:
@@ -106,6 +106,16 @@ def _summary_from_pg(start_date: str, end_date: str, limit: int) -> dict[str, An
         return None
 
 
+def _attach_version_meta(payload: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    out["version"] = str(meta.get("current_version") or meta.get("version") or "")
+    out["stale"] = bool(meta.get("stale"))
+    out["refresh_queued"] = bool(meta.get("stale"))
+    if meta.get("source"):
+        out["source"] = f"artifact_{meta['source']}"
+    return out
+
+
 def build_dashboard_summary(
     sess,
     *,
@@ -114,8 +124,7 @@ def build_dashboard_summary(
     limit: int = 10,
 ) -> dict[str, Any]:
     """
-    Lightweight dashboard aggregates — Tier-3 / PG first, never requires session platform copies.
-    Uses headline-only Tier-3 path (totals + daily chart points, no monthly/state rollup).
+    Hot path: prebuilt artifact → in-process cache → Tier-3 fallback (last resort).
     """
     s = str(start_date or "")[:10]
     e = str(end_date or "")[:10]
@@ -128,7 +137,25 @@ def build_dashboard_summary(
             return {k: v for k, v in hit.items() if k != "_ts"}
 
         try:
+            from .intelligence_artifacts import (
+                load_hot_summary_for_request,
+                save_artifact,
+                schedule_artifact_build,
+                KIND_HOT,
+            )
+
+            artifact, meta = load_hot_summary_for_request(sess, s, e, limit)
+            if artifact:
+                payload = _attach_version_meta(artifact, meta)
+                _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
+                return payload
+        except Exception:
+            pass
+
+        # Tier-3 fallback only when no artifact exists.
+        try:
             from ..routers.data import _build_intelligence_bundle_payload_from_tier3
+            from .intelligence_artifacts import save_artifact, schedule_artifact_build, KIND_HOT
 
             tier3 = _build_intelligence_bundle_payload_from_tier3(
                 sess,
@@ -141,13 +168,20 @@ def build_dashboard_summary(
             )
             if tier3 and tier3.get("platform_summary"):
                 payload = {
-                    "source": "tier3_sqlite",
+                    "source": "tier3_sqlite_fallback",
                     "platforms": _compact_platforms(tier3.get("platform_summary") or []),
                     "platform_summary": tier3.get("platform_summary") or [],
                     "top_skus": tier3.get("top_skus") or [],
                     "sales_summary": tier3.get("sales_summary") or {},
                     "data_completeness": "partial",
                 }
+                try:
+                    from .intelligence_artifacts import intelligence_version_for_window
+
+                    ver = save_artifact(s, e, KIND_HOT, payload)
+                    payload["version"] = ver
+                except Exception:
+                    schedule_artifact_build(s, e, KIND_HOT, limit=limit)
                 _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
                 return payload
         except Exception:

@@ -188,6 +188,9 @@ class DashboardSummaryResponse(BaseModel):
     sales_summary: dict = Field(default_factory=dict)
     data_completeness: str = "partial"
     message: str = ""
+    version: str = ""
+    stale: bool = False
+    refresh_queued: bool = False
 
 
 class PoReadinessResponse(BaseModel):

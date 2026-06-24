@@ -136,11 +136,18 @@ def _load_intelligence_bundle_cache_from_disk() -> None:
 
 
 def _invalidate_intelligence_bundle_cache() -> None:
-    """Bump generation so next lookup misses; keep disk entries for fast recovery.
-    Old entries expire naturally via TTL. Precompute rebuilds fresh entries async."""
+    """Clear RAM bundle cache and queue proactive artifact rebuild for standard windows."""
     global _INTELLIGENCE_BUNDLE_CACHE_GEN
     _GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
     schedule_intelligence_bundle_precompute()
+    try:
+        from ..services.intelligence_artifacts import prebuild_standard_artifacts, schedule_artifact_build, standard_intelligence_windows, KIND_HOT, KIND_DEEP
+
+        for start, end in standard_intelligence_windows():
+            schedule_artifact_build(start, end, KIND_HOT, limit=10)
+            schedule_artifact_build(start, end, KIND_DEEP, limit=10, include_extras=True)
+    except Exception:
+        pass
 
 
 _intel_precompute_lock = threading.Lock()
@@ -188,6 +195,12 @@ def _precompute_intelligence_bundles_worker() -> None:
             precompute_tier3_gapfill_intelligence_bundles()
         else:
             precompute_default_intelligence_bundles()
+        try:
+            from ..services.intelligence_artifacts import prebuild_standard_artifacts
+
+            prebuild_standard_artifacts()
+        except Exception:
+            _log.exception("intelligence artifact prebuild failed")
     except Exception:
         _log.exception("intelligence bundle precompute failed")
     finally:
@@ -4054,6 +4067,33 @@ def intelligence_readiness(request: Request):
     return IntelligenceReadinessResponse(**build_intelligence_readiness(sess, cov, session_id=sid))
 
 
+@router.get("/intelligence/version")
+def intelligence_version(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    basis: Optional[str] = None,
+):
+    """Cheap shared cache version for browser ↔ server coordination."""
+    from ..services.intelligence_artifacts import intelligence_version_for_window, load_artifact, KIND_HOT, KIND_DEEP
+
+    s = str(start_date or end_date or "")[:10]
+    e = str(end_date or start_date or "")[:10]
+    if len(s) != 10 or len(e) != 10:
+        return {"ok": False, "version": "", "message": "start_date and end_date required"}
+    ver = intelligence_version_for_window(s, e, basis=basis or "gross")
+    hot, _ = load_artifact(s, e, KIND_HOT, basis=basis or "gross", allow_stale=False)
+    deep, _ = load_artifact(s, e, KIND_DEEP, basis=basis or "gross", allow_stale=False)
+    return {
+        "ok": True,
+        "version": ver,
+        "start_date": s,
+        "end_date": e,
+        "basis": basis or "gross",
+        "hot_ready": hot is not None,
+        "deep_ready": deep is not None,
+    }
+
+
 @router.get("/dashboard/summary", response_model=DashboardSummaryResponse)
 async def dashboard_summary(
     request: Request,
@@ -4337,6 +4377,29 @@ def _intelligence_bundle_sync(
     if bundle_cache is None:
         bundle_cache = {}
         sess._intelligence_bundle_cache = bundle_cache
+
+    # Prebuilt artifact (hot/deep) — no SQLite on request path when warm.
+    if has_dates and len(s_win) == 10 and len(e_win) == 10:
+        try:
+            from ..services.intelligence_artifacts import load_deep_bundle_for_request
+
+            artifact, ameta = load_deep_bundle_for_request(
+                sess,
+                s_win,
+                e_win,
+                limit=int(limit),
+                include_extras=bool(include_extras),
+            )
+            if artifact is not None:
+                out = dict(artifact)
+                out["version"] = str(ameta.get("current_version") or ameta.get("version") or "")
+                out["stale"] = bool(ameta.get("stale"))
+                if ameta.get("stale"):
+                    out["message"] = "Showing prebuilt totals — refreshing in background…"
+                _bundle_cache_store(cache_key, bundle_cache, out)
+                return out
+        except Exception:
+            pass
 
     # Precomputed global/disk bundle — return before warm-cache bootstrap (prod hard refresh).
     cached_early = _bundle_cache_lookup(

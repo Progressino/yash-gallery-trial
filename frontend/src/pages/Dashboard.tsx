@@ -15,6 +15,7 @@ import api, {
   getDashboardSummary,
   getDataParity,
   getIntelligenceReadiness,
+  getIntelligenceVersion,
   invalidateDataQueries,
   type DashboardSummaryResponse,
 } from '../api/client'
@@ -26,6 +27,7 @@ import {
   clearIntelligenceCacheForRange,
   readIntelligenceCache,
   readIntelligenceCacheStale,
+  summaryToCachedBundle,
   writeIntelligenceCache,
   type DsrBrandMonthlyRow,
   type IntelligenceBundle,
@@ -1207,8 +1209,23 @@ export default function Dashboard() {
     return 180_000
   }, [bundleSpanDays])
 
+  const { data: intelligenceVersion } = useQuery({
+    queryKey: ['intelligence-version', dateStart, dateEnd, salesBasis],
+    queryFn: () =>
+      getIntelligenceVersion({
+        startDate: dateStart,
+        endDate: dateEnd,
+        basis: salesBasis,
+      }),
+    enabled: Boolean(dateStart && dateEnd),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+  })
+
+  const serverCacheVersion = intelligenceVersion?.version
+
   const { data: rangeSummary, isFetching: fetchingSummary, isFetched: summaryFetched, isError: summaryError } = useQuery({
-    queryKey: ['dashboard-summary', dateStart, dateEnd, topSkuLimit, salesBasis],
+    queryKey: ['dashboard-summary', dateStart, dateEnd, topSkuLimit, salesBasis, serverCacheVersion],
     queryFn: () =>
       getDashboardSummary({
         startDate: dateStart,
@@ -1221,6 +1238,22 @@ export default function Dashboard() {
     retry: 1,
     refetchOnWindowFocus: false,
   })
+
+  useEffect(() => {
+    if (!rangeSummary || !dateStart || !dateEnd) return
+    const cached = summaryToCachedBundle(rangeSummary)
+    if (cached && bundleHasDisplayData(cached)) {
+      writeIntelligenceCache(dateStart, dateEnd, salesBasis, cached, rangeSummary.version)
+    }
+  }, [rangeSummary, dateStart, dateEnd, salesBasis])
+
+  useEffect(() => {
+    if (!serverCacheVersion || !dateStart || !dateEnd) return
+    const hint = readIntelligenceCacheStale(dateStart, dateEnd, salesBasis, serverCacheVersion)
+    if (hint?.versionMismatch) {
+      clearIntelligenceCacheForRange(dateStart, dateEnd, salesBasis)
+    }
+  }, [serverCacheVersion, dateStart, dateEnd, salesBasis])
 
   const summaryBundle = useMemo(
     () => (rangeSummary ? summaryToBundle(rangeSummary) : undefined),
@@ -1309,21 +1342,21 @@ export default function Dashboard() {
   }, [parityReport?.ok, parityReport?.tier3_file_count, parityReport?.tier3_sync_mismatch])
 
   const cachedBundleHint = useMemo(() => {
-    const fresh = readIntelligenceCache(dateStart, dateEnd, salesBasis)
-    if (fresh && bundleHasDisplayData(fresh)) return { bundle: fresh, expired: false }
-    const stale = readIntelligenceCacheStale(dateStart, dateEnd, salesBasis)
-    if (stale && bundleHasDisplayData(stale.bundle)) return stale
+    const fresh = readIntelligenceCache(dateStart, dateEnd, salesBasis, serverCacheVersion)
+    if (fresh && bundleHasDisplayData(fresh)) return { bundle: fresh, expired: false, versionMismatch: false }
+    const stale = readIntelligenceCacheStale(dateStart, dateEnd, salesBasis, serverCacheVersion)
+    if (stale && bundleHasDisplayData(stale.bundle) && !stale.versionMismatch) return stale
     return null
-  }, [dateStart, dateEnd, salesBasis, parityReport?.tier3_file_count])
+  }, [dateStart, dateEnd, salesBasis, serverCacheVersion, parityReport?.tier3_file_count])
 
   const cacheExpired = cachedBundleHint?.expired === true
 
   useEffect(() => {
-    const c = readIntelligenceCache(dateStart, dateEnd, salesBasis)
+    const c = readIntelligenceCache(dateStart, dateEnd, salesBasis, serverCacheVersion)
     if (c && !bundleHasDisplayData(c)) {
       clearIntelligenceCacheForRange(dateStart, dateEnd, salesBasis)
     }
-  }, [dateStart, dateEnd, salesBasis])
+  }, [dateStart, dateEnd, salesBasis, serverCacheVersion])
 
   const bundleCoreParams = useMemo(() => {
     const p = new URLSearchParams({

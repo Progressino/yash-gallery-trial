@@ -1,6 +1,6 @@
 /**
- * Browser cache for Intelligence dashboard aggregates (summary + platforms + top SKUs).
- * Full sales history stays on the server; this stores only the small JSON the UI needs.
+ * Versioned browser cache for Intelligence dashboard aggregates.
+ * Coordinates with server ``/data/intelligence/version`` — instant render when versions match.
  */
 
 export interface DsrBrandMonthlyRow {
@@ -71,6 +71,8 @@ export type IntelligenceBundle = {
   top_skus: TopSku[]
   anomalies: AnomalyItem[]
   dsr_brand_monthly: DsrBrandMonthlyResponse
+  version?: string
+  stale?: boolean
 }
 
 export type CachedIntelligenceBundle = IntelligenceBundle & {
@@ -78,10 +80,10 @@ export type CachedIntelligenceBundle = IntelligenceBundle & {
   start_date: string
   end_date: string
   basis: 'gross' | 'net'
+  version: string
 }
 
-// v4: bust stale pre-tier3 bundles (e.g. 56,145 gross from warm-cache-only sessions).
-const STORAGE_PREFIX = 'erp_intelligence_bundle_v4'
+const STORAGE_PREFIX = 'erp_intelligence_bundle_v5'
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 
 function ttlMs(): number {
@@ -101,10 +103,17 @@ function storageKey(start: string, end: string, basis: 'gross' | 'net'): string 
   return `${STORAGE_PREFIX}:${start || '_'}:${end || '_'}:${basis}`
 }
 
+function versionMatches(cached: CachedIntelligenceBundle, serverVersion: string | undefined): boolean {
+  if (!serverVersion) return true
+  if (!cached.version) return false
+  return cached.version === serverVersion
+}
+
 export function readIntelligenceCache(
   start: string,
   end: string,
   basis: 'gross' | 'net',
+  serverVersion?: string,
 ): CachedIntelligenceBundle | null {
   try {
     const raw = localStorage.getItem(storageKey(start, end, basis))
@@ -112,25 +121,31 @@ export function readIntelligenceCache(
     const parsed = JSON.parse(raw) as CachedIntelligenceBundle
     if (!parsed?.cached_at || !parsed.platform_summary) return null
     if (Date.now() - parsed.cached_at > ttlMs()) return null
+    if (serverVersion && !versionMatches(parsed, serverVersion)) return null
     return parsed
   } catch {
     return null
   }
 }
 
-/** Stale-while-revalidate: return cached bundle even past TTL for instant first paint. */
+/** Stale-while-revalidate: return cached bundle for instant first paint. */
 export function readIntelligenceCacheStale(
   start: string,
   end: string,
   basis: 'gross' | 'net',
-): { bundle: CachedIntelligenceBundle; expired: boolean } | null {
+  serverVersion?: string,
+): { bundle: CachedIntelligenceBundle; expired: boolean; versionMismatch: boolean } | null {
   try {
     const raw = localStorage.getItem(storageKey(start, end, basis))
     if (!raw) return null
     const parsed = JSON.parse(raw) as CachedIntelligenceBundle
     if (!parsed?.cached_at || !parsed.platform_summary) return null
     const expired = Date.now() - parsed.cached_at > ttlMs()
-    return { bundle: parsed, expired }
+    const versionMismatch = Boolean(serverVersion && parsed.version && parsed.version !== serverVersion)
+    if (versionMismatch && serverVersion) {
+      return { bundle: parsed, expired: true, versionMismatch: true }
+    }
+    return { bundle: parsed, expired, versionMismatch: false }
   } catch {
     return null
   }
@@ -141,6 +156,7 @@ export function writeIntelligenceCache(
   end: string,
   basis: 'gross' | 'net',
   bundle: IntelligenceBundle,
+  version?: string,
 ): void {
   try {
     const payload: CachedIntelligenceBundle = {
@@ -149,6 +165,7 @@ export function writeIntelligenceCache(
       start_date: start,
       end_date: end,
       basis,
+      version: version || bundle.version || '',
     }
     localStorage.setItem(storageKey(start, end, basis), JSON.stringify(payload))
   } catch {
@@ -170,10 +187,17 @@ export function clearIntelligenceCacheForRange(
 
 export function clearIntelligenceCache(): void {
   try {
+    const prefixes = [
+      'erp_intelligence_bundle_v1',
+      'erp_intelligence_bundle_v2',
+      'erp_intelligence_bundle_v3',
+      'erp_intelligence_bundle_v4',
+      STORAGE_PREFIX,
+    ]
     const keys: string[] = []
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i)
-      if (k?.startsWith(STORAGE_PREFIX)) keys.push(k)
+      if (k && prefixes.some(p => k.startsWith(p))) keys.push(k)
     }
     keys.forEach(k => localStorage.removeItem(k))
   } catch {
@@ -199,13 +223,47 @@ export function bundleHasDisplayData(bundle: IntelligenceBundle | null | undefin
   return (bundle.sales_summary?.total_units ?? 0) > 0
 }
 
-/** Drop v1 keys written before the loaded-flag fix. */
+export function summaryToCachedBundle(
+  summary: {
+    platform_summary?: PlatformSummaryItem[]
+    sales_summary?: Partial<SalesSummary>
+    top_skus?: Array<{ sku: string; units?: number }>
+    data_completeness?: string
+    version?: string
+    stale?: boolean
+  },
+): IntelligenceBundle | null {
+  const platforms = summary.platform_summary ?? []
+  const units = Number(summary.sales_summary?.total_units ?? 0)
+  if (units <= 0 && platforms.length === 0) return null
+  return {
+    status: 'ready',
+    data_completeness: summary.data_completeness === 'full' ? 'full' : 'partial',
+    sales_summary: {
+      total_units: units,
+      total_returns: Number(summary.sales_summary?.total_returns ?? 0),
+      net_units: Number(summary.sales_summary?.net_units ?? units),
+      return_rate: Number(summary.sales_summary?.return_rate ?? 0),
+    },
+    platform_summary: platforms,
+    top_skus: (summary.top_skus ?? []).map(t => ({
+      sku: t.sku,
+      units: Number(t.units ?? 0),
+    })),
+    anomalies: [],
+    dsr_brand_monthly: { rows: [], totals: { YG: 0, Akiko: 0, Other: 0, Untagged: 0 }, note: '' },
+    version: summary.version,
+    stale: summary.stale,
+  }
+}
+
 function purgeLegacyIntelligenceCache(): void {
   try {
     const prefixes = [
       'erp_intelligence_bundle_v1',
       'erp_intelligence_bundle_v2',
       'erp_intelligence_bundle_v3',
+      'erp_intelligence_bundle_v4',
     ]
     const keys: string[] = []
     for (let i = 0; i < localStorage.length; i++) {
