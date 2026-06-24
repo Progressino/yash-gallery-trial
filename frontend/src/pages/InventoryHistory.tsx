@@ -64,7 +64,8 @@ export default function InventoryHistory() {
 
   const matrixQ = useQuery({
     queryKey: ['inv-history-matrix', skuFilter, page, HISTORY_WINDOW_DAYS],
-    enabled: mode === 'matrix',
+    enabled: mode === 'matrix' && (summaryQ.isSuccess || summaryQ.isError),
+    retry: 1,
     queryFn: async () =>
       getPoDailyInventoryHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE, {
         days: HISTORY_WINDOW_DAYS,
@@ -215,7 +216,19 @@ export default function InventoryHistory() {
           </div>
 
           {matrixQ.isLoading ? (
-            <p className="p-4 text-sm text-gray-500">Loading matrix…</p>
+            <p className="p-4 text-sm text-gray-500">
+              Loading matrix…
+              {summaryQ.data?.max_date ? (
+                <span className="block text-xs text-gray-400 mt-1">
+                  Summary loaded ({summaryQ.data.skus?.toLocaleString() ?? '—'} SKUs through{' '}
+                  {summaryQ.data.max_date}) — building table…
+                </span>
+              ) : null}
+            </p>
+          ) : matrixQ.isError ? (
+            <p className="p-4 text-sm text-red-700">
+              Matrix load failed — try refreshing. If this persists, ask admin to reload server cache.
+            </p>
           ) : !dates.length ? (
             <p className="p-4 text-sm text-gray-500">No inventory history dates loaded.</p>
           ) : (

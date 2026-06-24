@@ -4062,11 +4062,11 @@ async def dashboard_summary(
     limit: int = 10,
 ):
     """Compact dashboard aggregates from Tier-3 / PostgreSQL (no session platform copies)."""
-    from ..concurrency import run_aux
+    from ..concurrency import run_read_api
     from ..services.dashboard_summary import build_dashboard_summary
 
     sess = _sess(request)
-    payload = await run_aux(
+    payload = await run_read_api(
         build_dashboard_summary,
         sess,
         start_date=start_date,
@@ -4284,7 +4284,7 @@ def sales_summary(
 
 
 @router.get("/intelligence-bundle")
-def intelligence_bundle(
+async def intelligence_bundle(
     request: Request,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -4297,7 +4297,10 @@ def intelligence_bundle(
     One round-trip for the Intelligence dashboard (summary + platforms + top SKUs + anomalies + DSR brands).
     Runs session freshness once instead of five parallel handlers each rebuilding sales.
     """
-    return _intelligence_bundle_sync(
+    from ..concurrency import run_read_api
+
+    return await run_read_api(
+        _intelligence_bundle_sync,
         request,
         start_date,
         end_date,

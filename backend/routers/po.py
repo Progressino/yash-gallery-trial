@@ -20,6 +20,54 @@ router = APIRouter()
 _IST = ZoneInfo("Asia/Kolkata")
 
 
+def _inventory_history_df_for_read(sess) -> pd.DataFrame:
+    """Load daily inventory matrix from warm cache / disk — no full session PG restore."""
+    try:
+        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
+        import backend.main as _main
+
+        _main.restore_po_sidecars_from_warm(sess)
+        ensure_po_sidecars_hydrated(sess)
+    except Exception:
+        pass
+    df = getattr(sess, "daily_inventory_history_df", None)
+    if df is not None and not df.empty:
+        return df
+    try:
+        import backend.main as _main
+
+        wc = (_main._warm_cache or {}).get("daily_inventory_history_df")
+        if wc is not None and not wc.empty:
+            return wc
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def _inventory_matrix_payload(
+    sess,
+    *,
+    q: str = "",
+    limit: int = 150,
+    offset: int = 0,
+    days: int = 30,
+    end_date: Optional[str] = None,
+) -> dict:
+    from ..services.daily_inventory_history import inventory_history_wide_matrix
+
+    df = _inventory_history_df_for_read(sess)
+    out = inventory_history_wide_matrix(
+        df,
+        q=q,
+        limit=min(max(1, int(limit)), 15000),
+        offset=max(0, int(offset)),
+        days=min(max(1, int(days)), 120),
+        end_date=end_date,
+    )
+    out["ok"] = True
+    return out
+
+
 @router.get("/readiness")
 def po_readiness(request: Request):
     """Lightweight PO page gate — data ready for calculate, not all background jobs finished."""
@@ -364,31 +412,28 @@ def po_daily_inventory_upload_status(request: Request):
 
 
 @router.get("/daily-inventory-history")
-def po_get_daily_inventory_history(request: Request, days: int = 30, end_date: Optional[str] = None):
+async def po_get_daily_inventory_history(request: Request, days: int = 30, end_date: Optional[str] = None):
+    from ..concurrency import run_read_api
+
     sess = request.state.session
     if sess is None:
         return {"ok": False, "loaded": False}
-    try:
-        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
 
-        ensure_po_sidecars_hydrated(sess)
-        import backend.main as _main
+    def _work() -> dict:
+        from ..services.daily_inventory_history import inventory_history_summary
 
-        _main.restore_po_sidecars_from_warm(sess)
-    except Exception:
-        pass
-    df = sess.daily_inventory_history_df
-    from ..services.daily_inventory_history import inventory_history_summary
+        df = _inventory_history_df_for_read(sess)
+        summary = inventory_history_summary(
+            df,
+            days=min(max(1, int(days)), 120),
+            end_date=end_date,
+        )
+        out = {"ok": True, **summary}
+        out["uploaded_at"] = str(getattr(sess, "daily_inventory_history_uploaded_at", "") or "") or None
+        out["filename"] = str(getattr(sess, "daily_inventory_history_filename", "") or "") or None
+        return out
 
-    summary = inventory_history_summary(
-        df if df is not None else pd.DataFrame(),
-        days=min(max(1, int(days)), 120),
-        end_date=end_date,
-    )
-    out = {"ok": True, **summary}
-    out["uploaded_at"] = str(getattr(sess, "daily_inventory_history_uploaded_at", "") or "") or None
-    out["filename"] = str(getattr(sess, "daily_inventory_history_filename", "") or "") or None
-    return out
+    return await run_read_api(_work)
 
 
 @router.get("/daily-inventory-history/dates")
@@ -443,7 +488,7 @@ def po_daily_inventory_history_by_date(
 
 
 @router.get("/daily-inventory-history/matrix")
-def po_daily_inventory_history_matrix(
+async def po_daily_inventory_history_matrix(
     request: Request,
     q: str = "",
     limit: int = 150,
@@ -452,28 +497,20 @@ def po_daily_inventory_history_matrix(
     end_date: Optional[str] = None,
 ):
     """Excel-style wide matrix: SKU rows × date columns (paginated)."""
+    from ..concurrency import run_read_api
+
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
-    try:
-        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
-
-        ensure_po_sidecars_hydrated(sess)
-    except Exception:
-        pass
-    df = getattr(sess, "daily_inventory_history_df", None)
-    from ..services.daily_inventory_history import inventory_history_wide_matrix
-
-    out = inventory_history_wide_matrix(
-        df if df is not None else pd.DataFrame(),
+    return await run_read_api(
+        _inventory_matrix_payload,
+        sess,
         q=q,
-        limit=min(max(1, int(limit)), 15000),
-        offset=max(0, int(offset)),
-        days=min(max(1, int(days)), 120),
+        limit=limit,
+        offset=offset,
+        days=days,
         end_date=end_date,
     )
-    out["ok"] = True
-    return out
 
 
 @router.get("/daily-inventory-history/sku")

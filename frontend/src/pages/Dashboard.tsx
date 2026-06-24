@@ -1463,7 +1463,7 @@ export default function Dashboard() {
       )
       return data
     },
-    enabled: summaryUsable && fetchBundleExtras,
+    enabled: summaryUsable && fetchBundleExtras && hasDisplayData,
     staleTime: 300_000,
     retry: 0,
   })
@@ -1769,9 +1769,9 @@ export default function Dashboard() {
 
   const intelligenceLoading =
     bundleLoadActive ||
-    salesRebuildRunning ||
+    (salesRebuildRunning && !hasSummaryData && !hasDisplayData) ||
     (hasDisplayData && fetchingBundle && bundlePartial) ||
-    (!hasDisplayData && fetchingSummary) ||
+    (!hasDisplayData && !hasSummaryData && fetchingSummary) ||
     (!hasDisplayData && showDsr && loadingDsr) ||
     exportingSales ||
     exportingDsr ||

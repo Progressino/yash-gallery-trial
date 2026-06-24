@@ -2335,6 +2335,8 @@ def _session_skip_heavy_warm(path: str) -> bool:
         "/api/cache/hydrate-warm",
     ):
         return True
+    if path.startswith("/api/po/daily-inventory-history"):
+        return True
     return path.startswith(
         (
             "/api/po/daily-inventory-history/upload-status",
@@ -2355,6 +2357,8 @@ def _session_coverage_light(path: str, method: str, query: str) -> bool:
         "/api/data/sku-deepdive",
         "/api/po/sku-audit",
     ):
+        return True
+    if path.startswith("/api/po/daily-inventory-history"):
         return True
     if path != "/api/data/coverage":
         return False
@@ -2519,7 +2523,7 @@ async def session_middleware(request: Request, call_next):
         if path not in (
             "/api/data/intelligence-bundle",
             "/api/data/dashboard/summary",
-        ):
+        ) and not path.startswith("/api/po/daily-inventory-history"):
             try:
                 await run_aux(try_attach_shared_frames_fast, session)
             except Exception:
@@ -2559,6 +2563,9 @@ async def session_middleware(request: Request, call_next):
     _skip_sku_bundle = (
         request.method == "GET"
         and path in ("/api/data/coverage", "/api/data/job-status")
+    ) or (
+        request.method == "GET"
+        and path.startswith("/api/po/daily-inventory-history")
     ) or (
         request.method == "GET"
         and path.startswith("/api/data/")

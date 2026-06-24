@@ -70,6 +70,13 @@ AUTH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="erp-auth",
 )
 
+# Dashboard summary, inventory matrix, intelligence bundle — must not queue behind
+# session hydrate / SKU bundle work on AUX_EXECUTOR (users saw 5–10 min blank screens).
+READ_API_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="erp-read",
+)
+
 
 def upload_memory_lock_held() -> bool:
     """True when warm-cache load, restore, or a large upload holds the memory semaphore."""
@@ -108,5 +115,13 @@ async def run_auth(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         AUTH_EXECUTOR,
+        lambda: fn(*args, **kwargs),
+    )
+
+
+async def run_read_api(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        READ_API_EXECUTOR,
         lambda: fn(*args, **kwargs),
     )
