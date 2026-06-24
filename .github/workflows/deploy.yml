@@ -18,27 +18,28 @@ concurrency:
 jobs:
   deploy:
     runs-on: self-hosted
-    defaults:
-      run:
-        working-directory: /root/app
     steps:
-      - name: Sync repo to origin/main
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Sync checkout to /root/app
         run: |
           set -eu
+          APP_DIR=/root/app
           mkdir -p /root/app-data/postgres /root/app-data/finance
-          test -d .git || { echo "ERROR: /root/app is not a git clone"; exit 1; }
-          export GIT_TERMINAL_PROMPT=0
-          git remote -v
-          git fetch origin main
-          git checkout -f main
-          git reset --hard origin/main
-          git log -1 --oneline
-          # Keep /etc/nginx-vps/nginx.conf in sync (post-merge hook restores from here on pull).
-          if grep -q "raisinghanitextiles.com" nginx/nginx.conf && grep -q "acme-challenge" nginx/nginx.conf; then
-            cp nginx/nginx.conf /etc/nginx-vps/nginx.conf
-          fi
-          # Build metadata for /api/health version badge
-          _SHA="$(git rev-parse --short HEAD)"
+          mkdir -p "$APP_DIR"
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '.local-data' \
+            --exclude 'node_modules' \
+            --exclude '__pycache__' \
+            --exclude '.env' \
+            --exclude 'po_raise_archive_dev' \
+            "$GITHUB_WORKSPACE/" "$APP_DIR/"
+          cd "$APP_DIR"
+          _SHA="$(git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD 2>/dev/null || echo deploy)"
           _BUILT="$(date -u +%Y-%m-%dT%H:%MZ)"
           for _KV in "APP_GIT_SHA=${_SHA}" "APP_BUILT_AT=${_BUILT}"; do
             _K="${_KV%%=*}"
@@ -49,15 +50,16 @@ jobs:
               echo "${_K}=${_V}" >> .env
             fi
           done
-          # Keep session ZIP writes off until disk is stable (warm cache + Tier-3 hold data).
           if grep -q '^SESSION_PG_PERSIST=' .env 2>/dev/null; then
             sed -i 's/^SESSION_PG_PERSIST=.*/SESSION_PG_PERSIST=0/' .env
           else
             echo 'SESSION_PG_PERSIST=0' >> .env
           fi
-          # Production must load full platform frames (mtr/myntra/meesho/flipkart/snapdeal)
-          # into warm cache. PO_SESSION_ONLY is for local Mac dev only.
           sed -i '/^WARM_CACHE_PO_SESSION_ONLY=/d' .env 2>/dev/null || true
+          if grep -q "raisinghanitextiles.com" nginx/nginx.conf && grep -q "acme-challenge" nginx/nginx.conf; then
+            cp nginx/nginx.conf /etc/nginx-vps/nginx.conf
+          fi
+          echo "Deployed SHA ${_SHA} to ${APP_DIR}"
 
       # Never block deploy on diagnostics (docker/python quirks on self-hosted).
       - name: Tooling snapshot (debug)
@@ -82,8 +84,6 @@ jobs:
         run: |
           set -eu
           if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-            # UFW default-deny blocks some HTTPS SYN on INPUT unless 80/443 are explicit
-            # (Docker publish alone is not enough for all clients).
             ufw allow 80/tcp comment 'HTTP public web' >/dev/null 2>&1 || true
             ufw allow 443/tcp comment 'HTTPS public web' >/dev/null 2>&1 || true
             echo "UFW web rules:"
@@ -95,6 +95,7 @@ jobs:
       - name: Rebuild and restart containers
         run: |
           set -eu
+          cd /root/app
           _dc() {
             if docker compose version >/dev/null 2>&1; then
               docker compose "$@"
@@ -105,22 +106,20 @@ jobs:
               exit 1
             fi
           }
-          # Serialize deploys — concurrent GH Actions + manual ./deploy.sh caused ghost container IDs.
+          COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-progressino}"
           exec 200>/var/lock/yash-gallery-deploy.lock
           if ! flock -w 1800 200; then
             echo "ERROR: another deploy is still running (lock held >30m)." >&2
             exit 1
           fi
-          # Failed recreates leave hash-prefixed duplicates (e.g. 8d096020003c_app-backend-1)
-          # that block the next "up" with: container name "/app-backend-1" is already in use.
           _prune_stale_compose_containers() {
             local svc="$1"
-            local canonical="app-${svc}-1"
+            local canonical="${COMPOSE_PROJECT}-${svc}-1"
             docker ps -a --format '{{.ID}}\t{{.Names}}' | while IFS=$'\t' read -r id name; do
               [ -n "$id" ] || continue
               name="${name#/}"
               case "$name" in
-                *app-${svc}*)
+                *${COMPOSE_PROJECT}-${svc}*)
                   if [ "$name" != "$canonical" ]; then
                     echo "Removing stale container: ${name} (${id})"
                     docker rm -f "$id" 2>/dev/null || true
@@ -130,12 +129,11 @@ jobs:
             done
           }
           _prune_ghost_recreate_containers() {
-            # Failed compose recreates leave hash-prefixed names like 425ccd91a2be_app-frontend-1.
             docker ps -a --format '{{.ID}}\t{{.Names}}' | while IFS=$'\t' read -r id name; do
               [ -n "$id" ] || continue
               name="${name#/}"
               case "$name" in
-                *_app-*)
+                *_${COMPOSE_PROJECT}-*)
                   echo "Removing ghost recreate container: ${name} (${id})"
                   docker rm -f "$id" 2>/dev/null || true
                   ;;
@@ -148,32 +146,22 @@ jobs:
           _prune_stale_compose_containers autoheal
           _prune_ghost_recreate_containers
           docker container prune -f 2>/dev/null || true
-          # Ghost container 18d1277b5518 is stuck in compose's internal tracking.
-          # Kill everything and nuke compose's state so it starts clean.
-          _dc -f docker-compose.prod.yml kill 2>/dev/null || true
-          docker rm -f $(docker ps -aq) 2>/dev/null || true
-          docker container prune -f 2>/dev/null || true
-          # Remove compose project config from Docker to clear ghost references
-          docker compose -f docker-compose.prod.yml down --volumes=false --remove-orphans 2>/dev/null || true
+          _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml kill 2>/dev/null || true
+          _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml down --volumes=false --remove-orphans 2>/dev/null || true
 
           _NO_CACHE=""
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.no_cache }}" = "true" ]; then
             _NO_CACHE="--no-cache"
           fi
-          _dc -f docker-compose.prod.yml build ${_NO_CACHE} backend
-          _dc -f docker-compose.prod.yml build ${_NO_CACHE} frontend
-          # Fresh up with new project name if ghost containers block the default.
-          if ! _dc -f docker-compose.prod.yml up -d --remove-orphans 2>&1; then
-            echo "Compose up failed — trying with fresh project name to bypass ghost state"
-            docker rm -f $(docker ps -aq) 2>/dev/null || true
-            docker container prune -f 2>/dev/null || true
-            docker compose -p yg -f docker-compose.prod.yml up -d --remove-orphans
-          fi
+          _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml build ${_NO_CACHE} backend
+          _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml build ${_NO_CACHE} frontend
+          _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml up -d --remove-orphans
           docker image prune -f || true
 
       - name: Enable PostgreSQL query analytics (pg_stat_statements)
         run: |
           set -eu
+          cd /root/app
           chmod +x scripts/pg_enable_stat_statements.sh scripts/pg_slow_queries.sh
           bash scripts/pg_enable_stat_statements.sh
 
@@ -194,7 +182,7 @@ jobs:
           timeout 180s certbot renew \
             --cert-name app.progressino.com \
             --non-interactive \
-            --deploy-hook "docker compose -f /root/app/docker-compose.prod.yml exec -T frontend nginx -s reload" \
+            --deploy-hook "docker compose -p progressino -f /root/app/docker-compose.prod.yml exec -T frontend nginx -s reload" \
             || true
           if [ -f /etc/letsencrypt/live/app.progressino.com/fullchain.pem ]; then
             _EXP0="$(openssl x509 -in /etc/letsencrypt/live/app.progressino.com/fullchain.pem -noout -enddate | cut -d= -f2)"
@@ -208,7 +196,7 @@ jobs:
                 --agree-tos \
                 --register-unsafely-without-email \
                 --keep-until-expiring || true
-              docker compose -f /root/app/docker-compose.prod.yml exec -T frontend nginx -s reload || true
+              docker compose -p progressino -f /root/app/docker-compose.prod.yml exec -T frontend nginx -s reload || true
             fi
           fi
           if [ -f /etc/letsencrypt/live/app.progressino.com/fullchain.pem ]; then
@@ -221,8 +209,6 @@ jobs:
             fi
           fi
 
-      # Prefer direct backend on loopback :8000 (see docker-compose.prod.yml ports).
-      # Fallback: nginx on :80 for localhost (TLS/certs not involved on loopback HTTP).
       - name: Health check
         run: |
           set -eu
@@ -247,24 +233,26 @@ jobs:
         continue-on-error: true
         run: |
           set -eu
+          cd /root/app
           bash scripts/run-po-warmup-production.sh
 
       - name: Warm Intelligence bundle (default 30D window)
         continue-on-error: true
         run: |
           set -eu
+          cd /root/app
           bash scripts/run-intelligence-warmup-production.sh
 
       - name: Backend logs (on failure)
         if: failure()
         run: |
           set +e
-          docker ps -a --filter name=app-backend 2>&1 || true
-          docker ps -a --filter name=app-frontend 2>&1 || true
+          docker ps -a --filter name=progressino-backend 2>&1 || true
+          docker ps -a --filter name=progressino-frontend 2>&1 || true
           if docker compose version >/dev/null 2>&1; then
-            docker compose -f docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
-            docker compose -f docker-compose.prod.yml ps 2>&1 || true
+            docker compose -p progressino -f /root/app/docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
+            docker compose -p progressino -f /root/app/docker-compose.prod.yml ps 2>&1 || true
           elif command -v docker-compose >/dev/null 2>&1; then
-            docker-compose -f docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
-            docker-compose -f docker-compose.prod.yml ps 2>&1 || true
+            docker-compose -p progressino -f /root/app/docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
+            docker-compose -p progressino -f /root/app/docker-compose.prod.yml ps 2>&1 || true
           fi

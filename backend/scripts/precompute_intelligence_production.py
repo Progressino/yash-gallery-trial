@@ -55,9 +55,15 @@ def main() -> int:
         start_date, end_date, limit=10, basis="gross", include_extras=True
     )
     artifact_windows = {}
+    day_count = 0
+    from backend.services.intelligence_artifact_store import _by_date_root
+
     for s, e in standard_intelligence_windows():
         hot, _ = load_artifact(s, e, KIND_HOT, allow_stale=False)
         artifact_windows[f"{s}_{e}"] = hot is not None
+    by_date = _by_date_root()
+    if os.path.isdir(by_date):
+        day_count = len([f for f in os.listdir(by_date) if f.endswith(".parquet")])
 
     out = {
         "ok": core_ready,
@@ -65,6 +71,7 @@ def main() -> int:
         "core_bundle_ready": core_ready,
         "extras_bundle_ready": extras_ready,
         "artifact_windows": artifact_windows,
+        "day_parquet_count": day_count,
     }
     print(json.dumps(out, indent=2))
     return 0 if core_ready else 2

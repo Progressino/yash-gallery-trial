@@ -4094,6 +4094,28 @@ def intelligence_version(
     }
 
 
+@router.get("/intelligence/artifacts")
+def intelligence_artifacts_cdn():
+    """List prebuilt intelligence artifacts and CDN URLs (GitHub Release / S3)."""
+    from ..services.intelligence_artifact_store import list_cdn_artifacts
+
+    return list_cdn_artifacts()
+
+
+@router.get("/intelligence/day")
+def intelligence_day_drilldown(date: Optional[str] = None):
+    """Single-day drill-down from prebuilt ``intelligence_bundle_{date}.parquet``."""
+    from ..services.intelligence_artifacts import load_day_drilldown
+
+    iso = (date or "").strip()[:10]
+    if len(iso) != 10:
+        return {"ok": False, "message": "date required (YYYY-MM-DD)"}
+    payload, meta = load_day_drilldown(iso)
+    if not payload:
+        return {"ok": False, "date": iso, "message": "no day artifact"}
+    return {"ok": True, "date": iso, "meta": meta, **payload}
+
+
 @router.get("/dashboard/summary", response_model=DashboardSummaryResponse)
 async def dashboard_summary(
     request: Request,

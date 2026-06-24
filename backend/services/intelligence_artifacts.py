@@ -31,6 +31,7 @@ _BUILD_QUEUED: set[tuple[str, str, str]] = set()
 _BUILD_LOCK = threading.Lock()
 
 STANDARD_WINDOW_DAYS = (7, 30, 90)
+PER_DAY_ARTIFACT_LOOKBACK = int(os.environ.get("INTELLIGENCE_DAY_ARTIFACT_DAYS", "90"))
 
 
 def _artifact_root() -> str:
@@ -122,19 +123,54 @@ def save_artifact(
     *,
     basis: str = "gross",
 ) -> str:
+    from .intelligence_artifact_store import (
+        deep_parquet_path,
+        schedule_cdn_publish,
+        write_day_parquet,
+        write_deep_parquet,
+    )
+
     version = intelligence_version_for_window(start_date, end_date, basis=basis)
+    s, e = start_date[:10], end_date[:10]
     entry = {
         "version": version,
         "built_at": time.time(),
         "kind": kind,
-        "start_date": start_date[:10],
-        "end_date": end_date[:10],
+        "start_date": s,
+        "end_date": e,
         "payload": payload,
     }
     with _MEM_LOCK:
-        _MEM[(start_date[:10], end_date[:10], kind)] = entry
+        _MEM[(s, e, kind)] = entry
     try:
-        _write_disk_artifact(start_date, end_date, kind, version=version, payload=payload)
+        if kind == KIND_HOT:
+            _write_disk_artifact(s, e, kind, version=version, payload=payload)
+        else:
+            # Deep analytics: columnar parquet + slim JSON pointer (no huge nested JSON).
+            write_deep_parquet(s, e, payload)
+            slim = {
+                "version": version,
+                "built_at": datetime.now(IST).isoformat(),
+                "kind": kind,
+                "start_date": s,
+                "end_date": e,
+                "storage": "parquet",
+                "parquet": os.path.basename(deep_parquet_path(s, e)),
+                "payload": {
+                    "source": payload.get("source", "tier3_sqlite"),
+                    "data_completeness": payload.get("data_completeness", "full"),
+                    "sales_summary": payload.get("sales_summary") or {},
+                },
+            }
+            path = _artifact_json_path(s, e, kind)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(slim, f, default=str)
+            os.replace(tmp, path)
+            schedule_cdn_publish(os.path.basename(deep_parquet_path(s, e)))
+        if s == e:
+            if write_day_parquet(s, payload):
+                schedule_cdn_publish(f"by_date/intelligence_bundle_{s}.parquet")
     except Exception:
         _log.exception("write intelligence artifact failed")
     return version
@@ -177,27 +213,48 @@ def load_artifact(
             return mem["payload"], meta
 
     disk = _read_disk_artifact(s, e, kind)
-    if disk and isinstance(disk.get("payload"), dict):
+    payload_from_disk: dict[str, Any] | None = None
+    if disk:
+        if disk.get("storage") == "parquet" and kind == KIND_DEEP:
+            from .intelligence_artifact_store import read_deep_parquet
+
+            parquet_payload = read_deep_parquet(s, e)
+            if parquet_payload:
+                slim = disk.get("payload") if isinstance(disk.get("payload"), dict) else {}
+                payload_from_disk = {**parquet_payload, **slim}
+        elif isinstance(disk.get("payload"), dict):
+            payload_from_disk = disk["payload"]
+
+    if payload_from_disk:
         with _MEM_LOCK:
             _MEM[(s, e, kind)] = {
-                "version": disk.get("version"),
+                "version": disk.get("version") if disk else current,
                 "built_at": time.time(),
                 "kind": kind,
                 "start_date": s,
                 "end_date": e,
-                "payload": disk["payload"],
+                "payload": payload_from_disk,
             }
-        if disk.get("version") == current:
+        disk_ver = str((disk or {}).get("version") or "")
+        if disk_ver == current:
             meta.update(source="disk", version=current)
-            return disk["payload"], meta
+            return payload_from_disk, meta
         if allow_stale:
             meta.update(
                 stale=True,
                 source="disk_stale",
-                version=str(disk.get("version") or ""),
+                version=disk_ver,
                 current_version=current,
             )
-            return disk["payload"], meta
+            return payload_from_disk, meta
+
+    if kind == KIND_DEEP:
+        from .intelligence_artifact_store import read_deep_parquet
+
+        parquet_only = read_deep_parquet(s, e)
+        if parquet_only:
+            meta.update(source="parquet", version=current)
+            return parquet_only, meta
 
     return None, meta
 
@@ -354,6 +411,21 @@ def schedule_artifact_build(
         return False
 
 
+def prebuild_day_artifacts(sess, *, lookback_days: int | None = None) -> None:
+    """Prebuild per-day parquet drill-down artifacts for the last N calendar days."""
+    n = int(lookback_days if lookback_days is not None else PER_DAY_ARTIFACT_LOOKBACK)
+    today = datetime.now(IST).date()
+    for offset in range(n):
+        day = (today - timedelta(days=offset)).isoformat()
+        from .intelligence_artifact_store import day_parquet_path, read_day_parquet
+
+        if os.path.isfile(day_parquet_path(day)):
+            continue
+        if read_day_parquet(day):
+            continue
+        build_and_store_artifact(sess, day, day, KIND_HOT, include_extras=False)
+
+
 def prebuild_standard_artifacts(sess=None) -> None:
     """Build hot + deep artifacts for 7D / 30D / 90D windows (deploy + post-upload)."""
     if sess is None:
@@ -373,6 +445,10 @@ def prebuild_standard_artifacts(sess=None) -> None:
             if existing and not meta.get("stale") and meta.get("version") == current:
                 continue
             build_and_store_artifact(sess, start, end, kind, include_extras=extras)
+    try:
+        prebuild_day_artifacts(sess)
+    except Exception:
+        _log.exception("prebuild_day_artifacts failed")
 
 
 def load_hot_summary_for_request(
@@ -390,6 +466,16 @@ def load_hot_summary_for_request(
             schedule_artifact_build(start_date, end_date, KIND_HOT, limit=limit)
         return payload, meta
     return None, meta
+
+
+def load_day_drilldown(day: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Single-day drill-down from per-day parquet artifact."""
+    from .intelligence_artifact_store import read_day_parquet
+
+    iso = day[:10]
+    payload = read_day_parquet(iso)
+    meta = {"source": "day_parquet" if payload else "none", "date": iso}
+    return payload, meta
 
 
 def load_deep_bundle_for_request(

@@ -8,6 +8,7 @@ openpyxl==3.1.5
 xlrd==2.0.1
 pyarrow==18.1.0
 requests==2.32.3
+boto3==1.35.99  # optional: INTELLIGENCE_ARTIFACT_S3_BUCKET CDN uploads
 prophet==1.1.6
 python-dotenv==1.0.1
 python-jose[cryptography]==3.3.0
