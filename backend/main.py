@@ -2331,6 +2331,7 @@ def _session_skip_heavy_warm(path: str) -> bool:
         "/api/data/coverage",
         "/api/data/job-status",
         "/api/data/intelligence-bundle",
+        "/api/data/dashboard/summary",
         "/api/cache/hydrate-warm",
     ):
         return True
@@ -2514,8 +2515,11 @@ async def session_middleware(request: Request, call_next):
     if _session_coverage_light(path, request.method, request.url.query or ""):
         sid = request.cookies.get(SESSION_COOKIE)
         sid, session = await run_aux(store.get_or_empty, sid)
-        # Intelligence bundle serves from Tier-3 / disk cache — never block polls on warm-cache bootstrap.
-        if path != "/api/data/intelligence-bundle":
+        # Tier-3 dashboard routes never need session frame copies — skip attach (avoids warm-cache bootstrap).
+        if path not in (
+            "/api/data/intelligence-bundle",
+            "/api/data/dashboard/summary",
+        ):
             try:
                 await run_aux(try_attach_shared_frames_fast, session)
             except Exception:

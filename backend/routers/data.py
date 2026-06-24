@@ -3989,7 +3989,6 @@ def _get_coverage_sync(request: Request, light: bool = False) -> CoverageRespons
         _apply_light_coverage_hydrate(sess)
         if not _shared_frames_operational(sess):
             _maybe_queue_light_session_hydrate(sess, sid or None)
-            _maybe_queue_tier3_sales_sync(sess, sid or None)
             _maybe_queue_unified_sales_build(sess, sid or None)
         return _build_coverage_response(sess, light=True)
 
@@ -4081,8 +4080,9 @@ def data_parity(request: Request, planning_date: Optional[str] = None):
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
     report = build_parity_report(sess, planning_date=planning_date)
-    if report.get("tier3_sync_mismatch") or report.get("tier3_platforms_mismatch"):
-        _maybe_queue_tier3_sales_sync(sess, sid or None)
+    # Do not auto-queue heavy sales rebuild on every dashboard poll — that starves the single
+    # uvicorn worker and blocks /dashboard/summary for minutes. User triggers sync via
+    # "Reload data now" (POST /restore-full) or PO calculate.
     return report
 
 
