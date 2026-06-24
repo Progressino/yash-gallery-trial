@@ -18,6 +18,9 @@ git fetch origin
 git checkout "$BRANCH"
 git pull origin "$BRANCH"
 
+# 1b. Clean untracked files from frontend/src to prevent stale TS errors in Docker build
+git clean -fd frontend/src/ 2>/dev/null || true
+
 # 2. Check .env exists
 if [ ! -f .env ]; then
   echo "⚠️  .env not found — copying from .env.example"
