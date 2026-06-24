@@ -426,6 +426,58 @@ def prebuild_day_artifacts(sess, *, lookback_days: int | None = None) -> None:
         build_and_store_artifact(sess, day, day, KIND_HOT, include_extras=False)
 
 
+def _migrate_legacy_deep_json_to_parquet() -> None:
+    """One-time style migration: old full-json deep artifacts → parquet + slim JSON."""
+    from .intelligence_artifact_store import deep_parquet_path, write_deep_parquet
+
+    root = _artifact_root()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        if not name.endswith("_deep.json"):
+            continue
+        path = os.path.join(root, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                disk = json.load(f)
+        except Exception:
+            continue
+        if disk.get("storage") == "parquet":
+            continue
+        payload = disk.get("payload")
+        if not isinstance(payload, dict) or not payload.get("platform_summary"):
+            continue
+        s = str(disk.get("start_date") or "")[:10]
+        e = str(disk.get("end_date") or "")[:10]
+        if len(s) != 10 or len(e) != 10:
+            continue
+        if os.path.isfile(deep_parquet_path(s, e)):
+            continue
+        if not write_deep_parquet(s, e, payload):
+            continue
+        slim = {
+            "version": disk.get("version"),
+            "built_at": disk.get("built_at") or datetime.now(IST).isoformat(),
+            "kind": KIND_DEEP,
+            "start_date": s,
+            "end_date": e,
+            "storage": "parquet",
+            "parquet": os.path.basename(deep_parquet_path(s, e)),
+            "payload": {
+                "source": payload.get("source", "tier3_sqlite"),
+                "data_completeness": payload.get("data_completeness", "full"),
+                "sales_summary": payload.get("sales_summary") or {},
+            },
+        }
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(slim, f, default=str)
+        os.replace(tmp, path)
+        _log.info("migrated deep artifact to parquet %s..%s", s, e)
+
+
 def prebuild_standard_artifacts(sess=None) -> None:
     """Build hot + deep artifacts for 7D / 30D / 90D windows (deploy + post-upload)."""
     if sess is None:
@@ -438,6 +490,10 @@ def prebuild_standard_artifacts(sess=None) -> None:
             _main.try_attach_shared_frames_fast(sess)
         except Exception:
             pass
+    try:
+        _migrate_legacy_deep_json_to_parquet()
+    except Exception:
+        _log.exception("migrate legacy deep json failed")
     for start, end in standard_intelligence_windows():
         for kind, extras in ((KIND_HOT, False), (KIND_DEEP, True)):
             current = intelligence_version_for_window(start, end)

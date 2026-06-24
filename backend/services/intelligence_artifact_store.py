@@ -100,9 +100,9 @@ def _flatten_deep_payload(payload: dict[str, Any]) -> pd.DataFrame:
                     "section": "platform_daily",
                     "platform": plat,
                     "date": str(d.get("date") or "")[:10],
-                    "units": int(d.get("units") or d.get("shipped") or 0),
-                    "returns": int(d.get("returns") or 0),
-                    "net_units": int(d.get("net_units") or 0),
+                    "units": int(d.get("units") or d.get("shipments") or 0),
+                    "returns": int(d.get("returns") or d.get("refunds") or 0),
+                    "net_units": int(d.get("net_units") or d.get("net") or 0),
                 }
             )
         for m in p.get("monthly") or []:
@@ -167,6 +167,9 @@ def _unflatten_deep_df(df: pd.DataFrame) -> dict[str, Any]:
             daily_by_plat.setdefault(plat, []).append(
                 {
                     "date": str(row.get("date") or "")[:10],
+                    "shipments": int(row.get("units") or 0),
+                    "refunds": int(row.get("returns") or 0),
+                    "net": int(row.get("net_units") or 0),
                     "units": int(row.get("units") or 0),
                     "returns": int(row.get("returns") or 0),
                     "net_units": int(row.get("net_units") or 0),
