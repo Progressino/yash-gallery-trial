@@ -18,7 +18,10 @@ days with zero (or missing) inventory are excluded from the ADS denominator.
 from __future__ import annotations
 
 import io
+import os
+from datetime import datetime
 from typing import BinaryIO, Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -29,6 +32,9 @@ from .helpers import (
     normalize_id_token_for_mapping,
 )
 from .sku_status_lead import _strip_pl_sku
+
+_IST = ZoneInfo("Asia/Kolkata")
+_DEFAULT_VIEW_DAYS = int(os.environ.get("DAILY_INV_VIEW_DAYS", "30"))
 
 
 _TALL_COLS = ["OMS_SKU", "Date", "Qty"]
@@ -248,6 +254,85 @@ def inventory_history_max_date(df: Optional[pd.DataFrame]) -> Optional[pd.Timest
         return None
     mx = pd.to_datetime(df["Date"], errors="coerce").max()
     return pd.Timestamp(mx).normalize() if pd.notna(mx) else None
+
+
+def today_ist_timestamp() -> pd.Timestamp:
+    return pd.Timestamp.now(tz=_IST).normalize().tz_localize(None)
+
+
+def filter_inventory_history_window(
+    df: pd.DataFrame,
+    *,
+    days: int | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Keep SKU-day rows in the last ``days`` calendar days ending on ``end_date`` (default today IST)."""
+    if df is None or df.empty or "Date" not in df.columns:
+        return df if df is not None else pd.DataFrame(columns=_TALL_COLS)
+    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
+    if span <= 0:
+        return df.copy()
+    try:
+        end = pd.Timestamp(str(end_date or "")[:10]).normalize() if end_date else today_ist_timestamp()
+    except Exception:
+        end = today_ist_timestamp()
+    if pd.isna(end):
+        end = today_ist_timestamp()
+    start = end - pd.Timedelta(days=max(0, span - 1))
+    work = df.copy()
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work = work.dropna(subset=["Date"])
+    mask = (work["Date"] >= start) & (work["Date"] <= end)
+    return work.loc[mask].reset_index(drop=True)
+
+
+def append_snapshot_inventory_to_history(sess) -> dict:
+    """
+    After a daily snapshot inventory upload, append one SKU-day column to history.
+
+    Uses ``Total_Inventory`` per variant SKU and the inferred snapshot date.
+    """
+    import pandas as pd
+
+    variant = getattr(sess, "inventory_df_variant", None)
+    if variant is None or getattr(variant, "empty", True):
+        return {"appended": False, "reason": "empty_snapshot"}
+    snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
+    if len(snap) != 10:
+        snap = str(today_ist_timestamp().date())
+
+    work = variant.copy()
+    if "OMS_SKU" not in work.columns:
+        return {"appended": False, "reason": "no_sku_column"}
+    work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    qty_col = "Total_Inventory" if "Total_Inventory" in work.columns else None
+    if not qty_col:
+        return {"appended": False, "reason": "no_total_inventory"}
+    work["Qty"] = pd.to_numeric(work[qty_col], errors="coerce").fillna(0.0)
+    work = work[work["OMS_SKU"].str.len() > 0]
+    if work.empty:
+        return {"appended": False, "reason": "no_rows"}
+
+    incoming = pd.DataFrame(
+        {
+            "OMS_SKU": work["OMS_SKU"],
+            "Date": pd.Timestamp(snap),
+            "Qty": work["Qty"],
+            "Source": "daily_snapshot",
+        }
+    )
+    existing = getattr(sess, "daily_inventory_history_df", None)
+    merged = merge_inventory_history(existing, incoming)
+    merged = filter_inventory_history_window(merged, days=_DEFAULT_VIEW_DAYS)
+    sess.daily_inventory_history_df = merged
+    sess._quarterly_cache.clear()
+    return {
+        "appended": True,
+        "snapshot_date": snap,
+        "rows": int(len(merged)),
+        "skus": int(merged["OMS_SKU"].nunique()) if not merged.empty else 0,
+        "days": int(merged["Date"].nunique()) if not merged.empty else 0,
+    }
 
 
 def _parse_one_sheet(df: pd.DataFrame, mapping: dict, sheet_name: str = "") -> pd.DataFrame:
@@ -622,8 +707,14 @@ def coverage_days_within(
     return int(sub["Date"].dt.normalize().nunique())
 
 
-def inventory_history_summary(df: pd.DataFrame) -> dict:
-    if df is None or df.empty:
+def inventory_history_summary(
+    df: pd.DataFrame,
+    *,
+    days: int | None = None,
+    end_date: str | None = None,
+) -> dict:
+    view = filter_inventory_history_window(df, days=days, end_date=end_date)
+    if view is None or view.empty:
         return {
             "loaded": False,
             "rows": 0,
@@ -631,17 +722,21 @@ def inventory_history_summary(df: pd.DataFrame) -> dict:
             "days": 0,
             "min_date": "",
             "max_date": "",
+            "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
+            "window_end": str(end_date or today_ist_timestamp().date()),
         }
-    dates = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+    dates = pd.to_datetime(view["Date"], errors="coerce").dt.normalize()
     min_d = dates.min()
     max_d = dates.max()
     return {
         "loaded": True,
-        "rows": int(len(df)),
-        "skus": int(df["OMS_SKU"].astype(str).nunique()),
+        "rows": int(len(view)),
+        "skus": int(view["OMS_SKU"].astype(str).nunique()),
         "days": int(dates.nunique()),
         "min_date": str(pd.Timestamp(min_d).date()) if pd.notna(min_d) else "",
         "max_date": str(pd.Timestamp(max_d).date()) if pd.notna(max_d) else "",
+        "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
+        "window_end": str(end_date or today_ist_timestamp().date()),
     }
 
 
@@ -747,6 +842,8 @@ def inventory_history_wide_matrix(
     q: str = "",
     limit: int = 150,
     offset: int = 0,
+    days: int | None = None,
+    end_date: str | None = None,
 ) -> dict:
     """Pivot tall history to Excel-style wide matrix: SKU rows × date columns."""
     empty = {
@@ -757,11 +854,13 @@ def inventory_history_wide_matrix(
         "limit": int(limit),
         "offset": int(offset),
         "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
+        "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
+        "window_end": str(end_date or today_ist_timestamp().date()),
     }
     if df is None or df.empty:
         return empty
 
-    work = df.copy()
+    work = filter_inventory_history_window(df, days=days, end_date=end_date)
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work = work.dropna(subset=["Date", "OMS_SKU"])
     if work.empty:
@@ -805,6 +904,8 @@ def inventory_history_wide_matrix(
         "limit": int(limit),
         "offset": start,
         "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
+        "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
+        "window_end": str(end_date or today_ist_timestamp().date()),
     }
 
 
@@ -814,6 +915,8 @@ __all__ = [
     "effective_days_from_history",
     "coverage_days_within",
     "extend_history_with_sales",
+    "append_snapshot_inventory_to_history",
+    "filter_inventory_history_window",
     "inventory_history_summary",
     "list_inventory_history_dates",
     "inventory_rows_for_date",

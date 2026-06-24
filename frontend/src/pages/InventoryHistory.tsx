@@ -11,6 +11,7 @@ import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner
 import { todayIsoIST } from '../lib/reportingDates'
 
 const PAGE_SIZE = 100
+const HISTORY_WINDOW_DAYS = 30
 
 type SkuDayRow = { date: string; qty: number; in_stock: boolean; source: string }
 
@@ -41,9 +42,11 @@ export default function InventoryHistory() {
   const [exporting, setExporting] = useState(false)
 
   const summaryQ = useQuery({
-    queryKey: ['inv-history-summary'],
+    queryKey: ['inv-history-summary', HISTORY_WINDOW_DAYS],
     queryFn: async () => {
-      const { data } = await api.get('/po/daily-inventory-history')
+      const { data } = await api.get('/po/daily-inventory-history', {
+        params: { days: HISTORY_WINDOW_DAYS },
+      })
       return data as {
         loaded?: boolean
         min_date?: string
@@ -51,6 +54,8 @@ export default function InventoryHistory() {
         rows?: number
         skus?: number
         days?: number
+        window_days?: number
+        window_end?: string
         uploaded_at?: string
         filename?: string
       }
@@ -58,10 +63,12 @@ export default function InventoryHistory() {
   })
 
   const matrixQ = useQuery({
-    queryKey: ['inv-history-matrix', skuFilter, page],
+    queryKey: ['inv-history-matrix', skuFilter, page, HISTORY_WINDOW_DAYS],
     enabled: mode === 'matrix',
     queryFn: async () =>
-      getPoDailyInventoryHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE),
+      getPoDailyInventoryHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE, {
+        days: HISTORY_WINDOW_DAYS,
+      }),
   })
 
   const skuTimelineQ = useQuery({
@@ -81,7 +88,9 @@ export default function InventoryHistory() {
   const handleExportMatrix = async () => {
     setExporting(true)
     try {
-      const data = await getPoDailyInventoryHistoryMatrix(skuFilter, 15000, 0)
+      const data = await getPoDailyInventoryHistoryMatrix(skuFilter, 15000, 0, {
+        days: HISTORY_WINDOW_DAYS,
+      })
       const hdr = ['SKU', ...data.dates]
       const body = data.rows.map(r => [r.sku, ...r.qtys.map(q => String(q))])
       const label = skuFilter.trim() ? `inventory-matrix-${skuFilter.trim()}` : 'inventory-matrix'
@@ -110,12 +119,13 @@ export default function InventoryHistory() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">📅 Inventory History</h1>
           <p className="text-sm text-gray-600 mt-1 max-w-2xl">
-            Excel-style wide matrix — SKU rows × daily snapshot columns (OMS + Amazon sheets).
-            PO Engine uses this for <code className="font-mono text-xs">Eff_Days</code>.
+            Last {HISTORY_WINDOW_DAYS} days of daily snapshot inventory (Upload → Daily uploads → Snapshot inventory).
+            Each upload adds a column — use this matrix to verify on-hand counts match PO{' '}
+            <code className="font-mono text-xs">Eff_Days</code>.
           </p>
         </div>
         <Link to="/upload" className="text-sm font-medium text-indigo-700 hover:underline shrink-0">
-          Upload matrix →
+          Upload snapshot →
         </Link>
       </div>
 
@@ -128,7 +138,8 @@ export default function InventoryHistory() {
         </span>
         {summaryQ.data?.min_date && summaryQ.data?.max_date && (
           <span>
-            <strong>Range:</strong> {summaryQ.data.min_date} → {summaryQ.data.max_date}
+            <strong>Window:</strong> last {summaryQ.data.window_days ?? HISTORY_WINDOW_DAYS} days ·{' '}
+            {summaryQ.data.min_date} → {summaryQ.data.max_date}
           </span>
         )}
         {summaryQ.data?.skus != null && (
@@ -142,11 +153,18 @@ export default function InventoryHistory() {
 
       {!summaryQ.data?.loaded && !coverage.daily_inventory_history && (
         <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600">
-          Upload the wide inventory history workbook on{' '}
+          Upload daily snapshot inventory on{' '}
           <Link to="/upload" className="text-indigo-700 font-medium underline">
-            Upload → History &amp; setup → Daily inventory history matrix
+            Upload → Daily uploads → Snapshot inventory
           </Link>
-          .
+          . Each day you upload builds one column in this matrix (last {HISTORY_WINDOW_DAYS} days).
+        </div>
+      )}
+
+      {summaryQ.data?.loaded && !dates.length && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          No snapshot dates in the last {HISTORY_WINDOW_DAYS} days (today {todayIsoIST()}).
+          Upload today&apos;s snapshot inventory — older bulk matrix data is hidden from this view.
         </div>
       )}
 

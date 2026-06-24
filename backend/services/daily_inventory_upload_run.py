@@ -66,7 +66,7 @@ def execute_daily_inventory_upload(
     raw: bytes,
     filename: str,
 ) -> dict[str, Any]:
-    from .daily_inventory_history import parse_daily_inventory_history_upload
+    from .daily_inventory_history import filter_inventory_history_window, merge_inventory_history, parse_daily_inventory_history_upload
 
     df = parse_daily_inventory_history_upload(
         BytesIO(raw),
@@ -80,18 +80,16 @@ def execute_daily_inventory_upload(
             "column 2 = parent (optional), then daily snapshot columns whose first row is the date.",
         }
 
-    # Trim to recent window before storing — prevents OOM during calculate_po_base
-    # on multi-year baselines (e.g. 30M rows → ~3.5M for a 9,500-SKU catalog).
-    df, trim_note = _trim_history_to_recent(df, _MAX_HISTORY_DAYS)
-
-    from .daily_inventory_history import merge_inventory_history
+    df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS)
+    trim_note = f"Kept last {_MAX_HISTORY_DAYS} calendar days ending today (IST)."
 
     existing = getattr(sess, "daily_inventory_history_df", None)
     if existing is not None and not existing.empty:
         df = merge_inventory_history(existing, df)
-        df, trim_note2 = _trim_history_to_recent(df, _MAX_HISTORY_DAYS)
-        if trim_note2:
-            trim_note = (trim_note + " " + trim_note2).strip() if trim_note else trim_note2
+        df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS)
+        trim_note = (
+            f"Merged upload; kept last {_MAX_HISTORY_DAYS} days ending today (IST)."
+        )
 
     sess.daily_inventory_history_df = df
     sess.daily_inventory_history_uploaded_at = datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S")

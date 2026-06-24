@@ -2307,6 +2307,18 @@ def _inventory_apply_parse_result(
         _log.exception("OMS returns-to-overlay failed; inventory still saved")
 
     apply_inventory_snapshot_metadata(sess, file_parts, debug)
+    try:
+        from ..services.daily_inventory_history import append_snapshot_inventory_to_history
+
+        hist = append_snapshot_inventory_to_history(sess)
+        if hist.get("appended"):
+            _log.info(
+                "Daily snapshot appended to inventory history: %s (%s SKU-days)",
+                hist.get("snapshot_date"),
+                hist.get("rows"),
+            )
+    except Exception:
+        _log.exception("append_snapshot_inventory_to_history failed")
     refresh_inventory_api_cache(sess)
     try:
         from ..db.forecast_ops_tables import persist_inventory_dataframe

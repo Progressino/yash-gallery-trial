@@ -76,4 +76,4 @@ def test_execute_applies_trim(monkeypatch):
     assert result["rows"] >= 5 * 59
     assert sess.daily_inventory_history_df is not None
     assert len(sess.daily_inventory_history_df) == result["rows"]
-    assert "Trimmed" in result["message"] or "trimmed" in result["message"].lower()
+    assert "Kept last" in result["message"] or "trimmed" in result["message"].lower()

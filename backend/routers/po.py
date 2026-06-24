@@ -364,7 +364,7 @@ def po_daily_inventory_upload_status(request: Request):
 
 
 @router.get("/daily-inventory-history")
-def po_get_daily_inventory_history(request: Request):
+def po_get_daily_inventory_history(request: Request, days: int = 30, end_date: Optional[str] = None):
     sess = request.state.session
     if sess is None:
         return {"ok": False, "loaded": False}
@@ -380,7 +380,11 @@ def po_get_daily_inventory_history(request: Request):
     df = sess.daily_inventory_history_df
     from ..services.daily_inventory_history import inventory_history_summary
 
-    summary = inventory_history_summary(df if df is not None else pd.DataFrame())
+    summary = inventory_history_summary(
+        df if df is not None else pd.DataFrame(),
+        days=min(max(1, int(days)), 120),
+        end_date=end_date,
+    )
     out = {"ok": True, **summary}
     out["uploaded_at"] = str(getattr(sess, "daily_inventory_history_uploaded_at", "") or "") or None
     out["filename"] = str(getattr(sess, "daily_inventory_history_filename", "") or "") or None
@@ -444,6 +448,8 @@ def po_daily_inventory_history_matrix(
     q: str = "",
     limit: int = 150,
     offset: int = 0,
+    days: int = 30,
+    end_date: Optional[str] = None,
 ):
     """Excel-style wide matrix: SKU rows × date columns (paginated)."""
     sess = request.state.session
@@ -463,6 +469,8 @@ def po_daily_inventory_history_matrix(
         q=q,
         limit=min(max(1, int(limit)), 15000),
         offset=max(0, int(offset)),
+        days=min(max(1, int(days)), 120),
+        end_date=end_date,
     )
     out["ok"] = True
     return out

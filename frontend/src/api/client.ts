@@ -1059,6 +1059,7 @@ export async function getPoDailyInventoryHistoryMatrix(
   q = '',
   limit = 150,
   offset = 0,
+  opts?: { days?: number; endDate?: string },
 ) {
   const { data } = await api.get<{
     ok: boolean
@@ -1069,8 +1070,16 @@ export async function getPoDailyInventoryHistoryMatrix(
     limit: number
     offset: number
     in_stock_min_qty?: number
+    window_days?: number
+    window_end?: string
   }>('/po/daily-inventory-history/matrix', {
-    params: { q, limit, offset },
+    params: {
+      q,
+      limit,
+      offset,
+      days: opts?.days ?? 30,
+      ...(opts?.endDate ? { end_date: opts.endDate } : {}),
+    },
     timeout: 120_000,
   })
   return data
