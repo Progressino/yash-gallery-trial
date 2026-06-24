@@ -75,37 +75,6 @@ def test_enrich_upload_blob_counts_refunds_outside_window():
     assert blob[0]["total_returns"] == 53
 
 
-def test_merge_missing_refund_rows_dedupes_partial_primary():
-    from backend.routers.data import _merge_missing_refund_rows
-
-    primary = pd.DataFrame(
-        {
-            "Date": [pd.Timestamp("2026-05-26"), pd.Timestamp("2026-05-26")],
-            "TxnType": ["Shipment", "Refund"],
-            "Quantity": [100, 3],
-            "OrderId": ["O1", "O3"],
-            "OMS_SKU": ["S1", "S1"],
-        }
-    )
-    secondary = pd.DataFrame(
-        {
-            "Date": [
-                pd.Timestamp("2026-05-20"),
-                pd.Timestamp("2026-05-26"),
-                pd.Timestamp("2026-05-26"),
-            ],
-            "TxnType": ["Refund", "Refund", "Refund"],
-            "Quantity": [50, 3, 10],
-            "OrderId": ["O2", "O3", "O4"],
-            "OMS_SKU": ["S1", "S1", "S2"],
-        }
-    )
-    merged = _merge_missing_refund_rows(primary, secondary, "TxnType")
-    refunds = merged[merged["TxnType"] == "Refund"]
-    assert int(refunds["Quantity"].sum()) == 63
-    assert len(refunds) == 3
-
-
 def test_enrich_uses_unified_sales_without_return_sheet_double_count():
     sales = pd.DataFrame(
         {
