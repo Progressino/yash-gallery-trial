@@ -33,8 +33,9 @@ if ! curl -sf --max-time 5 http://127.0.0.1:8000/api/health >/dev/null 2>&1; the
 fi
 
 echo "==> Running precompute_intelligence_production (timeout ${TIMEOUT_SEC}s)…"
-WARMUP_CMD=(_dc -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" exec -T -e INTELLIGENCE_PRECOMPUTE_MODE=tier3_gapfill backend python -m backend.scripts.precompute_intelligence_production)
-if timeout "${TIMEOUT_SEC}s" "${WARMUP_CMD[@]}"; then
+if timeout "${TIMEOUT_SEC}s" _dc -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" exec -T \
+  -e INTELLIGENCE_PRECOMPUTE_MODE=tier3_gapfill \
+  backend python -m backend.scripts.precompute_intelligence_production; then
   echo "OK: Intelligence bundle warmup finished"
 else
   rc=$?
