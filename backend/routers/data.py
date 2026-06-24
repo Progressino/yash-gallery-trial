@@ -136,19 +136,10 @@ def _load_intelligence_bundle_cache_from_disk() -> None:
 
 
 def _invalidate_intelligence_bundle_cache() -> None:
-    """Drop the process-wide Intelligence bundle cache (memory + disk) after
-    sales/platform data actually changes."""
+    """Bump generation so next lookup misses; keep disk entries for fast recovery.
+    Old entries expire naturally via TTL. Precompute rebuilds fresh entries async."""
+    global _INTELLIGENCE_BUNDLE_CACHE_GEN
     _GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
-    try:
-        if os.path.isdir(_INTEL_BUNDLE_DISK_DIR):
-            for name in os.listdir(_INTEL_BUNDLE_DISK_DIR):
-                if name.startswith("intel_bundle_") and name.endswith(".json"):
-                    try:
-                        os.remove(os.path.join(_INTEL_BUNDLE_DISK_DIR, name))
-                    except OSError:
-                        pass
-    except Exception:
-        pass
     schedule_intelligence_bundle_precompute()
 
 
@@ -168,7 +159,7 @@ def _intelligence_precompute_mode() -> str:
         "off",
     ):
         return "off"
-    return "full"
+    return "tier3_gapfill"
 
 
 def schedule_intelligence_bundle_precompute() -> None:
@@ -862,9 +853,9 @@ def _report_span_days(
 
 def _intelligence_fast_window_days() -> int:
     try:
-        return max(7, int((os.environ.get("INTELLIGENCE_FAST_WINDOW_DAYS") or "45").strip()))
+        return max(7, int((os.environ.get("INTELLIGENCE_FAST_WINDOW_DAYS") or "999").strip()))
     except ValueError:
-        return 45
+        return 999
 
 
 def _refresh_sales_days_by_source(sess: AppSession) -> Dict[str, Set[str]]:
@@ -4231,13 +4222,32 @@ def data_quality_report(request: Request):
 
 
 @router.get("/upload-reconciliation")
-def upload_reconciliation_report(request: Request):
+async def upload_reconciliation_report(
+    request: Request,
+    start_month: Optional[str] = None,
+    end_month: Optional[str] = None,
+):
     """Daily vs monthly upload mismatches and dedup savings (read-only)."""
+    from ..concurrency import run_aux
+
+    return await run_aux(
+        _upload_reconciliation_report_sync,
+        request,
+        start_month,
+        end_month,
+    )
+
+
+def _upload_reconciliation_report_sync(
+    request: Request,
+    start_month: Optional[str] = None,
+    end_month: Optional[str] = None,
+):
     from ..services.upload_reconciliation import build_upload_reconciliation_report
 
     sess = _sess(request)
     _restore_daily_if_needed(sess)
-    return build_upload_reconciliation_report(sess)
+    return build_upload_reconciliation_report(sess, start_month=start_month, end_month=end_month)
 
 
 # ── Sales Dashboard KPIs ──────────────────────────────────────
@@ -4414,97 +4424,42 @@ def intelligence_bundle(
 
     _schedule_intelligence_refresh_async(sid or None)
 
-    session_payload: dict | None = None
-    session_build_unsafe = _intelligence_session_build_unsafe(sess)
+    # ── Tier-3 first: never block request thread on session DataFrame build ──
     if has_dates and len(s_win) == 10 and len(e_win) == 10:
-        # Tier-3 before session unified build — session path OOMs on 1M+ row catalogs.
-        if tier3_window or not _session_has_units_in_window(sess, s_win, e_win) or session_build_unsafe:
-            tier3_first = _try_serve_tier3_intelligence_bundle(
-                sess,
-                cache_key,
-                bundle_cache,
-                s_win,
-                e_win,
-                limit,
-                basis,
-                include_extras,
-                ts=now,
+        tier3_first = _try_serve_tier3_intelligence_bundle(
+            sess, cache_key, bundle_cache, s_win, e_win, limit, basis, include_extras, ts=now,
+        )
+        if tier3_first is not None:
+            _schedule_background_bundle_build(
+                sid or None, cache_key, s_win, e_win, limit, basis, include_extras
             )
-            if tier3_first is not None:
-                return tier3_first
+            return tier3_first
 
-        if not session_build_unsafe or _disk_bulk_history_available():
-            from ..services.shared_frames import frame_row_count
-            _sales_n = frame_row_count("sales_df", sess)
-            if _sales_n > 500_000 and not fast_window:
-                _schedule_background_bundle_build(
-                    sid or None, cache_key, s_win, e_win, limit, basis, include_extras
-                )
-                return _intelligence_warming_payload(
-                    f"Analytics warming up — aggregating {_sales_n:,} sales rows (building in background)…"
-                )
-            if _sales_n > 500_000 and fast_window:
-                fast_fallback = _serve_intelligence_bundle_fast(
-                    sess,
-                    cache_key,
-                    bundle_cache,
-                    s_win,
-                    e_win,
-                    limit,
-                    basis,
-                    include_extras,
-                    sid=sid or None,
-                    ts=now,
-                )
-                if fast_fallback is not None:
-                    return fast_fallback
-            session_payload = _build_intelligence_bundle_payload_from_session(
-                sess, s_win, e_win, limit, basis, include_extras
-            )
-            if session_payload and _bundle_payload_has_display_data(session_payload):
-                _bundle_cache_store(cache_key, bundle_cache, session_payload, ts=now)
-                return session_payload
+        fast_result = _serve_intelligence_bundle_fast(
+            sess, cache_key, bundle_cache, s_win, e_win, limit, basis, include_extras,
+            sid=sid or None, ts=now,
+        )
+        if fast_result is not None:
+            return fast_result
 
-        if fast_window or (session_build_unsafe and not _disk_bulk_history_available()):
-            tier3_payload = _try_serve_tier3_intelligence_bundle(
-                sess,
-                cache_key,
-                bundle_cache,
-                s_win,
-                e_win,
-                limit,
-                basis,
-                include_extras,
-                ts=now,
-            )
-            if tier3_payload is not None:
-                from ..services.daily_store import platforms_with_uploads_in_range
-
-                need_persist = platforms_with_uploads_in_range(s_win, e_win)
-                if need_persist:
-                    _schedule_persist_tier3_window(sid or None, s_win, e_win, need_persist)
-                return tier3_payload
+        _schedule_background_bundle_build(
+            sid or None, cache_key, s_win, e_win, limit, basis, include_extras
+        )
 
         from ..services.daily_store import platforms_with_uploads_in_range
-
         need_persist = platforms_with_uploads_in_range(s_win, e_win)
         if need_persist:
             _schedule_persist_tier3_window(sid or None, s_win, e_win, need_persist)
 
-    elif _session_has_operational_frames(sess) and (
-        not session_build_unsafe or _disk_bulk_history_available()
-    ):
-        session_payload = _build_intelligence_bundle_payload_from_session(
-            sess,
+    elif _session_has_operational_frames(sess):
+        tier3_el = _try_serve_tier3_intelligence_bundle(
+            sess, cache_key, bundle_cache,
             s_win or str(start_date or "")[:10],
             e_win or str(end_date or "")[:10],
-            limit,
-            basis,
-            include_extras,
+            limit, basis, include_extras, ts=now,
         )
-        if session_payload is not None and _bundle_payload_has_display_data(session_payload):
-            _bundle_cache_store(cache_key, bundle_cache, session_payload, ts=now)
-            return session_payload
+        if tier3_el is not None:
+            return tier3_el
 
     if has_dates and len(s_win) == 10 and len(e_win) == 10:
         tier3_any = _try_serve_tier3_intelligence_bundle(

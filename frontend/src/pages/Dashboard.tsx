@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react'
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -34,8 +34,10 @@ import {
 import { useSession } from '../store/session'
 import './Dashboard.css'
 import {
+  IntelligenceBundleLoadPanel,
   IntelligencePlatformChecklist,
   PageLoadingStripe,
+  estimateIntelligenceBundleLoadMs,
 } from '../components/LoadingProgressBar'
 
 /* ═══════════════════════════════════════════════════════════
@@ -549,6 +551,143 @@ function IndiaHeat({ states }: { states: { state: string; units: number }[] }) {
 }
 
 /* ═══════════════════════════════════════════════════════════
+   NET BREAKDOWN + DAY SNAPSHOT
+   ═══════════════════════════════════════════════════════════ */
+function NetBreakdownTable({
+  platforms,
+  salesSummary,
+}: {
+  platforms: PlatformSummaryItem[]
+  salesSummary?: SalesSummary
+}) {
+  const rows = platforms.filter(p => p.loaded && (p.total_units > 0 || p.total_returns > 0))
+  if (!rows.length && !salesSummary) return null
+  const totGross = salesSummary?.total_units ?? rows.reduce((s, p) => s + p.total_units, 0)
+  const totRet = salesSummary?.total_returns ?? rows.reduce((s, p) => s + p.total_returns, 0)
+  const totNet = salesSummary?.net_units ?? totGross - totRet
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">Gross · Net breakdown</div>
+          <div className="card-sub">Shipments, returns, and net units per marketplace</div>
+        </div>
+      </div>
+      <div className="card-body flush">
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs border-collapse">
+            <thead>
+              <tr className="text-left text-gray-500 border-b bg-slate-50/80">
+                <th className="py-2 px-3">Platform</th>
+                <th className="py-2 px-3 text-right">Gross</th>
+                <th className="py-2 px-3 text-right">Returns</th>
+                <th className="py-2 px-3 text-right">Net</th>
+                <th className="py-2 px-3 text-right">Return %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(p => {
+                const net = p.net_units ?? p.total_units - p.total_returns
+                return (
+                  <tr key={p.platform} className="border-b border-gray-50">
+                    <td className="py-2 px-3 font-medium">{p.platform}</td>
+                    <td className="py-2 px-3 text-right tabular-nums">{p.total_units.toLocaleString()}</td>
+                    <td className="py-2 px-3 text-right tabular-nums text-amber-700">
+                      {p.total_returns.toLocaleString()}
+                    </td>
+                    <td className="py-2 px-3 text-right tabular-nums font-semibold text-emerald-800">
+                      {net.toLocaleString()}
+                    </td>
+                    <td className="py-2 px-3 text-right tabular-nums">{p.return_rate.toFixed(1)}%</td>
+                  </tr>
+                )
+              })}
+              <tr className="bg-slate-50 font-semibold">
+                <td className="py-2 px-3">Total</td>
+                <td className="py-2 px-3 text-right tabular-nums">{totGross.toLocaleString()}</td>
+                <td className="py-2 px-3 text-right tabular-nums text-amber-700">{totRet.toLocaleString()}</td>
+                <td className="py-2 px-3 text-right tabular-nums text-emerald-800">{totNet.toLocaleString()}</td>
+                <td className="py-2 px-3 text-right tabular-nums">
+                  {totGross > 0 ? ((totRet / totGross) * 100).toFixed(1) : '0.0'}%
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DaySalesSnapshot({
+  date,
+  platforms,
+}: {
+  date: string
+  platforms: PlatformSummaryItem[]
+}) {
+  const rows = platforms
+    .filter(p => p.loaded)
+    .map(p => {
+      const day = p.daily?.find(d => d.date === date)
+      const gross = day?.shipments ?? 0
+      const ret = day?.refunds ?? 0
+      const net = day?.net ?? gross - ret
+      return { platform: p.platform, gross, ret, net, hasDay: Boolean(day) }
+    })
+    .filter(r => r.hasDay || r.gross > 0 || r.ret > 0)
+  const totGross = rows.reduce((s, r) => s + r.gross, 0)
+  const totRet = rows.reduce((s, r) => s + r.ret, 0)
+  const totNet = rows.reduce((s, r) => s + r.net, 0)
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">Day sales test · {date}</div>
+          <div className="card-sub">Per-marketplace shipments and returns for the selected day</div>
+        </div>
+      </div>
+      <div className="card-body flush">
+        {rows.length === 0 ? (
+          <p style={{ padding: 24, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+            No shipment data for this day in the current range — try Reload data or pick another date.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs border-collapse">
+              <thead>
+                <tr className="text-left text-gray-500 border-b bg-slate-50/80">
+                  <th className="py-2 px-3">Platform</th>
+                  <th className="py-2 px-3 text-right">Gross</th>
+                  <th className="py-2 px-3 text-right">Returns</th>
+                  <th className="py-2 px-3 text-right">Net</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(r => (
+                  <tr key={r.platform} className="border-b border-gray-50">
+                    <td className="py-2 px-3 font-medium">{r.platform}</td>
+                    <td className="py-2 px-3 text-right tabular-nums">{r.gross.toLocaleString()}</td>
+                    <td className="py-2 px-3 text-right tabular-nums text-amber-700">{r.ret.toLocaleString()}</td>
+                    <td className="py-2 px-3 text-right tabular-nums font-semibold">{r.net.toLocaleString()}</td>
+                  </tr>
+                ))}
+                <tr className="bg-slate-50 font-semibold">
+                  <td className="py-2 px-3">Day total</td>
+                  <td className="py-2 px-3 text-right tabular-nums">{totGross.toLocaleString()}</td>
+                  <td className="py-2 px-3 text-right tabular-nums text-amber-700">{totRet.toLocaleString()}</td>
+                  <td className="py-2 px-3 text-right tabular-nums text-emerald-800">{totNet.toLocaleString()}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════
    PLATFORM TILE
    ═══════════════════════════════════════════════════════════ */
 function PlatformTile({ p, salesViewNet, onClick }: {
@@ -807,9 +946,12 @@ export default function Dashboard() {
   const prevReturnsImport = useRef<string>('idle')
   const bundleLoadStartedAt = useRef<number | null>(null)
   const bundleKickedRef = useRef(false)
+  const rangeRefreshingRef = useRef(false)
   const hydrateRequested = useRef(false)
   const [bundleLoadTick, setBundleLoadTick] = useState(0)
+  const [rangeRefreshing, setRangeRefreshing] = useState(false)
   const salesRebuild = useSession(s => s.sales_rebuild ?? 'idle')
+  const salesRebuildRunning = String(salesRebuild) === 'running'
   const coverageReturnUnits = useSession(s => s.return_sheet_units ?? 0)
   const coverageReturnLoaded = useSession(s => s.return_sheet)
   const sessionSales = useSession(s => s.sales || (s.sales_rows ?? 0) > 0)
@@ -831,12 +973,42 @@ export default function Dashboard() {
   const [exportingDsrMonthly,setExportingDsrMonthly]= useState(false)
   const [skuSearch,      setSkuSearch]      = useState('')
   const salesBasis = salesViewNet ? 'net' : 'gross' as const
+  const isSingleDay = Boolean(dateStart && dateEnd && dateStart === dateEnd)
+
+  const beginRangeRefresh = useCallback(() => {
+    rangeRefreshingRef.current = true
+    setRangeRefreshing(true)
+    bundleLoadStartedAt.current = Date.now()
+  }, [])
 
   /* ── preset ── */
   function applyPreset(label: string, startFn: () => string, endFn?: () => string) {
+    beginRangeRefresh()
     setDateStart(startFn())
     setDateEnd(endFn ? endFn() : todayIsoIST())
     setActivePreset(label)
+    void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
+    void qc.invalidateQueries({ queryKey: ['intelligence-bundle-full'] })
+  }
+  function onDateStartChange(value: string) {
+    beginRangeRefresh()
+    setDateStart(value)
+    setActivePreset('')
+    void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
+    if (value && value === dateEnd) {
+      setShowDsr(true)
+      setDsrDate(value)
+    }
+  }
+  function onDateEndChange(value: string) {
+    beginRangeRefresh()
+    setDateEnd(value)
+    setActivePreset('')
+    void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
+    if (value && value === dateStart) {
+      setShowDsr(true)
+      setDsrDate(value)
+    }
   }
   function togglePlatform(name: string) {
     setHiddenPlatforms(prev => {
@@ -866,27 +1038,40 @@ export default function Dashboard() {
     prevReturnsImport.current = returnsImport
   }, [returnsImport, qc])
 
-  const [parityReloading, setParityReloading] = useState(false)
+  const [paritySyncError, setParitySyncError] = useState<string | null>(null)
   const handleParityReload = async () => {
-    setParityReloading(true)
+    setParitySyncError(null)
     try {
-      // Lightweight: sync Tier-3 SQLite into session + rebuild. No GitHub download.
-      await cacheSyncTier3()
-      await getCoverage()
-      invalidateDataQueries(qc)
-    } catch {
-      // best-effort; Layout's handler shows full error
-    } finally {
-      setParityReloading(false)
+      const res = await cacheSyncTier3()
+      if (!res.ok) {
+        setParitySyncError(res.message || 'Tier-3 sync failed')
+        return
+      }
+      beginRangeRefresh()
+      void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
+      void qc.invalidateQueries({ queryKey: ['data-parity'] })
+    } catch (e) {
+      setParitySyncError(e instanceof Error ? e.message : 'Tier-3 sync failed to start')
     }
   }
 
   const { data: parityReport } = useQuery({
     queryKey: ['data-parity', dateEnd],
     queryFn: () => getDataParity(dateEnd || undefined),
-    staleTime: 60_000,
-    refetchOnWindowFocus: true,
+    staleTime: 120_000,
+    refetchOnWindowFocus: false,
   })
+
+  useEffect(() => {
+    rangeRefreshingRef.current = rangeRefreshing
+  }, [rangeRefreshing])
+
+  useEffect(() => {
+    if (isSingleDay && dateStart) {
+      setShowDsr(true)
+      setDsrDate(dateStart)
+    }
+  }, [isSingleDay, dateStart])
 
   const { data: intelligenceReadiness } = useQuery({
     queryKey: ['intelligence-readiness'],
@@ -1004,13 +1189,17 @@ export default function Dashboard() {
           : data
       if (normalized?.status !== 'warming' && bundleHasDisplayData(normalized)) {
         writeIntelligenceCache(dateStart, dateEnd, salesBasis, normalized)
+        rangeRefreshingRef.current = false
+        setRangeRefreshing(false)
       }
       return normalized
     },
-    staleTime: 120_000,
+    staleTime: 300_000,
+    gcTime: 600_000,
     retry: 5,
     retryDelay: attempt => Math.min(10_000, 3_000 * (attempt + 1)),
     enabled: true,
+    refetchOnWindowFocus: false,
     placeholderData: previousData => {
       const prev = previousData as IntelligenceBundle | undefined
       if (prev && bundleHasDisplayData(prev)) return prev
@@ -1021,7 +1210,6 @@ export default function Dashboard() {
     },
     refetchInterval: q => {
       const d = q.state.data
-      // Never stall: poll while warming or until display data exists (do not gate on dashboard_ready).
       if (d?.status === 'warming' || (d as { computing?: boolean })?.computing) return 3_000
       if (q.state.fetchStatus === 'fetching') return false
       if (!bundleHasDisplayData(d)) return 3_000
@@ -1092,9 +1280,14 @@ export default function Dashboard() {
     (bundleWarming ||
       loadingBundle ||
       (fetchingBundle && !intelligenceCore))
+  const bundleLoadActive =
+    awaitingFirstBundle ||
+    rangeRefreshing ||
+    salesRebuildRunning ||
+    Boolean(intelligenceReadiness?.background_jobs?.length)
 
   useEffect(() => {
-    if (!awaitingFirstBundle) {
+    if (!bundleLoadActive) {
       bundleLoadStartedAt.current = null
       return
     }
@@ -1103,21 +1296,35 @@ export default function Dashboard() {
     }
     const id = window.setInterval(() => setBundleLoadTick(t => t + 1), 500)
     return () => window.clearInterval(id)
-  }, [awaitingFirstBundle])
+  }, [bundleLoadActive])
 
   useEffect(() => {
-    bundleLoadStartedAt.current = null
     bundleKickedRef.current = false
   }, [dateStart, dateEnd, salesBasis])
 
-  const bundleLoadElapsedMs = awaitingFirstBundle && bundleLoadStartedAt.current
+  const bundleLoadElapsedMs = bundleLoadActive && bundleLoadStartedAt.current
     ? Date.now() - bundleLoadStartedAt.current
     : 0
+  const bundleLoadPercent = bundleLoadActive
+    ? (fetchingBundle || loadingBundle) && bundleLoadElapsedMs > estimateIntelligenceBundleLoadMs(bundleSpanDays)
+      ? 99
+      : Math.min(
+          fetchingBundle || loadingBundle ? 99 : 100,
+          (bundleLoadElapsedMs / estimateIntelligenceBundleLoadMs(bundleSpanDays)) * 100,
+        )
+    : 100
   void bundleLoadTick
+
+  useEffect(() => {
+    if (!fetchingBundle && !loadingBundle && (hasDisplayData || intelligenceCore?.status === 'warming') && !bundleWarming) {
+      rangeRefreshingRef.current = false
+      setRangeRefreshing(false)
+    }
+  }, [fetchingBundle, loadingBundle, hasDisplayData, bundleWarming, intelligenceCore?.status])
 
   /** Watchdog: if the dashboard is still loading after 60s, kick hydrate + refetch. */
   useEffect(() => {
-    if (!awaitingFirstBundle) {
+    if (!bundleLoadActive) {
       bundleKickedRef.current = false
       return
     }
@@ -1135,7 +1342,7 @@ export default function Dashboard() {
         queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis, 'core'],
       })
     })()
-  }, [awaitingFirstBundle, bundleLoadElapsedMs, qc, dateStart, dateEnd, topSkuLimit, salesBasis])
+  }, [bundleLoadActive, bundleLoadElapsedMs, qc, dateStart, dateEnd, topSkuLimit, salesBasis])
 
   const salesSummary = intelligenceBundle?.sales_summary
   const topSkusRaw = intelligenceBundle?.top_skus
@@ -1305,15 +1512,21 @@ export default function Dashboard() {
   const hiddenByName = new Set([...hiddenPlatforms].map(id => id))
 
   const intelligenceLoading =
-    awaitingFirstBundle ||
-    (bundleWarming && !hasDisplayData && !hasCachedDisplay) ||
-    (fetchingBundle && bundlePartial) ||
+    bundleLoadActive ||
+    salesRebuildRunning ||
+    (fetchingBundle && (rangeRefreshing || bundlePartial)) ||
     (showDsr && loadingDsr) ||
     exportingSales ||
     exportingDsr ||
     exportingDsrMonthly
 
   const intelligenceLoadLabel = useMemo(() => {
+    if (salesRebuildRunning) return 'Rebuilding sales dataset in background…'
+    const bg = intelligenceReadiness?.background_jobs ?? []
+    if (bg.length > 0) return `Processing: ${bg.join(', ')}…`
+    if (rangeRefreshing && fetchingBundle) {
+      return `Loading ${activePreset || 'date range'} data (${dateStart} → ${dateEnd})…`
+    }
     if (awaitingFirstBundle) {
       return 'Loading marketplace data…'
     }
@@ -1344,6 +1557,12 @@ export default function Dashboard() {
     awaitingFirstBundle,
     bundleWarming,
     intelligenceBundle?.message,
+    rangeRefreshing,
+    activePreset,
+    dateStart,
+    dateEnd,
+    paritySyncError,
+    salesRebuild,
   ])
 
   /* ────────────────────────────────────────────────────────────────
@@ -1354,9 +1573,26 @@ export default function Dashboard() {
       <PageLoadingStripe
         active={intelligenceLoading}
         label={intelligenceLoadLabel}
+        percent={bundleLoadActive ? bundleLoadPercent : null}
         className="sticky top-0 z-50 mb-3"
       />
-      {awaitingFirstBundle ? (
+      {bundleLoadActive && salesRebuild !== 'running' ? (
+        <IntelligenceBundleLoadPanel
+          active={bundleLoadActive}
+          percent={bundleLoadPercent}
+          elapsedSec={Math.round(bundleLoadElapsedMs / 1000)}
+          dateStart={dateStart || 'all'}
+          dateEnd={dateEnd || todayIsoIST()}
+          serverMessage={intelligenceBundle?.message}
+          pollNote={
+            rangeRefreshing && activePreset
+              ? `Processing ${activePreset} window — charts update when the server responds.`
+              : undefined
+          }
+          className="mb-3"
+        />
+      ) : null}
+      {awaitingFirstBundle || (rangeRefreshing && fetchingBundle) ? (
         <IntelligencePlatformChecklist
           platforms={platforms}
           tier3Platforms={intelligenceReadiness?.tier3_platforms_in_window}
@@ -1379,13 +1615,21 @@ export default function Dashboard() {
           {parityReport.warnings.map((w, i) => (
             <p key={i}>{w}</p>
           ))}
+          {paritySyncError ? (
+            <p className="text-red-700 text-xs">{paritySyncError}</p>
+          ) : null}
           <button
-            onClick={handleParityReload}
-            disabled={parityReloading}
+            onClick={() => void handleParityReload()}
+            disabled={salesRebuildRunning}
             className="mt-1 inline-flex items-center gap-1.5 rounded-md bg-amber-100 border border-amber-300 px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-200 disabled:opacity-50 transition-colors"
           >
-            {parityReloading ? '↻ Reloading…' : '↻ Reload data now'}
+            {salesRebuildRunning ? '↻ Syncing in background…' : '↻ Reload data now'}
           </button>
+        </div>
+      ) : null}
+      {salesRebuildRunning ? (
+        <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-xs text-blue-900">
+          Syncing latest uploads from server in background — marketplace charts refresh automatically (may take a few minutes).
         </div>
       ) : null}
       {hasDisplayData && meeshoInTier3 && !meeshoInBundle ? (
@@ -1450,7 +1694,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className={`hero-grid-layout${!hasDisplayData && awaitingFirstBundle ? ' is-loading-metrics' : ''}`}>
+        <div className={`hero-grid-layout${bundleLoadActive ? ' is-loading-metrics' : ''}`}>
           {/* Giant number */}
           <div className="hero-total">
             <div className="hero-total-eyebrow">
@@ -1540,10 +1784,10 @@ export default function Dashboard() {
           </div>
           <div className="controls-row" style={{ gap: 6 }}>
             <input type="date" className="ctrl-date" value={dateStart} max={dateEnd || todayIsoIST()}
-              onChange={e => { setDateStart(e.target.value); setActivePreset('') }} />
+              onChange={e => onDateStartChange(e.target.value)} />
             <span className="ctrl-arrow">→</span>
             <input type="date" className="ctrl-date" value={dateEnd} min={dateStart} max={todayIsoIST()}
-              onChange={e => { setDateEnd(e.target.value); setActivePreset('') }} />
+              onChange={e => onDateEndChange(e.target.value)} />
           </div>
         </div>
         {salesSummary?.date_basis_note && (
@@ -1596,6 +1840,18 @@ export default function Dashboard() {
           )}
         </div>
       </div>
+
+      {hasDisplayData && !bundleLoadActive ? (
+        <div className="dash-section">
+          <NetBreakdownTable platforms={filteredPlatforms} salesSummary={salesSummary} />
+        </div>
+      ) : null}
+
+      {isSingleDay && hasDisplayData && !bundleLoadActive ? (
+        <div className="dash-section">
+          <DaySalesSnapshot date={dateStart} platforms={filteredPlatforms} />
+        </div>
+      ) : null}
 
       {/* ══════════ DAILY DSR ══════════ */}
       {showDsr && (
