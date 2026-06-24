@@ -161,6 +161,8 @@ def bootstrap_warm_cache_if_empty() -> bool:
         if disk_ok and disk_data:
             loose = _warm_cache_loose_parquets_from_dir(Path(_DISK_CACHE_DIR))
             for key, val in loose.items():
+                if key == "mtr_df":
+                    continue
                 cur = disk_data.get(key)
                 if cur is None or (
                     hasattr(val, "__len__")
@@ -1350,6 +1352,8 @@ def _do_load_warm_cache() -> bool:
 
             loose = _warm_cache_loose_parquets_from_dir(Path(_DISK_CACHE_DIR))
             for key, val in loose.items():
+                if key == "mtr_df":
+                    continue
                 cur = disk_data.get(key)
                 if cur is None or (
                     hasattr(val, "__len__")
