@@ -1446,7 +1446,7 @@ def _merge_missing_refund_rows(
     secondary: "pd.DataFrame",
     txn_col: str = "TxnType",
 ) -> "pd.DataFrame":
-    """When Tier-3 gap-fill has shipments only, pull Refund rows from session bulk uploads."""
+    """Merge Refund rows from session bulk uploads into gap-filled Tier-3 frames (deduped)."""
     import pandas as pd
 
     if primary is None or (hasattr(primary, "empty") and primary.empty):
@@ -1455,13 +1455,29 @@ def _merge_missing_refund_rows(
         return primary
     if txn_col not in primary.columns or txn_col not in secondary.columns:
         return primary
+
+    refund_types = {"Refund", "ReturnCancel"}
     prim_txn = primary[txn_col].astype(str).str.strip()
-    if (prim_txn == "Refund").any():
+    sec_txn = secondary[txn_col].astype(str).str.strip()
+    prim_ref = primary[prim_txn.isin(refund_types)]
+    sec_ref = secondary[sec_txn.isin(refund_types)]
+    if sec_ref.empty:
         return primary
-    extra = secondary[secondary[txn_col].astype(str).str.strip().isin(["Refund", "ReturnCancel"])]
-    if extra.empty:
+    prim_units = int(pd.to_numeric(prim_ref.get("Quantity"), errors="coerce").fillna(0).sum())
+    sec_units = int(pd.to_numeric(sec_ref.get("Quantity"), errors="coerce").fillna(0).sum())
+    if sec_units <= prim_units:
         return primary
-    return pd.concat([primary, extra], ignore_index=True)
+
+    combined_ref = pd.concat([prim_ref, sec_ref], ignore_index=True)
+    key_cols = [
+        c
+        for c in ("OrderId", "Date", "SKU", "OMS_SKU", "Quantity", txn_col)
+        if c in combined_ref.columns
+    ]
+    if key_cols:
+        combined_ref = combined_ref.drop_duplicates(subset=key_cols, keep="first")
+    prim_non = primary[~prim_txn.isin(refund_types)]
+    return pd.concat([prim_non, combined_ref], ignore_index=True)
 
 
 def _sales_slice_for_intelligence_returns(
@@ -1469,9 +1485,7 @@ def _sales_slice_for_intelligence_returns(
     start_date: str,
     end_date: str,
 ) -> "pd.DataFrame | None":
-    """Light unified-sales slice for return enrichment (no full session copy)."""
-    import pandas as pd
-
+    """Unified sales for return enrichment — full upload blob, not calendar-clipped."""
     from ..services.sales import apply_upload_report_day_gate
 
     sales = getattr(sess, "sales_df", None)
@@ -1480,7 +1494,7 @@ def _sales_slice_for_intelligence_returns(
     gated = apply_upload_report_day_gate(sales)
     if gated is None or gated.empty:
         return None
-    return _slice_sales_for_bundle(gated, start_date, end_date)
+    return gated
 
 
 def _apply_return_overlay_to_intelligence_bundle(
@@ -1511,7 +1525,7 @@ def _apply_return_overlay_to_intelligence_bundle(
         else _sales_slice_for_intelligence_returns(sess, s, e)
     )
     platform_summary = enrich_platform_summaries_with_all_returns(
-        platform_summary, sales_slice, s, e
+        platform_summary, sales_slice, s, e, refund_scope="upload_blob"
     )
     platform_summary = merge_return_data_into_platform_summaries(
         platform_summary,
@@ -1834,18 +1848,21 @@ def _intelligence_payload_from_tier3_direct(
         )
 
     metrics_specs = (
-        ("amazon", "Amazon", "Date", "SKU", "Transaction_Type"),
-        ("myntra", "Myntra", "Date", "OMS_SKU", "TxnType"),
-        ("meesho", "Meesho", "Date", "OMS_SKU", "TxnType"),
-        ("flipkart", "Flipkart", "Date", "OMS_SKU", "TxnType"),
-        ("snapdeal", "Snapdeal", "Date", "OMS_SKU", "TxnType"),
+        ("amazon", "Amazon", "mtr_df", "Date", "SKU", "Transaction_Type"),
+        ("myntra", "Myntra", "myntra_df", "Date", "OMS_SKU", "TxnType"),
+        ("meesho", "Meesho", "meesho_df", "Date", "OMS_SKU", "TxnType"),
+        ("flipkart", "Flipkart", "flipkart_df", "Date", "OMS_SKU", "TxnType"),
+        ("snapdeal", "Snapdeal", "snapdeal_df", "Date", "OMS_SKU", "TxnType"),
     )
     platform_summary: list[dict] = []
-    for plat, name, _dc, sku_col, txn_col in metrics_specs:
+    for plat, name, attr, _dc, sku_col, txn_col in metrics_specs:
         if plat not in uploaded:
             platform_summary.append(_unified_platform_stub(name, False))
             continue
         df = all_frames.get(plat, pd.DataFrame())
+        sess_df = getattr(sess, attr, None)
+        if sess_df is not None and hasattr(sess_df, "empty") and not sess_df.empty:
+            df = _merge_missing_refund_rows(df, sess_df, txn_col)
         if df.empty:
             platform_summary.append(_unified_platform_stub(name, False))
             continue

@@ -39,6 +39,73 @@ def test_upload_blob_counts_refunds_outside_ship_window():
     assert blob["total_units"] == 100
 
 
+def test_enrich_upload_blob_counts_refunds_outside_window():
+    sales = pd.DataFrame(
+        {
+            "Source": ["Amazon", "Amazon", "Amazon"],
+            "Transaction Type": ["Shipment", "Refund", "Refund"],
+            "Quantity": [100, 50, 3],
+            "TxnDate": [
+                pd.Timestamp("2026-05-26"),
+                pd.Timestamp("2026-05-20"),
+                pd.Timestamp("2026-05-26"),
+            ],
+            "OrderId": ["O1", "O2", "O3"],
+            "Sku": ["S1", "S1", "S1"],
+            "Units_Effective": [100, -50, -3],
+        }
+    )
+    cards = [
+        {
+            "platform": "Amazon",
+            "loaded": True,
+            "total_units": 100,
+            "total_returns": 3,
+            "net_units": 97,
+            "return_rate": 3.0,
+        }
+    ]
+    cal = enrich_platform_summaries_with_all_returns(
+        cards, sales, "2026-05-25", "2026-05-30", refund_scope="calendar"
+    )
+    blob = enrich_platform_summaries_with_all_returns(
+        cards, sales, "2026-05-25", "2026-05-30", refund_scope="upload_blob"
+    )
+    assert cal[0]["total_returns"] == 3
+    assert blob[0]["total_returns"] == 53
+
+
+def test_merge_missing_refund_rows_dedupes_partial_primary():
+    from backend.routers.data import _merge_missing_refund_rows
+
+    primary = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2026-05-26"), pd.Timestamp("2026-05-26")],
+            "TxnType": ["Shipment", "Refund"],
+            "Quantity": [100, 3],
+            "OrderId": ["O1", "O3"],
+            "OMS_SKU": ["S1", "S1"],
+        }
+    )
+    secondary = pd.DataFrame(
+        {
+            "Date": [
+                pd.Timestamp("2026-05-20"),
+                pd.Timestamp("2026-05-26"),
+                pd.Timestamp("2026-05-26"),
+            ],
+            "TxnType": ["Refund", "Refund", "Refund"],
+            "Quantity": [50, 3, 10],
+            "OrderId": ["O2", "O3", "O4"],
+            "OMS_SKU": ["S1", "S1", "S2"],
+        }
+    )
+    merged = _merge_missing_refund_rows(primary, secondary, "TxnType")
+    refunds = merged[merged["TxnType"] == "Refund"]
+    assert int(refunds["Quantity"].sum()) == 63
+    assert len(refunds) == 3
+
+
 def test_enrich_uses_unified_sales_without_return_sheet_double_count():
     sales = pd.DataFrame(
         {

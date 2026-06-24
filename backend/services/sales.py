@@ -1314,6 +1314,8 @@ def _native_refunds_from_unified_sales(
     platform_name: str,
     start_date: Optional[str],
     end_date: Optional[str],
+    *,
+    refund_scope: Literal["calendar", "upload_blob"] = "calendar",
 ) -> int:
     """Marketplace Refund rows from unified sales (excludes PO return-sheet injection)."""
     if sales_df is None or sales_df.empty:
@@ -1323,7 +1325,7 @@ def _native_refunds_from_unified_sales(
     prep = sales_df.copy()
     prep["TxnDate"] = txn_reporting_naive_ist(prep["TxnDate"])
     prep = prep.dropna(subset=["TxnDate"])
-    if start_date or end_date:
+    if refund_scope == "calendar" and (start_date or end_date):
         prep = _filter_by_reporting_days(prep, "TxnDate", start_date, end_date)
     if prep.empty:
         return 0
@@ -1355,6 +1357,8 @@ def enrich_platform_summaries_with_all_returns(
     sales_df: Optional[pd.DataFrame],
     start_date: Optional[str],
     end_date: Optional[str],
+    *,
+    refund_scope: Literal["calendar", "upload_blob"] = "upload_blob",
 ) -> List[dict]:
     """
     Raise platform return counts using unified sales refunds when uploads already
@@ -1367,7 +1371,7 @@ def enrich_platform_summaries_with_all_returns(
     for card in summaries:
         name = str(card.get("platform") or "")
         unified_ret = _native_refunds_from_unified_sales(
-            sales_df, name, start_date, end_date
+            sales_df, name, start_date, end_date, refund_scope=refund_scope
         )
         out.append(_apply_return_totals_to_platform_card(card, unified_ret))
     return out
@@ -2187,7 +2191,7 @@ def get_platform_summary(
             end_date,
         )
         return enrich_platform_summaries_with_all_returns(
-            summaries, sales_df, start_date, end_date
+            summaries, sales_df, start_date, end_date, refund_scope=refund_scope
         )
 
     # Legacy: raw platform frames only (differs from unified export when dedup/mapping changes rows)

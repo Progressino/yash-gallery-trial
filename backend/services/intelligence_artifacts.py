@@ -49,12 +49,15 @@ def intelligence_version_for_window(
 ) -> str:
     """Shared cache version key, e.g. ``2026-06-24_2026-05-25-a1b2c3d4``."""
     try:
+        from ..app_version import get_build_info
         from .daily_store import get_tier3_sync_token
 
         tok = tuple(sorted((get_tier3_sync_token() or {}).items()))
+        build = str(get_build_info().get("git_sha") or "")
     except Exception:
         tok = ()
-    raw = f"{start_date[:10]}:{end_date[:10]}:{basis}:{tok}"
+        build = ""
+    raw = f"{start_date[:10]}:{end_date[:10]}:{basis}:{tok}:{build}"
     digest = hashlib.sha1(raw.encode()).hexdigest()[:8]
     return f"{end_date[:10]}_{start_date[:10]}-{digest}"
 
