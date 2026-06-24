@@ -72,6 +72,8 @@ _META_JSON_FIELDS = (
     "finishing_receipt_uploaded_at",
     "finishing_receipt_filename",
     "finishing_receipt_report",
+    "daily_inventory_history_uploaded_at",
+    "daily_inventory_history_filename",
     "existing_po_generation",
     "po_calculate_existing_po_generation",
     "daily_restored",

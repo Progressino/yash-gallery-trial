@@ -378,21 +378,94 @@ def po_get_daily_inventory_history(request: Request):
     except Exception:
         pass
     df = sess.daily_inventory_history_df
-    if df is None or df.empty:
-        return {"ok": True, "loaded": False, "rows": 0, "skus": 0, "days": 0}
-    return {
-        "ok": True,
-        "loaded": True,
-        "rows": int(len(df)),
-        "skus": int(df["OMS_SKU"].nunique()),
-        "days": int(pd.to_datetime(df["Date"], errors="coerce").dt.normalize().nunique()),
-        "min_date": str(pd.to_datetime(df["Date"], errors="coerce").min().date())
-        if len(df)
-        else "",
-        "max_date": str(pd.to_datetime(df["Date"], errors="coerce").max().date())
-        if len(df)
-        else "",
-    }
+    from ..services.daily_inventory_history import inventory_history_summary
+
+    summary = inventory_history_summary(df if df is not None else pd.DataFrame())
+    out = {"ok": True, **summary}
+    out["uploaded_at"] = str(getattr(sess, "daily_inventory_history_uploaded_at", "") or "") or None
+    out["filename"] = str(getattr(sess, "daily_inventory_history_filename", "") or "") or None
+    return out
+
+
+@router.get("/daily-inventory-history/dates")
+def po_list_daily_inventory_history_dates(request: Request, limit: int = 120):
+    """List snapshot dates in the wide inventory matrix (newest first)."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "dates": []}
+    try:
+        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
+
+        ensure_po_sidecars_hydrated(sess)
+    except Exception:
+        pass
+    df = getattr(sess, "daily_inventory_history_df", None)
+    from ..services.daily_inventory_history import list_inventory_history_dates
+
+    dates = list_inventory_history_dates(df if df is not None else pd.DataFrame(), limit=limit)
+    return {"ok": True, "dates": dates, "count": len(dates)}
+
+
+@router.get("/daily-inventory-history/by-date")
+def po_daily_inventory_history_by_date(
+    request: Request,
+    date: str,
+    q: str = "",
+    limit: int = 500,
+    offset: int = 0,
+):
+    """All SKU on-hand quantities for one snapshot date (admin verification)."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    try:
+        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
+
+        ensure_po_sidecars_hydrated(sess)
+    except Exception:
+        pass
+    df = getattr(sess, "daily_inventory_history_df", None)
+    from ..services.daily_inventory_history import inventory_rows_for_date
+
+    out = inventory_rows_for_date(
+        df if df is not None else pd.DataFrame(),
+        date,
+        q=q,
+        limit=min(max(1, int(limit)), 2000),
+        offset=max(0, int(offset)),
+    )
+    out["ok"] = True
+    return out
+
+
+@router.get("/daily-inventory-history/matrix")
+def po_daily_inventory_history_matrix(
+    request: Request,
+    q: str = "",
+    limit: int = 150,
+    offset: int = 0,
+):
+    """Excel-style wide matrix: SKU rows × date columns (paginated)."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    try:
+        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
+
+        ensure_po_sidecars_hydrated(sess)
+    except Exception:
+        pass
+    df = getattr(sess, "daily_inventory_history_df", None)
+    from ..services.daily_inventory_history import inventory_history_wide_matrix
+
+    out = inventory_history_wide_matrix(
+        df if df is not None else pd.DataFrame(),
+        q=q,
+        limit=min(max(1, int(limit)), 15000),
+        offset=max(0, int(offset)),
+    )
+    out["ok"] = True
+    return out
 
 
 @router.get("/daily-inventory-history/sku")
@@ -522,6 +595,21 @@ def po_get_daily_inventory_history_for_sku(
         "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
         "rows": rows,
     }
+
+
+@router.get("/sku-audit")
+def po_sku_audit(request: Request, sku: str):
+    """
+  Cross-check one PO row (shared cache / last session run) vs Tier-3 sales in the ADS window.
+  Pass the same query params as ``GET /po/calculate/shared-cache`` (planning_date, period_days, …).
+    """
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    from ..services.po_sku_audit import build_po_sku_audit
+
+    qp = {k: request.query_params.get(k) for k in request.query_params.keys()}
+    return build_po_sku_audit(sess, sku, qp)
 
 
 @router.delete("/daily-inventory-history")
@@ -982,7 +1070,9 @@ def po_delete_raise_ledger_skus(request: Request, body: RaiseLedgerDeleteSkusBod
     from ..services.upload_policy import may_admin_po_session_edits
 
     role = _request_role(request)
-    if not may_admin_po_session_edits(role):
+    auth = getattr(request.state, "auth", None) or {}
+    username = str(auth.get("sub") or "")
+    if not may_admin_po_session_edits(role, username):
         return {
             "ok": False,
             "message": "Removing individual raised PO lines is Admin-only.",

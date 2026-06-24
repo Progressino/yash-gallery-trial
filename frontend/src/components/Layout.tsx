@@ -16,6 +16,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     label: 'Sales & Analytics',
     items: [
       { to: '/', module: 'intelligence', label: 'Intelligence', short: '📊' },
+      { to: '/inventory-history', module: 'po', label: 'Inv. History', short: '📅' },
       { to: '/upload', module: 'upload', label: 'Upload Data', short: '📁' },
       { to: '/mtr', module: 'amazon', label: 'Amazon', short: '📦' },
       { to: '/myntra', module: 'myntra', label: 'Myntra', short: '🛍️' },

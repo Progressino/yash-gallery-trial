@@ -118,3 +118,21 @@ def test_super_admin_may_clear_returns_overlay(monkeypatch):
     assert check_upload_api_access(
         "Manager", "DELETE", "/api/po/returns/overlay", username="mgr"
     ) is not None
+
+
+def test_irfan_may_upload_existing_po_when_locked(monkeypatch):
+    monkeypatch.setenv("UPLOAD_HISTORICAL_LOCKED", "1")
+    pol = upload_policy_for_role("Manager", "irfan")
+    assert pol["may_upload_po_baseline"] is True
+    assert check_upload_api_access(
+        "Manager", "POST", "/api/upload/existing-po", username="irfan"
+    ) is None
+    assert check_upload_api_access(
+        "Manager", "POST", "/api/upload/sku-mapping", username="irfan"
+    ) is None
+    assert check_upload_api_access(
+        "Manager", "POST", "/api/po/sku-status-lead", username="irfan"
+    ) is None
+    assert check_upload_api_access(
+        "Manager", "POST", "/api/upload/existing-po", username="other_mgr"
+    ) is not None

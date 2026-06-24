@@ -23,6 +23,55 @@ from ..session import wipe_app_session, resume_auto_data_restore
 router = APIRouter()
 _log = logging.getLogger(__name__)
 
+_tier3_manual_sync_queued: set[str] = set()
+
+
+def _run_manual_tier3_sync_worker(session_id: str) -> None:
+    """Background Tier-3 merge for /cache/sync-tier3 (can take several minutes on large catalogs)."""
+    from ..routers.upload import (
+        _rebuild_sales_sync,
+        _resolve_upload_session,
+        _sync_session_platforms_from_sqlite,
+    )
+    from ..routers.data import _invalidate_intelligence_bundle_cache
+    import backend.main as _main
+
+    sess = _resolve_upload_session(session_id)
+    if sess is None:
+        return
+    sess.sales_rebuild_status = "running"
+    sess.sales_rebuild_message = "Syncing Tier-3 uploads into session…"
+    try:
+        with sess._daily_restore_lock:
+            _sync_session_platforms_from_sqlite(sess, months=6)
+            ok, msg = _rebuild_sales_sync(sess, refresh_sqlite=False)
+        if not ok:
+            sess.sales_rebuild_message = msg or "Tier-3 sync failed"
+            return
+        n_sales = len(sess.sales_df) if not sess.sales_df.empty else 0
+        sess._quarterly_cache.clear()
+        try:
+            _main.publish_warm_cache_from_session(sess)
+        except Exception:
+            pass
+        try:
+            _invalidate_intelligence_bundle_cache()
+        except Exception:
+            pass
+        try:
+            from ..routers.upload import _finalize_sales_data_refresh
+
+            _finalize_sales_data_refresh(sess)
+        except Exception:
+            pass
+        sess.sales_rebuild_message = f"Merged latest daily uploads from Tier-3. {msg} ({n_sales:,} sales rows)"
+    except Exception as e:
+        _log.exception("background sync-tier3 failed")
+        sess.sales_rebuild_message = str(e)
+    finally:
+        sess.sales_rebuild_status = "idle"
+        _tier3_manual_sync_queued.discard(session_id)
+
 
 def _hydrate_warm_worker(session_id: str) -> None:
     """Background: copy warm cache into session (can take 30–90s on large catalogs)."""
@@ -818,39 +867,65 @@ def cache_sync_tier3(request: Request):
     """
     Lightweight Tier-3 merge: sync recent SQLite daily uploads into the current
     session and rebuild sales_df — NO GitHub download, no full session wipe.
-    Use this when the parity banner shows "Session platform history is shorter
-    than Tier-3 SQLite" and you want to merge recent uploads without the heavy
-    full-reload cost.
+    Runs in the background so the dashboard stays responsive.
     """
-    from ..routers.upload import _sync_session_platforms_from_sqlite, _rebuild_sales_sync
-    from ..routers.data import _invalidate_intelligence_bundle_cache
-    import backend.main as _main
-
     sess = request.state.session
     if sess is None:
         return CacheReloadResponse(ok=False, message="No session", sales_rows=0)
 
-    try:
-        with sess._daily_restore_lock:
-            _sync_session_platforms_from_sqlite(sess, months=4)
-            ok, msg = _rebuild_sales_sync(sess, refresh_sqlite=False)
-        if not ok:
-            return CacheReloadResponse(ok=False, message=msg, sales_rows=0)
-        n_sales = len(sess.sales_df) if not sess.sales_df.empty else 0
-        sess._quarterly_cache.clear()
-        try:
-            _main.publish_warm_cache_from_session(sess)
-        except Exception:
-            pass
-        try:
-            _invalidate_intelligence_bundle_cache()
-        except Exception:
-            pass
+    sid = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None) or ""
+    n_sales = len(sess.sales_df) if getattr(sess, "sales_df", None) is not None and not sess.sales_df.empty else 0
+
+    if getattr(sess, "sales_rebuild_status", "idle") == "running":
         return CacheReloadResponse(
             ok=True,
-            message=f"Merged latest daily uploads from Tier-3. {msg}",
+            message="Sales sync already running in background — charts refresh when complete.",
             sales_rows=n_sales,
         )
-    except Exception as e:
-        _log.exception("sync-tier3 failed")
-        return CacheReloadResponse(ok=False, message=str(e), sales_rows=0)
+    if sid and sid in _tier3_manual_sync_queued:
+        return CacheReloadResponse(
+            ok=True,
+            message="Tier-3 sync already queued — please wait for the current sync to finish.",
+            sales_rows=n_sales,
+        )
+
+    if sid:
+        _tier3_manual_sync_queued.add(str(sid))
+        from ..concurrency import AUX_EXECUTOR
+
+        AUX_EXECUTOR.submit(_run_manual_tier3_sync_worker, str(sid))
+    else:
+        try:
+            from ..routers.upload import _sync_session_platforms_from_sqlite, _rebuild_sales_sync
+            from ..routers.data import _invalidate_intelligence_bundle_cache
+            import backend.main as _main
+
+            with sess._daily_restore_lock:
+                _sync_session_platforms_from_sqlite(sess, months=6)
+                ok, msg = _rebuild_sales_sync(sess, refresh_sqlite=False)
+            if not ok:
+                return CacheReloadResponse(ok=False, message=msg, sales_rows=0)
+            n_sales = len(sess.sales_df) if not sess.sales_df.empty else 0
+            sess._quarterly_cache.clear()
+            try:
+                _main.publish_warm_cache_from_session(sess)
+            except Exception:
+                pass
+            try:
+                _invalidate_intelligence_bundle_cache()
+            except Exception:
+                pass
+            return CacheReloadResponse(
+                ok=True,
+                message=f"Merged latest daily uploads from Tier-3. {msg}",
+                sales_rows=n_sales,
+            )
+        except Exception as e:
+            _log.exception("sync-tier3 failed")
+            return CacheReloadResponse(ok=False, message=str(e), sales_rows=0)
+
+    return CacheReloadResponse(
+        ok=True,
+        message="Tier-3 sync started in background — dashboard refreshes automatically when complete.",
+        sales_rows=n_sales,
+    )

@@ -4278,12 +4278,26 @@ def intelligence_bundle(
     One round-trip for the Intelligence dashboard (summary + platforms + top SKUs + anomalies + DSR brands).
     Runs session freshness once instead of five parallel handlers each rebuilding sales.
     """
-    from ..services.sales import (
-        apply_upload_report_day_gate,
-        txn_reporting_naive_ist,
-        _filter_by_reporting_days,
+    return _intelligence_bundle_sync(
+        request,
+        start_date,
+        end_date,
+        limit,
+        basis,
+        include_extras,
+        mode,
     )
 
+
+def _intelligence_bundle_sync(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 10,
+    basis: Optional[str] = None,
+    include_extras: bool = False,
+    mode: Optional[str] = None,
+):
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
 
@@ -4312,16 +4326,38 @@ def intelligence_bundle(
         sess=sess,
     )
     if cached_early is not None:
-        _maybe_queue_light_session_hydrate(sess, sid or None)
         return cached_early
+
+    tier3_window = False
+    if has_dates and len(s_win) == 10 and len(e_win) == 10:
+        try:
+            from ..services.daily_store import platforms_with_uploads_in_range
+
+            tier3_window = bool(platforms_with_uploads_in_range(s_win, e_win))
+        except Exception:
+            tier3_window = False
+
+    # Tier-3 before warm-cache bootstrap — loading full parquets on every GET OOMs small VPS hosts.
+    if tier3_window:
+        tier3_early = _try_serve_tier3_intelligence_bundle(
+            sess,
+            cache_key,
+            bundle_cache,
+            s_win,
+            e_win,
+            limit,
+            basis,
+            include_extras,
+            allow_undercount=True,
+        )
+        if tier3_early is not None:
+            return tier3_early
 
     try:
         import backend.main as _main
 
         if not _main._warm_cache:
             _main.bootstrap_warm_cache_if_empty()
-        else:
-            _main._top_up_warm_cache_from_disk()
         _main.try_attach_shared_frames_fast(sess)
     except Exception:
         pass
@@ -4355,11 +4391,6 @@ def intelligence_bundle(
     else:
         use_fast = mode_norm == "fast"
 
-    tier3_window = False
-    if has_dates and len(s_win) == 10 and len(e_win) == 10:
-        from ..services.daily_store import platforms_with_uploads_in_range
-
-        tier3_window = bool(platforms_with_uploads_in_range(s_win, e_win))
     prefer_tier3 = tier3_window or _tier3_token_mismatch(sess)
 
     # Precomputed global/disk bundle — instant path before any Tier-3 rebuild.
@@ -4372,7 +4403,6 @@ def intelligence_bundle(
         sess=sess,
     )
     if cached_instant is not None:
-        _maybe_queue_light_session_hydrate(sess, sid or None)
         return cached_instant
 
     _hydrate_session_for_intelligence(sess)
@@ -4390,7 +4420,6 @@ def intelligence_bundle(
             sid=sid or None,
         )
         if fast_payload is not None:
-            _maybe_queue_light_session_hydrate(sess, sid or None)
             return fast_payload
 
     # Tier-3 daily uploads when cache miss and window has fresh Tier-3 blobs.
@@ -4406,12 +4435,10 @@ def intelligence_bundle(
             include_extras,
         )
         if tier3_immediate is not None:
-            _maybe_queue_tier3_sales_sync(sess, sid or None)
             return tier3_immediate
 
     if not use_fast:
         _hydrate_session_for_intelligence(sess)
-    _maybe_queue_light_session_hydrate(sess, sid or None)
 
     now = time.time()
     cached_payload = _bundle_cache_lookup(

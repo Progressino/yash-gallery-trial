@@ -788,6 +788,79 @@ def _size_suffix_label(oms_sku: str) -> str:
     return s
 
 
+def _apply_multi_size_sibling_po_lift(
+    po_df: pd.DataFrame,
+    target_cover_days: float,
+) -> pd.DataFrame:
+    """When ≥2 sizes in a parent already need PO, top up all siblings below target cover.
+
+    Ensures one combined order covers every active size up to post-PO target days instead
+    of raising PO for a subset and revisiting the style days later.
+    """
+    if po_df is None or po_df.empty or "Parent_SKU" not in po_df.columns:
+        return po_df
+
+    po_df = po_df.copy()
+    try:
+        from .sku_status_lead import is_excluded_po_status
+    except Exception:  # pragma: no cover
+        def is_excluded_po_status(_x: object) -> bool:
+            return False
+
+    _par = po_df["Parent_SKU"].astype(str)
+    _po_qty = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0.0)
+    _ads = pd.to_numeric(po_df["ADS"], errors="coerce").fillna(0.0)
+    _proj = pd.to_numeric(po_df["Projected_Running_Days"], errors="coerce").fillna(999.0)
+    _n_active = (_po_qty > 0).astype(int).groupby(_par).transform("sum")
+    _excl = po_df.get("SKU_Sheet_Status", pd.Series("", index=po_df.index)).astype(str).map(
+        is_excluded_po_status
+    )
+    if not isinstance(_excl, pd.Series):
+        _excl = pd.Series(_excl, index=po_df.index)
+    _closed = po_df.get("SKU_Sheet_Closed", pd.Series(False, index=po_df.index)).fillna(False)
+
+    _target = float(max(1.0, target_cover_days))
+    _lift = (
+        (_n_active >= 2)
+        & (_po_qty <= 0)
+        & (_ads > 0)
+        & (_proj < _target)
+        & ~_excl.fillna(False)
+        & ~_closed.astype(bool)
+    )
+    if not bool(_lift.any()):
+        return po_df
+
+    _lift_idx = po_df.index[_lift]
+    _bal = (_target - _proj.loc[_lift_idx]).clip(lower=0.0)
+    _rounded = np.vectorize(round_po_pack)((_bal * _ads.loc[_lift_idx]).to_numpy(dtype=float))
+    po_df.loc[_lift_idx, "Gross_PO_Qty"] = _rounded
+    po_df.loc[_lift_idx, "PO_Qty"] = _rounded
+
+    _proj_lift = _proj.loc[_lift_idx].to_numpy(dtype=float)
+    _ads_lift = _ads.loc[_lift_idx].to_numpy(dtype=float)
+    po_df.loc[_lift_idx, "Post_PO_Cover_Days_Capped"] = (
+        _proj_lift + _rounded / np.maximum(_ads_lift, 1e-9)
+    ).round(1)
+
+    _lt_pat = r"Projected cover exceeds (?:entered |sheet |factory )?lead time[^;]*"
+    _old_br = po_df.loc[_lift_idx, "PO_Block_Reason"].astype(str)
+    po_df.loc[_lift_idx, "PO_Block_Reason"] = (
+        _old_br.str.replace(_lt_pat, "", regex=True).str.strip("; ").str.strip()
+    )
+    if bool((_rounded > 0).any()):
+        po_df.loc[_lift_idx[_rounded > 0], "Priority"] = "🟡 HIGH"
+
+    import logging as _log_mod
+
+    _log_mod.getLogger(__name__).info(
+        "multi-size sibling PO lift: %d row(s) across %d parent(s)",
+        int(_lift.sum()),
+        int(_par.loc[_lift_idx].nunique()),
+    )
+    return po_df
+
+
 def _apply_sibling_cut_from_pending(po_df: pd.DataFrame, target_cover_days: float) -> pd.DataFrame:
     """When some sizes need a PO and siblings are over-covered with pending cutting, suggest cutting
     from those sizes instead of ordering new fabric (saves grey-fabric cost)."""
@@ -2537,10 +2610,9 @@ def calculate_po_base(
 
     # ── All-sizes expansion (two-part) ────────────────────────────────────────
     #
-    # Part A — Lead-time gate lift (target-only mode only):
-    #   When the lead gate is off, ≥2 sizes with PO can lift siblings blocked only
-    #   by projected > lead toward target_days.  Skipped when gate is on — qty is
-    #   already sized toward post-PO target for eligible rows.
+    # Part A — Multi-size sibling lift:
+    #   When ≥2 sizes in a parent already have PO, top up every other size with ADS
+    #   that is still below post-PO target cover (works with lead gate on or off).
     #
     # Part B — Missing-size ghost rows:
     #   When any size of a parent has Projected_Running_Days < urgent_all_sizes_days,
@@ -2548,70 +2620,12 @@ def calculate_po_base(
     #   entirely absent from the output (no inventory, no ADS).  These rows let the
     #   operator see and raise for every size even if some aren't in the current data.
     import logging as _log_mod
-    _LT_GATE_MSG = "Projected cover exceeds factory lead time"
 
     # ── Part A ────────────────────────────────────────────────────────────────
     try:
-        if not enforce_lead_time_release_gate:
-            _po_qty_a = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0.0)
-            _par_a    = po_df["Parent_SKU"]
-            _ads_a    = pd.to_numeric(po_df["ADS"], errors="coerce").fillna(0.0)
-            _proj_a   = pd.to_numeric(po_df["Projected_Running_Days"], errors="coerce").fillna(999.0)
-            _n_active = (_po_qty_a > 0).astype(int).groupby(_par_a).transform("sum")
-
-            # Siblings that qualify for the gate lift:
-            # • parent has ≥2 active PO sizes
-            # • this row currently has PO_Qty = 0
-            # • the *only* reason is the lead-time gate (i.e. block reason contains the gate msg)
-            # • the row has real ADS > 0 (it has sales history; not a phantom size)
-            # • projected cover is below target_days (otherwise there is nothing to order)
-            _target_eff = float(target_days) + float(grace_days)
-            _excl_status = po_df["SKU_Sheet_Status"].astype(str).map(is_excluded_po_status)
-            if not isinstance(_excl_status, pd.Series):
-                _excl_status = pd.Series(_excl_status, index=po_df.index)
-            _lift_mask = (
-                (_n_active >= 2)
-                & (_po_qty_a == 0)
-                & (_ads_a > 0)
-                & (_proj_a < _target_eff)
-                & po_df["PO_Block_Reason"].astype(str).str.contains(_LT_GATE_MSG, na=False)
-                & ~_excl_status.fillna(False)
-            )
-            if _lift_mask.any():
-                _lift_idx = po_df.index[_lift_mask]
-                _bal = (_target_eff - _proj_a.loc[_lift_idx]).clip(lower=0.0)
-                _gross = (_bal * _ads_a.loc[_lift_idx]).round(1)
-                _rounded = np.vectorize(round_po_pack)(_gross.to_numpy(dtype=float))
-
-                po_df.loc[_lift_idx, "Gross_PO_Qty"] = _rounded
-                po_df.loc[_lift_idx, "PO_Qty"] = _rounded
-
-                # Recompute Post-PO cover
-                _proj_lift = _proj_a.loc[_lift_idx].to_numpy(dtype=float)
-                _ads_lift = _ads_a.loc[_lift_idx].to_numpy(dtype=float)
-                _new_post = (_proj_lift + _rounded / np.maximum(_ads_lift, 1e-9)).round(1)
-                po_df.loc[_lift_idx, "Post_PO_Cover_Days_Capped"] = _new_post
-
-                # Strip the lead-time gate message from the block reason; keep any others
-                _old_br = po_df.loc[_lift_mask, "PO_Block_Reason"].astype(str)
-                _new_br = (
-                    _old_br
-                    .str.replace(_LT_GATE_MSG + "[^;]*", "", regex=True)
-                    .str.strip("; ").str.strip()
-                )
-                po_df.loc[_lift_idx, "PO_Block_Reason"] = _new_br
-                if bool((_rounded > 0).any()):
-                    po_df.loc[_lift_idx[_rounded > 0], "Priority"] = "🟡 HIGH"
-
-                _log_mod.getLogger(__name__).info(
-                    "all-sizes gate-lift: %d sibling row(s) unblocked across %d parent(s)",
-                    int(_lift_mask.sum()),
-                    int((_n_active >= 2)[_lift_mask].groupby(_par_a[_lift_mask]).ngroups
-                        if hasattr(_par_a[_lift_mask].groupby(_par_a[_lift_mask]), "ngroups")
-                        else len(_par_a[_lift_mask].unique())),
-                )
+        po_df = _apply_multi_size_sibling_po_lift(po_df, target_cover_days)
     except Exception as _lift_err:
-        _log_mod.getLogger(__name__).warning("all-sizes gate-lift failed (non-fatal): %s", _lift_err)
+        _log_mod.getLogger(__name__).warning("multi-size sibling PO lift failed (non-fatal): %s", _lift_err)
 
     # ── Part B ────────────────────────────────────────────────────────────────
     if urgent_all_sizes_days > 0 and sku_mapping:
@@ -2752,13 +2766,17 @@ def calculate_po_base(
 
     # Final lead-time gate (belt-and-suspenders after pack-round / ghost rows).
     if enforce_lead_time_release_gate and "Projected_Running_Days" in po_df.columns:
+        po_df = _apply_multi_size_sibling_po_lift(po_df, target_cover_days)
         _proj_fin = pd.to_numeric(po_df["Projected_Running_Days"], errors="coerce").fillna(999.0)
         _lt_fin_arr = _lead_time_release_gate_days(po_df, lead_time)
         _lt_fin_s = pd.Series(_lt_fin_arr, index=po_df.index)
         _po_fin = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0)
         _msg_lead_fin = _lead_time_gate_block_message(_lead_time_gate_uses_entered(lead_time))
+        _par_fin = po_df["Parent_SKU"]
+        _n_po_sizes = (_po_fin > 0).astype(int).groupby(_par_fin).transform("sum")
+        _multi_size_parent = _n_po_sizes >= 2
 
-        _over_lead = (_proj_fin >= _lt_fin_s) & (_po_fin > 0)
+        _over_lead = (_proj_fin >= _lt_fin_s) & (_po_fin > 0) & ~_multi_size_parent
         if _over_lead.any():
             po_df.loc[_over_lead, "PO_Qty"] = 0
             po_df.loc[_over_lead, "Gross_PO_Qty"] = 0

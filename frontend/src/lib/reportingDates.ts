@@ -15,6 +15,22 @@ export function daysAgoIsoIST(n: number): string {
   return addDaysIsoIST(todayIsoIST(), -n)
 }
 
+/** Monday of the current ISO week (IST). */
+export function startOfWeekIsoIST(): string {
+  const today = todayIsoIST()
+  const [y, m, d] = today.split('-').map(Number)
+  const utc = new Date(Date.UTC(y, m - 1, d))
+  const dow = utc.getUTCDay()
+  const mondayOffset = dow === 0 ? -6 : 1 - dow
+  return addDaysIsoIST(today, mondayOffset)
+}
+
+/** First day of calendar month containing `iso` (or today). */
+export function startOfMonthIsoIST(iso?: string): string {
+  const base = (iso || todayIsoIST()).slice(0, 7)
+  return `${base}-01`
+}
+
 export function reportingSpanDays(startIso: string, endIso: string): number | null {
   if (!startIso || !endIso) return null
   const d0 = new Date(`${startIso}T12:00:00`)

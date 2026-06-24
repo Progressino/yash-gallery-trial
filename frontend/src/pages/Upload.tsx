@@ -23,6 +23,8 @@ import { useSession } from '../store/session'
 import { usePOStore } from '../store/po'
 import { useUploadActivity } from '../store/uploadActivity'
 import { useAuth, mayUploadHistorical, mayResetSharedData, mayUploadPoBaseline, mayDeleteDailyUploadFile, mayClearPlatformData } from '../store/auth'
+import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner'
+import { downloadReconciliationReportCsv } from '../utils/reconciliationReportExport'
 
 type Toast = { type: 'success' | 'error'; msg: string }
 type UploadAlert = {
@@ -767,7 +769,7 @@ export default function Upload() {
         n > 0 ? 'error' : 'success',
         n > 0
           ? `Reconciliation: ${n} daily vs monthly mismatch(es) — review below.`
-          : 'Reconciliation: no daily vs monthly mismatches in overlapping months.',
+          : `Reconciliation: no daily vs monthly mismatches in overlapping months.${r.elapsed_ms != null ? ` (${(r.elapsed_ms / 1000).toFixed(1)}s)` : ''}`,
       )
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Could not load reconciliation')
@@ -1589,6 +1591,9 @@ export default function Upload() {
 
       {(uploadTab === 'daily' || !showAdminTab) && (
       <Section title="Daily uploads — sales, snapshot inventory, returns">
+        <div className="col-span-2">
+          <InventoryStalenessBanner className="mb-3" showHistoryLink />
+        </div>
         <div className="col-span-2 bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-3">
           <div>
             <h3 className="font-semibold text-[#002B5B] text-sm">📅 Daily order upload</h3>
@@ -2149,14 +2154,23 @@ function QualityReportView({ report }: { report: Awaited<ReturnType<typeof getDa
 function ReconciliationReportView({ report }: { report: UploadReconciliationReport }) {
   return (
     <div className="space-y-3 text-gray-800">
-      <p className="text-gray-600">
-        {report.file_count} Tier‑3 file(s) tracked ·{' '}
-        <span className={report.mismatch_count > 0 ? 'text-amber-700 font-medium' : 'text-green-700'}>
-          {report.mismatch_count} mismatch(es)
-        </span>
-        {' · '}
-        {(report.total_collapsible_rows ?? 0).toLocaleString()} rows deduped (not double-counted)
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-gray-600">
+          {report.file_count} Tier‑3 file(s) tracked ·{' '}
+          <span className={report.mismatch_count > 0 ? 'text-amber-700 font-medium' : 'text-green-700'}>
+            {report.mismatch_count} mismatch(es)
+          </span>
+          {' · '}
+          {(report.total_collapsible_rows ?? 0).toLocaleString()} rows deduped (not double-counted)
+        </p>
+        <button
+          type="button"
+          onClick={() => downloadReconciliationReportCsv(report)}
+          className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold text-blue-800 bg-blue-100 hover:bg-blue-200 border border-blue-200"
+        >
+          ⬇ Download full report (CSV)
+        </button>
+      </div>
       {report.return_overlay?.units ? (
         <p className="text-gray-600">
           Return overlay: {(report.return_overlay.units ?? 0).toLocaleString()} units on{' '}
@@ -2166,38 +2180,47 @@ function ReconciliationReportView({ report }: { report: UploadReconciliationRepo
       {report.mismatches.length > 0 ? (
         <div className="border-t border-gray-100 pt-2">
           <p className="font-semibold text-[#002B5B] mb-1">Daily vs monthly differences</p>
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto max-h-64 overflow-y-auto">
             <table className="w-full text-[11px] border-collapse">
-              <thead>
+              <thead className="sticky top-0 bg-white">
                 <tr className="text-left text-gray-500 border-b">
                   <th className="py-1 pr-2">Month</th>
                   <th className="py-1 pr-2">Company</th>
                   <th className="py-1 pr-2">Type</th>
                   <th className="py-1 pr-2">Daily</th>
                   <th className="py-1 pr-2">Monthly</th>
-                  <th className="py-1">Δ units</th>
+                  <th className="py-1 pr-2">Δ units</th>
+                  <th className="py-1 pr-2">Daily ₹</th>
+                  <th className="py-1 pr-2">Monthly ₹</th>
+                  <th className="py-1">Δ ₹</th>
                 </tr>
               </thead>
               <tbody>
-                {report.mismatches.slice(0, 40).map((m, i) => (
+                {report.mismatches.map((m, i) => (
                   <tr key={i} className="border-b border-gray-50">
                     <td className="py-1 pr-2">{m.month}</td>
                     <td className="py-1 pr-2">{m.segment}</td>
                     <td className="py-1 pr-2">{m.txn}</td>
                     <td className="py-1 pr-2">{m.daily_units.toLocaleString()}</td>
                     <td className="py-1 pr-2">{m.monthly_units.toLocaleString()}</td>
-                    <td className={`py-1 ${m.unit_diff !== 0 ? 'text-amber-700 font-medium' : ''}`}>
+                    <td className={`py-1 pr-2 ${m.unit_diff !== 0 ? 'text-amber-700 font-medium' : ''}`}>
                       {m.unit_diff > 0 ? '+' : ''}
                       {m.unit_diff.toLocaleString()}
+                    </td>
+                    <td className="py-1 pr-2">{m.daily_amount.toLocaleString()}</td>
+                    <td className="py-1 pr-2">{m.monthly_amount.toLocaleString()}</td>
+                    <td className={`py-1 ${Math.abs(m.amount_diff) >= 1 ? 'text-amber-700 font-medium' : ''}`}>
+                      {m.amount_diff > 0 ? '+' : ''}
+                      {m.amount_diff.toLocaleString()}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          {report.mismatches.length > 40 ? (
-            <p className="text-gray-500 mt-1">…and {report.mismatches.length - 40} more</p>
-          ) : null}
+          <p className="text-gray-500 mt-1">
+            {report.mismatches.length} row(s) — download CSV for full file inventory and Excel review.
+          </p>
         </div>
       ) : (
         <p className="text-green-700 border-t border-gray-100 pt-2">

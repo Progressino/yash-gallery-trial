@@ -622,12 +622,202 @@ def coverage_days_within(
     return int(sub["Date"].dt.normalize().nunique())
 
 
+def inventory_history_summary(df: pd.DataFrame) -> dict:
+    if df is None or df.empty:
+        return {
+            "loaded": False,
+            "rows": 0,
+            "skus": 0,
+            "days": 0,
+            "min_date": "",
+            "max_date": "",
+        }
+    dates = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+    min_d = dates.min()
+    max_d = dates.max()
+    return {
+        "loaded": True,
+        "rows": int(len(df)),
+        "skus": int(df["OMS_SKU"].astype(str).nunique()),
+        "days": int(dates.nunique()),
+        "min_date": str(pd.Timestamp(min_d).date()) if pd.notna(min_d) else "",
+        "max_date": str(pd.Timestamp(max_d).date()) if pd.notna(max_d) else "",
+    }
+
+
+def list_inventory_history_dates(df: pd.DataFrame, limit: int = 120) -> list[dict]:
+    if df is None or df.empty:
+        return []
+    work = df.copy()
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work = work.dropna(subset=["Date"])
+    if work.empty:
+        return []
+    grouped = (
+        work.groupby("Date", as_index=False)
+        .agg(rows=("OMS_SKU", "count"), skus=("OMS_SKU", "nunique"))
+        .sort_values("Date", ascending=False)
+    )
+    if limit > 0:
+        grouped = grouped.head(int(limit))
+    return [
+        {
+            "date": str(pd.Timestamp(r["Date"]).date()),
+            "rows": int(r["rows"]),
+            "skus": int(r["skus"]),
+        }
+        for _, r in grouped.iterrows()
+    ]
+
+
+def inventory_rows_for_date(
+    df: pd.DataFrame,
+    date_iso: str,
+    *,
+    q: str = "",
+    limit: int = 500,
+    offset: int = 0,
+) -> dict:
+    if df is None or df.empty:
+        return {
+            "loaded": False,
+            "date": date_iso,
+            "rows": [],
+            "total": 0,
+            "limit": int(limit),
+            "offset": int(offset),
+        }
+    try:
+        target = pd.Timestamp(date_iso).normalize()
+    except Exception:
+        return {
+            "loaded": True,
+            "date": date_iso,
+            "rows": [],
+            "total": 0,
+            "limit": int(limit),
+            "offset": int(offset),
+            "message": "Invalid date.",
+        }
+
+    work = df.copy()
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    sub = work[work["Date"] == target].copy()
+    if sub.empty:
+        return {
+            "loaded": True,
+            "date": str(target.date()),
+            "rows": [],
+            "total": 0,
+            "limit": int(limit),
+            "offset": int(offset),
+        }
+
+    sub["OMS_SKU"] = sub["OMS_SKU"].astype(str).str.strip()
+    sub["Qty"] = pd.to_numeric(sub["Qty"], errors="coerce").fillna(0.0)
+    needle = (q or "").strip().upper()
+    if needle:
+        sub = sub[sub["OMS_SKU"].str.upper().str.contains(needle, na=False)]
+    sub = sub.sort_values(["Qty", "OMS_SKU"], ascending=[False, True])
+    total = int(len(sub))
+    page = sub.iloc[max(0, int(offset)) : max(0, int(offset)) + max(1, int(limit))]
+    rows = [
+        {
+            "sku": str(r["OMS_SKU"]),
+            "qty": float(r["Qty"]),
+            "in_stock": bool(float(r["Qty"]) >= IN_STOCK_MIN_QTY),
+            "source": str(r.get("Source", "uploaded") or "uploaded"),
+        }
+        for _, r in page.iterrows()
+    ]
+    return {
+        "loaded": True,
+        "date": str(target.date()),
+        "rows": rows,
+        "total": total,
+        "limit": int(limit),
+        "offset": int(offset),
+        "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
+    }
+
+
+def inventory_history_wide_matrix(
+    df: pd.DataFrame,
+    *,
+    q: str = "",
+    limit: int = 150,
+    offset: int = 0,
+) -> dict:
+    """Pivot tall history to Excel-style wide matrix: SKU rows × date columns."""
+    empty = {
+        "loaded": False,
+        "dates": [],
+        "rows": [],
+        "total": 0,
+        "limit": int(limit),
+        "offset": int(offset),
+        "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
+    }
+    if df is None or df.empty:
+        return empty
+
+    work = df.copy()
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work = work.dropna(subset=["Date", "OMS_SKU"])
+    if work.empty:
+        return {**empty, "loaded": True}
+
+    work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip()
+    work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0.0)
+    needle = (q or "").strip().upper()
+    if needle:
+        work = work[work["OMS_SKU"].str.upper().str.contains(needle, na=False)]
+    if work.empty:
+        return {**empty, "loaded": True}
+
+    work = (
+        work.sort_values("Qty", ascending=False)
+        .drop_duplicates(subset=["OMS_SKU", "Date"], keep="first")
+    )
+    dates_sorted = sorted(work["Date"].unique())
+    date_strs = [str(pd.Timestamp(d).date()) for d in dates_sorted]
+
+    pivot = work.pivot(index="OMS_SKU", columns="Date", values="Qty")
+    pivot = pivot.reindex(columns=dates_sorted).fillna(0.0)
+    pivot = pivot.sort_index()
+    total = int(len(pivot))
+    start = max(0, int(offset))
+    end = start + max(1, int(limit))
+    page = pivot.iloc[start:end]
+
+    rows = [
+        {
+            "sku": str(sku),
+            "qtys": [float(row.get(d, 0.0) or 0.0) for d in dates_sorted],
+        }
+        for sku, row in page.iterrows()
+    ]
+    return {
+        "loaded": True,
+        "dates": date_strs,
+        "rows": rows,
+        "total": total,
+        "limit": int(limit),
+        "offset": start,
+        "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
+    }
+
+
 __all__ = [
     "parse_daily_inventory_history_dataframes",
     "parse_daily_inventory_history_upload",
     "effective_days_from_history",
     "coverage_days_within",
     "extend_history_with_sales",
+    "inventory_history_summary",
+    "list_inventory_history_dates",
+    "inventory_rows_for_date",
+    "inventory_history_wide_matrix",
 ]
 
 

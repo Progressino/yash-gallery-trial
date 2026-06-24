@@ -2352,6 +2352,7 @@ def _session_coverage_light(path: str, method: str, query: str) -> bool:
         "/api/data/intelligence-bundle",
         "/api/data/parity",
         "/api/data/sku-deepdive",
+        "/api/po/sku-audit",
     ):
         return True
     if path != "/api/data/coverage":
@@ -2513,10 +2514,12 @@ async def session_middleware(request: Request, call_next):
     if _session_coverage_light(path, request.method, request.url.query or ""):
         sid = request.cookies.get(SESSION_COOKIE)
         sid, session = await run_aux(store.get_or_empty, sid)
-        try:
-            await run_aux(try_attach_shared_frames_fast, session)
-        except Exception:
-            log.exception("shared-frame attach on light poll failed")
+        # Intelligence bundle serves from Tier-3 / disk cache — never block polls on warm-cache bootstrap.
+        if path != "/api/data/intelligence-bundle":
+            try:
+                await run_aux(try_attach_shared_frames_fast, session)
+            except Exception:
+                log.exception("shared-frame attach on light poll failed")
         request.state.session_id = sid
         request.state.session = session
         setattr(session, "_persist_sid", sid)

@@ -138,6 +138,9 @@ export function mayUploadPoBaseline(user: AuthUser | null | undefined): boolean 
   if (!user) return false
   if (user.may_upload_po_baseline === true) return true
   if (user.may_upload_po_baseline === false) return false
+  if (user.historical_upload_locked) {
+    return user.role === 'Super Admin' || user.role === 'Admin'
+  }
   return user.role === 'Super Admin' || user.role === 'Admin' || user.role === 'Manager'
 }
 

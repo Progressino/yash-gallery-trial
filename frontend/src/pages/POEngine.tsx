@@ -6,11 +6,13 @@ import {
   api,
   getCoverage,
   getPoCalculateStatus,
+  getPoSkuAudit,
   startPoCalculate,
   uploadPoReturnsImport,
   waitForPoCalculate,
   waitForReturnsImport,
   waitForSalesRebuild,
+  type PoSkuAuditResponse,
 } from '../api/client'
 import { useSession } from '../store/session'
 import { useAuth, mayResetSharedData } from '../store/auth'
@@ -28,6 +30,7 @@ import { calendarDateIST, yesterdayIST } from '../lib/dates'
 import { poOperationalReady, poOperationalLoaded, PO_OPERATIONAL_TOTAL } from '../lib/localSessionHint'
 import { archivePoExportOnServer } from '../lib/archivePoExport'
 import { looksLikePoExportCsv, pickPoExportCsvFromDownloads } from '../lib/pickPoExportCsv'
+import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner'
 
 interface PORow {
   OMS_SKU: string
@@ -363,27 +366,49 @@ export default function POEngine() {
     in_stock_min_qty?: number
     rows: { date: string; qty: number; in_stock: boolean; source?: string }[]
   } | null>(null)
+  const [effAudit, setEffAudit] = useState<PoSkuAuditResponse | null>(null)
 
   const openEffInvDrawer = async (sku: string, windowDays: number) => {
     setEffInvSku(sku)
     setEffInvLoading(true)
     setEffInvData(null)
+    setEffAudit(null)
     try {
-      const { data } = await api.get('/po/daily-inventory-history/sku', {
-        params: {
-          sku,
-          window_days: Math.max(7, Math.min(365, windowDays || 30)),
-          end_date: dailyInvMaxDate || calendarDateIST(),
-        },
-      })
-      if (data?.ok) setEffInvData(data)
+      const auditParams: Record<string, string | number | boolean> = {
+        planning_date: planningDate,
+        period_days: params.period_days,
+        lead_time: params.lead_time,
+        target_days: params.target_days,
+        demand_basis: params.demand_basis,
+        grace_days: params.grace_days,
+        safety_pct: params.safety_pct,
+        use_seasonality: params.use_seasonality,
+        seasonal_weight: params.seasonal_weight,
+        group_by_parent: params.group_by_parent,
+        enforce_two_size_minimum: params.enforce_two_size_minimum,
+        enforce_lead_time_release_gate: params.enforce_lead_time_release_gate,
+        urgent_all_sizes_days: params.urgent_all_sizes_days,
+      }
+      const [invRes, auditRes] = await Promise.all([
+        api.get('/po/daily-inventory-history/sku', {
+          params: {
+            sku,
+            window_days: Math.max(7, Math.min(365, windowDays || 30)),
+            end_date: dailyInvMaxDate || calendarDateIST(),
+          },
+        }),
+        getPoSkuAudit(sku, auditParams).catch(() => ({ ok: false, sku, message: 'Audit unavailable' })),
+      ])
+      if (invRes.data?.ok) setEffInvData(invRes.data)
+      if (auditRes?.ok) setEffAudit(auditRes)
     } catch {
       setEffInvData(null)
+      setEffAudit(null)
     } finally {
       setEffInvLoading(false)
     }
   }
-  const closeEffInvDrawer = () => { setEffInvSku(null); setEffInvData(null) }
+  const closeEffInvDrawer = () => { setEffInvSku(null); setEffInvData(null); setEffAudit(null) }
 
   const [formulaModal, setFormulaModal] = useState<POFormulaModalState | null>(null)
   const openFormulaCol = useCallback((col: string) => setFormulaModal({ key: col }), [])
@@ -1344,6 +1369,7 @@ export default function POEngine() {
         percent={loading ? poProgressPct : null}
         className="sticky top-0 z-30 -mt-2 mb-2"
       />
+      <InventoryStalenessBanner />
       <div>
         <h2 className="text-2xl font-bold text-[#002B5B]">🎯 PO Engine</h2>
         <p className="text-gray-400 text-sm mt-1">Calculate purchase orders with quarterly history inline.</p>
@@ -2906,7 +2932,7 @@ export default function POEngine() {
             <div className="px-5 py-3 border-b border-gray-100 bg-gray-50 text-xs text-gray-700 flex flex-wrap gap-x-6 gap-y-1">
               {effInvLoading ? (
                 <span>Loading…</span>
-              ) : !effInvData ? (
+              ) : !effInvData && !effAudit?.po_row ? (
                 <span className="text-amber-700">
                   No daily inventory history uploaded for this SKU. Upload the “Daily Inventory History” matrix on the{' '}
                   <Link to="/upload" className="underline font-medium text-amber-900">
@@ -2916,6 +2942,47 @@ export default function POEngine() {
                 </span>
               ) : (
                 <>
+                  {effAudit?.checks && effAudit.checks.length > 0 && (
+                    <div className="w-full mb-2 p-2 rounded border border-slate-200 bg-white">
+                      <div className="font-semibold text-gray-800 mb-1">Sales audit · Tier-3 vs PO engine</div>
+                      <div className="text-gray-600 mb-1">
+                        ADS window {effAudit.ads_window?.start} → {effAudit.ads_window?.end} (period {effAudit.period_days}d)
+                      </div>
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-gray-500">
+                            <th className="text-left py-1">Metric</th>
+                            <th className="text-right py-1">PO row</th>
+                            <th className="text-right py-1">Tier-3</th>
+                            <th className="text-right py-1">Δ</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {effAudit.checks.map(c => (
+                            <tr key={c.field} className={c.ok ? '' : 'text-amber-800 font-medium'}>
+                              <td className="py-1">{c.field}</td>
+                              <td className="text-right tabular-nums">{c.engine.toLocaleString()}</td>
+                              <td className="text-right tabular-nums">{c.tier3_window.toLocaleString()}</td>
+                              <td className="text-right tabular-nums">{c.delta > 0 ? `+${c.delta}` : c.delta}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {effAudit.checks.some(c => !c.ok) && (
+                        <p className="mt-1 text-amber-700">
+                          Mismatch may be return-sheet overlay, parent rollup, or uploads still syncing — use SKU Deepdive for line-level txns.
+                        </p>
+                      )}
+                      <Link
+                        to={`/sku-deepdive?sku=${encodeURIComponent(effInvSku || '')}&start_date=${effAudit.ads_window?.start || ''}&end_date=${effAudit.ads_window?.end || ''}`}
+                        className="inline-block mt-2 text-indigo-700 underline font-medium"
+                      >
+                        Open SKU Deepdive for this window →
+                      </Link>
+                    </div>
+                  )}
+                  {effInvData ? (
+                    <>
                   <span><strong>Window:</strong> {effInvData.window_start} → {effInvData.window_end} ({effInvData.window_days}d)</span>
                   <span><strong>Sheet coverage:</strong> {effInvData.covered_days ?? effInvData.rows.length}d</span>
                   <span><strong>In-stock:</strong> <span className="text-emerald-700 font-semibold">{effInvData.in_stock_days}d</span></span>
@@ -2939,6 +3006,8 @@ export default function POEngine() {
                   {effInvData.parent_used && (
                     <span className="text-amber-700">⚠ Showing parent-rollup (no exact-variant history found)</span>
                   )}
+                    </>
+                  ) : null}
                 </>
               )}
             </div>

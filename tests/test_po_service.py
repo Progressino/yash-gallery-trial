@@ -1691,6 +1691,68 @@ def test_lead_gate_qty_targets_post_po_cover_not_lead_only():
     assert float(row["Post_PO_Cover_Days_Capped"]) >= 170.0
 
 
+def test_multi_size_parent_lifts_siblings_to_post_po_target_with_lead_gate():
+    """1317-style: when ≥2 sizes already need PO, lift siblings below target cover in one pass."""
+    parent = "1317YKBLUE"
+    sizes = {
+        f"{parent}-L": (16, 7, 0.457, 50.3),
+        f"{parent}-7XL": (18, 1, 0.375, 50.7),
+        f"{parent}-XS": (11, 0, 0.207, 53.1),
+        f"{parent}-M": (35, 2, 0.391, 94.6),
+        f"{parent}-8XL": (13, 2, 0.235, 63.8),
+    }
+    days = pd.date_range("2026-03-01", periods=45, freq="D")
+    sales_rows = []
+    for sku, (_inv, _pipe, ads, _proj) in sizes.items():
+        qty = max(1, int(round(ads * 30)))
+        for d in days[:qty]:
+            sales_rows.append(
+                {
+                    "Sku": sku,
+                    "TxnDate": d,
+                    "Transaction Type": "Shipment",
+                    "Quantity": 1,
+                    "Units_Effective": 1,
+                    "Source": "Amazon",
+                }
+            )
+    sales = pd.DataFrame(sales_rows)
+    inv = pd.DataFrame(
+        [{"OMS_SKU": sku, "Total_Inventory": v[0]} for sku, v in sizes.items()]
+    )
+    existing = pd.DataFrame(
+        [{"OMS_SKU": sku, "PO_Pipeline_Total": v[1]} for sku, v in sizes.items()]
+    )
+    sheet = pd.DataFrame(
+        {
+            "OMS_SKU": list(sizes.keys()),
+            "SKU_Sheet_Status": ["High selling"] * len(sizes),
+            "SKU_Sheet_Closed": [False] * len(sizes),
+            "Lead_Time_From_Sheet": [45.0] * len(sizes),
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        existing_po_df=existing,
+        period_days=45,
+        lead_time=60,
+        target_days=180,
+        grace_days=0,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        sku_status_df=sheet,
+        enforce_lead_time_release_gate=True,
+        enforce_two_size_minimum=True,
+    )
+    by_sku = {str(r["OMS_SKU"]): r for _, r in po.iterrows()}
+    assert int(by_sku[f"{parent}-L"]["PO_Qty"]) > 0
+    assert int(by_sku[f"{parent}-7XL"]["PO_Qty"]) > 0
+    assert int(by_sku[f"{parent}-M"]["PO_Qty"]) > 0
+    assert int(by_sku[f"{parent}-8XL"]["PO_Qty"]) > 0
+    assert float(by_sku[f"{parent}-M"]["Post_PO_Cover_Days_Capped"]) >= 170.0
+
+
 def test_po_release_not_blocked_just_because_projected_cover_exceeds_lead_time():
     """With ``enforce_lead_time_release_gate=False``, target-only mode still tops up
     when projected cover is below target even if it already exceeds lead time."""

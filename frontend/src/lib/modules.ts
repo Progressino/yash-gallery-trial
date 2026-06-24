@@ -70,6 +70,7 @@ export const PATH_MODULE: Record<string, ModuleKey> = {
   '/grey': 'grey',
   '/hrm': 'hrm',
   '/inventory': 'inventory',
+  '/inventory-history': 'po',
   '/po-fresh': 'po',
   '/po-legacy': 'po',
   '/po2': 'po',

@@ -4,12 +4,15 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from datetime import datetime
 from io import BytesIO
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+_IST = ZoneInfo("Asia/Kolkata")
 
 # PO engine only uses recent history for Eff_Days / roll-forward (default: last 30 calendar
 # days in the sheet, anchored on the latest snapshot date). Older columns are dropped at
@@ -91,6 +94,8 @@ def execute_daily_inventory_upload(
             trim_note = (trim_note + " " + trim_note2).strip() if trim_note else trim_note2
 
     sess.daily_inventory_history_df = df
+    sess.daily_inventory_history_uploaded_at = datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S")
+    sess.daily_inventory_history_filename = filename or ""
     sess._quarterly_cache.clear()
     skus = int(df["OMS_SKU"].nunique())
     dates_norm = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()

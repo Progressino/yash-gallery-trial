@@ -19,6 +19,7 @@ import api, {
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
 import { calendarDateIST } from '../lib/dates'
 import { salesDataGapNeedsWarning } from '../lib/reportingDates'
+import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner'
 import {
   PO_OPERATIONAL_TOTAL,
   poOperationalLoaded,
@@ -636,6 +637,7 @@ function POFreshInner() {
           percent={progress?.pct}
           className="sticky top-0 z-40"
         />
+        <InventoryStalenessBanner />
         {/* Page header */}
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>

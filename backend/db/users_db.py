@@ -108,6 +108,7 @@ def init_db():
         pass
     ensure_super_admin(conn)
     ensure_user_has_modules(conn, "harsh", ["hrm"])
+    ensure_irfan_upload_account(conn)
     conn.commit(); conn.close()
 
 # ── Super Admin bootstrap ─────────────────────────────────────────────────────
@@ -167,6 +168,100 @@ def ensure_super_admin(conn=None):
         if close:
             conn.commit()
             conn.close()
+
+
+_IRFAN_CANONICAL_USERNAME = "irfan"
+
+
+def ensure_irfan_upload_account(conn) -> None:
+    """One Irfan account (case-insensitive login) with full daily upload + PO access (Admin, no delete)."""
+    canonical = _IRFAN_CANONICAL_USERNAME
+    rows = conn.execute(
+        """SELECT u.id, u.username, u.full_name, u.active, u.role_id, r.role_name
+           FROM erp_users u LEFT JOIN roles r ON r.id = u.role_id
+           WHERE lower(u.username) = lower(?)
+           ORDER BY u.active DESC,
+                    CASE WHEN lower(u.username) = ? THEN 0 ELSE 1 END,
+                    u.id""",
+        (canonical, canonical),
+    ).fetchall()
+    if not rows:
+        return
+
+    keeper = next((r for r in rows if r["active"] and r["username"] == canonical), None)
+    if not keeper:
+        keeper = next(
+            (r for r in rows if r["active"] and r["username"].lower() == canonical),
+            None,
+        )
+    if not keeper:
+        keeper = next((r for r in rows if r["active"]), rows[0])
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    keeper_id = keeper["id"]
+    for r in rows:
+        if r["id"] != keeper_id and r["active"]:
+            retired_name = f"{r['username']}_retired_{r['id']}"
+            conn.execute(
+                "UPDATE erp_users SET active=0, username=?, updated_at=? WHERE id=?",
+                (retired_name, now, r["id"]),
+            )
+
+    admin_row = conn.execute("SELECT id FROM roles WHERE role_name='Admin'").fetchone()
+    updates: dict = {}
+    if keeper["username"] != canonical:
+        updates["username"] = canonical
+    role_name = keeper["role_name"] or ""
+    if admin_row and role_name != "Super Admin":
+        updates["role_id"] = admin_row["id"]
+    if not (keeper["full_name"] or "").strip():
+        updates["full_name"] = "Irfan"
+    if updates:
+        sets = ", ".join(f"{k}=?" for k in updates)
+        vals = list(updates.values()) + [now, keeper_id]
+        conn.execute(f"UPDATE erp_users SET {sets}, updated_at=? WHERE id=?", vals)
+
+    ensure_user_upload_access(conn, canonical)
+
+
+def ensure_user_upload_access(conn, username: str) -> None:
+    """Grant daily upload + intelligence modules (Employee/HOD users who upload sales data)."""
+    import json
+
+    from ..services.rbac import resolve_module_access
+
+    uname = (username or "").strip()
+    if not uname:
+        return
+    upload_modules = [
+        "intelligence",
+        "upload",
+        "sales",
+        "po",
+        "amazon",
+        "myntra",
+        "meesho",
+        "flipkart",
+        "snapdeal",
+        "inventory",
+        "sku_deepdive",
+    ]
+    row = conn.execute(
+        """SELECT u.id, u.module_access, r.role_name
+           FROM erp_users u LEFT JOIN roles r ON r.id = u.role_id
+           WHERE lower(u.username) = lower(?) AND u.active = 1""",
+        (uname,),
+    ).fetchone()
+    if not row:
+        return
+    current = resolve_module_access(row["role_name"] or "", row["module_access"])
+    if all(m in current for m in upload_modules):
+        return
+    merged = sorted(set(current) | set(upload_modules))
+    conn.execute(
+        "UPDATE erp_users SET module_access=?, updated_at=? WHERE id=?",
+        (json.dumps(merged), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row["id"]),
+    )
 
 
 def ensure_user_has_modules(conn, username: str, modules: list[str]) -> None:
@@ -242,6 +337,15 @@ def create_user(data: dict):
     if not username:
         conn.close()
         raise ValueError("username is required")
+    dup = conn.execute(
+        "SELECT username FROM erp_users WHERE lower(username)=lower(?) AND active=1",
+        (username,),
+    ).fetchone()
+    if dup:
+        conn.close()
+        raise ValueError(
+            f"Username already taken (login is case-insensitive): {dup['username']}"
+        )
     pw = data.get('password', 'changeme123')
     hashed = bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
     email = _normalize_email(data.get("email"))
@@ -285,12 +389,17 @@ def deactivate_user(uid: int):
     conn.commit(); conn.close()
 
 def verify_erp_user(username: str, password: str):
+    uname = (username or "").strip()
+    if not uname:
+        return None
     conn = _connect()
     row = conn.execute(
         """SELECT u.*, r.role_name FROM erp_users u
            LEFT JOIN roles r ON r.id = u.role_id
-           WHERE u.username=? AND u.active=1""",
-        (username,),
+           WHERE lower(u.username)=lower(?) AND u.active=1
+           ORDER BY CASE WHEN u.username=? THEN 0 ELSE 1 END, u.id
+           LIMIT 1""",
+        (uname, uname),
     ).fetchone()
     conn.close()
     if not row:
@@ -304,6 +413,9 @@ def verify_erp_user(username: str, password: str):
 
 def get_user_auth_profile(username: str) -> dict | None:
     """Load user + role for /auth/me (no password)."""
+    uname = (username or "").strip()
+    if not uname:
+        return None
     conn = _connect()
     row = conn.execute(
         """SELECT u.id, u.username, u.email, u.full_name, u.role_id, u.department,
@@ -311,8 +423,10 @@ def get_user_auth_profile(username: str) -> dict | None:
                   u.module_access, u.phone, u.active, r.role_name
            FROM erp_users u
            LEFT JOIN roles r ON r.id = u.role_id
-           WHERE u.username=? AND u.active=1""",
-        (username,),
+           WHERE lower(u.username)=lower(?) AND u.active=1
+           ORDER BY CASE WHEN u.username=? THEN 0 ELSE 1 END, u.id
+           LIMIT 1""",
+        (uname, uname),
     ).fetchone()
     conn.close()
     return dict(row) if row else None

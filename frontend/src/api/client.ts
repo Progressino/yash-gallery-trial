@@ -4,7 +4,7 @@
  * In production, nginx proxies /api → FastAPI.
  */
 import axios from 'axios'
-import { clearIntelligenceCache } from '../lib/intelligenceCache'
+import { clearIntelligenceCache, type PlatformSummaryItem } from '../lib/intelligenceCache'
 import { isUploadBusy } from '../store/uploadActivity'
 import {
   shouldUseChunkedUpload,
@@ -67,6 +67,15 @@ export interface CoverageResponse {
   sku_status_lead_rows?: number
   daily_inventory_history_rows?: number
   daily_inventory_history_skus?: number
+  daily_inventory_history_min_date?: string | null
+  daily_inventory_history_max_date?: string | null
+  daily_inventory_history_uploaded_at?: string | null
+  daily_inventory_history_filename?: string | null
+  inventory_snapshot_stale?: boolean
+  inventory_snapshot_lag_days?: number | null
+  daily_inventory_history_stale?: boolean
+  daily_inventory_history_lag_days?: number | null
+  inventory_staleness_warnings?: string[] | null
   manual_intransit_sheet?: boolean
   manual_intransit_skus?: number
   manual_intransit_units?: number
@@ -199,8 +208,10 @@ export interface IntelligenceReadinessResponse {
 export interface DashboardSummaryResponse {
   source: string
   platforms: Record<string, { sales?: number; returns?: number; net?: number; loaded?: boolean }>
+  platform_summary?: PlatformSummaryItem[]
   top_skus: Array<{ sku: string; units?: number }>
   sales_summary: Record<string, number>
+  data_completeness?: 'partial' | 'full'
   message?: string
 }
 
@@ -999,6 +1010,72 @@ export async function waitForDailyInventoryUpload(
   throw new Error('Daily inventory upload timed out — try again in a minute.')
 }
 
+export type DailyInventoryHistoryDate = { date: string; rows: number; skus: number }
+
+export async function getPoDailyInventoryHistoryDates(limit = 120) {
+  const { data } = await api.get<{ ok: boolean; dates: DailyInventoryHistoryDate[] }>(
+    '/po/daily-inventory-history/dates',
+    { params: { limit } },
+  )
+  return data
+}
+
+export async function getPoDailyInventoryHistoryByDate(
+  date: string,
+  q = '',
+  limit = 500,
+  offset = 0,
+) {
+  const { data } = await api.get<{
+    ok: boolean
+    date: string
+    rows: Array<{ sku: string; qty: number; in_stock: boolean; source: string }>
+    total: number
+  }>('/po/daily-inventory-history/by-date', {
+    params: { date, q, limit, offset },
+  })
+  return data
+}
+
+export async function getPoDailyInventoryHistorySku(sku: string, windowDays = 30) {
+  const { data } = await api.get<{
+    ok: boolean
+    loaded: boolean
+    sku: string
+    rows: Array<{ date: string; qty: number; in_stock: boolean; source: string }>
+    in_stock_days?: number
+    window_days?: number
+    window_start?: string
+    window_end?: string
+  }>('/po/daily-inventory-history/sku', {
+    params: { sku, window_days: windowDays },
+  })
+  return data
+}
+
+export type InventoryHistoryMatrixRow = { sku: string; qtys: number[] }
+
+export async function getPoDailyInventoryHistoryMatrix(
+  q = '',
+  limit = 150,
+  offset = 0,
+) {
+  const { data } = await api.get<{
+    ok: boolean
+    loaded: boolean
+    dates: string[]
+    rows: InventoryHistoryMatrixRow[]
+    total: number
+    limit: number
+    offset: number
+    in_stock_min_qty?: number
+  }>('/po/daily-inventory-history/matrix', {
+    params: { q, limit, offset },
+    timeout: 120_000,
+  })
+  return data
+}
+
 function _isAxiosTimeout(e: unknown): boolean {
   return axios.isAxiosError(e) && e.code === 'ECONNABORTED'
 }
@@ -1594,6 +1671,41 @@ export async function getDataParity(planningDate?: string): Promise<DataParityRe
   return data
 }
 
+export type PoSkuAuditCheck = {
+  field: string
+  engine: number
+  tier3_window: number
+  delta: number
+  ok: boolean
+  note: string
+}
+
+export type PoSkuAuditResponse = {
+  ok: boolean
+  sku: string
+  planning_date?: string
+  period_days?: number
+  ads_window?: { start: string; end: string }
+  po_row?: Record<string, unknown> | null
+  shared_cache?: { created_at_ist?: string; total_rows?: number; sales_through?: string }
+  tier3?: { sold_units: number; return_units: number; net_units: number; platforms?: Record<string, { sold: number; returns: number }> }
+  checks?: PoSkuAuditCheck[]
+  message?: string
+}
+
+/** Cross-check PO row vs Tier-3 sales in the ADS window (same params as PO calculate). */
+export async function getPoSkuAudit(
+  sku: string,
+  calcParams: Record<string, string | number | boolean | undefined>,
+): Promise<PoSkuAuditResponse> {
+  const params: Record<string, string | number | boolean> = { sku }
+  for (const [k, v] of Object.entries(calcParams)) {
+    if (v !== undefined && v !== '') params[k] = v
+  }
+  const { data } = await api.get<PoSkuAuditResponse>('/po/sku-audit', { params, timeout: 90_000 })
+  return data
+}
+
 /** Full restore: warm + disk + Tier-3 + GitHub for missing platforms (Upload page). */
 export type RestoreFullResponse = CoverageResponse & {
   ok: boolean
@@ -1864,7 +1976,7 @@ export async function cacheReloadFresh(): Promise<{ ok: boolean; message: string
 
 /** Lightweight: sync Tier-3 SQLite into session + rebuild sales. No GitHub download. */
 export async function cacheSyncTier3(): Promise<{ ok: boolean; message: string; sales_rows?: number }> {
-  const { data } = await api.post('/cache/sync-tier3', undefined, { timeout: 120_000 })
+  const { data } = await api.post('/cache/sync-tier3', undefined, { timeout: 300_000 })
   return data
 }
 
@@ -1934,11 +2046,22 @@ export type UploadReconciliationReport = {
   total_collapsible_rows: number
   return_overlay: { skus?: number; units?: number }
   hints: string[]
+  parquet_files_loaded?: number
+  parquet_files_skipped?: number
+  elapsed_ms?: number
+  cached?: boolean
 }
 
-export async function getUploadReconciliation(): Promise<UploadReconciliationReport> {
+export async function getUploadReconciliation(
+  startMonth?: string,
+  endMonth?: string,
+): Promise<UploadReconciliationReport> {
+  const params: Record<string, string> = {}
+  if (startMonth) params.start_month = startMonth
+  if (endMonth) params.end_month = endMonth
   const { data } = await api.get<UploadReconciliationReport>('/data/upload-reconciliation', {
-    timeout: 120_000,
+    params,
+    timeout: 300_000,
   })
   return data
 }

@@ -57,6 +57,29 @@ _PO_ADMIN_BASELINE_PREFIXES = (
     "/api/upload/finishing-receipt",
 )
 
+# Users with full upload + PO baseline access when org historical lock is on (same as Admin, no delete).
+_FULL_UPLOAD_USERS = frozenset(
+    u.strip().lower()
+    for u in (
+        os.environ.get("FULL_UPLOAD_USERS")
+        or os.environ.get("PO_BASELINE_UPLOAD_USERS", "irfan")
+    ).split(",")
+    if u.strip()
+)
+
+
+def _username_has_full_upload_access(username: str | None) -> bool:
+    uname = (username or "").strip().lower()
+    return bool(uname) and uname in _FULL_UPLOAD_USERS
+
+
+def _has_admin_upload_access(role: str, username: str | None = None) -> bool:
+    """Admin/Super Admin, or allowlisted ops users (e.g. daily upload + PO runner)."""
+    if (role or "").strip() in _RESET_DATA_ROLES:
+        return True
+    return _username_has_full_upload_access(username)
+
+
 _DELETE_DENIED_MSG = (
     "Only Super Admin may delete uploaded data, clear platforms, or reset shared cache."
 )
@@ -97,16 +120,18 @@ def may_delete_daily_upload_file(role: str, username: str | None = None) -> bool
     return may_delete_upload_data(role, username)
 
 
-def may_admin_po_session_edits(role: str) -> bool:
-    """PO raise-ledger edits — Admin/Super Admin (not upload delete)."""
-    return role in _RESET_DATA_ROLES
+def may_admin_po_session_edits(role: str, username: str | None = None) -> bool:
+    """PO raise-ledger edits — Admin/Super Admin or allowlisted ops users."""
+    return _has_admin_upload_access(role, username)
 
 
-def may_upload_po_baseline(role: str) -> bool:
-    """Wide PO inventory history + SKU status/lead — Admin only when org lock is on."""
+def may_upload_po_baseline(role: str, username: str | None = None) -> bool:
+    """SKU map, wide PO inventory history, SKU status/lead, existing PO — Admin or allowlisted users when locked."""
+    if _has_admin_upload_access(role, username):
+        return True
     if not historical_upload_locked():
         return role in _HISTORICAL_UPLOAD_ROLES or role in _RESET_DATA_ROLES
-    return role in _RESET_DATA_ROLES
+    return False
 
 
 def upload_policy_for_role(role: str, username: str | None = None) -> dict:
@@ -122,7 +147,7 @@ def upload_policy_for_role(role: str, username: str | None = None) -> dict:
         "may_save_shared_cache": hist,
         "may_reload_shared_cache": hist,
         "may_delete_daily_upload": can_delete,
-        "may_upload_po_baseline": may_upload_po_baseline(role),
+        "may_upload_po_baseline": may_upload_po_baseline(role, username),
         "upload_delete_locked": not can_delete,
     }
 
@@ -177,7 +202,10 @@ def check_upload_api_access(
         return None
 
     # Admin-only while lock is on: PO baselines, SKU master map, existing PO sheet.
-    if role not in _RESET_DATA_ROLES:
+    if m == "POST" and p.startswith("/api/upload/existing-po"):
+        if not _has_admin_upload_access(role, username):
+            return "Existing PO baseline upload is Admin-only while historical data is locked."
+    if not _has_admin_upload_access(role, username):
         if m == "POST" and any(p.startswith(prefix) for prefix in _PO_ADMIN_BASELINE_PREFIXES):
             return (
                 "PO baseline uploads are Admin-only while historical data is locked. "
@@ -187,8 +215,6 @@ def check_upload_api_access(
             return _DELETE_DENIED_MSG
         if m == "POST" and p.startswith("/api/upload/sku-mapping"):
             return "SKU mapping is Admin-only while historical data is locked."
-        if m == "POST" and p.startswith("/api/upload/existing-po"):
-            return "Existing PO baseline upload is Admin-only while historical data is locked."
         if p == "/api/po/returns/overlay" and m == "DELETE":
             return _DELETE_DENIED_MSG
 

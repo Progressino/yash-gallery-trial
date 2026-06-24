@@ -933,6 +933,12 @@ def save_daily_file(
     conn.commit()
     conn.close()
     invalidate_upload_coverage_cache()
+    try:
+        from .upload_reconciliation import invalidate_upload_reconciliation_cache
+
+        invalidate_upload_reconciliation_cache()
+    except Exception:
+        pass
     _invalidate_intelligence_bundle_after_daily_save()
     try:
         from ..db.forecast_ops_pg import pg_save_daily_file, ops_pg_enabled

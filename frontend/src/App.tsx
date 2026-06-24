@@ -35,6 +35,7 @@ const Production  = lazy(() => import('./pages/Production'))
 const StitchingCosting = lazy(() => import('./pages/StitchingCosting'))
 const GreyFabric  = lazy(() => import('./pages/GreyFabric'))
 const HRM         = lazy(() => import('./pages/HRM'))
+const InventoryHistory         = lazy(() => import('./pages/InventoryHistory'))
 const Admin                  = lazy(() => import('./pages/Admin'))
 const AdminPerformance       = lazy(() => import('./pages/AdminPerformance'))
 const MarketplaceConnections = lazy(() => import('./pages/MarketplaceConnections'))
@@ -325,6 +326,7 @@ export default function App() {
               <Route path="stitching-costing" element={<StitchingCosting />} />
               <Route path="grey"      element={<GreyFabric />} />
               <Route path="hrm"       element={<HRM />} />
+              <Route path="inventory-history" element={<InventoryHistory />} />
               <Route path="admin"       element={<Admin />} />
               <Route path="admin/performance" element={<AdminPerformance />} />
               <Route path="marketplace-connections" element={<MarketplaceConnections />} />

@@ -57,6 +57,8 @@ services:
     env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
+      - APP_GIT_SHA=${APP_GIT_SHA:-}
+      - APP_BUILT_AT=${APP_BUILT_AT:-}
       # Emergency stabilization: keep Intelligence aligned with loaded uploaded data
       - DASHBOARD_UPLOAD_DAY_GATE=0
       # Lock Tier-1 bulk uploads / clear / reset for non-Admin roles (daily uploads only).

@@ -12,11 +12,13 @@ import api, {
   downloadDsrBrandMonthlyCsv,
   downloadIntelligenceSalesCsv,
   getCoverage,
+  getDashboardSummary,
   getDataParity,
   getIntelligenceReadiness,
   invalidateDataQueries,
+  type DashboardSummaryResponse,
 } from '../api/client'
-import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, todayIsoIST } from '../lib/reportingDates'
+import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, startOfMonthIsoIST, startOfWeekIsoIST, todayIsoIST } from '../lib/reportingDates'
 import { dashboardGateReady } from '../lib/localSessionHint'
 import {
   bundleHasDisplayData,
@@ -58,6 +60,127 @@ interface DsrResponse {
 
 export type { DsrBrandMonthlyRow, PlatformSummaryItem, SalesSummary, TopSku }
 
+function summaryToBundle(summary: DashboardSummaryResponse): IntelligenceBundle | undefined {
+  const emptyDsr = {
+    rows: [],
+    totals: { YG: 0, Akiko: 0, Other: 0, Untagged: 0 },
+    note: '',
+  }
+
+  if (summary.platform_summary?.length) {
+    const ss = summary.sales_summary || {}
+    const totalUnits = Number(ss.total_units ?? 0)
+    const totalReturns = Number(ss.total_returns ?? 0)
+    if (totalUnits <= 0 && totalReturns <= 0) return undefined
+    return {
+      status: 'ready',
+      data_completeness: summary.data_completeness === 'full' ? 'full' : 'partial',
+      sales_summary: {
+        total_units: totalUnits,
+        total_returns: totalReturns,
+        net_units: Number(ss.net_units ?? totalUnits - totalReturns),
+        return_rate: Number(ss.return_rate ?? (totalUnits > 0 ? (totalReturns / totalUnits) * 100 : 0)),
+        date_basis_note: typeof ss.date_basis_note === 'string' ? ss.date_basis_note : undefined,
+      },
+      platform_summary: summary.platform_summary,
+      top_skus: (summary.top_skus || []).map(t => ({ sku: t.sku, units: Number(t.units ?? 0) })),
+      anomalies: [],
+      dsr_brand_monthly: emptyDsr,
+    }
+  }
+
+  const ss = summary.sales_summary || {}
+  const totalUnits = Number(ss.total_units ?? 0)
+  const totalReturns = Number(ss.total_returns ?? 0)
+  const platforms = summary.platforms || {}
+  const platformKeys = Object.keys(platforms)
+  if (totalUnits <= 0 && platformKeys.length === 0) return undefined
+
+  const platform_summary: PlatformSummaryItem[] = platformKeys.map(rawKey => {
+    const p = platforms[rawKey] || {}
+    const sales = Number(p.sales ?? 0)
+    const returns = Number(p.returns ?? 0)
+    const net = Number(p.net ?? sales - returns)
+    const name = rawKey.charAt(0).toUpperCase() + rawKey.slice(1)
+    return {
+      platform: name,
+      loaded: p.loaded ?? sales > 0,
+      total_units: sales,
+      total_returns: returns,
+      net_units: net,
+      return_rate: sales > 0 ? (returns / sales) * 100 : 0,
+      top_sku: '',
+      trend_direction: 'flat',
+      monthly: [],
+      daily: [],
+      by_state: [],
+    }
+  })
+
+  return {
+    status: 'ready',
+    data_completeness: 'partial',
+    sales_summary: {
+      total_units: totalUnits,
+      total_returns: totalReturns,
+      net_units: totalUnits - totalReturns,
+      return_rate: totalUnits > 0 ? (totalReturns / totalUnits) * 100 : 0,
+    },
+    platform_summary,
+    top_skus: (summary.top_skus || []).map(t => ({ sku: t.sku, units: Number(t.units ?? 0) })),
+    anomalies: [],
+    dsr_brand_monthly: emptyDsr,
+  }
+}
+
+function dsrToBundle(dsr: DsrResponse): IntelligenceBundle | undefined {
+  const sales = Number(dsr.subtotal?.sales ?? 0)
+  const returns = Number(dsr.subtotal?.returns ?? 0)
+  if (sales <= 0 && returns <= 0 && !(dsr.sections?.length)) return undefined
+
+  const platform_summary: PlatformSummaryItem[] = (dsr.sections || []).map(sec => {
+    const secSales = Number(sec.section_sales ?? 0)
+    const secReturns = Number(sec.section_returns ?? 0)
+    return {
+      platform: sec.platform,
+      loaded: true,
+      total_units: secSales,
+      total_returns: secReturns,
+      net_units: secSales - secReturns,
+      return_rate: secSales > 0 ? (secReturns / secSales) * 100 : 0,
+      top_sku: '',
+      trend_direction: 'flat',
+      monthly: [],
+      daily: [{
+        date: dsr.date,
+        shipments: secSales,
+        refunds: secReturns,
+        net: secSales - secReturns,
+      }],
+      by_state: [],
+    }
+  })
+
+  return {
+    status: 'ready',
+    data_completeness: 'partial',
+    sales_summary: {
+      total_units: sales,
+      total_returns: returns,
+      net_units: sales - returns,
+      return_rate: sales > 0 ? (returns / sales) * 100 : 0,
+    },
+    platform_summary,
+    top_skus: [],
+    anomalies: [],
+    dsr_brand_monthly: {
+      rows: [],
+      totals: { YG: 0, Akiko: 0, Other: 0, Untagged: 0 },
+      note: '',
+    },
+  }
+}
+
 /* ═══════════════════════════════════════════════════════════
    CONSTANTS
    ═══════════════════════════════════════════════════════════ */
@@ -85,7 +208,10 @@ function monthsAgoIsoIST(n: number): string {
 
 type DatePreset = { label: string; start: () => string; end?: () => string }
 const PRESETS: DatePreset[] = [
+  { label: '7D',   start: () => daysAgoIsoIST(6) },
   { label: '30D',  start: () => daysAgoIsoIST(30) },
+  { label: 'Week', start: () => startOfWeekIsoIST(), end: () => todayIsoIST() },
+  { label: 'Month', start: () => startOfMonthIsoIST(), end: () => todayIsoIST() },
   { label: '90D',  start: () => daysAgoIsoIST(90) },
   { label: '6M',   start: () => monthsAgoIsoIST(6) },
   { label: '1Y',   start: () => monthsAgoIsoIST(12) },
@@ -1066,12 +1192,75 @@ export default function Dashboard() {
     rangeRefreshingRef.current = rangeRefreshing
   }, [rangeRefreshing])
 
+  const bundleSpanDays = useMemo(
+    () => reportingSpanDays(dateStart, dateEnd),
+    [dateStart, dateEnd],
+  )
+
+  const summaryTimeoutMs = useMemo(() => {
+    const span = bundleSpanDays ?? 90
+    if (span <= 7) return 60_000
+    if (span <= 45) return 120_000
+    return 180_000
+  }, [bundleSpanDays])
+
+  const { data: rangeSummary, isFetching: fetchingSummary, isFetched: summaryFetched, isError: summaryError } = useQuery({
+    queryKey: ['dashboard-summary', dateStart, dateEnd, topSkuLimit, salesBasis],
+    queryFn: () =>
+      getDashboardSummary({
+        startDate: dateStart,
+        endDate: dateEnd,
+        limit: topSkuLimit,
+        timeout: summaryTimeoutMs,
+      }),
+    enabled: Boolean(dateStart && dateEnd),
+    staleTime: 120_000,
+    retry: 1,
+    refetchOnWindowFocus: false,
+  })
+
+  const summaryBundle = useMemo(
+    () => (rangeSummary ? summaryToBundle(rangeSummary) : undefined),
+    [rangeSummary],
+  )
+
+  useEffect(() => {
+    if (summaryBundle && bundleHasDisplayData(summaryBundle)) {
+      rangeRefreshingRef.current = false
+      setRangeRefreshing(false)
+    }
+  }, [summaryBundle])
+
   useEffect(() => {
     if (isSingleDay && dateStart) {
       setShowDsr(true)
       setDsrDate(dateStart)
     }
   }, [isSingleDay, dateStart])
+
+  const { data: dsrData, isLoading: loadingDsr } = useQuery<DsrResponse>({
+    queryKey: ['daily-dsr', dsrDate],
+    queryFn: async () => {
+      const { data } = await api.get(`/data/daily-dsr?date=${encodeURIComponent(dsrDate)}`)
+      return data
+    },
+    enabled: Boolean((showDsr || isSingleDay) && dsrDate),
+    staleTime: 60_000,
+    retry: 2,
+    refetchOnWindowFocus: false,
+  })
+
+  const dsrBundle = useMemo(
+    () => (dsrData ? dsrToBundle(dsrData) : undefined),
+    [dsrData],
+  )
+
+  useEffect(() => {
+    if (isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle)) {
+      rangeRefreshingRef.current = false
+      setRangeRefreshing(false)
+    }
+  }, [isSingleDay, dsrBundle])
 
   const { data: intelligenceReadiness } = useQuery({
     queryKey: ['intelligence-readiness'],
@@ -1123,11 +1312,6 @@ export default function Dashboard() {
     }
   }, [dateStart, dateEnd, salesBasis])
 
-  const bundleSpanDays = useMemo(
-    () => reportingSpanDays(dateStart, dateEnd),
-    [dateStart, dateEnd],
-  )
-
   const bundleCoreParams = useMemo(() => {
     const p = new URLSearchParams({
       limit: String(topSkuLimit),
@@ -1139,6 +1323,12 @@ export default function Dashboard() {
     if (dateEnd) p.set('end_date', dateEnd)
     return p.toString()
   }, [dateStart, dateEnd, topSkuLimit, salesBasis])
+
+  const summaryUsable = Boolean(summaryBundle && bundleHasDisplayData(summaryBundle))
+  const hasDsrDataEarly = Boolean(isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle))
+  const summarySettled = summaryFetched || summaryError
+  const needBundleFallback =
+    summarySettled && !summaryUsable && !hasDsrDataEarly
 
   const bundleFullParams = useMemo(() => {
     const p = new URLSearchParams({
@@ -1176,6 +1366,8 @@ export default function Dashboard() {
     data: intelligenceCore,
     isLoading: loadingBundle,
     isFetching: fetchingBundle,
+    isError: bundleError,
+    isFetched: bundleFetched,
   } = useQuery<IntelligenceBundle>({
     queryKey: ['intelligence-bundle', dateStart, dateEnd, topSkuLimit, salesBasis, 'core'],
     queryFn: async () => {
@@ -1196,11 +1388,18 @@ export default function Dashboard() {
     },
     staleTime: 300_000,
     gcTime: 600_000,
-    retry: 5,
+    retry: needBundleFallback ? 3 : 0,
     retryDelay: attempt => Math.min(10_000, 3_000 * (attempt + 1)),
-    enabled: true,
+    enabled: Boolean(dateStart && dateEnd) && summarySettled && needBundleFallback,
     refetchOnWindowFocus: false,
-    placeholderData: previousData => {
+    placeholderData: (previousData, previousQuery) => {
+      const prevKey = previousQuery?.queryKey as unknown[] | undefined
+      if (
+        prevKey &&
+        (prevKey[1] !== dateStart || prevKey[2] !== dateEnd || prevKey[4] !== salesBasis)
+      ) {
+        return undefined
+      }
       const prev = previousData as IntelligenceBundle | undefined
       if (prev && bundleHasDisplayData(prev)) return prev
       if (cachedBundleHint && bundleHasDisplayData(cachedBundleHint.bundle)) {
@@ -1210,10 +1409,12 @@ export default function Dashboard() {
     },
     refetchInterval: q => {
       const d = q.state.data
-      if (d?.status === 'warming' || (d as { computing?: boolean })?.computing) return 3_000
+      if (dsrBundle && bundleHasDisplayData(dsrBundle) && isSingleDay) return false
+      if (summaryBundle && bundleHasDisplayData(summaryBundle)) return false
+      if (d?.status === 'warming' || (d as { computing?: boolean })?.computing) return 8_000
       if (q.state.fetchStatus === 'fetching') return false
-      if (!bundleHasDisplayData(d)) return 3_000
-      if (q.state.status === 'error') return 5_000
+      if (!bundleHasDisplayData(d)) return 8_000
+      if (q.state.status === 'error') return 8_000
       return false
     },
   })
@@ -1249,22 +1450,32 @@ export default function Dashboard() {
       )
       return data
     },
-    enabled: fetchBundleExtras && bundleHasDisplayData(intelligenceCore ?? intelligenceFull),
+    enabled: summaryUsable && fetchBundleExtras,
     staleTime: 300_000,
     retry: 0,
   })
 
   const intelligenceBundle = useMemo<IntelligenceBundle | undefined>(() => {
     const core = intelligenceFull ?? intelligenceCore
-    if (!core) return undefined
-    if (!intelligenceExtras) return core
-    return {
-      ...core,
-      anomalies: intelligenceExtras.anomalies ?? core.anomalies,
-      dsr_brand_monthly:
-        intelligenceExtras.dsr_brand_monthly ?? core.dsr_brand_monthly,
+    let merged: IntelligenceBundle | undefined
+    if (core) {
+      merged = !intelligenceExtras
+        ? core
+        : {
+            ...core,
+            anomalies: intelligenceExtras.anomalies ?? core.anomalies,
+            dsr_brand_monthly:
+              intelligenceExtras.dsr_brand_monthly ?? core.dsr_brand_monthly,
+          }
     }
-  }, [intelligenceCore, intelligenceFull, intelligenceExtras])
+    if (merged && bundleHasDisplayData(merged) && merged.data_completeness !== 'partial') {
+      return merged
+    }
+    if (merged && bundleHasDisplayData(merged)) return merged
+    if (isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle)) return dsrBundle
+    if (summaryBundle && bundleHasDisplayData(summaryBundle)) return summaryBundle
+    return merged ?? dsrBundle ?? summaryBundle
+  }, [intelligenceCore, intelligenceFull, intelligenceExtras, summaryBundle, dsrBundle, isSingleDay])
 
   const bundleWarming = intelligenceBundle?.status === 'warming'
   const bundlePartial = intelligenceBundle?.data_completeness === 'partial'
@@ -1273,18 +1484,26 @@ export default function Dashboard() {
     cachedBundleHint && bundleHasDisplayData(cachedBundleHint.bundle),
   )
 
+  const hasSummaryData = Boolean(summaryBundle && bundleHasDisplayData(summaryBundle))
+  const hasDsrData = Boolean(isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle))
+  const showingSummaryOnly = hasSummaryData && !bundleHasDisplayData(intelligenceFull ?? intelligenceCore)
+  const showingDsrOnly = hasDsrData && !bundleHasDisplayData(intelligenceFull ?? intelligenceCore) && !hasSummaryData
+
   const awaitingDashboardReady = false
   const awaitingFirstBundle =
     !hasDisplayData &&
     !hasCachedDisplay &&
-    (bundleWarming ||
+    !hasSummaryData &&
+    !hasDsrData &&
+    (fetchingSummary ||
+      bundleWarming ||
       loadingBundle ||
       (fetchingBundle && !intelligenceCore))
   const bundleLoadActive =
-    awaitingFirstBundle ||
-    rangeRefreshing ||
-    salesRebuildRunning ||
-    Boolean(intelligenceReadiness?.background_jobs?.length)
+    !hasDisplayData &&
+    ((awaitingFirstBundle && !hasSummaryData && !hasDsrData) ||
+      (rangeRefreshing && (fetchingBundle || loadingBundle)) ||
+      salesRebuildRunning)
 
   useEffect(() => {
     if (!bundleLoadActive) {
@@ -1306,21 +1525,38 @@ export default function Dashboard() {
     ? Date.now() - bundleLoadStartedAt.current
     : 0
   const bundleLoadPercent = bundleLoadActive
-    ? (fetchingBundle || loadingBundle) && bundleLoadElapsedMs > estimateIntelligenceBundleLoadMs(bundleSpanDays)
-      ? 99
-      : Math.min(
-          fetchingBundle || loadingBundle ? 99 : 100,
-          (bundleLoadElapsedMs / estimateIntelligenceBundleLoadMs(bundleSpanDays)) * 100,
-        )
+    ? hasDisplayData && !fetchingBundle && !loadingBundle
+      ? 100
+      : (fetchingBundle || loadingBundle) && bundleLoadElapsedMs > estimateIntelligenceBundleLoadMs(bundleSpanDays)
+        ? 99
+        : Math.min(
+            fetchingBundle || loadingBundle ? 98 : 100,
+            (bundleLoadElapsedMs / estimateIntelligenceBundleLoadMs(bundleSpanDays)) * 100,
+          )
     : 100
   void bundleLoadTick
 
   useEffect(() => {
-    if (!fetchingBundle && !loadingBundle && (hasDisplayData || intelligenceCore?.status === 'warming') && !bundleWarming) {
-      rangeRefreshingRef.current = false
-      setRangeRefreshing(false)
+    if (!fetchingBundle && !loadingBundle) {
+      if (bundleError || bundleFetched) {
+        rangeRefreshingRef.current = false
+        setRangeRefreshing(false)
+        return
+      }
+      if ((hasDisplayData || intelligenceCore?.status === 'warming') && !bundleWarming) {
+        rangeRefreshingRef.current = false
+        setRangeRefreshing(false)
+      }
     }
-  }, [fetchingBundle, loadingBundle, hasDisplayData, bundleWarming, intelligenceCore?.status])
+  }, [
+    fetchingBundle,
+    loadingBundle,
+    hasDisplayData,
+    bundleWarming,
+    intelligenceCore?.status,
+    bundleError,
+    bundleFetched,
+  ])
 
   /** Watchdog: if the dashboard is still loading after 60s, kick hydrate + refetch. */
   useEffect(() => {
@@ -1351,13 +1587,6 @@ export default function Dashboard() {
   const dsrBrandMonthly = intelligenceBundle?.dsr_brand_monthly
   const loadingPlatforms = !hasDisplayData && !hasCachedDisplay && awaitingFirstBundle
   const loadingDsrBrands = loadingBundle && !dsrBrandMonthly?.rows?.length
-
-  const { data: dsrData, isLoading: loadingDsr } = useQuery<DsrResponse>({
-    queryKey: ['daily-dsr', dsrDate],
-    queryFn: async () => { const { data } = await api.get(`/data/daily-dsr?date=${encodeURIComponent(dsrDate)}`); return data },
-    enabled: showDsr && !!dsrDate,
-    staleTime: 60_000,
-  })
 
   /* ── derived ── */
   const salesLoaded = sessionSales || hasDisplayData || hasCachedDisplay
@@ -1514,8 +1743,9 @@ export default function Dashboard() {
   const intelligenceLoading =
     bundleLoadActive ||
     salesRebuildRunning ||
-    (fetchingBundle && (rangeRefreshing || bundlePartial)) ||
-    (showDsr && loadingDsr) ||
+    (hasDisplayData && fetchingBundle && bundlePartial) ||
+    (!hasDisplayData && fetchingSummary) ||
+    (!hasDisplayData && showDsr && loadingDsr) ||
     exportingSales ||
     exportingDsr ||
     exportingDsrMonthly
@@ -1523,7 +1753,10 @@ export default function Dashboard() {
   const intelligenceLoadLabel = useMemo(() => {
     if (salesRebuildRunning) return 'Rebuilding sales dataset in background…'
     const bg = intelligenceReadiness?.background_jobs ?? []
-    if (bg.length > 0) return `Processing: ${bg.join(', ')}…`
+    if (bg.length > 0 && !hasDisplayData) return `Processing: ${bg.join(', ')}…`
+    if (!hasDisplayData && fetchingSummary) {
+      return `Loading ${activePreset || 'date range'} totals (${dateStart} → ${dateEnd})…`
+    }
     if (rangeRefreshing && fetchingBundle) {
       return `Loading ${activePreset || 'date range'} data (${dateStart} → ${dateEnd})…`
     }
@@ -1555,6 +1788,7 @@ export default function Dashboard() {
     showDsr,
     loadingDsr,
     awaitingFirstBundle,
+    fetchingSummary,
     bundleWarming,
     intelligenceBundle?.message,
     rangeRefreshing,
@@ -1605,7 +1839,15 @@ export default function Dashboard() {
           Showing cached totals — updating from server…
         </div>
       ) : null}
-      {bundlePartial && hasDisplayData && !awaitingFirstBundle ? (
+      {showingDsrOnly ? (
+        <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50/80 px-4 py-2 text-xs text-emerald-900">
+          Day totals from Daily Sales Report — full charts still loading in the background.
+        </div>
+      ) : showingSummaryOnly ? (
+        <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50/80 px-4 py-2 text-xs text-emerald-900">
+          Fast totals loaded — charts and platform detail still loading in the background.
+        </div>
+      ) : bundlePartial && hasDisplayData && !awaitingFirstBundle ? (
         <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50/80 px-4 py-2 text-xs text-blue-800">
           Preliminary totals (~) — full history is refining in the background.
         </div>
@@ -1630,6 +1872,11 @@ export default function Dashboard() {
       {salesRebuildRunning ? (
         <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-xs text-blue-900">
           Syncing latest uploads from server in background — marketplace charts refresh automatically (may take a few minutes).
+        </div>
+      ) : null}
+      {(intelligenceReadiness?.background_jobs?.length ?? 0) > 0 && hasDisplayData ? (
+        <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-700">
+          Background sync running ({intelligenceReadiness?.background_jobs?.join(', ')}) — totals above are already live.
         </div>
       ) : null}
       {hasDisplayData && meeshoInTier3 && !meeshoInBundle ? (
@@ -1841,13 +2088,13 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {hasDisplayData && !bundleLoadActive ? (
+      {hasDisplayData ? (
         <div className="dash-section">
           <NetBreakdownTable platforms={filteredPlatforms} salesSummary={salesSummary} />
         </div>
       ) : null}
 
-      {isSingleDay && hasDisplayData && !bundleLoadActive ? (
+      {isSingleDay && hasDisplayData ? (
         <div className="dash-section">
           <DaySalesSnapshot date={dateStart} platforms={filteredPlatforms} />
         </div>

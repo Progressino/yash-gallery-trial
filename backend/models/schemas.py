@@ -66,6 +66,15 @@ class CoverageResponse(BaseModel):
     sku_status_lead_rows: int = 0
     daily_inventory_history_rows: int = 0
     daily_inventory_history_skus: int = 0
+    daily_inventory_history_min_date: Optional[str] = None
+    daily_inventory_history_max_date: Optional[str] = None
+    daily_inventory_history_uploaded_at: Optional[str] = None
+    daily_inventory_history_filename: Optional[str] = None
+    inventory_snapshot_stale: bool = False
+    inventory_snapshot_lag_days: Optional[int] = None
+    daily_inventory_history_stale: bool = False
+    daily_inventory_history_lag_days: Optional[int] = None
+    inventory_staleness_warnings: Optional[list[str]] = None
     manual_intransit_skus: int = 0
     manual_intransit_units: int = 0
     manual_not_in_inventory_units: int = 0
@@ -174,8 +183,10 @@ class IntelligenceReadinessResponse(BaseModel):
 class DashboardSummaryResponse(BaseModel):
     source: str = "none"
     platforms: dict[str, dict] = Field(default_factory=dict)
+    platform_summary: list[dict] = Field(default_factory=list)
     top_skus: list[dict] = Field(default_factory=list)
     sales_summary: dict = Field(default_factory=dict)
+    data_completeness: str = "partial"
     message: str = ""
 
 

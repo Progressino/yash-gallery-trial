@@ -117,8 +117,10 @@ def build_dashboard_summary(
                 return {
                     "source": "tier3_sqlite",
                     "platforms": _compact_platforms(tier3.get("platform_summary") or []),
+                    "platform_summary": tier3.get("platform_summary") or [],
                     "top_skus": tier3.get("top_skus") or [],
                     "sales_summary": tier3.get("sales_summary") or {},
+                    "data_completeness": tier3.get("data_completeness") or "full",
                 }
         except Exception:
             pass

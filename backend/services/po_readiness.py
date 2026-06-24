@@ -228,6 +228,7 @@ def _augment_coverage_light(sess, cov: CoverageResponse) -> CoverageResponse:
         data["po_ready"] = (
             sales_rows >= PO_MIN_SALES_ROWS and inv_rows >= PO_MIN_INVENTORY_ROWS
         )
+    _attach_inventory_staleness(sess, data)
     return CoverageResponse(**data)
 
 
@@ -254,4 +255,27 @@ def augment_coverage(sess, cov: CoverageResponse, *, light: bool = False) -> Cov
     intel = build_intelligence_readiness(sess, cov, session_id=sid)
     data["intelligence_ready"] = bool(intel.get("intelligence_ready"))
     data["dashboard_ready"] = dashboard_gate_ready(sess, cov, session_id=sid)
+    _attach_inventory_staleness(sess, data)
     return CoverageResponse(**data)
+
+
+def _attach_inventory_staleness(sess, data: dict) -> None:
+    from .inventory_staleness import build_inventory_staleness, daily_inventory_history_bounds
+
+    hist_df = getattr(sess, "daily_inventory_history_df", None)
+    min_d, max_d = daily_inventory_history_bounds(hist_df)
+    data["daily_inventory_history_min_date"] = min_d or None
+    data["daily_inventory_history_max_date"] = max_d or None
+    data["daily_inventory_history_uploaded_at"] = (
+        getattr(sess, "daily_inventory_history_uploaded_at", "") or None
+    )
+    data["daily_inventory_history_filename"] = (
+        getattr(sess, "daily_inventory_history_filename", "") or None
+    )
+    stale = build_inventory_staleness(
+        inventory_loaded=bool(data.get("inventory")),
+        inventory_snapshot_date=data.get("inventory_snapshot_date"),
+        daily_inventory_history_loaded=bool(data.get("daily_inventory_history")),
+        daily_inventory_history_max_date=max_d or None,
+    )
+    data.update(stale)
