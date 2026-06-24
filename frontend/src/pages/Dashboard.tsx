@@ -1463,7 +1463,7 @@ export default function Dashboard() {
       )
       return data
     },
-    enabled: summaryUsable && fetchBundleExtras && hasDisplayData,
+    enabled: summaryUsable && fetchBundleExtras && Boolean(summaryBundle),
     staleTime: 300_000,
     retry: 0,
   })
