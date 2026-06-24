@@ -1115,7 +1115,15 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
             else:
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 if os.path.exists(path):
-                    loaded[key] = pd.read_parquet(path)
+                    df = pd.read_parquet(path)
+                    if key == "mtr_df" and not df.empty and "TxnDate" in df.columns:
+                        cutoff = (datetime.now(IST) - timedelta(days=180)).strftime("%Y-%m-%d")
+                        try:
+                            df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
+                            df = df[df["TxnDate"] >= cutoff].reset_index(drop=True)
+                        except Exception:
+                            pass
+                    loaded[key] = df
 
         if not loaded:
             return False, {}
@@ -1154,7 +1162,15 @@ def _warm_cache_loose_parquets_from_dir(disk_dir: "Path") -> dict:
         p = disk_dir / f"{key}.parquet"
         if p.is_file():
             try:
-                out[key] = pd.read_parquet(p)
+                df = pd.read_parquet(p)
+                if key == "mtr_df" and not df.empty and "TxnDate" in df.columns:
+                    cutoff = (datetime.now(IST) - timedelta(days=180)).strftime("%Y-%m-%d")
+                    try:
+                        df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
+                        df = df[df["TxnDate"] >= cutoff].reset_index(drop=True)
+                    except Exception:
+                        pass
+                out[key] = df
             except Exception as ex:
                 log.warning("warm-cache parquet read %s: %s", p, ex)
     sm = disk_dir / "sku_mapping.json"
