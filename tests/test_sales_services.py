@@ -1608,12 +1608,12 @@ def test_flipkart_parse_excel_order_dates_serial_and_iso():
 
 
 def test_flipkart_earn_more_prefers_final_sale_units_over_gross():
-    """earn_more_report must not count cancelled demand in shipments (Final Sale vs Gross)."""
+    """earn_more_report: gross shipments + cancel rows; net units = gross − cancel − return."""
     from io import BytesIO
 
     from openpyxl import Workbook
 
-    from backend.services.flipkart import _parse_flipkart_earn_more
+    from backend.services.flipkart import _parse_flipkart_earn_more, flipkart_to_sales_rows
 
     wb = Workbook()
     ws = wb.active
@@ -1636,8 +1636,45 @@ def test_flipkart_earn_more_prefers_final_sale_units_over_gross():
     wb.save(buf)
     out = _parse_flipkart_earn_more(buf.getvalue(), "earn-Apr-2026.xlsx", {"LIST1": "OMS-1"})
     ship = out[out["TxnType"] == "Shipment"]
+    cancel = out[out["TxnType"] == "Cancel"]
     assert len(ship) == 1
-    assert float(ship["Quantity"].iloc[0]) == 7.0
+    assert float(ship["Quantity"].iloc[0]) == 10.0
+    assert len(cancel) == 1
+    assert float(cancel["Quantity"].iloc[0]) == 3.0
+    sales = flipkart_to_sales_rows(out)
+    assert float(sales["Units_Effective"].sum()) == 7.0
+
+
+def test_flipkart_order_export_emits_return_units():
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    from backend.services.flipkart import _parse_flipkart_xlsx
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        [
+            "Product Id",
+            "SKU ID",
+            "Brand",
+            "Order Date",
+            "Gross Units",
+            "Return Units",
+            "Cancellation Units",
+            "Final Sale Units",
+            "Final Sale Amount",
+            "Return Amount",
+        ]
+    )
+    ws.append(["P1", "LIST1", "B1", "2026-04-01", 20, 5, 2, 13, 1300, 250])
+    buf = BytesIO()
+    wb.save(buf)
+    out = _parse_flipkart_xlsx(buf.getvalue(), "orders-Apr-2026.xlsx", {"LIST1": "OMS-1"})
+    assert int(out[out["TxnType"] == "Shipment"]["Quantity"].sum()) == 20
+    assert int(out[out["TxnType"] == "Refund"]["Quantity"].sum()) == 5
+    assert int(out[out["TxnType"] == "Cancel"]["Quantity"].sum()) == 2
 
 
 def test_flipkart_earn_more_parses_numeric_excel_serial_order_date():
