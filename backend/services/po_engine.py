@@ -1813,6 +1813,7 @@ def calculate_po_base(
     _breakdown_cols: list[str] = []
     if not _ep_prepared.empty and "PO_Pipeline_Total" in _ep_prepared.columns:
         from .existing_po import (
+            bundled_band_redundant_with_child_pipeline,
             bundled_pipeline_children_in_po,
             coalesce_pipeline_columns_on_po_df,
             existing_po_merge_key,
@@ -1820,6 +1821,7 @@ def calculate_po_base(
             per_size_pipeline_covered_by_bundled_po_row,
             rollup_pipeline_onto_bundled_rows,
             unbundle_inventory_rows_for_existing_po,
+            zero_bundled_pipeline_when_children_carry_qty,
         )
 
         _breakdown_cols = [
@@ -1856,6 +1858,7 @@ def calculate_po_base(
                 po_df, _ep_prepared, _breakdown_cols, canonical_fn=existing_po_merge_key
             )
             po_df = coalesce_pipeline_columns_on_po_df(po_df, _ep_prepared)
+            po_df = zero_bundled_pipeline_when_children_carry_qty(po_df, _ep_prepared)
             # Unbundled per-size rows keep pipeline qty only — not parent/bundled Eff_Days.
             # Do not wipe inventory-based active days (e.g. 1361YKBLUE-XL with 8/30 in-stock
             # days) — only clear inherited Eff_Days when there is no demand and no history.
@@ -1922,8 +1925,9 @@ def calculate_po_base(
         if missing_mask.any():
             for idx in _ep_ghost.index[missing_mask]:
                 sk = existing_po_merge_key(_ep_ghost.at[idx, "OMS_SKU"])
-                if is_bundled_size_range_sku(sk) and bundled_pipeline_children_in_po(
-                    sk, _ep_ghost, _po_keys
+                if is_bundled_size_range_sku(sk) and (
+                    bundled_pipeline_children_in_po(sk, _ep_ghost, _po_keys)
+                    or bundled_band_redundant_with_child_pipeline(sk, po_df, _ep_ghost)
                 ):
                     missing_mask.at[idx] = False
                 elif per_size_pipeline_covered_by_bundled_po_row(sk, po_df):

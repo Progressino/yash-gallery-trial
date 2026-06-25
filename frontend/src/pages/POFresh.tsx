@@ -484,7 +484,11 @@ function POFreshInner() {
       medium: allRows.filter(r => r.Priority === '🟢 MEDIUM').length,
       pipeline: allRows.filter(r => r.Priority === '🔄 In Pipeline').length,
       withPo: allRows.filter(r => num(r.PO_Qty) > 0).length,
-      pipelineUnits: allRows.reduce((s, r) => s + num(r.PO_Pipeline_Total), 0),
+      pipelineUnits:
+        typeof result?.summary?.pipeline_qty_sum === 'number' &&
+        Number.isFinite(result.summary.pipeline_qty_sum)
+          ? result.summary.pipeline_qty_sum
+          : allRows.reduce((s, r) => s + num(r.PO_Pipeline_Total), 0),
       grossPo: allRows.reduce((s, r) => s + num(r.Gross_PO_Qty), 0),
     }),
     [allRows],

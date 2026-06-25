@@ -752,6 +752,51 @@ def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 77
 
 
+def test_bundled_and_per_size_pipeline_not_double_counted():
+    """When sheet + inventory list both band and per-size rows, count pipeline once."""
+    days = pd.date_range("2026-05-01", periods=20, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1488YKWHITE-XL"] * 10 + ["1488YKWHITE-XXL"] * 10,
+            "TxnDate": list(days)[:10] + list(days)[:10],
+            "Transaction Type": ["Shipment"] * 20,
+            "Quantity": [2] * 20,
+            "Units_Effective": [2] * 20,
+            "Source": ["Amazon"] * 20,
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["1488YKWHITE-XL", "1488YKWHITE-XXL", "1488YKWHITE-XL-XXL"],
+            "Total_Inventory": [10, 8, 0],
+        }
+    )
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1488YKWHITE-XL", "1488YKWHITE-XXL", "1488YKWHITE-XL-XXL"],
+            "PO_Pipeline_Total": [44, 177, 221],
+            "Balance_to_Dispatch": [44, 177, 221],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+    )
+    xl = po.loc[po["OMS_SKU"] == "1488YKWHITE-XL"].iloc[0]
+    xxl = po.loc[po["OMS_SKU"] == "1488YKWHITE-XXL"].iloc[0]
+    band = po.loc[po["OMS_SKU"] == "1488YKWHITE-XL-XXL"].iloc[0]
+    assert int(xl["PO_Pipeline_Total"]) == 44
+    assert int(xxl["PO_Pipeline_Total"]) == 177
+    assert int(band["PO_Pipeline_Total"]) == 0
+    assert int(po["PO_Pipeline_Total"].sum()) == 221
+
+
 def test_bundled_only_sheet_splits_pipeline_to_per_size_inventory():
     """Bundled-only PO sheet (XXL-3XL) fans out to per-size rows when no L/XL lines exist."""
     days = pd.date_range("2026-05-01", periods=20, freq="D")

@@ -1247,6 +1247,129 @@ def bundled_pipeline_children_in_po(bundled_sku: str, ep: pd.DataFrame, po_keys:
     return saw_child_pipeline
 
 
+def zero_bundled_pipeline_when_children_carry_qty(
+    po_df: pd.DataFrame,
+    ep: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    Avoid double-counting open PO pipeline on both a size-band listing row (e.g. L-XL)
+    and its per-size children when both appear in the PO output.
+
+    When the sheet lists individual sizes plus a small exclusive band line (e.g. 4XL-5XL: 4
+    while 4XL/5XL have their own rows), keep the band residual. When the band line is a
+    summary of the same units already on per-size rows, clear the band row.
+    """
+    if po_df is None or po_df.empty or "OMS_SKU" not in po_df.columns:
+        return po_df
+    breakdown = [
+        c
+        for c in _PIPELINE_COALESCE_COLS
+        if c in po_df.columns and c not in ("PO_Confirmed_Raise_Pipeline", "PO_Pipeline_Effective")
+    ]
+    if not breakdown:
+        return po_df
+    out = po_df.copy()
+    po_keys = set(out["OMS_SKU"].astype(str).str.strip())
+    ep_idx = ep.set_index("OMS_SKU") if ep is not None and not ep.empty else None
+    is_bundled = (
+        out["OMS_SKU"].astype(str).map(_normalize_sku_text).map(is_bundled_size_range_sku)
+    )
+    for idx, row in out[is_bundled].iterrows():
+        sku = _normalize_sku_text(row.get("OMS_SKU"))
+        children = _split_bundled_po_sku(sku)
+        if len(children) < 2:
+            continue
+        child_pipe = 0.0
+        ep_child_sum = 0.0
+        for child in children:
+            ck = existing_po_merge_key(child)
+            if ck not in po_keys:
+                continue
+            rows = out[out["OMS_SKU"].astype(str).str.strip() == ck]
+            if rows.empty or "PO_Pipeline_Total" not in rows.columns:
+                continue
+            child_pipe += float(
+                pd.to_numeric(rows["PO_Pipeline_Total"], errors="coerce").fillna(0).max() or 0
+            )
+            if ep_idx is not None and ck in ep_idx.index and "PO_Pipeline_Total" in ep_idx.columns:
+                ep_child_sum += float(
+                    pd.to_numeric(ep_idx.at[ck, "PO_Pipeline_Total"], errors="coerce") or 0
+                )
+        bundled_pipe = float(pd.to_numeric(row.get("PO_Pipeline_Total"), errors="coerce") or 0)
+        if child_pipe <= 0 or bundled_pipe <= 0:
+            continue
+        bundled_key = existing_po_merge_key(sku)
+        ep_bundled = 0.0
+        if ep_idx is not None and bundled_key in ep_idx.index and "PO_Pipeline_Total" in ep_idx.columns:
+            ep_bundled = float(
+                pd.to_numeric(ep_idx.at[bundled_key, "PO_Pipeline_Total"], errors="coerce") or 0
+            )
+        if ep_bundled > 0 and ep_child_sum > 0:
+            if ep_bundled >= ep_child_sum * 0.9:
+                for col in breakdown:
+                    out.at[idx, col] = 0
+                continue
+            for col in breakdown:
+                if ep_idx is not None and bundled_key in ep_idx.index and col in ep_idx.columns:
+                    val = pd.to_numeric(ep_idx.at[bundled_key, col], errors="coerce")
+                    out.at[idx, col] = 0 if pd.isna(val) else int(val)
+            continue
+        if bundled_pipe <= child_pipe:
+            for col in breakdown:
+                out.at[idx, col] = 0
+    return out
+
+
+def bundled_band_redundant_with_child_pipeline(
+    bundled_sku: str,
+    po_df: pd.DataFrame,
+    ep: pd.DataFrame | None = None,
+) -> bool:
+    """True when a band row duplicates per-size pipeline already on child rows."""
+    if po_df is None or po_df.empty or "OMS_SKU" not in po_df.columns:
+        return False
+    sku = _normalize_sku_text(bundled_sku)
+    if not is_bundled_size_range_sku(sku):
+        return False
+    po_keys = set(po_df["OMS_SKU"].astype(str).str.strip())
+    child_pipe = 0.0
+    ep_child_sum = 0.0
+    ep_idx = ep.set_index("OMS_SKU") if ep is not None and not ep.empty else None
+    for child in _split_bundled_po_sku(sku):
+        ck = existing_po_merge_key(child)
+        if ck not in po_keys:
+            continue
+        rows = po_df[po_df["OMS_SKU"].astype(str).str.strip() == ck]
+        if rows.empty:
+            continue
+        child_pipe += float(
+            pd.to_numeric(rows["PO_Pipeline_Total"], errors="coerce").fillna(0).max() or 0
+        )
+        if ep_idx is not None and ck in ep_idx.index and "PO_Pipeline_Total" in ep_idx.columns:
+            ep_child_sum += float(
+                pd.to_numeric(ep_idx.at[ck, "PO_Pipeline_Total"], errors="coerce") or 0
+            )
+    if child_pipe <= 0:
+        return False
+    bundled_key = existing_po_merge_key(sku)
+    band_rows = po_df[po_df["OMS_SKU"].astype(str).str.strip() == bundled_key]
+    if band_rows.empty:
+        return False
+    bundled_pipe = float(
+        pd.to_numeric(band_rows["PO_Pipeline_Total"], errors="coerce").fillna(0).max() or 0
+    )
+    if bundled_pipe <= 0:
+        return False
+    ep_bundled = 0.0
+    if ep_idx is not None and bundled_key in ep_idx.index and "PO_Pipeline_Total" in ep_idx.columns:
+        ep_bundled = float(
+            pd.to_numeric(ep_idx.at[bundled_key, "PO_Pipeline_Total"], errors="coerce") or 0
+        )
+    if ep_bundled > 0 and ep_child_sum > 0:
+        return ep_bundled >= ep_child_sum * 0.9
+    return bundled_pipe <= child_pipe
+
+
 def dedupe_po_rows_by_sku(po_df: pd.DataFrame) -> pd.DataFrame:
     """Collapse duplicate OMS_SKU rows — keep the richest row (pipeline / sales / stock)."""
     if po_df is None or po_df.empty or "OMS_SKU" not in po_df.columns:
