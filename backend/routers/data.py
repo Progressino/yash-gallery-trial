@@ -4128,8 +4128,8 @@ def intelligence_version(
     if len(s) != 10 or len(e) != 10:
         return {"ok": False, "version": "", "message": "start_date and end_date required"}
     ver = intelligence_version_for_window(s, e, basis=basis or "gross")
-    hot, _ = load_artifact(s, e, KIND_HOT, basis=basis or "gross", allow_stale=False)
-    deep, _ = load_artifact(s, e, KIND_DEEP, basis=basis or "gross", allow_stale=False)
+    hot, hot_meta = load_artifact(s, e, KIND_HOT, basis=basis or "gross", allow_stale=True)
+    deep, deep_meta = load_artifact(s, e, KIND_DEEP, basis=basis or "gross", allow_stale=True)
     return {
         "ok": True,
         "version": ver,
@@ -4138,6 +4138,8 @@ def intelligence_version(
         "basis": basis or "gross",
         "hot_ready": hot is not None,
         "deep_ready": deep is not None,
+        "hot_stale": bool(hot_meta.get("stale")) if hot else False,
+        "deep_stale": bool(deep_meta.get("stale")) if deep else False,
     }
 
 

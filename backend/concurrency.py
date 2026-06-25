@@ -73,7 +73,7 @@ AUTH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 # Dashboard summary, inventory matrix, intelligence bundle — must not queue behind
 # session hydrate / SKU bundle work on AUX_EXECUTOR (users saw 5–10 min blank screens).
 READ_API_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=2,
+    max_workers=4,
     thread_name_prefix="erp-read",
 )
 

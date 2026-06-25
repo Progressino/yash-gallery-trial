@@ -1247,13 +1247,7 @@ export default function Dashboard() {
     }
   }, [rangeSummary, dateStart, dateEnd, salesBasis])
 
-  useEffect(() => {
-    if (!serverCacheVersion || !dateStart || !dateEnd) return
-    const hint = readIntelligenceCacheStale(dateStart, dateEnd, salesBasis, serverCacheVersion)
-    if (hint?.versionMismatch) {
-      clearIntelligenceCacheForRange(dateStart, dateEnd, salesBasis)
-    }
-  }, [serverCacheVersion, dateStart, dateEnd, salesBasis])
+  // Keep stale local cache after uploads — instant paint while server artifacts refresh.
 
   const summaryBundle = useMemo(
     () => (rangeSummary ? summaryToBundle(rangeSummary) : undefined),
@@ -1345,7 +1339,7 @@ export default function Dashboard() {
     const fresh = readIntelligenceCache(dateStart, dateEnd, salesBasis, serverCacheVersion)
     if (fresh && bundleHasDisplayData(fresh)) return { bundle: fresh, expired: false, versionMismatch: false }
     const stale = readIntelligenceCacheStale(dateStart, dateEnd, salesBasis, serverCacheVersion)
-    if (stale && bundleHasDisplayData(stale.bundle) && !stale.versionMismatch) return stale
+    if (stale && bundleHasDisplayData(stale.bundle)) return stale
     return null
   }, [dateStart, dateEnd, salesBasis, serverCacheVersion, parityReport?.tier3_file_count])
 
