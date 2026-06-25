@@ -379,16 +379,88 @@ def _meesho_panel_suborder_sku_map_from_bytes(raw: bytes) -> Dict[str, str]:
     return out
 
 
+def _meesho_suborder_sku_maps_from_frame(
+    meesho_df: pd.DataFrame | None,
+) -> Tuple[Dict[Tuple[str, str], str], Dict[str, str]]:
+    """
+    Sub-order → listing SKU for Meesho TCS return workbooks.
+
+    Session / warm-cache ``meesho_df`` often uses ``MeeshoSubOrder`` + ``OMS_SKU``
+    (unified or Tier-3 frame) rather than raw export ``OrderId`` + ``SKU``.
+    """
+    day_map: Dict[Tuple[str, str], str] = {}
+    oid_map: Dict[str, str] = {}
+    if meesho_df is None or getattr(meesho_df, "empty", True):
+        return day_map, oid_map
+
+    from .meesho import meesho_export_sku_recovery_maps
+
+    if {"OrderId", "Date"}.issubset(meesho_df.columns):
+        sku_src = next(
+            (c for c in ("SKU", "OMS_SKU", "Sku") if c in meesho_df.columns),
+            None,
+        )
+        if sku_src:
+            tmp = meesho_df.copy()
+            tmp["SKU"] = tmp[sku_src]
+            d, o = meesho_export_sku_recovery_maps(tmp)
+            day_map.update(d)
+            oid_map.update(o)
+
+    sub_col = next(
+        (
+            c
+            for c in ("MeeshoSubOrder", "LineKey", "sub_order_num", "OrderId")
+            if c in meesho_df.columns
+        ),
+        None,
+    )
+    sku_col = next(
+        (c for c in ("OMS_SKU", "SKU", "Sku") if c in meesho_df.columns),
+        None,
+    )
+    date_col = next((c for c in ("Date", "TxnDate") if c in meesho_df.columns), None)
+    if not sub_col or not sku_col:
+        return day_map, oid_map
+
+    from .helpers import clean_line_id_series
+
+    m = meesho_df.copy()
+    m["_sub"] = clean_line_id_series(m[sub_col])
+    m["_sku"] = m[sku_col].astype(str).str.strip()
+    txn_col = next(
+        (c for c in ("TxnType", "Transaction Type", "Transaction_Type") if c in m.columns),
+        None,
+    )
+    if txn_col:
+        ship = m[txn_col].astype(str).str.strip().eq("Shipment")
+        if ship.any():
+            m = m.loc[ship]
+    if date_col:
+        dt = pd.to_datetime(m[date_col], errors="coerce")
+        m["_day"] = dt.dt.strftime("%Y-%m-%d")
+    good = (
+        m["_sub"].ne("")
+        & m["_sku"].str.len().gt(0)
+        & ~m["_sku"].str.lower().isin(["nan", "none"])
+        & ~m["_sku"].str.upper().eq("MEESHO_TOTAL")
+    )
+    m = m.loc[good]
+    for _, row in m.iterrows():
+        sub = str(row["_sub"]).strip()
+        sku = str(row["_sku"]).strip()
+        oid_map.setdefault(sub, sku)
+        day = str(row.get("_day", "")).strip()[:10]
+        if _valid_return_iso(day):
+            day_map.setdefault((sub, day), sku)
+    return day_map, oid_map
+
+
 def _meesho_return_suborder_sku_lookups(
     meesho_df: pd.DataFrame | None,
     panel_maps: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict[Tuple[str, str], str], Dict[str, str]]:
-    day_map: Dict[Tuple[str, str], str] = {}
-    oid_map: Dict[str, str] = {}
-    if meesho_df is not None and not getattr(meesho_df, "empty", True):
-        from .meesho import meesho_export_sku_recovery_maps
-
-        day_map, oid_map = meesho_export_sku_recovery_maps(meesho_df)
+    day_map, oid_map = _meesho_suborder_sku_maps_from_frame(meesho_df)
     if panel_maps:
         for sub, sku in panel_maps.items():
             oid_map.setdefault(str(sub), str(sku))

@@ -315,6 +315,103 @@ def test_meesho_tcs_sales_return_maps_suborder_to_sku():
     assert (out["Return_Platform"] == "meesho").all()
 
 
+def test_meesho_tcs_maps_via_meesho_suborder_column():
+    """Prod session meesho_df uses MeeshoSubOrder + OMS_SKU (not OrderId + SKU)."""
+    openpyxl = pytest.importorskip("openpyxl")
+    raw_xlsx = BytesIO()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(
+        [
+            "identifier",
+            "sub_order_num",
+            "order_date",
+            "quantity",
+            "cancel_return_date",
+        ]
+    )
+    ws.append(["vvxpj", "246113537743954370_1", "2026-01-23", 2, "2026-01-29"])
+    ws.append(["vvxpj", "243005505897928640_1", "2026-01-14", 1, "2026-01-14"])
+    wb.save(raw_xlsx)
+    raw_xlsx.seek(0)
+    meesho_df = pd.DataFrame(
+        {
+            "MeeshoSubOrder": ["246113537743954370_1", "243005505897928640_1"],
+            "OMS_SKU": ["1158YKGREEN-XL", "999YKRED-M"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Date": pd.to_datetime(["2026-01-23", "2026-01-14"]),
+            "Quantity": [2, 1],
+        }
+    )
+    out, err, _warns = parse_return_upload_bytes(
+        raw_xlsx.read(),
+        "gst_1662411_1_2026.zip/tcs_sales_return.xlsx",
+        meesho_df=meesho_df,
+    )
+    assert err is None, err
+    assert int(out["Return_Units"].sum()) == 3
+    assert set(out["OMS_SKU"]) == {"1158YKGREEN-XL", "999YKRED-M"}
+
+
+@pytest.mark.parametrize(
+    "path,name,min_units,platform",
+    [
+        (
+            "gst_1662411_1_2026.zip",
+            "gst_1662411_1_2026.zip",
+            1500,
+            "meesho",
+        ),
+        (
+            "Myntra Other Brand Return Jan-2026.rar",
+            "Myntra Other Brand Return Jan-2026.rar",
+            10000,
+            "myntra",
+        ),
+    ],
+)
+def test_user_return_uploads_jun2026(path, name, min_units, platform):
+    fixture = Path("/Users/samraisinghani/Downloads") / path
+    if not fixture.is_file():
+        pytest.skip(f"{path} not on disk")
+    meesho_df = None
+    if platform == "meesho":
+        meesho_df = _synthetic_meesho_df_from_tcs_rar(fixture)
+        if meesho_df.empty and path.endswith(".zip"):
+            import zipfile
+            from io import BytesIO
+
+            with zipfile.ZipFile(fixture) as zf:
+                for info in zf.infolist():
+                    if "tcs_sales_return" not in info.filename.lower():
+                        continue
+                    tdf = pd.read_excel(BytesIO(zf.read(info.filename)), sheet_name=0)
+                    rows = []
+                    for _, r in tdf.iterrows():
+                        sub = str(r.get("sub_order_num") or "").strip()
+                        if not sub:
+                            continue
+                        rows.append(
+                            {
+                                "MeeshoSubOrder": sub,
+                                "OMS_SKU": "1158YKGREEN-XL",
+                                "Date": pd.to_datetime(
+                                    r.get("cancel_return_date") or "2026-01-01"
+                                ),
+                                "TxnType": "Shipment",
+                                "Quantity": 1,
+                            }
+                        )
+                    meesho_df = pd.DataFrame(rows)
+                    break
+    df, err, _warns = parse_return_upload_bytes(
+        fixture.read_bytes(), name, meesho_df=meesho_df
+    )
+    assert err is None, err
+    assert int(df["Return_Units"].sum()) >= min_units
+    assert (df["Return_Platform"] == platform).all()
+
+
 def test_meesho_tcs_sales_return_warns_without_sales_lookup():
     openpyxl = pytest.importorskip("openpyxl")
     raw_xlsx = BytesIO()
