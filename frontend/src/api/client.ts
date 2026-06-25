@@ -877,6 +877,12 @@ export interface POCalculateResult {
   summary?: {
     new_po_qty_sum?: number
     new_po_sku_count?: number
+    pipeline_qty_sum?: number
+    pipeline_sku_count?: number
+    sheet_po_ordered_sum?: number
+    existing_po_applied?: boolean
+    existing_po_generation?: number
+    existing_po_filename?: string
   }
 }
 
