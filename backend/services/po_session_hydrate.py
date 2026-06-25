@@ -92,7 +92,38 @@ def _should_prefer_sidecar_backup(
         return True
     if _sidecar_looks_placeholder(key, cur):
         return bak_n > cur_n
+    if key == "daily_inventory_history_df":
+        try:
+            from .daily_inventory_history import inventory_history_max_date
+
+            cur_max = inventory_history_max_date(cur)
+            bak_max = inventory_history_max_date(backup)
+            if bak_max is not None and (cur_max is None or bak_max > cur_max):
+                return True
+            if (
+                cur_max is not None
+                and bak_max is not None
+                and bak_max == cur_max
+                and bak_n > cur_n
+            ):
+                return True
+        except Exception:
+            pass
     return bak_n >= max(100, cur_n * 2) and cur_n < 500
+
+
+def _sidecar_candidate_score(key: str, df: pd.DataFrame | None) -> tuple:
+    n = _df_row_count(df)
+    if key == "daily_inventory_history_df":
+        try:
+            from .daily_inventory_history import inventory_history_max_date
+
+            mx = inventory_history_max_date(df)
+            mx_ord = int(mx.toordinal()) if mx is not None else 0
+            return (0 if _sidecar_looks_placeholder(key, df) else 1, mx_ord, n)
+        except Exception:
+            pass
+    return (0 if _sidecar_looks_placeholder(key, df) else 1, n)
 
 
 def load_po_sidecar_backups_from_disk() -> dict[str, pd.DataFrame]:
@@ -129,9 +160,9 @@ def load_po_sidecar_backups_from_disk() -> dict[str, pd.DataFrame]:
             except Exception:
                 _log.exception("po sidecar backup read failed: %s", path)
                 continue
-            n = _df_row_count(df)
-            if n > out.get(key, (0, pd.DataFrame()))[0]:
-                out[key] = (n, df)
+            prev = out.get(key)
+            if prev is None or _sidecar_candidate_score(key, df) > _sidecar_candidate_score(key, prev[1]):
+                out[key] = (_df_row_count(df), df)
 
     return {k: v for k, (_, v) in out.items() if _df_row_count(v) > 0}
 
@@ -154,10 +185,23 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
     wc = _main._warm_cache or {}
     # Skip the expensive disk scan if the warm cache already has non-placeholder sidecar
     # data for all keys — the common fast path after a normal startup.
+    def _inventory_sidecar_stale(df: pd.DataFrame | None) -> bool:
+        try:
+            from .daily_inventory_history import inventory_history_max_date, today_ist_timestamp
+
+            mx = inventory_history_max_date(df)
+            if mx is None:
+                return True
+            return (today_ist_timestamp() - mx).days > 2
+        except Exception:
+            return False
+
     need_backups = any(
         _sidecar_looks_placeholder(key, wc.get(key)) or _df_row_count(wc.get(key)) == 0
         for key in _PO_SIDECAR_KEYS
     )
+    if not need_backups and _inventory_sidecar_stale(wc.get("daily_inventory_history_df")):
+        need_backups = True
     backups = load_po_sidecar_backups_from_disk() if need_backups else {}
     if not _main._warm_cache:
         _main._warm_cache = {}
@@ -174,7 +218,7 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
             stats[key] = 0
             continue
         non_placeholder = [d for d in candidates if not _sidecar_looks_placeholder(key, d)]
-        best = max(non_placeholder or candidates, key=_df_row_count)
+        best = max(non_placeholder or candidates, key=lambda d: _sidecar_candidate_score(key, d))
 
         if (
             _df_row_count(best) != _df_row_count(warm_df)

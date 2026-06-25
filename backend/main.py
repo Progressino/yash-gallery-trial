@@ -175,11 +175,13 @@ def bootstrap_warm_cache_if_empty() -> bool:
             if _warm_cache_generation < 1:
                 _warm_cache_generation = 1
             _warm_cache_ready.set()
+            _top_up_po_sidecars_from_loose_disk()
             log.info("Warm cache bootstrapped from disk (%d keys)", len(_warm_cache))
             _deferred_load_mtr_df(Path(_DISK_CACHE_DIR))
             return True
         if _try_bootstrap_warm_cache_from_pg():
             _top_up_warm_cache_from_disk()
+            _top_up_po_sidecars_from_loose_disk()
             return True
         return False
 
@@ -984,11 +986,46 @@ def _persist_shared_snapshot_if_ready() -> None:
         log.exception("PostgreSQL shared snapshot persist failed")
 
 
+def _top_up_po_sidecars_from_loose_disk() -> None:
+    """Load PO sidecars + existing PO from loose parquets (not always listed in _manifest.json)."""
+    global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
+    from pathlib import Path
+
+    if not _warm_cache:
+        _warm_cache = {}
+    loose = _warm_cache_loose_parquets_from_dir(Path(_DISK_CACHE_DIR))
+    topped = 0
+    for key, val in loose.items():
+        if key in _WARM_PLATFORM_KEYS or key in ("sales_df", "mtr_df"):
+            continue
+        if not hasattr(val, "__len__") or int(len(val)) <= 0:
+            continue
+        cur = _warm_cache.get(key)
+        cur_rows = int(len(cur)) if cur is not None and hasattr(cur, "__len__") else 0
+        disk_rows = int(len(val))
+        if cur_rows <= 0 or disk_rows > cur_rows:
+            _warm_cache[key] = val
+            topped += 1
+            log.info("PO sidecar topped up %s from loose disk (%d -> %d rows)", key, cur_rows, disk_rows)
+    try:
+        from .services.existing_po import seed_existing_po_warm_cache_from_disk
+
+        if seed_existing_po_warm_cache_from_disk():
+            topped += 1
+    except Exception:
+        log.exception("seed_existing_po_warm_cache_from_disk during sidecar top-up failed")
+    if topped:
+        _warm_cache_loaded_at = datetime.now(IST)
+        _warm_cache_generation = max(_warm_cache_generation, 1) + 1
+        _warm_cache_ready.set()
+
+
 def _top_up_warm_cache_from_disk() -> None:
     """Merge missing or shrunken warm-cache keys from on-disk parquets (PG partial restore)."""
     global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
     disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
     if not disk_ok or not disk_data:
+        _top_up_po_sidecars_from_loose_disk()
         return
     if not _warm_cache:
         _warm_cache = {}
@@ -1025,6 +1062,7 @@ def _top_up_warm_cache_from_disk() -> None:
         _warm_cache_loaded_at = datetime.now(IST)
         _warm_cache_generation = max(_warm_cache_generation, 1) + 1
         _warm_cache_ready.set()
+    _top_up_po_sidecars_from_loose_disk()
 
 
 def _try_bootstrap_warm_cache_from_pg() -> bool:
@@ -1160,6 +1198,10 @@ def _warm_cache_loose_parquets_from_dir(disk_dir: "Path") -> dict:
         "inventory_df_variant",
         "inventory_df_parent",
         "existing_po_df",
+        "daily_inventory_history_df",
+        "sku_status_lead_df",
+        "po_raise_ledger_df",
+        "po_return_overlay_df",
     ):
         p = disk_dir / f"{key}.parquet"
         if p.is_file():

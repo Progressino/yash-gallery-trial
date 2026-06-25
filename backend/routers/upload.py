@@ -2047,6 +2047,9 @@ def _persist_inventory_after_upload(sess: AppSession, session_id: str | None = N
         import backend.main as _main
 
         _main.merge_inventory_into_warm_cache(sess)
+        hist = getattr(sess, "daily_inventory_history_df", None)
+        if hist is not None and hasattr(hist, "empty") and not hist.empty:
+            _main.merge_po_optional_sheets_into_warm_cache(sess)
     except Exception:
         _log.exception("merge_inventory_into_warm_cache failed")
     sid = (session_id or getattr(sess, "_persist_sid", None) or "").strip() or None
