@@ -1022,7 +1022,7 @@ def _load_tier3_frames_for_platforms(
     start_date: str,
     end_date: str,
     *,
-    dedup: bool = False,
+    dedup: bool = True,
     columns_only: bool = False,
 ) -> dict[str, "pd.DataFrame"]:
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1254,7 +1254,7 @@ def _platform_df_for_intelligence_bundle(
         platform_key,
         gap_start,
         e,
-        dedup=False,
+        dedup=True,
         columns_only=True,
     )
     if t3.empty:
@@ -1262,7 +1262,7 @@ def _platform_df_for_intelligence_bundle(
             platform_key,
             gap_start,
             e,
-            dedup=False,
+            dedup=True,
             columns_only=False,
         )
     if t3.empty:
@@ -1824,11 +1824,11 @@ def _intelligence_payload_from_tier3_direct(
     e = str(end_date)[:10]
     uploaded = set(platforms or platforms_with_uploads_in_range(s, e))
     all_frames = _load_tier3_frames_for_platforms(
-        sorted(uploaded), s, e, dedup=False, columns_only=True
+        sorted(uploaded), s, e, dedup=True, columns_only=True
     )
     if not all_frames:
         all_frames = _load_tier3_frames_for_platforms(
-            sorted(uploaded), s, e, dedup=False, columns_only=False
+            sorted(uploaded), s, e, dedup=True, columns_only=False
         )
 
     metrics_specs = (
@@ -5183,7 +5183,7 @@ def _resolve_daily_dsr_date(sess: AppSession, date: Optional[str]) -> tuple:
 
                 plats = platforms_with_uploads_in_range(iso, iso)
                 if plats:
-                    frames = _load_tier3_frames_for_platforms(plats, iso, iso, dedup=False)
+                    frames = _load_tier3_frames_for_platforms(plats, iso, iso, dedup=True)
                     if frames:
                         tier3_sales = _build_sales_from_tier3_frames(sess, frames)
                         if tier3_sales is not None and not tier3_sales.empty:

@@ -65,9 +65,9 @@ def _tier3_sku_totals(sess, sku: str, start_date: str, end_date: str) -> dict[st
     target = canonical_oms_key(sku, sku_map)
     parent = get_parent_sku(target)
 
-    frames = _load_tier3_frames_for_platforms(sorted(uploaded), s, e, dedup=False, columns_only=True)
+    frames = _load_tier3_frames_for_platforms(sorted(uploaded), s, e, dedup=True, columns_only=True)
     if not frames:
-        frames = _load_tier3_frames_for_platforms(sorted(uploaded), s, e, dedup=False, columns_only=False)
+        frames = _load_tier3_frames_for_platforms(sorted(uploaded), s, e, dedup=True, columns_only=False)
 
     specs = (
         ("amazon", "SKU", "Transaction_Type"),
