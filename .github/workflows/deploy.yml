@@ -56,6 +56,10 @@ jobs:
             echo 'SESSION_PG_PERSIST=0' >> .env
           fi
           sed -i '/^WARM_CACHE_PO_SESSION_ONLY=/d' .env 2>/dev/null || true
+          if grep -q 'rt-backend' nginx/nginx.conf; then
+            echo "FATAL: nginx/nginx.conf references rt-backend — use backend (progressino compose service name)." >&2
+            exit 1
+          fi
           if grep -q "raisinghanitextiles.com" nginx/nginx.conf && grep -q "acme-challenge" nginx/nginx.conf; then
             cp nginx/nginx.conf /etc/nginx-vps/nginx.conf
           fi
