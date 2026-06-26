@@ -653,8 +653,12 @@ export default function Purchase() {
       const res = await api.get(`/production/mrp/lines-for-so?so_number=${encodeURIComponent(mrpSO.trim())}`)
       const d: MRPLinesResult = res.data
       setMrpLinesData(d)
-      setSelectedPurchaseItems(new Set(d.purchase_items.map(i => i.material_code)))
-      setSelectedSFGItems(new Set(d.sfg_items.map(i => i.material_code)))
+      setSelectedPurchaseItems(new Set(
+        d.purchase_items.filter(i => (i.net_req ?? i.remaining_qty ?? 0) > 0).map(i => i.material_code),
+      ))
+      setSelectedSFGItems(new Set(
+        d.sfg_items.filter(i => (i.net_req ?? i.remaining_qty ?? 0) > 0).map(i => i.material_code),
+      ))
     } catch {
       setMrpLinesData({ so_number: mrpSO, purchase_items: [], sfg_items: [], error: 'Failed to load material planning lines.' })
     }

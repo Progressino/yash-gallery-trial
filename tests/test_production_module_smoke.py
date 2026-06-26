@@ -740,6 +740,29 @@ def test_mrp_legacy_payload_still_renders_via_last(isolated_module_dbs, client):
     assert body["warnings"] == []
 
 
+def test_mrp_lines_for_so_skip_zero_net_requirement(isolated_module_dbs, client):
+    """Purchase PR must not list materials already covered by stock (net_req = 0)."""
+    import sqlite3
+
+    _seed_parent_with_bom(isolated_module_dbs["ITEM_DB_PATH"], parent_code="STYLE-Z")
+    conn = sqlite3.connect(isolated_module_dbs["ITEM_DB_PATH"])
+    conn.execute("UPDATE items SET stock=1000 WHERE item_code='FAB-CTN'")
+    conn.commit()
+    conn.close()
+
+    so = _create_so_with_sku(client, "STYLE-Z-XL", qty=10)
+    run = client.post("/api/production/mrp/run", json={"so_numbers": [so]})
+    assert run.status_code == 200
+    fab = run.json()["result"].get("FAB-CTN")
+    assert fab is not None
+    assert fab["net_req"] == 0
+
+    lines = client.get(f"/api/production/mrp/lines-for-so?so_number={so}")
+    assert lines.status_code == 200
+    codes = [i["material_code"] for i in lines.json()["purchase_items"]]
+    assert "FAB-CTN" not in codes
+
+
 # ── /api/items ────────────────────────────────────────────────────────────────
 
 

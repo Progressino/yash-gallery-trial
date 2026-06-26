@@ -661,12 +661,18 @@ def get_mrp_lines_for_so(so_number: str = ''):
     purchase_items, sfg_items = [], []
     for code, mat in result.items():
         so_qty = (sum(bd['qty_req'] for bd in mat.get('breakdown',[]) if bd.get('so_no')==so_number) if so_number else mat['total_req'])
-        if so_qty <= 0: continue
+        if so_qty <= 0:
+            continue
+        net_req = round(float(mat.get('net_req_with_soft', mat.get('net_req', 0)) or 0), 3)
+        if net_req <= 1e-9:
+            continue
         commit = commitments.get(code, {})
-        remaining = commit.get('remaining_qty', so_qty)
+        remaining = min(float(commit.get('remaining_qty', net_req) or 0), net_req)
+        if remaining <= 1e-9:
+            continue
         item_data = {'material_code': code, 'material_name': mat['name'], 'material_type': mat.get('type','RM'),
-                     'required_qty': round(so_qty,3), 'unit': mat['unit'], 'net_req': mat.get('net_req_with_soft', so_qty),
-                     'mrp_qty': round(float(commit.get('mrp_qty') or so_qty), 3),
+                     'required_qty': round(so_qty,3), 'unit': mat['unit'], 'net_req': net_req,
+                     'mrp_qty': round(float(commit.get('mrp_qty') or net_req), 3),
                      'po_committed_qty': round(float(commit.get('po_committed_qty') or 0), 3),
                      'jo_committed_qty': round(float(commit.get('jo_committed_qty') or 0), 3),
                      'remaining_qty': round(float(remaining), 3),
