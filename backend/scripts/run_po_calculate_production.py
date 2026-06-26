@@ -56,6 +56,7 @@ _PROFILES: tuple[dict, ...] = (
         "raise_ledger_lookback_days": 45,
     },
     {
+        "label": "no_lead_gate",
         "period_days": 30,
         "lead_time": 45,
         "target_days": 180,
@@ -122,17 +123,17 @@ def main() -> int:
     for profile in _PROFILES:
         body = {k: v for k, v in profile.items() if k != "label"}
         body["use_shared_cache"] = False
-        sid = f"po-recalc-{profile['label']}-{uuid.uuid4().hex[:8]}"
+        sid = f"po-recalc-{profile.get('label', 'profile')}-{uuid.uuid4().hex[:8]}"
         result, po_df = _run_profile(sess, body, sid)
         key = save_shared_cache(sess, body, po_df, result)
         saved.append(
             {
-                "label": profile["label"],
+                "label": profile.get("label", "profile"),
                 "cache_key": key,
                 "total_rows": int(len(po_df)),
             }
         )
-        if profile["label"] == "ui_default_30":
+        if profile.get("label") == "ui_default_30":
             skus = po_df["OMS_SKU"].astype(str).tolist()
             dups = [s for s in skus if _DUP_SUFFIX_RE.search(s)]
             xl = po_df[po_df["OMS_SKU"].astype(str) == "1361YKBLUE-XL"]

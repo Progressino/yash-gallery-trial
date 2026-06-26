@@ -239,6 +239,11 @@ export interface PoReadinessResponse {
   background_jobs: string[]
   background_tasks?: Record<string, boolean>
   critical_restore_running?: boolean
+  calculate_allowed?: boolean
+  pipeline_blockers?: string[]
+  pipeline_warnings?: string[]
+  pipeline_version?: number
+  snapshot_id?: string
 }
 
 export type DailyAutoIngestSummary = {

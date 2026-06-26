@@ -7,6 +7,7 @@ import { createPortal } from 'react-dom'
 import api, {
   getCoverage,
   getCoverageResilient,
+  getPoReadiness,
   getDataParity,
   getPoSharedCacheAvailability,
   loadPoCalculateResultFromSession,
@@ -15,6 +16,7 @@ import api, {
   type CoverageResponse,
   type DataParityReport,
   type PoSharedCacheAvailability,
+  type PoReadinessResponse,
 } from '../api/client'
 import { PageLoadingStripe } from '../components/LoadingProgressBar'
 import { calendarDateIST } from '../lib/dates'
@@ -169,6 +171,7 @@ function POFreshInner() {
     null,
   )
   const [coverageDetail, setCoverageDetail] = useState<CoverageResponse | null>(null)
+  const [pipelineReadiness, setPipelineReadiness] = useState<PoReadinessResponse | null>(null)
   const [checkingData, setCheckingData] = useState(false)
   const [coverageError, setCoverageError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -210,6 +213,12 @@ function POFreshInner() {
       const c = await getCoverageResilient({ light: true, timeout: 90_000 })
       setCoverageDetail(c)
       setDataStatus(countLoaded(c))
+      try {
+        const pr = await getPoReadiness({ timeout: 30_000 })
+        setPipelineReadiness(pr)
+      } catch {
+        setPipelineReadiness(null)
+      }
       try {
         const parity = await getDataParity(calendarDateIST())
         setParityReport(parity)
@@ -399,6 +408,19 @@ function POFreshInner() {
           message: `Data not ready (${status.loaded}/${status.total}). Sidebar → Reload from GitHub, then retry.`,
         })
         return
+      }
+      try {
+        const pr = await getPoReadiness({ timeout: 30_000 })
+        setPipelineReadiness(pr)
+        if (pr.calculate_allowed === false && pr.pipeline_blockers?.length) {
+          setResult({
+            ok: false,
+            message: pr.pipeline_blockers[0],
+          })
+          return
+        }
+      } catch {
+        /* readiness optional — server gate still applies */
       }
       const useSharedCache = !force
       setProgress({
@@ -634,9 +656,17 @@ function POFreshInner() {
 
   const readinessLabel = dataStatus
     ? dataStatus.ready
-      ? `All ${dataStatus.total} data sources loaded — ready to calculate.`
+      ? pipelineReadiness?.calculate_allowed === false
+        ? pipelineReadiness.pipeline_blockers?.[0] ??
+          'Inputs still processing — wait before calculating.'
+        : `All ${dataStatus.total} data sources loaded — ready to calculate.`
       : `${dataStatus.loaded}/${dataStatus.total} sources loaded — reload data before calculating.`
     : 'Check data coverage before your first calculation.'
+
+  const canCalculate =
+    Boolean(dataStatus?.ready) &&
+    pipelineReadiness?.calculate_allowed !== false &&
+    !loading
 
   return (
     <div className="po-fresh-shell -m-4 md:-m-6 p-4 md:p-8" data-testid="po-fresh-root">
@@ -912,11 +942,22 @@ function POFreshInner() {
               <button
                 type="button"
                 onClick={() => void runCalculate()}
-                className="po-fresh-btn-primary w-full py-4 text-lg"
+                disabled={!canCalculate}
+                className="po-fresh-btn-primary w-full py-4 text-lg disabled:opacity-50 disabled:cursor-not-allowed"
                 aria-busy={loading}
+                title={
+                  pipelineReadiness?.calculate_allowed === false
+                    ? pipelineReadiness.pipeline_blockers?.[0]
+                    : undefined
+                }
               >
                 {loading ? 'Calculating…' : 'Calculate PO'}
               </button>
+              {pipelineReadiness?.pipeline_warnings?.length ? (
+                <p className="text-xs text-amber-100/90 leading-relaxed">
+                  {pipelineReadiness.pipeline_warnings[0]}
+                </p>
+              ) : null}
               {loading && (
                 <p className="text-xs text-white/80 text-center">
                   Usually completes in under a minute — keep this tab open.
@@ -924,7 +965,7 @@ function POFreshInner() {
               )}
               <button
                 type="button"
-                disabled={loading || !dataStatus?.ready}
+                disabled={loading || !canCalculate}
                 onClick={() => void runCalculate({ force: true })}
                 className="w-full text-sm font-semibold text-white/90 hover:text-white disabled:opacity-40"
               >
