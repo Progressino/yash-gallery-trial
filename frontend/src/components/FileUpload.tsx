@@ -13,9 +13,11 @@ interface Props {
   onUpload: (file: File) => Promise<void>
   uploading?: boolean
   multiple?: boolean
+  /** Overrides the default "Uploading…" text while ``uploading`` is true. */
+  progressText?: string | null
 }
 
-export default function FileUpload({ label, accept, onUpload, uploading, multiple = false }: Props) {
+export default function FileUpload({ label, accept, onUpload, uploading, multiple = false, progressText }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [progress, setProgress] = useState<string | null>(null)
 
@@ -62,7 +64,7 @@ export default function FileUpload({ label, accept, onUpload, uploading, multipl
       >
         <input {...getInputProps()} />
         {uploading || progress ? (
-          <p className="text-sm text-blue-600 animate-pulse">{progress || 'Uploading…'}</p>
+          <p className="text-sm text-blue-600 animate-pulse">{progress || progressText || 'Uploading…'}</p>
         ) : isDragActive ? (
           <p className="text-sm text-blue-600">Drop file{multiple ? 's' : ''} here</p>
         ) : (

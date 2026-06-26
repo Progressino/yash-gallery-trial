@@ -407,14 +407,13 @@ async def po_upload_daily_inventory_history(
     except Exception:
         logging.getLogger(__name__).exception("daily inventory history upload sniff failed")
 
-    from ..concurrency import HEAVY_EXECUTOR
+    from ..concurrency import INVENTORY_EXECUTOR
     from ..services.daily_inventory_upload_run import background_daily_inventory_upload
 
     sess.daily_inventory_upload_status = "running"
-    sess.daily_inventory_upload_message = "Upload received. Parsing sheet…"
+    sess.daily_inventory_upload_message = "Upload received — queued for parse…"
     sess.daily_inventory_upload_result = {}
-    asyncio.get_running_loop().run_in_executor(
-        HEAVY_EXECUTOR,
+    INVENTORY_EXECUTOR.submit(
         background_daily_inventory_upload,
         sid,
         raw,

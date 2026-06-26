@@ -233,6 +233,21 @@ def execute_po_calculate(
     import gc as _gc
 
     _period = int(body.get("period_days", 30))
+    try:
+        from .daily_inventory_history import (
+            daily_inventory_meta_is_newer,
+            read_daily_inventory_history_disk_meta,
+        )
+        from .po_session_hydrate import ensure_po_sidecars_hydrated
+
+        disk_meta = read_daily_inventory_history_disk_meta()
+        if daily_inventory_meta_is_newer(disk_meta, sess) or getattr(
+            sess, "daily_inventory_history_df", None
+        ) is None or getattr(sess.daily_inventory_history_df, "empty", True):
+            ensure_po_sidecars_hydrated(sess)
+    except Exception:
+        logger.exception("ensure daily inventory history before PO calc failed")
+
     _raw_ih = getattr(sess, "daily_inventory_history_df", None)
     _inv_history_for_calc: pd.DataFrame | None = None
 
@@ -304,6 +319,31 @@ def execute_po_calculate(
         if _rows_dropped >= 100_000:
             _set_po_calculate_progress(sess, progress_id, 27, "Releasing trimmed inventory memory…")
             _gc.collect()
+
+    if _inv_history_for_calc is not None and not _inv_history_for_calc.empty:
+        from .daily_inventory_history import overlay_inventory_variant_from_history
+
+        ref_date = str(body.get("planning_date") or "")[:10] or None
+        inv_variant, _ov_meta = overlay_inventory_variant_from_history(
+            inv_variant,
+            _inv_history_for_calc,
+            snapshot_date=str(getattr(sess, "inventory_snapshot_date", "") or "") or None,
+            reference_date=ref_date,
+        )
+        if _ov_meta.get("applied"):
+            hist_as_of = str(_ov_meta.get("history_as_of") or "")
+            if hist_as_of:
+                sess.inventory_snapshot_date = hist_as_of
+            logger.info(
+                "PO calc: inventory overlaid from history matrix (%s SKUs, as of %s)",
+                _ov_meta.get("skus_updated", 0),
+                hist_as_of or "?",
+            )
+            inv_df = (
+                inv_parent
+                if group_by_parent and inv_parent is not None and not inv_parent.empty
+                else inv_variant
+            )
 
     stage_timer.mark("inventory")
 

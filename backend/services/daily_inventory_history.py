@@ -21,7 +21,7 @@ import io
 import os
 import re
 from datetime import date, datetime
-from typing import BinaryIO, Optional
+from typing import BinaryIO, Callable, Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -258,6 +258,22 @@ def _build_column_date_map(
     return date_map, header_row_count
 
 
+def _trim_date_map_to_window(
+    date_map: dict[int, pd.Timestamp],
+    max_days: int,
+) -> dict[int, pd.Timestamp]:
+    """Drop snapshot columns outside the last ``max_days`` calendar days (anchored on max date)."""
+    if max_days <= 0 or not date_map:
+        return date_map
+    max_date = max(pd.Timestamp(d).normalize() for d in date_map.values())
+    cutoff = max_date - pd.Timedelta(days=max_days - 1)
+    return {
+        i: d
+        for i, d in date_map.items()
+        if pd.Timestamp(d).normalize() >= cutoff
+    }
+
+
 def merge_inventory_history(
     existing: Optional[pd.DataFrame],
     incoming: pd.DataFrame,
@@ -371,10 +387,82 @@ def append_snapshot_inventory_to_history(sess) -> dict:
     }
 
 
-def _parse_one_sheet(df: pd.DataFrame, mapping: dict, sheet_name: str = "") -> pd.DataFrame:
+def _column_usecols_for_inventory_sheet(
+    raw: bytes,
+    sheet_name: str,
+    max_days: int | None,
+) -> list[int] | None:
+    """Peek sheet headers; return column indices to read (SKU + recent date columns only)."""
+    try:
+        import openpyxl
+    except ImportError:
+        return None
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        try:
+            if sheet_name not in wb.sheetnames:
+                return None
+            ws = wb[sheet_name]
+            rows: list[list] = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i >= 5:
+                    break
+                rows.append(list(row) if row else [])
+        finally:
+            wb.close()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    width = max(len(r) for r in rows)
+    header_df = pd.DataFrame([r + [None] * (width - len(r)) for r in rows])
+    sku_idx = _detect_sku_column(header_df)
+    if sku_idx is None:
+        return None
+    parent_idx = _detect_parent_column(header_df, sku_idx)
+    date_map, _ = _build_column_date_map(header_df, sku_idx, parent_idx)
+    if max_days is not None and max_days > 0:
+        date_map = _trim_date_map_to_window(date_map, max_days)
+    if not date_map:
+        return None
+    return [sku_idx] + sorted(i for i in date_map if i != sku_idx)
+
+
+def _read_inventory_history_sheet(
+    raw: bytes,
+    sheet_name: str,
+    *,
+    max_days: int | None = None,
+) -> pd.DataFrame:
+    """Read only SKU + recent date columns from a wide inventory sheet."""
+    usecols = _column_usecols_for_inventory_sheet(raw, sheet_name, max_days)
+    if usecols is None:
+        return pd.read_excel(
+            io.BytesIO(raw),
+            sheet_name=sheet_name,
+            header=None,
+            dtype=str,
+            engine="openpyxl",
+        )
+    return pd.read_excel(
+        io.BytesIO(raw),
+        sheet_name=sheet_name,
+        header=None,
+        usecols=usecols,
+        dtype=str,
+        engine="openpyxl",
+    )
+
+
+def _parse_one_sheet(
+    df: pd.DataFrame,
+    mapping: dict,
+    sheet_name: str = "",
+    *,
+    max_days: int | None = None,
+) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=_TALL_COLS)
-    df = df.copy()
 
     sku_idx = _detect_sku_column(df)
     if sku_idx is None:
@@ -382,6 +470,8 @@ def _parse_one_sheet(df: pd.DataFrame, mapping: dict, sheet_name: str = "") -> p
     parent_idx = _detect_parent_column(df, sku_idx)
 
     date_map, header_row_count = _build_column_date_map(df, sku_idx, parent_idx)
+    if max_days is not None and max_days > 0:
+        date_map = _trim_date_map_to_window(date_map, max_days)
     if not date_map:
         # Sheet shape unrecognised — fail silently for this sheet, parser keeps trying others.
         return pd.DataFrame(columns=_TALL_COLS)
@@ -439,13 +529,15 @@ def _parse_one_sheet(df: pd.DataFrame, mapping: dict, sheet_name: str = "") -> p
 def parse_daily_inventory_history_dataframes(
     sheet_dfs: dict[str, pd.DataFrame],
     sku_mapping: Optional[dict] = None,
+    *,
+    max_days: int | None = None,
 ) -> pd.DataFrame:
     mapping = sku_mapping if sku_mapping is not None else {}
     parts: list[pd.DataFrame] = []
     for name, df in sheet_dfs.items():
         if df is None or df.empty:
             continue
-        parts.append(_parse_one_sheet(df, mapping, sheet_name=name))
+        parts.append(_parse_one_sheet(df, mapping, sheet_name=name, max_days=max_days))
     if not parts:
         return pd.DataFrame(columns=_TALL_COLS)
     out = pd.concat(parts, ignore_index=True)
@@ -473,25 +565,58 @@ def parse_daily_inventory_history_upload(
     file: BinaryIO,
     filename: str,
     sku_mapping: Optional[dict] = None,
+    *,
+    max_days: int | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> pd.DataFrame:
+    def _progress(msg: str) -> None:
+        if on_progress is not None:
+            on_progress(msg)
+
     name = (filename or "").lower()
     raw = file.read() if hasattr(file, "read") else file
     if not raw:
         return pd.DataFrame(columns=_TALL_COLS)
     if name.endswith(".csv"):
-        df = pd.read_csv(io.BytesIO(raw))
-        return parse_daily_inventory_history_dataframes({"csv": df}, sku_mapping=sku_mapping)
-    xl = pd.ExcelFile(io.BytesIO(raw))
-    sheet_names = list(xl.sheet_names)
-    inv_names = [sn for sn in sheet_names if _sheet_looks_like_inventory(sn)]
-    to_read = inv_names if inv_names else sheet_names
-    sheets: dict[str, pd.DataFrame] = {}
-    for sn in to_read:
-        try:
-            sheets[sn] = xl.parse(sn)
-        except Exception:
-            continue
-    return parse_daily_inventory_history_dataframes(sheets, sku_mapping=sku_mapping)
+        _progress("Parsing CSV…")
+        df = pd.read_csv(io.BytesIO(raw), dtype=str, low_memory=False)
+        return parse_daily_inventory_history_dataframes(
+            {"csv": df}, sku_mapping=sku_mapping, max_days=max_days,
+        )
+    _progress("Opening workbook…")
+    name_l = (filename or "").lower()
+    is_xlsx = name_l.endswith(".xlsx") or (not name_l.endswith(".xls") and not name_l.endswith(".csv"))
+    if is_xlsx:
+        xl = pd.ExcelFile(io.BytesIO(raw))
+        sheet_names = list(xl.sheet_names)
+        inv_names = [sn for sn in sheet_names if _sheet_looks_like_inventory(sn)]
+        to_read = inv_names if inv_names else sheet_names
+        sheets: dict[str, pd.DataFrame] = {}
+        for i, sn in enumerate(to_read):
+            _progress(f"Reading sheet {i + 1}/{len(to_read)}: {sn}…")
+            try:
+                sheets[sn] = _read_inventory_history_sheet(raw, sn, max_days=max_days)
+            except Exception:
+                try:
+                    sheets[sn] = xl.parse(sn, dtype=str)
+                except Exception:
+                    continue
+    else:
+        xl = pd.ExcelFile(io.BytesIO(raw))
+        sheet_names = list(xl.sheet_names)
+        inv_names = [sn for sn in sheet_names if _sheet_looks_like_inventory(sn)]
+        to_read = inv_names if inv_names else sheet_names
+        sheets = {}
+        for i, sn in enumerate(to_read):
+            _progress(f"Reading sheet {i + 1}/{len(to_read)}: {sn}…")
+            try:
+                sheets[sn] = xl.parse(sn, dtype=str)
+            except Exception:
+                continue
+    _progress("Melting date columns…")
+    return parse_daily_inventory_history_dataframes(
+        sheets, sku_mapping=sku_mapping, max_days=max_days,
+    )
 
 
 #: Operational threshold for "in stock" when counting Eff_Days. A day
@@ -573,6 +698,107 @@ def effective_days_from_history(
     )
     out["Eff_Days_Inventory"] = out["Eff_Days_Inventory"].astype(int)
     return out
+
+
+def latest_inventory_qty_by_sku(
+    history_df: pd.DataFrame,
+    *,
+    as_of: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Latest on-hand qty per SKU from the wide inventory history matrix."""
+    if history_df is None or history_df.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "History_Qty"])
+    df = history_df.copy()
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+    df["Qty"] = pd.to_numeric(df["Qty"], errors="coerce")
+    df = df.dropna(subset=["Date", "OMS_SKU", "Qty"])
+    if df.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "History_Qty"])
+    if as_of is not None:
+        cap = pd.Timestamp(as_of).normalize()
+        df = df[df["Date"] <= cap]
+        if df.empty:
+            return pd.DataFrame(columns=["OMS_SKU", "History_Qty"])
+    latest_date = df["Date"].max()
+    latest = df[df["Date"] == latest_date]
+    out = (
+        latest.groupby("OMS_SKU", as_index=False)["Qty"]
+        .max()
+        .rename(columns={"Qty": "History_Qty"})
+    )
+    out["OMS_SKU"] = out["OMS_SKU"].astype(str).str.strip().str.upper()
+    return out
+
+
+def overlay_inventory_variant_from_history(
+    inv_df: pd.DataFrame,
+    history_df: pd.DataFrame | None,
+    *,
+    snapshot_date: str | None = None,
+    reference_date: str | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    When the wide history matrix is fresher than the daily snapshot, use its
+    latest column for PO on-hand (Total_Inventory / OMS_Inventory).
+    """
+    from .inventory_staleness import data_is_stale, today_ist_iso
+
+    meta: dict = {"applied": False, "skus_updated": 0, "reason": ""}
+    if inv_df is None or getattr(inv_df, "empty", True):
+        meta["reason"] = "empty_inventory"
+        return inv_df, meta
+    if history_df is None or getattr(history_df, "empty", True):
+        meta["reason"] = "empty_history"
+        return inv_df, meta
+
+    ref = (reference_date or today_ist_iso()).strip()[:10]
+    hist_max = inventory_history_max_date(history_df)
+    if hist_max is None:
+        meta["reason"] = "no_history_dates"
+        return inv_df, meta
+    hist_max_s = str(hist_max.date())
+    if data_is_stale(ref, hist_max_s, max_expected_lag_days=1):
+        meta["reason"] = "history_stale"
+        return inv_df, meta
+
+    snap_s = str(snapshot_date or "").strip()[:10]
+    snap_stale = not snap_s or data_is_stale(ref, snap_s, max_expected_lag_days=1)
+    if not snap_stale and snap_s >= hist_max_s:
+        meta["reason"] = "snapshot_fresh"
+        return inv_df, meta
+
+    latest = latest_inventory_qty_by_sku(history_df, as_of=hist_max)
+    if latest.empty:
+        meta["reason"] = "no_latest_rows"
+        return inv_df, meta
+
+    out = inv_df.copy()
+    if "OMS_SKU" not in out.columns:
+        meta["reason"] = "no_sku_column"
+        return inv_df, meta
+    out["OMS_SKU"] = out["OMS_SKU"].astype(str).str.strip().str.upper()
+    merged = out.merge(latest, on="OMS_SKU", how="left")
+    has_hist = merged["History_Qty"].notna()
+    if not bool(has_hist.any()):
+        meta["reason"] = "no_overlap"
+        return inv_df, meta
+
+    hist_qty = pd.to_numeric(merged["History_Qty"], errors="coerce").fillna(0.0)
+    for col in ("Total_Inventory", "OMS_Inventory"):
+        if col in merged.columns:
+            cur = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
+            merged[col] = np.where(has_hist, hist_qty, cur)
+        elif col == "Total_Inventory":
+            merged["Total_Inventory"] = np.where(has_hist, hist_qty, 0.0)
+    if "Total_Inventory" not in merged.columns:
+        merged["Total_Inventory"] = np.where(has_hist, hist_qty, 0.0)
+    merged.drop(columns=["History_Qty"], inplace=True)
+
+    meta["applied"] = True
+    meta["skus_updated"] = int(has_hist.sum())
+    meta["history_as_of"] = hist_max_s
+    meta["reason"] = "history_newer_than_snapshot"
+    return merged, meta
 
 
 def extend_history_with_sales(
@@ -1068,6 +1294,8 @@ __all__ = [
     "parse_daily_inventory_history_dataframes",
     "parse_daily_inventory_history_upload",
     "effective_days_from_history",
+    "latest_inventory_qty_by_sku",
+    "overlay_inventory_variant_from_history",
     "coverage_days_within",
     "extend_history_with_sales",
     "append_snapshot_inventory_to_history",

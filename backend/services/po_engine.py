@@ -1536,6 +1536,12 @@ def calculate_po_base(
 
                 eff_inv = effective_days_from_history(ih_work, inv_window_start, inv_window_end)
                 coverage_days = coverage_days_within(ih_work, inv_window_start, inv_window_end)
+                history_authoritative = bool(
+                    skip_extend
+                    and pd.notna(sheet_max)
+                    and sheet_max >= inv_window_end - timedelta(days=1)
+                    and coverage_days >= min(int(ADS_WINDOW) - 2, 28)
+                )
                 if not eff_inv.empty and coverage_days > 0:
                     po_df = po_df.merge(eff_inv, on="OMS_SKU", how="left")
                     inv_days = pd.to_numeric(po_df["Eff_Days_Inventory"], errors="coerce")
@@ -1571,22 +1577,26 @@ def calculate_po_base(
                     )
                     # Sparse sales inside a long in-stock window: do not dilute ADS.
                     # When stock was the bottleneck (inv < active span), keep inv-based days.
-                    _eff_from_inv = np.where(
-                        _has_demand & (_active_eff > 0),
-                        np.where(
-                            inv_clipped < _active_eff,
-                            inv_clipped,
+                    if history_authoritative:
+                        _eff_from_inv = inv_clipped
+                        _apply_inv = use_inv
+                    else:
+                        _eff_from_inv = np.where(
+                            _has_demand & (_active_eff > 0),
                             np.where(
-                                inv_clipped >= _active_eff * 2,
-                                _active_eff.clip(lower=1.0),
+                                inv_clipped < _active_eff,
                                 inv_clipped,
+                                np.where(
+                                    inv_clipped >= _active_eff * 2,
+                                    _active_eff.clip(lower=1.0),
+                                    inv_clipped,
+                                ),
                             ),
-                        ),
-                        inv_clipped,
-                    )
-                    _apply_inv = use_inv & (
-                        _allow_inv_shorten | _oos_restock
-                    )
+                            inv_clipped,
+                        )
+                        _apply_inv = use_inv & (
+                            _allow_inv_shorten | _oos_restock
+                        )
                     po_df["Eff_Days"] = np.where(
                         _apply_inv,
                         _eff_from_inv,

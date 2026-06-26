@@ -621,6 +621,59 @@ def persist_po_sidecars_to_disk() -> None:
         log.warning("PO sidecar disk persist failed: %s", _e)
 
 
+def sync_daily_inventory_history_sidecar(sess) -> None:
+    """Fast warm-cache + disk sync after matrix upload (skips other PO sidecars)."""
+    import json
+    import os
+
+    import pandas as pd
+
+    global _warm_cache
+    if not _warm_cache:
+        _warm_cache = {}
+    df = getattr(sess, "daily_inventory_history_df", None)
+    if df is None or not hasattr(df, "empty") or df.empty:
+        _warm_cache["daily_inventory_history_df"] = pd.DataFrame()
+        df_write = None
+    else:
+        _warm_cache["daily_inventory_history_df"] = df.copy()
+        df_write = df
+    try:
+        from .services.daily_inventory_history import (
+            daily_inventory_history_meta_bundle,
+            persist_daily_inventory_history_meta,
+        )
+
+        meta = daily_inventory_history_meta_bundle(sess)
+        if meta.get("daily_inventory_history_uploaded_at") or meta.get("daily_inventory_history_rows"):
+            _warm_cache[_DAILY_INV_META_WARM_KEY] = meta
+            persist_daily_inventory_history_meta(sess)
+    except Exception:
+        log.exception("persist daily_inventory_history meta after sync failed")
+    if df_write is None or df_write.empty:
+        return
+    try:
+        os.makedirs(_DISK_CACHE_DIR, exist_ok=True)
+        manifest_path = os.path.join(_DISK_CACHE_DIR, "_manifest.json")
+        manifest: dict = {}
+        if os.path.exists(manifest_path):
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        keys = set(manifest.get("keys") or [])
+        path = os.path.join(_DISK_CACHE_DIR, "daily_inventory_history_df.parquet")
+        from .services.helpers import _coerce_df_for_parquet
+
+        _coerce_df_for_parquet(df_write).to_parquet(path, index=False)
+        keys.add("daily_inventory_history_df")
+        manifest["keys"] = sorted(keys)
+        manifest["saved_at"] = datetime.now(IST).isoformat()
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        log.info("Daily inventory history sidecar disk cache updated")
+    except Exception:
+        log.exception("daily_inventory_history sidecar disk persist failed")
+
+
 def merge_po_optional_sheets_into_warm_cache(sess) -> None:
     """Copy PO-only sidecar frames into the shared warm cache (non-destructive merge).
 

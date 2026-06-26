@@ -995,7 +995,18 @@ export async function uploadPoDailyInventoryHistoryFile(
   const { data } = await api.post<DailyInventoryUploadResult>(
     '/po/daily-inventory-history',
     fd,
-    { headers: { 'Content-Type': 'multipart/form-data' }, timeout: UPLOAD_TIMEOUT_MS },
+    {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: UPLOAD_TIMEOUT_MS,
+      onUploadProgress: e => {
+        if (e.total && e.total > 0) {
+          const pct = Math.min(99, Math.round((e.loaded / e.total) * 100))
+          onTick?.(`Uploading file… ${pct}%`)
+        } else if (e.loaded > 0) {
+          onTick?.(`Uploading file… ${(e.loaded / (1024 * 1024)).toFixed(1)} MB`)
+        }
+      },
+    },
   )
   if (!data?.ok) {
     return { ok: false, message: data?.message || 'Upload failed.' }
@@ -1020,7 +1031,7 @@ export async function waitForDailyInventoryUpload(
     const st = data.status ?? 'idle'
     if (st === 'running') {
       onTick?.(data.message || 'Parsing daily inventory sheet…')
-      await new Promise(r => setTimeout(r, 2000))
+      await new Promise(r => setTimeout(r, 1000))
       continue
     }
     if (st === 'error') {

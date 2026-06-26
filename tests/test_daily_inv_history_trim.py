@@ -49,6 +49,109 @@ def test_trim_noop_when_disabled():
     assert note == ""
 
 
+def test_parse_trims_date_columns_before_melt():
+    """Wide sheets with years of daily columns should only melt the recent window."""
+    from backend.services.daily_inventory_history import parse_daily_inventory_history_dataframes
+
+    n_skus = 100
+    n_date_cols = 200  # far more than the 30-day retention window
+    today = pd.Timestamp("2026-06-22")
+    dates = [today - pd.Timedelta(days=i) for i in range(n_date_cols)]
+
+    header_row = [""] * (2 + n_date_cols)
+    header_row[0] = "Item SkuCode"
+    header_row[1] = "Parent"
+    for j, d in enumerate(dates):
+        header_row[2 + j] = d.strftime("%Y-%m-%d")
+
+    rows = [header_row]
+    for i in range(n_skus):
+        row = [f"SKU-{i:04d}", f"P-{i}"] + [10] * n_date_cols
+        rows.append(row)
+
+    wide = pd.DataFrame(rows)
+    out = parse_daily_inventory_history_dataframes({"OMS": wide}, max_days=30)
+    assert not out.empty
+    unique_days = out["Date"].nunique()
+    assert unique_days <= 30
+    assert len(out) <= n_skus * 30
+
+
+def test_full_replace_skips_merge(monkeypatch):
+    """Re-uploading a full date window should not run merge_inventory_history."""
+    import backend.services.daily_inventory_upload_run as mod
+    import backend.services.daily_inventory_history as dih_mod
+    from backend.session import AppSession
+
+    monkeypatch.setattr(mod, "_MAX_HISTORY_DAYS", 30)
+    today = pd.Timestamp.now().normalize()
+    dates = [today - pd.Timedelta(days=i) for i in range(30)]
+    incoming = pd.DataFrame(
+        [{"OMS_SKU": "SKU-A", "Date": d, "Qty": 5.0} for d in dates]
+        + [{"OMS_SKU": "SKU-B", "Date": d, "Qty": 3.0} for d in dates]
+    )
+    existing = incoming.copy()
+
+    merge_calls: list[int] = []
+
+    def _fake_merge(ex, inc):
+        merge_calls.append(1)
+        return dih_mod.merge_inventory_history(ex, inc)
+
+    def _fake_parse(fp, filename, sku_mapping=None, **kwargs):
+        return incoming
+
+    monkeypatch.setattr(dih_mod, "parse_daily_inventory_history_upload", _fake_parse)
+    monkeypatch.setattr(dih_mod, "merge_inventory_history", _fake_merge)
+
+    sess = AppSession()
+    sess.sku_mapping = {}
+    sess.daily_inventory_history_df = existing
+    result = mod.execute_daily_inventory_upload(sess, b"dummy", "test.xlsx")
+    assert result["ok"] is True
+    assert merge_calls == []
+
+
+def test_column_usecols_trims_wide_xlsx():
+    """Optimized xlsx read should only load SKU + recent date columns."""
+    import io
+
+    import openpyxl
+    from backend.services.daily_inventory_history import (
+        _column_usecols_for_inventory_sheet,
+        parse_daily_inventory_history_upload,
+    )
+
+    n_date_cols = 80
+    today = pd.Timestamp("2026-06-22")
+    dates = [today - pd.Timedelta(days=i) for i in range(n_date_cols)]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "OMS"
+    ws.cell(1, 1, "Item SkuCode")
+    ws.cell(1, 2, "Parent")
+    for j, d in enumerate(dates):
+        ws.cell(1, 3 + j, d.strftime("%Y-%m-%d"))
+    for row_i in range(50):
+        ws.cell(2 + row_i, 1, f"SKU-{row_i:04d}")
+        ws.cell(2 + row_i, 2, f"P-{row_i}")
+        for j in range(n_date_cols):
+            ws.cell(2 + row_i, 3 + j, 10)
+    buf = io.BytesIO()
+    wb.save(buf)
+    raw = buf.getvalue()
+
+    usecols = _column_usecols_for_inventory_sheet(raw, "OMS", 30)
+    assert usecols is not None
+    assert len(usecols) <= 32  # SKU + up to 30 dates
+
+    out = parse_daily_inventory_history_upload(io.BytesIO(raw), "test.xlsx", max_days=30)
+    assert not out.empty
+    assert out["Date"].nunique() <= 30
+    assert len(out) <= 50 * 30
+
+
 def test_execute_applies_trim(monkeypatch):
     """execute_daily_inventory_upload must trim the stored dataframe to _MAX_HISTORY_DAYS."""
     import backend.services.daily_inventory_upload_run as mod
@@ -60,7 +163,7 @@ def test_execute_applies_trim(monkeypatch):
     # Build a fake 5 SKUs × 500 days history (analogous to 9500 SKU × 3000 day problem).
     big_df = _make_history(n_skus=5, n_days=500)
 
-    def _fake_parse(fp, filename, sku_mapping=None):
+    def _fake_parse(fp, filename, sku_mapping=None, **kwargs):
         return big_df
 
     # The function does a local import from .daily_inventory_history — patch that module.

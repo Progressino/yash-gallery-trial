@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from datetime import datetime
 from io import BytesIO
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -64,13 +65,24 @@ def execute_daily_inventory_upload(
     sess,
     raw: bytes,
     filename: str,
+    *,
+    on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     from .daily_inventory_history import filter_inventory_history_window, merge_inventory_history, parse_daily_inventory_history_upload
 
+    def _progress(msg: str) -> None:
+        if on_progress is not None:
+            on_progress(msg)
+        if sess is not None:
+            sess.daily_inventory_upload_message = msg
+
+    _progress("Parsing daily inventory sheet…")
     df = parse_daily_inventory_history_upload(
         BytesIO(raw),
         filename,
         sku_mapping=sess.sku_mapping or None,
+        max_days=_MAX_HISTORY_DAYS,
+        on_progress=_progress,
     )
     if df.empty:
         return {
@@ -91,16 +103,19 @@ def execute_daily_inventory_upload(
 
     existing = getattr(sess, "daily_inventory_history_df", None)
     if existing is not None and not existing.empty:
-        # Wide matrix upload is authoritative — replace overlapping dates instead of
-        # merging 500k+ rows (slow and kept stale mis-parsed history on re-upload).
         incoming_dates = set(
             pd.to_datetime(df["Date"], errors="coerce").dt.normalize().dropna().unique()
         )
         if incoming_dates:
-            ex = existing.copy()
-            ex["Date"] = pd.to_datetime(ex["Date"], errors="coerce").dt.normalize()
-            ex = ex[~ex["Date"].isin(incoming_dates)]
-            df = merge_inventory_history(ex, df)
+            ex_dates = pd.to_datetime(existing["Date"], errors="coerce").dt.normalize()
+            ex_date_set = set(ex_dates.dropna().unique())
+            if incoming_dates >= ex_date_set:
+                # Full matrix re-upload — skip slow merge/groupby.
+                pass
+            else:
+                _progress("Merging with saved history…")
+                kept = existing.loc[~ex_dates.isin(incoming_dates)]
+                df = merge_inventory_history(kept, df)
         else:
             df = merge_inventory_history(existing, df)
         sheet_max = inventory_history_max_date(df)
@@ -136,6 +151,22 @@ def execute_daily_inventory_upload(
     }
 
 
+def _acquire_daily_inventory_memory_lock(sess, session_id: str, progress) -> bool:
+    """Wait briefly for the global upload lock (same as snapshot inventory)."""
+    from ..concurrency import _UPLOAD_MEMORY_LOCK
+
+    wait_sec = int(os.environ.get("INVENTORY_MEMORY_LOCK_WAIT_SEC", "120"))
+    if _UPLOAD_MEMORY_LOCK.acquire(blocking=False):
+        return True
+    progress(f"Queued — waiting for server ({wait_sec}s max)…")
+    logger.info("daily-inventory-history queued behind another heavy job (session=%s)", session_id[:8])
+    if _UPLOAD_MEMORY_LOCK.acquire(timeout=wait_sec):
+        return True
+    logger.warning("daily-inventory-history proceeding without memory lock (session=%s)", session_id[:8])
+    progress("Parsing sheet (server finishing cache load in background)…")
+    return False
+
+
 def background_daily_inventory_upload(
     session_id: str,
     raw: bytes,
@@ -147,13 +178,18 @@ def background_daily_inventory_upload(
     if sess is None:
         return
 
-    def _sync_sidecars() -> None:
+    def _progress(msg: str) -> None:
+        sess.daily_inventory_upload_message = msg
+
+    def _sync_disk_and_cache() -> None:
         try:
             import backend.main as _main
 
-            _main.merge_po_optional_sheets_into_warm_cache(sess)
+            _main.sync_daily_inventory_history_sidecar(sess)
         except Exception:
-            logger.exception("merge_po_optional_sheets_into_warm_cache failed")
+            logger.exception("sync_daily_inventory_history_sidecar failed")
+
+    def _persist_pg_background() -> None:
         try:
             from ..db.forecast_session_pg import persist_session_bundle_thread_safe
 
@@ -162,14 +198,15 @@ def background_daily_inventory_upload(
             logger.exception("PostgreSQL persist after daily inventory upload failed")
 
     sess.daily_inventory_upload_status = "running"
-    sess.daily_inventory_upload_message = "Parsing daily inventory sheet…"
+    sess.daily_inventory_upload_message = "Starting parse…"
+    lock_held = _acquire_daily_inventory_memory_lock(sess, session_id, _progress)
     try:
-        result = execute_daily_inventory_upload(sess, raw, filename)
+        result = execute_daily_inventory_upload(sess, raw, filename, on_progress=_progress)
         sess.daily_inventory_upload_result = result
         if result.get("ok"):
-            # Shared disk + warm cache must be updated before we report success — otherwise
-            # other users keep stale May-era matrices from their PostgreSQL session restore.
-            _sync_sidecars()
+            _progress("Saving to server…")
+            _sync_disk_and_cache()
+            threading.Thread(target=_persist_pg_background, daemon=True).start()
             sess.daily_inventory_upload_status = "done"
             sess.daily_inventory_upload_message = result.get("message") or "Daily inventory loaded."
         else:
@@ -180,3 +217,8 @@ def background_daily_inventory_upload(
         sess.daily_inventory_upload_status = "error"
         sess.daily_inventory_upload_message = str(e)
         sess.daily_inventory_upload_result = {"ok": False, "message": str(e)}
+    finally:
+        if lock_held:
+            from ..concurrency import _UPLOAD_MEMORY_LOCK
+
+            _UPLOAD_MEMORY_LOCK.release()
