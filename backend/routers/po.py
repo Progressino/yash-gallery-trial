@@ -1600,6 +1600,14 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
         progress=0,
         message="Queued…",
     )
+
+    if body_dict.get("use_shared_cache", True):
+        from ..services.po_shared_cache import apply_shared_cache_to_session
+
+        cached = apply_shared_cache_to_session(sess, sid, body_dict, job_id=job_id)
+        if cached:
+            return {"ok": True, "job_id": job_id, "from_shared_cache": True}
+
     asyncio.get_running_loop().run_in_executor(
         PO_CALC_EXECUTOR,
         background_po_calculate,

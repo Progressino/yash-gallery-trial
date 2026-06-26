@@ -162,11 +162,14 @@ def _hydration_label(sess, session_id: str = "") -> str:
 
 
 def build_po_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> dict[str, Any]:
+    from .po_pipeline import build_pipeline_readiness
+
     pg_sales, pg_inv = _pg_row_floors()
     sales_rows, inventory_rows = _effective_row_floors(cov, sess)
     data_source = _resolve_data_source(sess)
     if pg_sales >= PO_MIN_SALES_ROWS and data_source == "warm_cache":
         data_source = "postgres_normalized"
+    pipeline = build_pipeline_readiness(sess, cov=cov)
     return {
         "po_ready": compute_po_ready(sess, cov),
         "data_ready": compute_data_ready(cov, sess),
@@ -177,6 +180,12 @@ def build_po_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> 
         "background_jobs": background_job_names(sess),
         "background_tasks": background_tasks_running(sess),
         "critical_restore_running": critical_restore_running(sess),
+        "calculate_allowed": pipeline.get("calculate_allowed", False),
+        "pipeline_blockers": pipeline.get("blockers") or [],
+        "pipeline_warnings": pipeline.get("warnings") or [],
+        "pipeline_version": pipeline.get("pipeline_version"),
+        "dataset_versions": pipeline.get("dataset_versions") or {},
+        "snapshot_id": pipeline.get("snapshot_id") or "",
     }
 
 

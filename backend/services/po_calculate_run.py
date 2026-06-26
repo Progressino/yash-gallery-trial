@@ -141,69 +141,19 @@ def execute_po_calculate(
     skip_hydrate: bool = False,
 ) -> dict[str, Any]:
     """Run full PO engine math and return the same payload as the legacy sync endpoint."""
-    from .po_session_hydrate import (
-        effective_sku_status_df_for_engine,
-        hydrate_po_session_for_calculate,
-    )
-    from .po_inputs import load_po_inputs, po_inputs_from_pg_enabled
+    from ..services.po_engine import calculate_po_base
+    from .po_pipeline import PoInputSnapshot, prepare_po_snapshot
     from .po_stage_timer import PoStageTimer
-    from .shared_frames import session_inventory_variant, session_sales_df
 
     stage_timer = PoStageTimer()
-
     progress_id = job_id or session_id
 
-    if not skip_hydrate:
-        hydrate_po_session_for_calculate(sess)
-
-    inputs = load_po_inputs(sess, body)
-    _set_po_calculate_progress(sess, progress_id, 5, "Validating sales and inventory…")
-
-    sales_df = inputs.sales_df if not inputs.sales_df.empty else session_sales_df(sess)
-    inv_variant = (
-        inputs.inventory_df_variant
-        if not inputs.inventory_df_variant.empty
-        else session_inventory_variant(sess)
-    )
-
-    if sales_df.empty:
-        return {"ok": False, "message": "Build Sales first (upload platforms, then POST /api/upload/build-sales)."}
-    if inv_variant.empty:
-        return {"ok": False, "message": "Upload Inventory first."}
-
-    from ..services.po_engine import calculate_po_base
-
-    group_by_parent = bool(body.get("group_by_parent", False))
-    inv_parent = inputs.inventory_df_parent if not inputs.inventory_df_parent.empty else getattr(
-        sess, "inventory_df_parent", None
-    )
-    inv_df = inv_parent if group_by_parent and inv_parent is not None and not inv_parent.empty else inv_variant
-    sku_mapping = inputs.sku_mapping or getattr(sess, "sku_mapping", None) or None
-
-    from ..services.po_raise_import import hydrate_session_ledger_from_db
+    def _progress(pct: int, message: str) -> None:
+        _set_po_calculate_progress(sess, progress_id, pct, message)
 
     lookback = max(int(body.get("raise_ledger_lookback_days") or 14), 14)
-    _set_po_calculate_progress(sess, progress_id, 12, "Loading raise ledger…")
-    hydrate_session_ledger_from_db(sess, body.get("planning_date"), lookback_days=lookback, authoritative=True)
+    group_by_parent = bool(body.get("group_by_parent", False))
 
-    ledger_auto_import = None
-    if body.get("auto_import_yesterday_ledger", True) and session_id:
-        from ..services.po_raise_archive import try_auto_import_recent_ledgers
-
-        ledger_auto_import = try_auto_import_recent_ledgers(
-            sess,
-            session_id,
-            body.get("planning_date"),
-            group_by_parent=group_by_parent,
-            lookback_days=lookback,
-        )
-        if ledger_auto_import and ledger_auto_import.get("ok") and sync_sidecars:
-            try:
-                sync_sidecars()
-            except Exception:
-                logger.exception("sync_sidecars after ledger auto-import failed")
-
-    # Persist ledger to warm cache without blocking the PO engine thread.
     try:
         import backend.main as _main
 
@@ -215,194 +165,33 @@ def execute_po_calculate(
     except Exception:
         logger.exception("merge_po_optional_sheets_into_warm_cache after ledger load failed")
 
-    _ledger = getattr(sess, "po_raise_ledger_df", None)
-
-    _set_po_calculate_progress(sess, progress_id, 18, "Loading existing PO sheet…")
-    try:
-        from .existing_po import ensure_existing_po_hydrated
-
-        ensure_existing_po_hydrated(sess)
-    except Exception:
-        logger.exception("ensure_existing_po_hydrated before calculate failed")
-
-    _existing_po = (
-        sess.existing_po_df if getattr(sess, "existing_po_df", None) is not None and not sess.existing_po_df.empty else None
+    _progress(4, "Building PO input snapshot…")
+    snap_or_err = prepare_po_snapshot(
+        sess,
+        body,
+        skip_hydrate=skip_hydrate,
+        progress_cb=_progress,
+        enforce_gate=True,
+        session_id=session_id,
+        sync_sidecars=sync_sidecars,
     )
-
-    # ── Inventory-history memory management ───────────────────────────────────
-    import gc as _gc
+    if isinstance(snap_or_err, dict):
+        return snap_or_err
+    snap: PoInputSnapshot = snap_or_err
 
     _period = int(body.get("period_days", 30))
-    try:
-        from .daily_inventory_history import (
-            daily_inventory_meta_is_newer,
-            read_daily_inventory_history_disk_meta,
-        )
-        from .po_session_hydrate import ensure_po_sidecars_hydrated
-
-        disk_meta = read_daily_inventory_history_disk_meta()
-        if daily_inventory_meta_is_newer(disk_meta, sess) or getattr(
-            sess, "daily_inventory_history_df", None
-        ) is None or getattr(sess.daily_inventory_history_df, "empty", True):
-            ensure_po_sidecars_hydrated(sess)
-    except Exception:
-        logger.exception("ensure daily inventory history before PO calc failed")
-
-    _raw_ih = getattr(sess, "daily_inventory_history_df", None)
-    _inv_history_for_calc: pd.DataFrame | None = None
-
-    _rows_dropped = 0
-    if _raw_ih is not None and not _raw_ih.empty:
-        from .daily_inventory_upload_run import (
-            _MAX_HISTORY_DAYS,
-            _series_as_dates,
-            _trim_history_to_recent,
-        )
-
-        _ih_rows = len(_raw_ih)
-        _set_po_calculate_progress(
-            sess,
-            progress_id,
-            22,
-            f"Preparing daily inventory history ({_ih_rows:,} rows)…",
-        )
-        # Stage 1: migrate oversized sessions (warm-cache restore with old data).
-        if _ih_rows > (_MAX_HISTORY_DAYS + 10) * 500:
-            _set_po_calculate_progress(
-                sess,
-                progress_id,
-                24,
-                f"Trimming oversized inventory history ({_ih_rows:,} rows)…",
-            )
-            _trimmed_sess, _trim_note = _trim_history_to_recent(_raw_ih, _MAX_HISTORY_DAYS)
-            if len(_trimmed_sess) < len(_raw_ih):
-                _rows_dropped += len(_raw_ih) - len(_trimmed_sess)
-                logger.info(
-                    "PO calc: session inventory history over-sized (%s rows) — "
-                    "trimming to %d days in-place (%s rows). %s",
-                    f"{len(_raw_ih):,}",
-                    _MAX_HISTORY_DAYS,
-                    f"{len(_trimmed_sess):,}",
-                    _trim_note,
-                )
-                sess.daily_inventory_history_df = _trimmed_sess
-                _raw_ih = _trimmed_sess
-            del _trimmed_sess, _trim_note
-
-        # Stage 2: calc-time pre-trim (bounded by DAILY_INV_MAX_DAYS / _MAX_HISTORY_DAYS).
-        _inv_dates = _series_as_dates(_raw_ih["Date"])
-        _max_inv = _inv_dates.max()
-        if pd.notna(_max_inv):
-            _depth_days = min(_period + 14, _MAX_HISTORY_DAYS)
-            _pretrim_cutoff = pd.Timestamp(_max_inv).normalize() - pd.Timedelta(
-                days=_depth_days
-            )
-            _min_inv = _inv_dates.min()
-            if pd.notna(_min_inv) and _min_inv >= _pretrim_cutoff:
-                _inv_history_for_calc = _raw_ih
-            else:
-                _mask = _inv_dates >= _pretrim_cutoff
-                _inv_history_for_calc = _raw_ih.loc[_mask].reset_index(drop=True)
-                if len(_inv_history_for_calc) < len(_raw_ih):
-                    _rows_dropped += len(_raw_ih) - len(_inv_history_for_calc)
-                    logger.info(
-                        "PO calc pre-trim: %s → %s inventory-history rows (period=%d days, depth_cap=%d)",
-                        f"{len(_raw_ih):,}",
-                        f"{len(_inv_history_for_calc):,}",
-                        _period,
-                        _depth_days,
-                    )
-                del _mask
-        else:
-            _inv_history_for_calc = _raw_ih
-        del _inv_dates
-        if _rows_dropped >= 100_000:
-            _set_po_calculate_progress(sess, progress_id, 27, "Releasing trimmed inventory memory…")
-            _gc.collect()
-
-    if _inv_history_for_calc is not None and not _inv_history_for_calc.empty:
-        from .daily_inventory_history import overlay_inventory_variant_from_history
-
-        ref_date = str(body.get("planning_date") or "")[:10] or None
-        inv_variant, _ov_meta = overlay_inventory_variant_from_history(
-            inv_variant,
-            _inv_history_for_calc,
-            snapshot_date=str(getattr(sess, "inventory_snapshot_date", "") or "") or None,
-            reference_date=ref_date,
-        )
-        if _ov_meta.get("applied"):
-            logger.info(
-                "PO calc: inventory overlaid from history matrix (%s SKUs, as of %s)",
-                _ov_meta.get("skus_updated", 0),
-                _ov_meta.get("history_as_of") or "?",
-            )
-            inv_df = (
-                inv_parent
-                if group_by_parent and inv_parent is not None and not inv_parent.empty
-                else inv_variant
-            )
+    _ads_source = snap.sales_df
+    _ads_label = snap.ads_label
+    inv_df = snap.inv_df
+    sku_mapping = snap.sku_mapping
+    _existing_po = snap.existing_po_df
+    _ledger = snap.po_raise_ledger_df
+    _inv_history_for_calc = snap.inventory_history_df
 
     stage_timer.mark("inventory")
-
-    # Tier-3 overlay for ADS (in-memory only — never blocks on full session merge / sales rebuild).
-    from .tier3_session_merge import build_po_ads_platform_sales
-
-    _set_po_calculate_progress(sess, progress_id, 28, "Loading Tier-3 daily sales for ADS window…")
-    _platform_sales = build_po_ads_platform_sales(
-        sess,
-        planning_date=body.get("planning_date"),
-        period_days=_period,
-        use_seasonality=bool(body.get("use_seasonality", False)),
-        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
-    )
-    _mat_sales = None
-    if po_inputs_from_pg_enabled() and not sales_df.empty and inputs.sales_source.startswith("postgres"):
-        _mat_sales = sales_df
-    else:
-        try:
-            from ..db.forecast_sales_materializations import load_po_sales_df
-
-            _mat_sales = load_po_sales_df(
-                sess,
-                period_days=_period,
-                planning_date=body.get("planning_date"),
-                use_seasonality=bool(body.get("use_seasonality", False)),
-                use_ly_fallback=bool(body.get("use_ly_fallback", True)),
-            )
-        except Exception:
-            logger.exception("load_po_sales_df failed — falling back to raw sales")
-    if _mat_sales is not None and not _mat_sales.empty:
-        _ads_source = _mat_sales
-        _ads_label = inputs.ads_source_label if inputs.sales_source.startswith("postgres") else "materialized-daily"
-    elif not _platform_sales.empty:
-        _ads_source = _platform_sales
-        _ads_label = "platform"
-    else:
-        _ads_source = _build_platform_sales_df(sess)
-        _ads_label = "platform-built"
-        if _ads_source.empty:
-            _ads_source = sales_df
-            _ads_label = "OMS"
-    if _ads_label != "materialized-daily":
-        _ads_source = _trim_sales_for_po_memory(
-            _ads_source,
-            period_days=_period,
-            use_seasonality=bool(body.get("use_seasonality", False)),
-            use_ly_fallback=bool(body.get("use_ly_fallback", True)),
-        )
-    logger.info(
-        "PO ADS source: %s (%d rows)",
-        _ads_label,
-        len(_ads_source),
-    )
     stage_timer.mark("sales load")
 
-    _set_po_calculate_progress(
-        sess,
-        progress_id,
-        30,
-        "Running PO calculation engine…",
-    )
+    _progress(30, "Running PO calculation engine…")
     _hb_stop = threading.Event()
 
     def _calc_heartbeat() -> None:
@@ -437,7 +226,7 @@ def execute_po_calculate(
             sku_mapping=sku_mapping,
             group_by_parent=group_by_parent,
             existing_po_df=_existing_po,
-            sku_status_df=effective_sku_status_df_for_engine(sess),
+            sku_status_df=snap.sku_status_df,
             enforce_two_size_minimum=bool(body.get("enforce_two_size_minimum", False)),
             # App PO mode always uses Excel Qty rule (lead-time gate). Do not honour
             # ``False`` from legacy API defaults — ``body.get(..., True)`` would still
@@ -448,7 +237,7 @@ def execute_po_calculate(
             planning_date=body.get("planning_date"),
             raise_ledger_lookback_days=lookback,
             raise_view_date=body.get("raise_view_date"),
-            po_return_overlay_df=_po_return_overlay_for_calc(sess),
+            po_return_overlay_df=snap.po_return_overlay_df,
             urgent_all_sizes_days=int(body.get("urgent_all_sizes_days", 45)),
             use_ly_fallback=bool(body.get("use_ly_fallback", True)),
             stage_timer=stage_timer,
@@ -536,8 +325,6 @@ def execute_po_calculate(
         else 0
     )
     auto_msg = None
-    if ledger_auto_import and ledger_auto_import.get("ok"):
-        auto_msg = ledger_auto_import.get("message")
 
     cols = list(po_df.columns)
 
@@ -563,6 +350,8 @@ def execute_po_calculate(
         "ledger_auto_import": auto_msg,
         "stage_timings": stage_timings,
         "ads_source": _ads_label,
+        "snapshot_id": snap.snapshot_id,
+        "pipeline_warnings": snap.warnings,
         "summary": {
             "new_po_qty_sum": int(_po_qty.sum()),
             "new_po_sku_count": int((_po_qty > 0).sum()),
@@ -624,13 +413,6 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
 
     try:
         _set_po_calculate_progress(sess, job_id, 4, "Hydrating sales and inventory…")
-        try:
-            import backend.main as _main
-
-            _main.try_attach_shared_frames_fast(sess)
-        except Exception:
-            pass
-        hydrate_po_session_for_calculate(sess)
 
         if body.get("use_shared_cache"):
             from .po_shared_cache import apply_shared_cache_to_session
@@ -641,6 +423,31 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
                     getattr(sess, "existing_po_generation", 0) or 0
                 )
                 return
+
+        try:
+            import backend.main as _main
+
+            _main.try_attach_shared_frames_fast(sess)
+        except Exception:
+            pass
+        hydrate_po_session_for_calculate(sess)
+
+        from .po_pipeline import check_calculate_gate
+
+        gate = check_calculate_gate(sess)
+        if not gate.get("calculate_allowed"):
+            msg = gate["blockers"][0] if gate.get("blockers") else "PO inputs not ready."
+            sess.po_calculate_status = "error"
+            sess.po_calculate_progress = 0
+            sess.po_calculate_message = msg
+            sess.po_calculate_result = {
+                "ok": False,
+                "message": msg,
+                "pipeline_blockers": gate.get("blockers") or [],
+                "pipeline_warnings": gate.get("warnings") or [],
+            }
+            set_po_job(job_id, status="error", ok=False, progress=0, message=msg)
+            return
 
         sales_df = session_sales_df(sess)
         inv_df = session_inventory_variant(sess)

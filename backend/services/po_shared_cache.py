@@ -130,6 +130,15 @@ def normalize_planning_date(body: dict) -> str:
 
 
 def _sales_through(sess) -> str:
+    """Server-wide sales freshness for cache fingerprint (not per-session pointers)."""
+    try:
+        from .tier3_session_merge import tier3_sales_through
+
+        t3 = tier3_sales_through()
+        if t3:
+            return str(t3)[:10]
+    except Exception:
+        pass
     from .tier3_session_merge import effective_sales_through
 
     return effective_sales_through(sess)
@@ -275,6 +284,11 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
     except Exception:
         pass
 
+    try:
+        from .po_pipeline import PO_PIPELINE_VERSION
+    except Exception:
+        PO_PIPELINE_VERSION = 0
+
     return {
         "planning_date": planning,
         "params": params,
@@ -295,6 +309,8 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
         "sku_mapping": _sku_mapping_fingerprint(sess),
         "return_overlay": _return_overlay_fingerprint(sess),
         "tier3_sync_token": tier3_token,
+        "pipeline_snapshot_hash": str(getattr(sess, "po_pipeline_snapshot_id", "") or ""),
+        "pipeline_version": PO_PIPELINE_VERSION,
     }
 
 

@@ -203,6 +203,12 @@ class PoReadinessResponse(BaseModel):
     background_jobs: list[str] = Field(default_factory=list)
     background_tasks: dict[str, bool] = Field(default_factory=dict)
     critical_restore_running: bool = False
+    calculate_allowed: bool = False
+    pipeline_blockers: list[str] = Field(default_factory=list)
+    pipeline_warnings: list[str] = Field(default_factory=list)
+    pipeline_version: int = 0
+    dataset_versions: dict[str, Any] = Field(default_factory=dict)
+    snapshot_id: str = ""
 
 
 class RestoreFullResponse(CoverageResponse):

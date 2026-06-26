@@ -2843,12 +2843,14 @@ async def session_middleware(request: Request, call_next):
                 hasattr(sess.sales_df, "empty") and sess.sales_df.empty
             ):
                 sid, sess = await run_aux(store.get_or_create, sid)
+            # Do not attach shared frames here — it replaces session DataFrames and
+            # breaks shared-cache fingerprint matching. Background job attaches after cache.
         else:
             sid, sess = await run_aux(store.get_or_empty, sid)
-        try:
-            await run_aux(try_attach_shared_frames_fast, sess)
-        except Exception:
-            log.exception("shared-frame attach on PO light path failed")
+            try:
+                await run_aux(try_attach_shared_frames_fast, sess)
+            except Exception:
+                log.exception("shared-frame attach on PO light path failed")
         request.state.session_id = sid
         request.state.session = sess
         setattr(sess, "_persist_sid", sid)

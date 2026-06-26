@@ -26,6 +26,8 @@ def isolated_shared_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("PO_RESULT_SPILL_DIR", str(tmp_path / "spill"))
     monkeypatch.setenv("PO_SHARED_CACHE_ENABLED", "1")
     monkeypatch.setenv("WARM_CACHE_DIR", str(warm))
+    monkeypatch.setattr("backend.services.po_readiness.PO_MIN_SALES_ROWS", 1)
+    monkeypatch.setattr("backend.services.po_readiness.PO_MIN_INVENTORY_ROWS", 1)
     main_mod.clear_warm_cache()
     yield
 
@@ -310,6 +312,15 @@ def test_shared_cache_used_when_session_has_existing_po(client, monkeypatch, ses
 
     from backend.routers.po import PORequest
 
+    monkeypatch.setattr(
+        "backend.services.po_session_hydrate.hydrate_po_session_for_calculate",
+        lambda _sess: {},
+    )
+    monkeypatch.setattr(
+        "backend.services.po_shared_cache._shared_cache_stale_vs_disk",
+        lambda _meta: False,
+    )
+
     _, sess = session_for_client
     days = pd.date_range("2025-12-01", periods=10, freq="D")
     sess.sales_df = pd.DataFrame(
@@ -340,9 +351,6 @@ def test_shared_cache_used_when_session_has_existing_po(client, monkeypatch, ses
     body = PORequest(
         planning_date=_PLAN_DATE, period_days=30, lead_time=7, target_days=60, use_shared_cache=True
     ).model_dump()
-    from backend.services.po_session_hydrate import hydrate_po_session_for_calculate
-
-    hydrate_po_session_for_calculate(sess)
     psc.save_shared_cache(
         sess,
         body,
