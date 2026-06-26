@@ -92,12 +92,24 @@ def execute_daily_inventory_upload(
 
     existing = getattr(sess, "daily_inventory_history_df", None)
     if existing is not None and not existing.empty:
-        df = merge_inventory_history(existing, df)
+        # Wide matrix upload is authoritative — replace overlapping dates instead of
+        # merging 500k+ rows (slow and kept stale mis-parsed history on re-upload).
+        incoming_dates = set(
+            pd.to_datetime(df["Date"], errors="coerce").dt.normalize().dropna().unique()
+        )
+        if incoming_dates:
+            ex = existing.copy()
+            ex["Date"] = pd.to_datetime(ex["Date"], errors="coerce").dt.normalize()
+            ex = ex[~ex["Date"].isin(incoming_dates)]
+            df = merge_inventory_history(ex, df)
+        else:
+            df = merge_inventory_history(existing, df)
         sheet_max = inventory_history_max_date(df)
         end_anchor = str(sheet_max.date()) if sheet_max is not None else end_anchor
         df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS, end_date=end_anchor)
         trim_note = (
-            f"Merged upload; kept last {_MAX_HISTORY_DAYS} days ending today (IST)."
+            f"Replaced overlapping dates; kept last {_MAX_HISTORY_DAYS} days ending "
+            f"{end_anchor or 'today (IST)'}."
         )
 
     sess.daily_inventory_history_df = df

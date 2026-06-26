@@ -44,19 +44,34 @@ _TALL_COLS = ["OMS_SKU", "Date", "Qty"]
 _DMY_HEADER_RE = re.compile(r"^(\d{1,2})-(\d{1,2})-(\d{2,4})$")
 
 
+def _safe_normalize(ts) -> pd.Timestamp | None:
+    """Normalize a timestamp; return None for NaT / unparsable values."""
+    if ts is None:
+        return None
+    try:
+        t = pd.Timestamp(ts)
+    except Exception:
+        return None
+    if pd.isna(t):
+        return None
+    return t.normalize()
+
+
 def _parse_inventory_snapshot_date(value) -> pd.Timestamp | None:
     """Parse snapshot dates from wide-matrix headers (D-M-YY) and other exports."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
-    if isinstance(value, (pd.Timestamp, datetime, date)):
-        return pd.Timestamp(value).normalize()
+    if isinstance(value, pd.Timestamp):
+        return _safe_normalize(value)
+    if isinstance(value, (datetime, date)):
+        return _safe_normalize(value)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         fv = float(value)
         if 40_000 <= fv <= 60_000:
             try:
                 ts = pd.to_datetime(fv, unit="D", origin="1899-12-30", errors="coerce")
                 if ts is not None and pd.notna(ts) and 2015 <= int(ts.year) <= 2035:
-                    return pd.Timestamp(ts).normalize()
+                    return _safe_normalize(ts)
             except Exception:
                 pass
         return None
@@ -69,16 +84,16 @@ def _parse_inventory_snapshot_date(value) -> pd.Timestamp | None:
         if year < 100:
             year += 2000
         try:
-            ts = pd.Timestamp(year=year, month=month, day=day).normalize()
+            ts = pd.Timestamp(year=year, month=month, day=day)
             if 2015 <= int(ts.year) <= 2035:
-                return ts
+                return _safe_normalize(ts)
         except ValueError:
             return None
     if re.match(r"^\d{4}-\d{2}-\d{2}", s):
         try:
             ts = pd.to_datetime(s[:10], errors="coerce")
             if ts is not None and pd.notna(ts) and 2015 <= int(ts.year) <= 2035:
-                return pd.Timestamp(ts).normalize()
+                return _safe_normalize(ts)
         except Exception:
             return None
     try:

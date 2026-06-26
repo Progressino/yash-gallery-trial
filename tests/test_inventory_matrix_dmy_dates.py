@@ -40,6 +40,22 @@ SKU-B,0,0,0,0,0,,0
     assert int(a[pd.Timestamp("2026-06-25")]) == 8
 
 
+def test_nat_cells_do_not_crash_parser():
+    import pandas as pd
+    from backend.services.daily_inventory_history import _is_date_value, _parse_one_sheet
+
+    assert not _is_date_value(pd.NaT)
+    df = pd.DataFrame(
+        [
+            ["Item SkuCode", "Item", pd.NaT, "2026-06-01", "2026-06-02"],
+            ["SKU-A", "PARENT", 5, 6, 7],
+        ]
+    )
+    tall = _parse_one_sheet(df, {})
+    assert not tall.empty
+    assert set(tall["Date"].dt.strftime("%Y-%m-%d")) == {"2026-06-01", "2026-06-02"}
+
+
 @pytest.mark.skipif(
     not __import__("pathlib").Path("/Users/samraisinghani/Downloads/inventory-matrix.csv").is_file(),
     reason="user fixture not on disk",
