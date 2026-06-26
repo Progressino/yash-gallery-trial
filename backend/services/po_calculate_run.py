@@ -331,13 +331,10 @@ def execute_po_calculate(
             reference_date=ref_date,
         )
         if _ov_meta.get("applied"):
-            hist_as_of = str(_ov_meta.get("history_as_of") or "")
-            if hist_as_of:
-                sess.inventory_snapshot_date = hist_as_of
             logger.info(
                 "PO calc: inventory overlaid from history matrix (%s SKUs, as of %s)",
                 _ov_meta.get("skus_updated", 0),
-                hist_as_of or "?",
+                _ov_meta.get("history_as_of") or "?",
             )
             inv_df = (
                 inv_parent
@@ -633,20 +630,7 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
             _main.try_attach_shared_frames_fast(sess)
         except Exception:
             pass
-        sales_before = session_sales_df(sess)
-        inv_before = session_inventory_variant(sess)
-        if sales_before.empty or inv_before.empty:
-            hydrate_po_session_for_calculate(sess)
-        else:
-            from .po_session_hydrate import ensure_po_sidecars_hydrated
-
-            ensure_po_sidecars_hydrated(sess)
-            try:
-                import backend.main as _main
-
-                _main.restore_po_sidecars_from_warm(sess)
-            except Exception:
-                logger.exception("restore_po_sidecars_from_warm during PO job failed")
+        hydrate_po_session_for_calculate(sess)
 
         if body.get("use_shared_cache"):
             from .po_shared_cache import apply_shared_cache_to_session

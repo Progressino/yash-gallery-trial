@@ -120,8 +120,8 @@ export default function InventoryHistory() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">📅 Inventory History</h1>
           <p className="text-sm text-gray-600 mt-1 max-w-2xl">
-            Last {HISTORY_WINDOW_DAYS} days of daily snapshot inventory (Upload → Daily uploads → Snapshot inventory).
-            Each upload adds a column — use this matrix to verify on-hand counts match PO{' '}
+            Last {HISTORY_WINDOW_DAYS} days of daily inventory (wide matrix from Upload → History &amp; setup,
+            or snapshot columns from Upload → Daily uploads). Use this matrix to verify on-hand counts match PO{' '}
             <code className="font-mono text-xs">Eff_Days</code>.
           </p>
         </div>
@@ -162,10 +162,21 @@ export default function InventoryHistory() {
         </div>
       )}
 
-      {summaryQ.data?.loaded && !dates.length && (
+      {summaryQ.data?.loaded && !dates.length && !matrixQ.isLoading && !matrixQ.isFetching && (
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          No snapshot dates in the last {HISTORY_WINDOW_DAYS} days (today {todayIsoIST()}).
-          Upload today&apos;s snapshot inventory — older bulk matrix data is hidden from this view.
+          {summaryQ.data.max_date &&
+          summaryQ.data.max_date < todayIsoIST().slice(0, 10) ? (
+            <>
+              Inventory history matrix ends <strong>{summaryQ.data.max_date}</strong> (today{' '}
+              {todayIsoIST()}). Re-upload the wide Excel under Upload → History &amp; setup → Daily
+              inventory history matrix (PO).
+            </>
+          ) : (
+            <>
+              Matrix summary loaded but the table is empty — try refreshing. If this persists after
+              upload, use Upload → Server &amp; cache → Reload from server.
+            </>
+          )}
         </div>
       )}
 

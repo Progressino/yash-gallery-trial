@@ -312,6 +312,51 @@ def today_ist_timestamp() -> pd.Timestamp:
     return pd.Timestamp.now(tz=_IST).normalize().tz_localize(None)
 
 
+def inventory_history_view_end_date(
+    df: pd.DataFrame | None,
+    end_date: str | None = None,
+) -> str:
+    """End anchor for UI windows — use latest matrix date when it trails today."""
+    try:
+        end = pd.Timestamp(str(end_date or "")[:10]).normalize() if end_date else today_ist_timestamp()
+    except Exception:
+        end = today_ist_timestamp()
+    if pd.isna(end):
+        end = today_ist_timestamp()
+    mx = inventory_history_max_date(df)
+    if mx is not None and mx < end - pd.Timedelta(days=1):
+        end = pd.Timestamp(mx).normalize()
+    return str(end.date())
+
+
+def inventory_history_is_newer_than(
+    incoming: pd.DataFrame | None,
+    existing: pd.DataFrame | None,
+    *,
+    incoming_uploaded_at: str = "",
+    existing_uploaded_at: str = "",
+) -> bool:
+    """True when ``incoming`` should replace ``existing`` (never downgrade on PO calc persist)."""
+    if incoming is None or getattr(incoming, "empty", True):
+        return False
+    if existing is None or getattr(existing, "empty", True):
+        return True
+    in_at = upload_timestamp_epoch(incoming_uploaded_at)
+    ex_at = upload_timestamp_epoch(existing_uploaded_at)
+    if in_at > ex_at + 0.5:
+        return True
+    if ex_at > in_at + 0.5:
+        return False
+    in_max = inventory_history_max_date(incoming)
+    ex_max = inventory_history_max_date(existing)
+    if in_max is not None and ex_max is not None:
+        if in_max > ex_max:
+            return True
+        if in_max < ex_max:
+            return False
+    return len(incoming) >= len(existing)
+
+
 def filter_inventory_history_window(
     df: pd.DataFrame,
     *,
@@ -324,10 +369,13 @@ def filter_inventory_history_window(
     span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
     if span <= 0:
         return df.copy()
-    try:
-        end = pd.Timestamp(str(end_date or "")[:10]).normalize() if end_date else today_ist_timestamp()
-    except Exception:
-        end = today_ist_timestamp()
+    if end_date:
+        try:
+            end = pd.Timestamp(str(end_date)[:10]).normalize()
+        except Exception:
+            end = today_ist_timestamp()
+    else:
+        end = pd.Timestamp(inventory_history_view_end_date(df))
     if pd.isna(end):
         end = today_ist_timestamp()
     start = end - pd.Timedelta(days=max(0, span - 1))
@@ -784,13 +832,12 @@ def overlay_inventory_variant_from_history(
         return inv_df, meta
 
     hist_qty = pd.to_numeric(merged["History_Qty"], errors="coerce").fillna(0.0)
-    for col in ("Total_Inventory", "OMS_Inventory"):
-        if col in merged.columns:
-            cur = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
-            merged[col] = np.where(has_hist, hist_qty, cur)
-        elif col == "Total_Inventory":
-            merged["Total_Inventory"] = np.where(has_hist, hist_qty, 0.0)
-    if "Total_Inventory" not in merged.columns:
+    # Matrix cells are total on-hand per day — update Total_Inventory only so we do not
+    # mirror the same figure into OMS_Inventory (that made PO stock look doubled).
+    if "Total_Inventory" in merged.columns:
+        cur = pd.to_numeric(merged["Total_Inventory"], errors="coerce").fillna(0.0)
+        merged["Total_Inventory"] = np.where(has_hist, hist_qty, cur)
+    else:
         merged["Total_Inventory"] = np.where(has_hist, hist_qty, 0.0)
     merged.drop(columns=["History_Qty"], inplace=True)
 
@@ -1299,6 +1346,8 @@ __all__ = [
     "coverage_days_within",
     "extend_history_with_sales",
     "append_snapshot_inventory_to_history",
+    "inventory_history_view_end_date",
+    "inventory_history_is_newer_than",
     "filter_inventory_history_window",
     "inventory_history_summary",
     "list_inventory_history_dates",

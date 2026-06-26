@@ -112,18 +112,26 @@ def _should_prefer_sidecar_backup(
     return bak_n >= max(100, cur_n * 2) and cur_n < 500
 
 
-def _sidecar_candidate_score(key: str, df: pd.DataFrame | None) -> tuple:
+def _sidecar_candidate_score(key: str, df: pd.DataFrame | None, meta: dict | None = None) -> tuple:
     n = _df_row_count(df)
+    meta_at = 0
+    if isinstance(meta, dict):
+        try:
+            from .daily_inventory_history import upload_timestamp_epoch
+
+            meta_at = int(upload_timestamp_epoch(str(meta.get("daily_inventory_history_uploaded_at") or "")))
+        except Exception:
+            meta_at = 0
     if key == "daily_inventory_history_df":
         try:
             from .daily_inventory_history import inventory_history_max_date
 
             mx = inventory_history_max_date(df)
             mx_ord = int(mx.toordinal()) if mx is not None else 0
-            return (0 if _sidecar_looks_placeholder(key, df) else 1, mx_ord, n)
+            return (0 if _sidecar_looks_placeholder(key, df) else 1, meta_at, mx_ord, n)
         except Exception:
             pass
-    return (0 if _sidecar_looks_placeholder(key, df) else 1, n)
+    return (0 if _sidecar_looks_placeholder(key, df) else 1, meta_at, n)
 
 
 def load_po_sidecar_backups_from_disk() -> dict[str, pd.DataFrame]:
@@ -234,7 +242,26 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
             stats[key] = 0
             continue
         non_placeholder = [d for d in candidates if not _sidecar_looks_placeholder(key, d)]
-        best = max(non_placeholder or candidates, key=lambda d: _sidecar_candidate_score(key, d))
+        meta_candidates = []
+        if key == "daily_inventory_history_df":
+            warm_meta = _main._warm_cache.get(_main._DAILY_INV_META_WARM_KEY)
+            disk_meta = None
+            try:
+                from .daily_inventory_history import read_daily_inventory_history_disk_meta
+
+                disk_meta = read_daily_inventory_history_disk_meta()
+            except Exception:
+                disk_meta = None
+            meta_candidates = [m for m in (disk_meta, warm_meta) if isinstance(m, dict)]
+        best_meta = meta_candidates[0] if meta_candidates else None
+        best = max(
+            non_placeholder or candidates,
+            key=lambda d: _sidecar_candidate_score(
+                key,
+                d,
+                meta=best_meta if key == "daily_inventory_history_df" else None,
+            ),
+        )
 
         if (
             _df_row_count(best) != _df_row_count(warm_df)

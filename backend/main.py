@@ -513,12 +513,16 @@ def restore_po_sidecars_from_warm(sess) -> bool:
                     pass
                 changed = True
             elif cur is not None and hasattr(cur, "empty") and not cur.empty:
-                from .services.daily_inventory_history import merge_inventory_history
+                if wc_max is not None and cur_max is not None and wc_max < cur_max:
+                    # Session already has newer matrix — do not merge older warm-cache rows in.
+                    pass
+                else:
+                    from .services.daily_inventory_history import merge_inventory_history
 
-                merged = merge_inventory_history(cur, wc)
-                if len(merged) != len(cur) or not merged.equals(cur):
-                    setattr(sess, key, merged)
-                    changed = True
+                    merged = merge_inventory_history(cur, wc)
+                    if len(merged) != len(cur) or not merged.equals(cur):
+                        setattr(sess, key, merged)
+                        changed = True
             else:
                 setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
                 changed = True
@@ -633,37 +637,69 @@ def sync_daily_inventory_history_sidecar(sess) -> None:
         _warm_cache = {}
     df = getattr(sess, "daily_inventory_history_df", None)
     if df is None or not hasattr(df, "empty") or df.empty:
-        _warm_cache["daily_inventory_history_df"] = pd.DataFrame()
-        df_write = None
-    else:
-        _warm_cache["daily_inventory_history_df"] = df.copy()
-        df_write = df
-    try:
-        from .services.daily_inventory_history import (
-            daily_inventory_history_meta_bundle,
-            persist_daily_inventory_history_meta,
-        )
-
-        meta = daily_inventory_history_meta_bundle(sess)
-        if meta.get("daily_inventory_history_uploaded_at") or meta.get("daily_inventory_history_rows"):
-            _warm_cache[_DAILY_INV_META_WARM_KEY] = meta
-            persist_daily_inventory_history_meta(sess)
-    except Exception:
-        log.exception("persist daily_inventory_history meta after sync failed")
-    if df_write is None or df_write.empty:
         return
+
+    from .services.daily_inventory_history import (
+        daily_inventory_history_meta_bundle,
+        inventory_history_is_newer_than,
+        persist_daily_inventory_history_meta,
+        read_daily_inventory_history_disk_meta,
+    )
+
+    warm_df = _warm_cache.get("daily_inventory_history_df")
+    warm_meta = _warm_cache.get(_DAILY_INV_META_WARM_KEY) if isinstance(_warm_cache.get(_DAILY_INV_META_WARM_KEY), dict) else {}
+    disk_meta = read_daily_inventory_history_disk_meta() or {}
+    sess_meta = daily_inventory_history_meta_bundle(sess)
+
+    if not inventory_history_is_newer_than(
+        df,
+        warm_df,
+        incoming_uploaded_at=str(sess_meta.get("daily_inventory_history_uploaded_at") or ""),
+        existing_uploaded_at=str((warm_meta or {}).get("daily_inventory_history_uploaded_at") or ""),
+    ):
+        log.warning(
+            "Skipping daily inventory warm-cache sync — session matrix is older than server copy"
+        )
+        if warm_df is not None and not getattr(warm_df, "empty", True):
+            sess.daily_inventory_history_df = warm_df.copy()
+            from .services.daily_inventory_history import apply_daily_inventory_history_meta
+
+            if warm_meta:
+                apply_daily_inventory_history_meta(sess, warm_meta)
+        return
+
+    _warm_cache["daily_inventory_history_df"] = df.copy()
+    meta = sess_meta
+    if meta.get("daily_inventory_history_uploaded_at") or meta.get("daily_inventory_history_rows"):
+        _warm_cache[_DAILY_INV_META_WARM_KEY] = meta
+        persist_daily_inventory_history_meta(sess)
     try:
         os.makedirs(_DISK_CACHE_DIR, exist_ok=True)
+        path = os.path.join(_DISK_CACHE_DIR, "daily_inventory_history_df.parquet")
+        if os.path.exists(path):
+            try:
+                old = pd.read_parquet(path)
+                if not inventory_history_is_newer_than(
+                    df,
+                    old,
+                    incoming_uploaded_at=str(meta.get("daily_inventory_history_uploaded_at") or ""),
+                    existing_uploaded_at=str(disk_meta.get("daily_inventory_history_uploaded_at") or ""),
+                ):
+                    log.warning(
+                        "Refusing to overwrite daily inventory parquet with older session matrix"
+                    )
+                    return
+            except Exception:
+                pass
         manifest_path = os.path.join(_DISK_CACHE_DIR, "_manifest.json")
         manifest: dict = {}
         if os.path.exists(manifest_path):
             with open(manifest_path, encoding="utf-8") as f:
                 manifest = json.load(f)
         keys = set(manifest.get("keys") or [])
-        path = os.path.join(_DISK_CACHE_DIR, "daily_inventory_history_df.parquet")
         from .services.helpers import _coerce_df_for_parquet
 
-        _coerce_df_for_parquet(df_write).to_parquet(path, index=False)
+        _coerce_df_for_parquet(df).to_parquet(path, index=False)
         keys.add("daily_inventory_history_df")
         manifest["keys"] = sorted(keys)
         manifest["saved_at"] = datetime.now(IST).isoformat()
@@ -717,6 +753,31 @@ def merge_po_optional_sheets_into_warm_cache(sess) -> None:
                         df = cur.copy()
                 except Exception:
                     pass
+        if key == "daily_inventory_history_df" and not df.empty:
+            try:
+                from .services.daily_inventory_history import (
+                    daily_inventory_history_meta_bundle,
+                    inventory_history_is_newer_than,
+                )
+
+                cur = _warm_cache.get(key)
+                warm_meta = _warm_cache.get(_DAILY_INV_META_WARM_KEY)
+                sess_meta = daily_inventory_history_meta_bundle(sess)
+                if not inventory_history_is_newer_than(
+                    df,
+                    cur,
+                    incoming_uploaded_at=str(sess_meta.get("daily_inventory_history_uploaded_at") or ""),
+                    existing_uploaded_at=str((warm_meta or {}).get("daily_inventory_history_uploaded_at") or "")
+                    if isinstance(warm_meta, dict)
+                    else "",
+                ):
+                    if cur is not None and not getattr(cur, "empty", True):
+                        setattr(sess, key, cur.copy())
+                        df = cur.copy()
+                    else:
+                        continue
+            except Exception:
+                log.exception("daily inventory history warm-cache merge guard failed")
         _warm_cache[key] = df.copy() if not df.empty else pd.DataFrame()
     try:
         from .services.daily_inventory_history import (
