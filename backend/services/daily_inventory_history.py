@@ -949,6 +949,121 @@ def inventory_history_wide_matrix(
     }
 
 
+_DAILY_INV_META_FILENAME = "daily_inventory_history_meta.json"
+
+
+def _warm_cache_dir() -> "Path":
+    from pathlib import Path
+
+    import os
+
+    return Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
+
+
+def daily_inventory_history_meta_bundle(sess) -> dict:
+    """Serializable metadata for warm-cache / disk restore (shared across users)."""
+    df = getattr(sess, "daily_inventory_history_df", None)
+    rows = int(len(df)) if df is not None and not getattr(df, "empty", True) else 0
+    skus = int(df["OMS_SKU"].astype(str).nunique()) if rows and "OMS_SKU" in df.columns else 0
+    mx = inventory_history_max_date(df)
+    mn = None
+    if df is not None and not getattr(df, "empty", True) and "Date" in df.columns:
+        mn = pd.to_datetime(df["Date"], errors="coerce").min()
+    return {
+        "daily_inventory_history_uploaded_at": str(
+            getattr(sess, "daily_inventory_history_uploaded_at", "") or ""
+        ),
+        "daily_inventory_history_filename": str(
+            getattr(sess, "daily_inventory_history_filename", "") or ""
+        ),
+        "daily_inventory_history_rows": rows,
+        "daily_inventory_history_skus": skus,
+        "daily_inventory_history_max_date": str(pd.Timestamp(mx).date()) if mx is not None else "",
+        "daily_inventory_history_min_date": str(pd.Timestamp(mn).date()) if pd.notna(mn) else "",
+    }
+
+
+def apply_daily_inventory_history_meta(sess, meta: dict) -> None:
+    """Copy upload metadata onto a session (not the dataframe)."""
+    if not isinstance(meta, dict):
+        return
+    for key in (
+        "daily_inventory_history_uploaded_at",
+        "daily_inventory_history_filename",
+    ):
+        if meta.get(key):
+            setattr(sess, key, str(meta[key]))
+
+
+def read_daily_inventory_history_disk_meta() -> dict | None:
+    try:
+        path = _warm_cache_dir() / _DAILY_INV_META_FILENAME
+        if not path.is_file():
+            return None
+        import json
+
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def persist_daily_inventory_history_meta(sess) -> bool:
+    meta = daily_inventory_history_meta_bundle(sess)
+    if not meta.get("daily_inventory_history_uploaded_at") and not meta.get("daily_inventory_history_rows"):
+        return False
+    try:
+        import json
+
+        path = _warm_cache_dir()
+        path.mkdir(parents=True, exist_ok=True)
+        (path / _DAILY_INV_META_FILENAME).write_text(
+            json.dumps(meta, default=str),
+            encoding="utf-8",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def upload_timestamp_epoch(value: str) -> float:
+    """Parse uploaded_at strings (IST local or UTC ISO) for comparison."""
+    s = str(value or "").strip()
+    if not s:
+        return 0.0
+    try:
+        from datetime import datetime
+
+        if s.endswith("Z"):
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=_IST).timestamp()
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
+
+def daily_inventory_meta_is_newer(meta: dict | None, sess) -> bool:
+    """True when shared meta is strictly newer than what the session holds."""
+    if not isinstance(meta, dict) or not meta:
+        return False
+    disk_at = upload_timestamp_epoch(str(meta.get("daily_inventory_history_uploaded_at") or ""))
+    sess_at = upload_timestamp_epoch(str(getattr(sess, "daily_inventory_history_uploaded_at", "") or ""))
+    if disk_at > sess_at + 0.5:
+        return True
+    disk_max = str(meta.get("daily_inventory_history_max_date") or "").strip()
+    if not disk_max:
+        return False
+    df = getattr(sess, "daily_inventory_history_df", None)
+    sess_max = inventory_history_max_date(df)
+    if sess_max is None:
+        return True
+    try:
+        return pd.Timestamp(disk_max).normalize() > pd.Timestamp(sess_max).normalize()
+    except Exception:
+        return False
+
+
 __all__ = [
     "parse_daily_inventory_history_dataframes",
     "parse_daily_inventory_history_upload",
@@ -961,6 +1076,12 @@ __all__ = [
     "list_inventory_history_dates",
     "inventory_rows_for_date",
     "inventory_history_wide_matrix",
+    "daily_inventory_history_meta_bundle",
+    "apply_daily_inventory_history_meta",
+    "read_daily_inventory_history_disk_meta",
+    "persist_daily_inventory_history_meta",
+    "upload_timestamp_epoch",
+    "daily_inventory_meta_is_newer",
 ]
 
 

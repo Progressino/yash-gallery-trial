@@ -196,10 +196,26 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
         except Exception:
             return False
 
-    need_backups = any(
-        _sidecar_looks_placeholder(key, wc.get(key)) or _df_row_count(wc.get(key)) == 0
-        for key in _PO_SIDECAR_KEYS
-    )
+    try:
+        from .daily_inventory_history import (
+            apply_daily_inventory_history_meta,
+            daily_inventory_meta_is_newer,
+            read_daily_inventory_history_disk_meta,
+        )
+
+        disk_meta = read_daily_inventory_history_disk_meta()
+        if daily_inventory_meta_is_newer(disk_meta, sess):
+            need_backups = True
+        else:
+            need_backups = False
+    except Exception:
+        need_backups = False
+
+    if not need_backups:
+        need_backups = any(
+            _sidecar_looks_placeholder(key, wc.get(key)) or _df_row_count(wc.get(key)) == 0
+            for key in _PO_SIDECAR_KEYS
+        )
     if not need_backups and _inventory_sidecar_stale(wc.get("daily_inventory_history_df")):
         need_backups = True
     backups = load_po_sidecar_backups_from_disk() if need_backups else {}
@@ -229,6 +245,23 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
         if _df_row_count(best) != _df_row_count(sess_df) or _sidecar_looks_placeholder(key, sess_df):
             setattr(sess, key, best.copy())
             changed = True
+        if key == "daily_inventory_history_df":
+            try:
+                from .daily_inventory_history import (
+                    apply_daily_inventory_history_meta,
+                    read_daily_inventory_history_disk_meta,
+                )
+
+                warm_meta = _main._warm_cache.get(_main._DAILY_INV_META_WARM_KEY)
+                disk_meta = read_daily_inventory_history_disk_meta()
+                for meta in (warm_meta, disk_meta):
+                    if isinstance(meta, dict) and meta.get("daily_inventory_history_uploaded_at"):
+                        apply_daily_inventory_history_meta(sess, meta)
+                        if isinstance(warm_meta, dict):
+                            _main._warm_cache[_main._DAILY_INV_META_WARM_KEY] = dict(meta)
+                        break
+            except Exception:
+                _log.exception("apply daily inventory history meta failed")
         stats[key] = _df_row_count(best)
 
     if changed:

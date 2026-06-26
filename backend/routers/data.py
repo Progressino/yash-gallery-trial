@@ -3332,6 +3332,13 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
     except Exception:
         pass
 
+    try:
+        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
+
+        ensure_po_sidecars_hydrated(sess)
+    except Exception:
+        pass
+
     if not light:
         from ..services.daily_store import get_summary
 

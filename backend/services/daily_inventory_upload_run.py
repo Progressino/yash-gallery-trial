@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 from datetime import datetime
 from io import BytesIO
 from typing import Any
@@ -168,14 +167,11 @@ def background_daily_inventory_upload(
         result = execute_daily_inventory_upload(sess, raw, filename)
         sess.daily_inventory_upload_result = result
         if result.get("ok"):
+            # Shared disk + warm cache must be updated before we report success — otherwise
+            # other users keep stale May-era matrices from their PostgreSQL session restore.
+            _sync_sidecars()
             sess.daily_inventory_upload_status = "done"
             sess.daily_inventory_upload_message = result.get("message") or "Daily inventory loaded."
-            # Respond to polls immediately; warm-cache + PG save can take minutes.
-            threading.Thread(
-                target=_sync_sidecars,
-                daemon=True,
-                name=f"daily-inv-save-{session_id[:8]}",
-            ).start()
         else:
             sess.daily_inventory_upload_status = "error"
             sess.daily_inventory_upload_message = result.get("message") or "Upload failed."

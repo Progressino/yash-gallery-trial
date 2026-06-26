@@ -133,6 +133,54 @@ def _warm_frame_has_more_rows(warm_val, sess_val) -> bool:
     return len(warm_val) > len(sess_val)
 
 
+def _warm_sidecar_newer_than_session(key: str, warm_val, sess_val, sess) -> bool:
+    """True when shared warm cache has a fresher PO sidecar than this session."""
+    import pandas as pd
+
+    if not isinstance(warm_val, pd.DataFrame) or warm_val.empty:
+        return False
+    if key == "daily_inventory_history_df":
+        try:
+            from .services.daily_inventory_history import (
+                daily_inventory_meta_is_newer,
+                inventory_history_max_date,
+            )
+
+            warm_meta = (_warm_cache or {}).get(_DAILY_INV_META_WARM_KEY)
+            if daily_inventory_meta_is_newer(warm_meta if isinstance(warm_meta, dict) else None, sess):
+                return True
+            wc_max = inventory_history_max_date(warm_val)
+            cur_max = inventory_history_max_date(sess_val if isinstance(sess_val, pd.DataFrame) else None)
+            if wc_max is not None and (cur_max is None or wc_max > cur_max):
+                return True
+        except Exception:
+            pass
+        return False
+    if key == "existing_po_df":
+        try:
+            from .services.daily_inventory_history import upload_timestamp_epoch
+            from .services.existing_po import count_per_size_pipeline_skus, read_existing_po_disk_meta
+
+            warm_meta = (_warm_cache or {}).get(_EXISTING_PO_META_WARM_KEY)
+            disk_meta = read_existing_po_disk_meta()
+            sess_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
+            sess_at = upload_timestamp_epoch(str(getattr(sess, "existing_po_uploaded_at", "") or ""))
+            for meta in (warm_meta, disk_meta):
+                if not isinstance(meta, dict):
+                    continue
+                mg = int(meta.get("existing_po_generation") or 0)
+                ma = upload_timestamp_epoch(str(meta.get("existing_po_uploaded_at") or ""))
+                if mg > sess_gen or ma > sess_at + 0.5:
+                    return True
+            wc_per = count_per_size_pipeline_skus(warm_val)
+            cur_per = count_per_size_pipeline_skus(sess_val if isinstance(sess_val, pd.DataFrame) else None)
+            if wc_per > cur_per + 200:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def clear_warm_cache() -> None:
     """Drop app-level warm cache so the next load re-downloads from GitHub / rebuilds from SQLite."""
     global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
@@ -449,9 +497,24 @@ def restore_po_sidecars_from_warm(sess) -> bool:
         if wc is None or not hasattr(wc, "empty") or wc.empty:
             continue
         if key == "daily_inventory_history_df":
-            from .services.daily_inventory_history import merge_inventory_history
+            from .services.daily_inventory_history import inventory_history_max_date
 
-            if cur is not None and hasattr(cur, "empty") and not cur.empty:
+            wc_max = inventory_history_max_date(wc)
+            cur_max = inventory_history_max_date(cur) if cur is not None and hasattr(cur, "empty") and not cur.empty else None
+            if wc_max is not None and (cur_max is None or wc_max > cur_max):
+                setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
+                try:
+                    from .services.daily_inventory_history import apply_daily_inventory_history_meta
+
+                    warm_meta = _warm_cache.get(_DAILY_INV_META_WARM_KEY)
+                    if isinstance(warm_meta, dict):
+                        apply_daily_inventory_history_meta(sess, warm_meta)
+                except Exception:
+                    pass
+                changed = True
+            elif cur is not None and hasattr(cur, "empty") and not cur.empty:
+                from .services.daily_inventory_history import merge_inventory_history
+
                 merged = merge_inventory_history(cur, wc)
                 if len(merged) != len(cur) or not merged.equals(cur):
                     setattr(sess, key, merged)
@@ -603,6 +666,18 @@ def merge_po_optional_sheets_into_warm_cache(sess) -> None:
                     pass
         _warm_cache[key] = df.copy() if not df.empty else pd.DataFrame()
     try:
+        from .services.daily_inventory_history import (
+            daily_inventory_history_meta_bundle,
+            persist_daily_inventory_history_meta,
+        )
+
+        meta = daily_inventory_history_meta_bundle(sess)
+        if meta.get("daily_inventory_history_uploaded_at") or meta.get("daily_inventory_history_rows"):
+            _warm_cache[_DAILY_INV_META_WARM_KEY] = meta
+            persist_daily_inventory_history_meta(sess)
+    except Exception:
+        log.exception("persist daily_inventory_history meta after merge failed")
+    try:
         persist_po_sidecars_to_disk()
     except Exception:
         log.exception("persist_po_sidecars_to_disk after merge failed")
@@ -619,6 +694,7 @@ _INVENTORY_META_WARM_KEY = "inventory_session_meta"
 
 
 _EXISTING_PO_META_WARM_KEY = "existing_po_session_meta"
+_DAILY_INV_META_WARM_KEY = "daily_inventory_history_meta"
 _RETURN_OVERLAY_META_WARM_KEY = "return_overlay_meta"
 
 
@@ -1056,10 +1132,45 @@ def _top_up_po_sidecars_from_loose_disk() -> None:
         cur = _warm_cache.get(key)
         cur_rows = int(len(cur)) if cur is not None and hasattr(cur, "__len__") else 0
         disk_rows = int(len(val))
-        if cur_rows <= 0 or disk_rows > cur_rows:
+        replace = cur_rows <= 0 or disk_rows > cur_rows
+        if not replace and key == "daily_inventory_history_df":
+            try:
+                from .services.daily_inventory_history import inventory_history_max_date
+
+                cur_max = inventory_history_max_date(cur if hasattr(cur, "empty") else None)
+                disk_max = inventory_history_max_date(val)
+                if disk_max is not None and (cur_max is None or disk_max > cur_max):
+                    replace = True
+            except Exception:
+                pass
+        if replace:
             _warm_cache[key] = val
             topped += 1
             log.info("PO sidecar topped up %s from loose disk (%d -> %d rows)", key, cur_rows, disk_rows)
+    try:
+        from .services.daily_inventory_history import read_daily_inventory_history_disk_meta
+
+        disk_meta = read_daily_inventory_history_disk_meta()
+        if isinstance(disk_meta, dict) and disk_meta:
+            cur_meta = _warm_cache.get(_DAILY_INV_META_WARM_KEY)
+            cur_at = 0.0
+            disk_at = 0.0
+            try:
+                from .services.daily_inventory_history import upload_timestamp_epoch
+
+                cur_at = upload_timestamp_epoch(
+                    str((cur_meta or {}).get("daily_inventory_history_uploaded_at") or "")
+                )
+                disk_at = upload_timestamp_epoch(
+                    str(disk_meta.get("daily_inventory_history_uploaded_at") or "")
+                )
+            except Exception:
+                pass
+            if disk_at > cur_at + 0.5 or not isinstance(cur_meta, dict):
+                _warm_cache[_DAILY_INV_META_WARM_KEY] = dict(disk_meta)
+                topped += 1
+    except Exception:
+        log.exception("daily_inventory_history meta top-up from disk failed")
     try:
         from .services.existing_po import seed_existing_po_warm_cache_from_disk
 
@@ -2175,6 +2286,8 @@ def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
             wc_has_data = hasattr(wc, "empty") and not wc.empty
             cur_has_data = hasattr(cur, "empty") and not cur.empty
             if wc_has_data and not cur_has_data:
+                return True
+            if _warm_sidecar_newer_than_session(key, wc, cur, sess):
                 return True
             if _warm_frame_has_more_rows(wc, cur):
                 return True
