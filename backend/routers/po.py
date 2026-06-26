@@ -58,17 +58,30 @@ def _inventory_matrix_payload(
 ) -> dict:
     from ..services.daily_inventory_history import inventory_history_wide_matrix
 
-    df = _inventory_history_df_for_read(sess)
-    out = inventory_history_wide_matrix(
-        df,
-        q=q,
-        limit=min(max(1, int(limit)), 15000),
-        offset=max(0, int(offset)),
-        days=min(max(1, int(days)), 120),
-        end_date=end_date,
-    )
-    out["ok"] = True
-    return out
+    try:
+        df = _inventory_history_df_for_read(sess)
+        out = inventory_history_wide_matrix(
+            df,
+            q=q,
+            limit=min(max(1, int(limit)), 15000),
+            offset=max(0, int(offset)),
+            days=min(max(1, int(days)), 120),
+            end_date=end_date,
+        )
+        out["ok"] = True
+        return out
+    except Exception as e:
+        logging.getLogger(__name__).exception("inventory history matrix failed")
+        return {
+            "ok": False,
+            "loaded": False,
+            "message": str(e),
+            "dates": [],
+            "rows": [],
+            "total": 0,
+            "limit": int(limit),
+            "offset": int(offset),
+        }
 
 
 @router.get("/readiness")

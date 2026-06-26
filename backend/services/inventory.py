@@ -187,6 +187,23 @@ _SNAPSHOT_MARKETPLACE_COLS = (
 )
 
 
+def parse_fba_intransit_from_rar() -> bool:
+    """When false (default), FBA inbound TSVs inside inventory RAR are ignored unless uploaded separately."""
+    raw = os.environ.get("INVENTORY_PARSE_FBA_FROM_RAR", "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def strip_fba_intransit_unless_enabled(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop RAR-derived FBA in-transit when parsing is disabled (existing snapshots)."""
+    if parse_fba_intransit_from_rar() or df is None or getattr(df, "empty", True):
+        return df
+    if "FBA_InTransit" not in df.columns:
+        return df
+    out = df.copy()
+    out["FBA_InTransit"] = 0
+    return recompute_inventory_totals(out)
+
+
 def inventory_marketplace_breakdown(df: pd.DataFrame, debug: dict | None = None) -> list[dict[str, Any]]:
     """Per-channel totals for UI; ``included`` means column present with stock > 0."""
     dbg = debug or {}
@@ -205,6 +222,13 @@ def inventory_marketplace_breakdown(df: pd.DataFrame, debug: dict | None = None)
             "units": units,
             "skus": skus,
         })
+    if not parse_fba_intransit_from_rar():
+        for row in rows:
+            if row["key"] == "FBA_InTransit":
+                row["included"] = False
+                row["units"] = 0
+                row["skus"] = 0
+                row["note"] = "Skipped (upload FBA separately or set INVENTORY_PARSE_FBA_FROM_RAR=1)"
     # Parse-status hints from last upload debug
     parse_hints = {
         "Flipkart_Inventory": dbg.get("flipkart"),
@@ -358,11 +382,28 @@ def sync_inventory_snapshot_from_warm(sess: Any) -> None:
         for key in ("inventory_df_variant", "inventory_df_parent"):
             val = warm.get(key)
             if val is not None and hasattr(val, "empty") and not val.empty:
-                setattr(sess, key, val.copy() if hasattr(val, "copy") else val)
+                frame = val.copy() if hasattr(val, "copy") else val
+                if key == "inventory_df_variant":
+                    frame = strip_fba_intransit_unless_enabled(frame)
+                setattr(sess, key, frame)
         if warm_meta:
             apply_inventory_session_meta(sess, warm_meta)
+        try:
+            from .manual_intransit_sheet import ensure_manual_intransit_overlay_applied
+
+            ensure_manual_intransit_overlay_applied(sess)
+        except Exception:
+            pass
         refresh_inventory_api_cache(sess)
         return
+
+    if sess_has:
+        try:
+            from .manual_intransit_sheet import ensure_manual_intransit_overlay_applied
+
+            ensure_manual_intransit_overlay_applied(sess)
+        except Exception:
+            pass
 
     if sess_has and (not warm_has or sess_at > warm_at + 1e-6):
         try:
@@ -1382,9 +1423,16 @@ def load_inventory_consolidated(
 
             part, fba_dbg = _aggregate_fba_intransit_tsvs(extracted["fba_tsvs"], mapping)
             debug.update(fba_dbg)
-            if not part.empty:
-                inv_dfs.append(part)
-                debug["fba"] = f"{len(part)} SKUs"
+            if parse_fba_intransit_from_rar():
+                if not part.empty:
+                    inv_dfs.append(part)
+                    debug["fba"] = f"{len(part)} SKUs"
+            elif extracted["fba_tsvs"]:
+                debug["fba"] = (
+                    f"{len(extracted['fba_tsvs'])} inbound file(s) in RAR skipped "
+                    "(set INVENTORY_PARSE_FBA_FROM_RAR=1 to include)"
+                )
+                debug["fba_skipped_from_rar"] = True
 
             myn_blobs, myn_drop = _dedupe_identical_byte_payloads(extracted["myntra_csvs"])
             debug["myntra_rar_deduped"] = myn_drop

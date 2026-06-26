@@ -610,6 +610,12 @@ def merge_inventory_into_warm_cache(sess) -> None:
     global _warm_cache, _warm_cache_loaded_at
     if not _warm_cache:
         _warm_cache = {}
+    try:
+        from .services.manual_intransit_sheet import ensure_manual_intransit_overlay_applied
+
+        ensure_manual_intransit_overlay_applied(sess)
+    except Exception:
+        pass
     for key in _INVENTORY_WARM_KEYS:
         df = getattr(sess, key, None)
         if df is None or not hasattr(df, "empty") or df.empty:
@@ -1202,6 +1208,7 @@ def _warm_cache_loose_parquets_from_dir(disk_dir: "Path") -> dict:
         "sku_status_lead_df",
         "po_raise_ledger_df",
         "po_return_overlay_df",
+        "manual_intransit_overlay_df",
     ):
         p = disk_dir / f"{key}.parquet"
         if p.is_file():

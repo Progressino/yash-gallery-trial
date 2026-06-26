@@ -386,7 +386,7 @@ export default function Inventory() {
                   <p className="mt-0.5 tabular-nums">
                     {m.included
                       ? `${m.units.toLocaleString()} units · ${m.skus.toLocaleString()} SKUs`
-                      : 'Not in upload'}
+                      : (m as { note?: string }).note || 'Not in upload'}
                   </p>
                 </div>
               ))}

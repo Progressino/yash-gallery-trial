@@ -337,6 +337,27 @@ def apply_manual_intransit_import(
     }
 
 
+def ensure_manual_intransit_overlay_applied(sess) -> bool:
+    """Restore manual in-transit sheet from warm cache/disk and merge into live inventory."""
+    overlay = getattr(sess, "manual_intransit_overlay_df", None)
+    if overlay is None or getattr(overlay, "empty", True):
+        try:
+            import backend.main as _main
+            from .po_session_hydrate import ensure_po_sidecars_hydrated
+
+            _main.bootstrap_warm_cache_if_empty()
+            _main._top_up_po_sidecars_from_loose_disk()
+            _main.restore_po_sidecars_from_warm(sess)
+            ensure_po_sidecars_hydrated(sess)
+        except Exception:
+            pass
+        overlay = getattr(sess, "manual_intransit_overlay_df", None)
+    if overlay is None or getattr(overlay, "empty", True):
+        return False
+    apply_manual_intransit_overlay_to_inventory(sess)
+    return True
+
+
 def apply_manual_intransit_overlay_to_inventory(sess) -> None:
     """Merge manual in-transit / not-in-inventory columns into the live inventory snapshot."""
     inv = getattr(sess, "inventory_df_variant", None)

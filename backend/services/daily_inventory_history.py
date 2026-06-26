@@ -881,20 +881,24 @@ def inventory_history_wide_matrix(
     dates_sorted = sorted(work["Date"].unique())
     date_strs = [str(pd.Timestamp(d).date()) for d in dates_sorted]
 
-    pivot = work.pivot(index="OMS_SKU", columns="Date", values="Qty")
-    pivot = pivot.reindex(columns=dates_sorted).fillna(0.0)
-    pivot = pivot.sort_index()
-    total = int(len(pivot))
+    sku_list = sorted(work["OMS_SKU"].astype(str).unique())
+    total = int(len(sku_list))
     start = max(0, int(offset))
     end = start + max(1, int(limit))
-    page = pivot.iloc[start:end]
+    page_skus = sku_list[start:end]
+    if not len(page_skus):
+        return {**empty, "loaded": True, "dates": date_strs, "total": total}
+
+    page_work = work[work["OMS_SKU"].isin(page_skus)]
+    pivot = page_work.pivot(index="OMS_SKU", columns="Date", values="Qty")
+    pivot = pivot.reindex(index=page_skus, columns=dates_sorted).fillna(0.0)
 
     rows = [
         {
             "sku": str(sku),
             "qtys": [float(row.get(d, 0.0) or 0.0) for d in dates_sorted],
         }
-        for sku, row in page.iterrows()
+        for sku, row in pivot.iterrows()
     ]
     return {
         "loaded": True,
