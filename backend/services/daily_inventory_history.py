@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import io
 import os
-from datetime import datetime
+import re
+from datetime import date, datetime
 from typing import BinaryIO, Optional
 from zoneinfo import ZoneInfo
 
@@ -38,6 +39,55 @@ _DEFAULT_VIEW_DAYS = int(os.environ.get("DAILY_INV_VIEW_DAYS", "30"))
 
 
 _TALL_COLS = ["OMS_SKU", "Date", "Qty"]
+
+# Yash wide-matrix exports: ``28-5-26`` = 28 May 2026 (day-month-year).
+_DMY_HEADER_RE = re.compile(r"^(\d{1,2})-(\d{1,2})-(\d{2,4})$")
+
+
+def _parse_inventory_snapshot_date(value) -> pd.Timestamp | None:
+    """Parse snapshot dates from wide-matrix headers (D-M-YY) and other exports."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        return pd.Timestamp(value).normalize()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        fv = float(value)
+        if 40_000 <= fv <= 60_000:
+            try:
+                ts = pd.to_datetime(fv, unit="D", origin="1899-12-30", errors="coerce")
+                if ts is not None and pd.notna(ts) and 2015 <= int(ts.year) <= 2035:
+                    return pd.Timestamp(ts).normalize()
+            except Exception:
+                pass
+        return None
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "none", "nat", "days"}:
+        return None
+    m = _DMY_HEADER_RE.match(s)
+    if m:
+        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if year < 100:
+            year += 2000
+        try:
+            ts = pd.Timestamp(year=year, month=month, day=day).normalize()
+            if 2015 <= int(ts.year) <= 2035:
+                return ts
+        except ValueError:
+            return None
+    if re.match(r"^\d{4}-\d{2}-\d{2}", s):
+        try:
+            ts = pd.to_datetime(s[:10], errors="coerce")
+            if ts is not None and pd.notna(ts) and 2015 <= int(ts.year) <= 2035:
+                return pd.Timestamp(ts).normalize()
+        except Exception:
+            return None
+    try:
+        ts = pd.to_datetime(s, errors="coerce")
+        if ts is not None and pd.notna(ts) and 2015 <= int(ts.year) <= 2035:
+            return pd.Timestamp(ts).normalize()
+    except Exception:
+        return None
+    return None
 
 
 def _norm(s) -> str:
@@ -61,30 +111,7 @@ def _looks_like_sku_header(value) -> bool:
 
 
 def _is_date_value(v) -> bool:
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return False
-    if isinstance(v, (pd.Timestamp,)):
-        return True
-    # Wide inventory sheets use integer column headers for on-hand totals (e.g. 150).
-    # Those must not be treated as Excel serial dates.
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
-        fv = float(v)
-        if fv < 40_000 or fv > 60_000:
-            return False
-        try:
-            ts = pd.to_datetime(fv, unit="D", origin="1899-12-30", errors="coerce")
-            if ts is None or pd.isna(ts):
-                return False
-            return 2015 <= int(ts.year) <= 2035
-        except Exception:
-            return False
-    try:
-        ts = pd.to_datetime(v, errors="coerce")
-        if ts is None or pd.isna(ts):
-            return False
-        return 2015 <= int(ts.year) <= 2035
-    except Exception:
-        return False
+    return _parse_inventory_snapshot_date(v) is not None
 
 
 _VARIANT_LABELS = {"itemskucode", "skucode", "sellersku", "stylesku"}
@@ -153,12 +180,9 @@ def _row_date_hints(df: pd.DataFrame, row_idx: int, skip_cols: set[int]) -> dict
         if i in skip_cols:
             continue
         if _is_date_value(val):
-            try:
-                ts = pd.to_datetime(val, errors="coerce")
-                if pd.notna(ts):
-                    out[i] = pd.Timestamp(ts).normalize()
-            except Exception:
-                pass
+            ts = _parse_inventory_snapshot_date(val)
+            if ts is not None:
+                out[i] = ts
     return out
 
 
@@ -182,12 +206,9 @@ def _build_column_date_map(
         if i in skip:
             continue
         if isinstance(col, (pd.Timestamp,)) or _is_date_value(col):
-            try:
-                ts = pd.to_datetime(col, errors="coerce")
-                if pd.notna(ts):
-                    header_dates[i] = pd.Timestamp(ts).normalize()
-            except Exception:
-                pass
+            ts = _parse_inventory_snapshot_date(col)
+            if ts is not None:
+                header_dates[i] = ts
 
     row_maps: list[dict[int, pd.Timestamp]] = []
     for ridx in range(min(4, len(df))):

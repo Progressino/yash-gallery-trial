@@ -80,13 +80,22 @@ def execute_daily_inventory_upload(
             "column 2 = parent (optional), then daily snapshot columns whose first row is the date.",
         }
 
-    df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS)
-    trim_note = f"Kept last {_MAX_HISTORY_DAYS} calendar days ending today (IST)."
+    from .daily_inventory_history import inventory_history_max_date
+
+    sheet_max = inventory_history_max_date(df)
+    end_anchor = str(sheet_max.date()) if sheet_max is not None else None
+    df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS, end_date=end_anchor)
+    trim_note = (
+        f"Kept last {_MAX_HISTORY_DAYS} calendar days ending "
+        f"{end_anchor or 'today (IST)'}."
+    )
 
     existing = getattr(sess, "daily_inventory_history_df", None)
     if existing is not None and not existing.empty:
         df = merge_inventory_history(existing, df)
-        df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS)
+        sheet_max = inventory_history_max_date(df)
+        end_anchor = str(sheet_max.date()) if sheet_max is not None else end_anchor
+        df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS, end_date=end_anchor)
         trim_note = (
             f"Merged upload; kept last {_MAX_HISTORY_DAYS} days ending today (IST)."
         )
