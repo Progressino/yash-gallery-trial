@@ -13,7 +13,7 @@ from backend.session import AppSession
 
 
 def test_quarterly_cache_schema_bumped():
-    assert quarterly_cache_key(False, 8)[0] == 8
+    assert quarterly_cache_key(False, 8)[0] == 9
 
 
 def test_normalize_quarterly_payload_pads_missing_columns():
@@ -87,6 +87,10 @@ def test_short_session_span_skips_partial_quarterly_and_streams(monkeypatch):
         }
 
     monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._ensure_session_operational_frames",
+        lambda _s: None,
+    )
+    monkeypatch.setattr(
         "backend.services.po_quarterly_warmup._build_via_streaming",
         lambda *a, **k: _fake_stream(),
     )
@@ -95,13 +99,73 @@ def test_short_session_span_skips_partial_quarterly_and_streams(monkeypatch):
         lambda _s: 30,
     )
     monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup.sales_df_span_days",
+        lambda _df: 30,
+    )
+    monkeypatch.setattr(
         "backend.services.po_quarterly_warmup._session_has_platform_rows",
         lambda _s: True,
+    )
+    monkeypatch.setattr(
+        "backend.services.platform_session_window.session_platform_shorter_than_tier3",
+        lambda _s: False,
     )
 
     out = build_quarterly_payload(sess, n_quarters=8)
     assert streamed["called"] is True
     assert out["rows"][0]["OMS_SKU"] == "STREAM-SKU"
+
+
+def test_tier3_deeper_than_session_uses_streaming(monkeypatch):
+    """When Tier-3 has older dates than session frames, stream full history."""
+    from backend.session import AppSession
+
+    sess = AppSession()
+    sess.mtr_df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-06-01", "2026-06-01"]),
+            "SKU": ["165YKRED-M", "165YKRED-M"],
+            "Transaction_Type": ["Shipment", "Shipment"],
+            "Quantity": [10, 20],
+        }
+    )
+    streamed = {"called": False}
+
+    def _fake_stream(*a, **k):
+        streamed["called"] = True
+        return {
+            "loaded": True,
+            "columns": ["OMS_SKU", "Oct-Dec 2024", "Apr-Jun 2026"],
+            "rows": [
+                {
+                    "OMS_SKU": "165YKRED-M",
+                    "Oct-Dec 2024": 400,
+                    "Apr-Jun 2026": 1200,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._build_via_streaming",
+        lambda *a, **k: _fake_stream(),
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup.platform_frames_span_days",
+        lambda _s: 800,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._session_has_platform_rows",
+        lambda _s: True,
+    )
+    monkeypatch.setattr(
+        "backend.services.platform_session_window.session_platform_shorter_than_tier3",
+        lambda _s: True,
+    )
+
+    out = build_quarterly_payload(sess, n_quarters=8)
+    assert streamed["called"] is True
+    row = out["rows"][0]
+    assert int(row["Oct-Dec 2024"]) == 400
 
 
 def test_hydrate_is_noop(monkeypatch):

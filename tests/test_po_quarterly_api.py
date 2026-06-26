@@ -13,8 +13,8 @@ from backend.services.po_quarterly_warmup import (
 )
 
 
-def test_quarterly_cache_schema_v8():
-    assert quarterly_cache_key(False, 8)[0] == QUARTERLY_CACHE_SCHEMA == 8
+def test_quarterly_cache_schema_v9():
+    assert quarterly_cache_key(False, 8)[0] == QUARTERLY_CACHE_SCHEMA == 9
 
 
 def test_quarterly_report_window_covers_eight_quarters():
@@ -27,6 +27,10 @@ def test_quarterly_report_window_covers_eight_quarters():
 def test_po_quarterly_returns_cached_without_rebuild(client, monkeypatch):
     from backend.session import store
 
+    monkeypatch.setattr(
+        "backend.main.try_attach_shared_frames_fast",
+        lambda _s: None,
+    )
     monkeypatch.setattr(
         "backend.services.po_quarterly_warmup.try_build_quarterly_payload_sync",
         lambda *a, **k: pytest.fail("should not rebuild when cache warm"),

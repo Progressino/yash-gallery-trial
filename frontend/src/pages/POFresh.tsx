@@ -496,13 +496,19 @@ function POFreshInner() {
 
   const dashboardParams = useMemo(() => buildBody(params), [params])
 
-  const quarterRowCount = quarterly?.rows?.length ?? 0
+  const filteredQuarterlyRows = useMemo(() => {
+    const rows = quarterly?.rows ?? []
+    const q = search.trim().toLowerCase()
+    if (!q) return rows
+    return rows.filter(r => String(r.OMS_SKU ?? '').toLowerCase().includes(q))
+  }, [quarterly?.rows, search])
+
+  const quarterRowCount = filteredQuarterlyRows.length
   const quarterPageCount = Math.max(1, Math.ceil(quarterRowCount / PAGE_SIZE))
   const quarterPageRows = useMemo(() => {
-    const rows = quarterly?.rows ?? []
     const start = quarterlyPage * PAGE_SIZE
-    return rows.slice(start, start + PAGE_SIZE)
-  }, [quarterly?.rows, quarterlyPage])
+    return filteredQuarterlyRows.slice(start, start + PAGE_SIZE)
+  }, [filteredQuarterlyRows, quarterlyPage])
 
   const tableCols = useMemo(
     () => visiblePoColumns(result?.columns, quarterCols),
@@ -1703,7 +1709,19 @@ function SalesWindowBanner({
           {result.summary?.new_po_qty_sum != null && (
             <>
               {' '}
-              · server total <strong>{result.summary.new_po_qty_sum.toLocaleString()}</strong> PO units
+              · new PO to raise{' '}
+              <strong>{result.summary.new_po_qty_sum.toLocaleString()}</strong> units
+              {result.summary.pipeline_qty_sum != null && result.summary.pipeline_qty_sum > 0 && (
+                <>
+                  {' '}
+                  <span className="opacity-80">
+                    (Existing PO pipeline already loaded:{' '}
+                    <strong>{result.summary.pipeline_qty_sum.toLocaleString()}</strong> units on{' '}
+                    {result.summary.pipeline_sku_count?.toLocaleString() ?? '—'} SKUs — not added
+                    again)
+                  </span>
+                </>
+              )}
             </>
           )}
         </span>

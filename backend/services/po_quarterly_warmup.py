@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 8
+QUARTERLY_CACHE_SCHEMA = 9
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
@@ -261,11 +261,33 @@ def build_quarterly_payload(
     """Never merge Tier-3 into session — warm-cache frames or streaming aggregate only."""
     _ensure_session_operational_frames(sess)
 
+    from .platform_session_window import session_platform_shorter_than_tier3
+
     min_span = int(n_quarters) * 92 + 45
     plat_span = platform_frames_span_days(sess)
     has_plat = _session_has_platform_rows(sess)
     sales_span = sales_df_span_days(getattr(sess, "sales_df", None))
     span_ok = plat_span >= min_span - 60 or sales_span >= min_span - 60
+    tier3_deeper = session_platform_shorter_than_tier3(sess)
+
+    # Tier-3 SQLite / daily uploads often hold older FY quarters than the warm-cache
+    # platform copy in memory — streaming avoids zeros for top sellers in 2024/2025.
+    if tier3_deeper:
+        if progress_cb:
+            progress_cb(
+                12,
+                "Session platform history is shallow — streaming full Tier-3 uploads…",
+            )
+        start, end = quarterly_report_window(n_quarters)
+        mapping = sess.sku_mapping or {}
+        return _build_via_streaming(
+            mapping,
+            start,
+            end,
+            group_by_parent=group_by_parent,
+            n_quarters=n_quarters,
+            progress_cb=progress_cb,
+        )
 
     if has_plat and plat_span >= min_span - 60:
         if progress_cb:

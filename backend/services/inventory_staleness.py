@@ -68,24 +68,6 @@ def build_inventory_staleness(
     ref = (reference_date or today_ist_iso()).strip()[:10]
     warnings: list[str] = []
 
-    snap_lag = None
-    snap_stale = False
-    if inventory_loaded:
-        snap_lag = data_lag_days(ref, inventory_snapshot_date or "")
-        snap_stale = data_is_stale(
-            ref,
-            inventory_snapshot_date,
-            max_expected_lag_days=max_expected_lag_days,
-        )
-        if snap_stale:
-            label = inventory_snapshot_date or "unknown"
-            warnings.append(
-                f"Daily snapshot inventory is from {label} "
-                f"({snap_lag or '?'} day(s) behind today). "
-                "Upload today's OMS + marketplace inventory on Upload → Daily uploads "
-                "so PO stock and cover days stay accurate."
-            )
-
     hist_lag = None
     hist_stale = False
     if daily_inventory_history_loaded:
@@ -103,7 +85,36 @@ def build_inventory_staleness(
                 "Re-upload the wide inventory history Excel (Upload → History & setup) "
                 "or update the matrix — Eff_Days in PO may be wrong without fresh history."
             )
-    elif inventory_loaded:
+
+    snap_lag = None
+    snap_stale = False
+    if inventory_loaded:
+        snap_lag = data_lag_days(ref, inventory_snapshot_date or "")
+        snap_stale = data_is_stale(
+            ref,
+            inventory_snapshot_date,
+            max_expected_lag_days=max_expected_lag_days,
+        )
+        # When the wide history matrix is current, PO stock/Eff_Days do not depend on
+        # a separate daily snapshot date — avoid a misleading "unknown" banner.
+        if (
+            snap_stale
+            and not inventory_snapshot_date
+            and daily_inventory_history_loaded
+            and daily_inventory_history_max_date
+            and not hist_stale
+        ):
+            snap_stale = False
+            snap_lag = hist_lag
+        if snap_stale:
+            label = inventory_snapshot_date or "unknown"
+            warnings.append(
+                f"Daily snapshot inventory is from {label} "
+                f"({snap_lag or '?'} day(s) behind today). "
+                "Upload today's OMS + marketplace inventory on Upload → Daily uploads "
+                "so PO stock and cover days stay accurate."
+            )
+    if inventory_loaded and not daily_inventory_history_loaded:
         warnings.append(
             "No daily inventory history matrix loaded. Upload the wide "
             "'Daily Inventory History' Excel (same format as your OMS/Amazon sheets) "

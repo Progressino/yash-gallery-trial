@@ -1827,11 +1827,13 @@ def calculate_po_base(
             bundled_pipeline_children_in_po,
             coalesce_pipeline_columns_on_po_df,
             existing_po_merge_key,
+            fan_bundled_demand_to_sheet_children,
             is_bundled_size_range_sku,
             per_size_pipeline_covered_by_bundled_po_row,
             rollup_pipeline_onto_bundled_rows,
             unbundle_inventory_rows_for_existing_po,
             zero_bundled_pipeline_when_children_carry_qty,
+            zero_bundled_po_when_sheet_children_present,
         )
 
         _breakdown_cols = [
@@ -1869,6 +1871,54 @@ def calculate_po_base(
             )
             po_df = coalesce_pipeline_columns_on_po_df(po_df, _ep_prepared)
             po_df = zero_bundled_pipeline_when_children_carry_qty(po_df, _ep_prepared)
+            po_df, _fan_touched = fan_bundled_demand_to_sheet_children(
+                po_df,
+                _ep_prepared,
+                _breakdown_cols,
+                canonical_fn=existing_po_merge_key,
+            )
+            # Recompute ADS only on rows touched by bundled→per-size fan-out.
+            if _fan_touched:
+                _fan_idx = po_df.index.isin(list(_fan_touched))
+                _has_eff = pd.to_numeric(po_df["Eff_Days"], errors="coerce").fillna(0) > 0
+                _fan_active = _fan_idx & _has_eff
+                if _fan_active.any():
+                    _ads_demand = (
+                        pd.to_numeric(po_df.loc[_fan_active, "Net_Units"], errors="coerce").fillna(0)
+                        if demand_basis == "Net"
+                        else pd.to_numeric(po_df.loc[_fan_active, "Sold_Units"], errors="coerce").fillna(0)
+                    )
+                    po_df.loc[_fan_active, "Recent_ADS"] = (
+                        _ads_demand
+                        / pd.to_numeric(po_df.loc[_fan_active, "Eff_Days"], errors="coerce").clip(lower=1)
+                    ).round(3)
+                    _recent = pd.to_numeric(po_df["Recent_ADS"], errors="coerce").fillna(0.0)
+                    _ly = pd.to_numeric(po_df["LY_ADS"], errors="coerce").fillna(0.0)
+                    _seasonal = pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0)
+                    _flat = pd.to_numeric(po_df["Flat30_ADS"], errors="coerce").fillna(0.0)
+                    if use_seasonality:
+                        _prim = np.where(
+                            _ly > 0,
+                            (_recent * (1 - seasonal_weight)) + (_ly * seasonal_weight),
+                            _recent,
+                        )
+                    elif use_ly_fallback:
+                        _prim = np.maximum(_recent, _ly)
+                    else:
+                        _prim = _recent
+                    po_df.loc[_fan_active, "ADS"] = (
+                        np.maximum.reduce(
+                            [
+                                pd.Series(_prim, index=po_df.index).loc[_fan_active],
+                                _seasonal.loc[_fan_active],
+                                _flat.loc[_fan_active],
+                            ]
+                        )
+                    ).round(3)
+                _fan_zero = _fan_idx & ~_has_eff
+                if _fan_zero.any():
+                    po_df.loc[_fan_zero, "Recent_ADS"] = 0.0
+                    po_df.loc[_fan_zero, "ADS"] = 0.0
             # Unbundled per-size rows keep pipeline qty only — not parent/bundled Eff_Days.
             # Do not wipe inventory-based active days (e.g. 1361YKBLUE-XL with 8/30 in-stock
             # days) — only clear inherited Eff_Days when there is no demand and no history.
@@ -2437,6 +2487,16 @@ def calculate_po_base(
             br.eq("") | br.eq("nan"),
             _RECOMMEND_MSG,
             br + "; " + _RECOMMEND_MSG,
+        )
+
+    if not _ep_prepared.empty and "PO_Pipeline_Total" in _ep_prepared.columns:
+        from .existing_po import existing_po_merge_key, zero_bundled_po_when_sheet_children_present
+
+        po_df = zero_bundled_po_when_sheet_children_present(
+            po_df,
+            _ep_prepared,
+            _breakdown_cols if _breakdown_cols else None,
+            canonical_fn=existing_po_merge_key,
         )
 
     # SKU Status sheet rules (after every automated PO_Qty adjustment):

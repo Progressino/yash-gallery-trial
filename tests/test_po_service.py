@@ -752,6 +752,61 @@ def test_calculate_po_dedupes_bundled_sku_after_pipeline_merge():
     assert int(po.loc[po["OMS_SKU"] == "1917YKBLUE-5XL", "PO_Pipeline_Total"].iloc[0]) == 77
 
 
+def test_bundled_listing_po_zeroed_when_sheet_has_per_size_pipeline():
+    """Sales on 4XL-5XL listing must not raise PO on the band when 4XL/5XL are on the sheet."""
+    days = pd.date_range("2026-05-28", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1916YKRED-4XL-5XL"] * len(days),
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * len(days),
+            "Quantity": [7] * len(days),
+            "Units_Effective": [7] * len(days),
+            "Source": ["Amazon"] * len(days),
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["1916YKRED-4XL-5XL"],
+            "Total_Inventory": [10],
+        }
+    )
+    existing_po = pd.DataFrame(
+        {
+            "OMS_SKU": ["1916YKRED-4XL", "1916YKRED-5XL"],
+            "PO_Pipeline_Total": [440, 440],
+            "Balance_to_Dispatch": [440, 440],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=60,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        existing_po_df=existing_po,
+        use_seasonality=True,
+        use_ly_fallback=True,
+        enforce_lead_time_release_gate=True,
+    )
+    bundled = po.loc[po["OMS_SKU"] == "1916YKRED-4XL-5XL"].iloc[0]
+    assert int(bundled["PO_Qty"]) == 0
+    assert int(bundled["Gross_PO_Qty"]) == 0
+    assert int(bundled["Net_Units"]) == 0
+    xl4 = po.loc[po["OMS_SKU"] == "1916YKRED-4XL"].iloc[0]
+    xl5 = po.loc[po["OMS_SKU"] == "1916YKRED-5XL"].iloc[0]
+    assert int(xl4["Net_Units"]) > 0
+    assert int(xl5["Net_Units"]) > 0
+    assert int(xl4["PO_Pipeline_Total"]) == 440
+    assert int(xl5["PO_Pipeline_Total"]) == 440
+    # Heavy pipeline already covers demand — no fresh PO on either size.
+    assert int(xl4["PO_Qty"]) == 0
+    assert int(xl5["PO_Qty"]) == 0
+    assert int(po["PO_Qty"].sum()) < 500
+
+
 def test_bundled_and_per_size_pipeline_not_double_counted():
     """When sheet + inventory list both band and per-size rows, count pipeline once."""
     days = pd.date_range("2026-05-01", periods=20, freq="D")

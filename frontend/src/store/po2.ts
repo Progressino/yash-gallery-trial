@@ -25,6 +25,8 @@ export interface PO2Result {
   summary?: {
     new_po_qty_sum?: number
     new_po_sku_count?: number
+    pipeline_qty_sum?: number
+    pipeline_sku_count?: number
   }
 }
 

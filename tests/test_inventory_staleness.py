@@ -35,6 +35,20 @@ def test_build_inventory_staleness_snapshot_and_matrix():
     assert len(out["inventory_staleness_warnings"]) >= 2
 
 
+def test_snapshot_not_stale_when_history_matrix_current():
+    """Missing snapshot date must not warn when history matrix is through yesterday."""
+    out = build_inventory_staleness(
+        reference_date="2026-06-26",
+        inventory_loaded=True,
+        inventory_snapshot_date=None,
+        daily_inventory_history_loaded=True,
+        daily_inventory_history_max_date="2026-06-25",
+    )
+    assert out["inventory_snapshot_stale"] is False
+    assert out["daily_inventory_history_stale"] is False
+    assert out["inventory_staleness_warnings"] == []
+
+
 def test_build_inventory_staleness_missing_matrix():
     out = build_inventory_staleness(
         reference_date="2026-06-23",
@@ -43,6 +57,20 @@ def test_build_inventory_staleness_missing_matrix():
         daily_inventory_history_loaded=False,
     )
     assert any("history matrix" in w.lower() for w in out["inventory_staleness_warnings"])
+
+
+def test_build_inventory_staleness_snapshot_unknown_but_history_current():
+    """When wide history matrix is through yesterday, do not warn about missing snapshot date."""
+    out = build_inventory_staleness(
+        reference_date="2026-06-26",
+        inventory_loaded=True,
+        inventory_snapshot_date=None,
+        daily_inventory_history_loaded=True,
+        daily_inventory_history_max_date="2026-06-25",
+    )
+    assert out["inventory_snapshot_stale"] is False
+    assert out["daily_inventory_history_stale"] is False
+    assert out["inventory_staleness_warnings"] == []
 
 
 def test_inventory_history_browse_helpers():

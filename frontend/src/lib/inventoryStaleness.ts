@@ -30,25 +30,43 @@ export function buildInventoryStalenessWarnings(
   referenceIso = todayIsoIST(),
 ): string[] {
   if (cov.inventory_staleness_warnings?.length) {
-    return [...cov.inventory_staleness_warnings]
+    const histMax = cov.daily_inventory_history_max_date || ''
+    const histCurrent =
+      cov.daily_inventory_history &&
+      histMax &&
+      !inventoryDataGapNeedsWarning(referenceIso, histMax)
+    const filtered = cov.inventory_staleness_warnings.filter(w => {
+      if (!histCurrent) return true
+      return !/snapshot inventory is from unknown/i.test(w)
+    })
+    if (filtered.length) return filtered
   }
   const warnings: string[] = []
-  if (cov.inventory && cov.inventory_snapshot_date) {
-    if (inventoryDataGapNeedsWarning(referenceIso, cov.inventory_snapshot_date)) {
+  const histMax = cov.daily_inventory_history_max_date || ''
+  const histStale =
+    cov.daily_inventory_history &&
+    histMax &&
+    inventoryDataGapNeedsWarning(referenceIso, histMax)
+  if (cov.daily_inventory_history && histMax) {
+    if (histStale) {
       warnings.push(
-        `Daily snapshot inventory is from ${cov.inventory_snapshot_date}. Upload today's file on Upload → Daily uploads.`,
-      )
-    }
-  }
-  if (cov.daily_inventory_history && cov.daily_inventory_history_max_date) {
-    if (inventoryDataGapNeedsWarning(referenceIso, cov.daily_inventory_history_max_date)) {
-      warnings.push(
-        `Inventory history matrix ends ${cov.daily_inventory_history_max_date}. Re-upload the wide Excel on Upload → History & setup — Eff_Days in PO may be wrong.`,
+        `Inventory history matrix ends ${histMax}. Re-upload the wide Excel on Upload → History & setup — Eff_Days in PO may be wrong.`,
       )
     }
   } else if (cov.inventory && !cov.daily_inventory_history) {
     warnings.push(
       'No daily inventory history matrix loaded. Upload the wide Inventory History Excel (OMS + Amazon sheets) for accurate Eff_Days in PO.',
+    )
+  }
+  if (cov.inventory && cov.inventory_snapshot_date && !histStale) {
+    if (inventoryDataGapNeedsWarning(referenceIso, cov.inventory_snapshot_date)) {
+      warnings.push(
+        `Daily snapshot inventory is from ${cov.inventory_snapshot_date}. Upload today's file on Upload → Daily uploads.`,
+      )
+    }
+  } else if (cov.inventory && !cov.inventory_snapshot_date && !cov.daily_inventory_history && !histMax) {
+    warnings.push(
+      "Daily snapshot inventory date is unknown. Upload today's OMS + marketplace inventory on Upload → Daily uploads.",
     )
   }
   return warnings

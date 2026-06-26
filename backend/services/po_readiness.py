@@ -260,10 +260,21 @@ def augment_coverage(sess, cov: CoverageResponse, *, light: bool = False) -> Cov
 
 
 def _attach_inventory_staleness(sess, data: dict) -> None:
+    from .daily_inventory_history import read_daily_inventory_history_disk_meta
     from .inventory_staleness import build_inventory_staleness, daily_inventory_history_bounds
 
     hist_df = getattr(sess, "daily_inventory_history_df", None)
     min_d, max_d = daily_inventory_history_bounds(hist_df)
+    hist_loaded = bool(data.get("daily_inventory_history")) or bool(max_d)
+    if not max_d:
+        disk_meta = read_daily_inventory_history_disk_meta()
+        if isinstance(disk_meta, dict):
+            max_d = str(disk_meta.get("daily_inventory_history_max_date") or "").strip()[:10]
+            if not min_d:
+                min_d = str(disk_meta.get("daily_inventory_history_min_date") or "").strip()[:10]
+            if max_d or int(disk_meta.get("daily_inventory_history_rows") or 0) > 0:
+                hist_loaded = True
+                data["daily_inventory_history"] = True
     data["daily_inventory_history_min_date"] = min_d or None
     data["daily_inventory_history_max_date"] = max_d or None
     data["daily_inventory_history_uploaded_at"] = (
@@ -272,10 +283,14 @@ def _attach_inventory_staleness(sess, data: dict) -> None:
     data["daily_inventory_history_filename"] = (
         getattr(sess, "daily_inventory_history_filename", "") or None
     )
+    snap_date = data.get("inventory_snapshot_date")
+    if not snap_date and max_d and hist_loaded:
+        snap_date = max_d
+        data["inventory_snapshot_date"] = max_d
     stale = build_inventory_staleness(
         inventory_loaded=bool(data.get("inventory")),
-        inventory_snapshot_date=data.get("inventory_snapshot_date"),
-        daily_inventory_history_loaded=bool(data.get("daily_inventory_history")),
+        inventory_snapshot_date=snap_date,
+        daily_inventory_history_loaded=hist_loaded,
         daily_inventory_history_max_date=max_d or None,
     )
     data.update(stale)

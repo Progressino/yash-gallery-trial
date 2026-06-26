@@ -1288,6 +1288,206 @@ def bundled_pipeline_children_in_po(bundled_sku: str, ep: pd.DataFrame, po_keys:
     return saw_child_pipeline
 
 
+_BUNDLED_FAN_INTEGER_COLS = (
+    "Sold_Units",
+    "Return_Units",
+    "Net_Units",
+    "ADS_Sold_Units",
+    "ADS_Net_Units",
+    "Ship_Units_150d",
+)
+_BUNDLED_FAN_FLOAT_COLS = (
+    "Recent_ADS",
+    "LY_ADS",
+    "Seasonal_Month_ADS",
+    "Flat30_ADS",
+    "ADS",
+)
+
+
+def _fan_metric_shares(row: pd.Series, n_children: int) -> dict[str, list[float | int]]:
+    """Split bundled-row demand metrics across per-size children (sum preserved)."""
+    shares: dict[str, list[float | int]] = {}
+    for col in _BUNDLED_FAN_INTEGER_COLS:
+        if col not in row.index:
+            continue
+        val = int(pd.to_numeric(row.get(col), errors="coerce") or 0)
+        shares[col] = _split_integer_qty(val, n_children)
+    for col in _BUNDLED_FAN_FLOAT_COLS:
+        if col not in row.index:
+            continue
+        val = float(pd.to_numeric(row.get(col), errors="coerce") or 0)
+        shares[col] = [val / n_children] * n_children
+    eff = float(pd.to_numeric(row.get("Eff_Days"), errors="coerce") or 0)
+    shares["Eff_Days"] = [eff] * n_children
+    return shares
+
+
+def fan_bundled_demand_to_sheet_children(
+    po_df: pd.DataFrame,
+    ep: pd.DataFrame | None,
+    breakdown_cols: list[str] | None = None,
+    *,
+    canonical_fn=None,
+) -> tuple[pd.DataFrame, set[int]]:
+    """
+    When the Existing PO sheet lists per-size pipeline (4XL, 5XL) for a bundled
+    marketplace listing (4XL-5XL), shift demand/ADS from the band row onto those
+    children so PO is raised on cuttable sizes — not on the listing SKU.
+
+    Returns ``(dataframe, touched_row_indices)`` for ADS refresh.
+    """
+    touched: set[int] = set()
+    if po_df is None or po_df.empty or ep is None or ep.empty or "OMS_SKU" not in po_df.columns:
+        return po_df, touched
+    breakdown = list(
+        breakdown_cols
+        or [c for c in _PIPELINE_COALESCE_COLS if c in ep.columns]
+    )
+    if not breakdown:
+        return po_df, touched
+
+    merge_key = canonical_fn or existing_po_merge_key
+    ep_idx = ep.set_index("OMS_SKU")
+    out = po_df.copy()
+    po_skus = out["OMS_SKU"].astype(str).str.strip()
+    is_bundled = out["OMS_SKU"].astype(str).map(_normalize_sku_text).map(is_bundled_size_range_sku)
+
+    for idx, row in out[is_bundled].iterrows():
+        sku = _normalize_sku_text(row.get("OMS_SKU"))
+        children = _split_bundled_po_sku(sku)
+        if len(children) < 2:
+            continue
+        sheet_children = [
+            c for c in (_normalize_sku_text(ch) for ch in children)
+            if _ep_row_has_pipeline(ep_idx, merge_key(c), breakdown)
+        ]
+        if len(sheet_children) < 1:
+            continue
+        bundled_key = merge_key(sku)
+        bundled_on_sheet = _ep_row_has_pipeline(ep_idx, bundled_key, breakdown)
+        child_keys = [merge_key(c) for c in sheet_children]
+        if not any((po_skus == ck).any() for ck in child_keys):
+            continue
+
+        # Children that already received proportional sales from bundled-listing
+        # fan-out during the sales merge must keep their metrics — do not re-fan.
+        children_need_demand = False
+        for child in sheet_children:
+            child_key = merge_key(child)
+            child_mask = po_skus == child_key
+            if not child_mask.any():
+                continue
+            child_idx = out.index[child_mask][0]
+            child_net = float(pd.to_numeric(out.at[child_idx, "Net_Units"], errors="coerce") or 0)
+            child_sold = float(pd.to_numeric(out.at[child_idx, "Sold_Units"], errors="coerce") or 0)
+            if child_net <= 0 and child_sold <= 0:
+                children_need_demand = True
+        if not children_need_demand:
+            # Sales already fanned to per-size rows during merge — clear duplicate demand
+            # on the bundled listing so PO is not raised twice (unless the sheet also
+            # lists the band row as its own exclusive line alongside per-size rows).
+            if bundled_on_sheet:
+                continue
+            child_has_metrics = False
+            for child in sheet_children:
+                child_key = merge_key(child)
+                child_mask = po_skus == child_key
+                if not child_mask.any():
+                    continue
+                child_idx = out.index[child_mask][0]
+                child_net = float(pd.to_numeric(out.at[child_idx, "Net_Units"], errors="coerce") or 0)
+                child_sold = float(pd.to_numeric(out.at[child_idx, "Sold_Units"], errors="coerce") or 0)
+                if child_net > 0 or child_sold > 0:
+                    child_has_metrics = True
+                    touched.add(int(child_idx))
+            if child_has_metrics:
+                for col in _BUNDLED_FAN_INTEGER_COLS + _BUNDLED_FAN_FLOAT_COLS + ("Eff_Days",):
+                    if col in out.columns:
+                        out.at[idx, col] = 0
+                touched.add(int(idx))
+            continue
+
+        sold = float(pd.to_numeric(row.get("Sold_Units"), errors="coerce") or 0)
+        net = float(pd.to_numeric(row.get("Net_Units"), errors="coerce") or 0)
+        if sold <= 0 and net <= 0:
+            continue
+
+        shares = _fan_metric_shares(row, len(sheet_children))
+        for i, child in enumerate(sheet_children):
+            child_key = merge_key(child)
+            child_mask = po_skus == child_key
+            if not child_mask.any():
+                continue
+            child_idx = out.index[child_mask][0]
+            for col, parts in shares.items():
+                if col not in out.columns:
+                    continue
+                val = parts[i] if i < len(parts) else 0
+                if col in _BUNDLED_FAN_INTEGER_COLS:
+                    out.at[child_idx, col] = int(val)
+                elif col == "Eff_Days":
+                    out.at[child_idx, col] = float(val)
+                else:
+                    out.at[child_idx, col] = round(float(val), 3)
+
+        for col in _BUNDLED_FAN_INTEGER_COLS + _BUNDLED_FAN_FLOAT_COLS + ("Eff_Days",):
+            if col in out.columns:
+                out.at[idx, col] = 0
+        touched.add(int(idx))
+        for child in sheet_children:
+            child_key = merge_key(child)
+            child_mask = po_skus == child_key
+            if child_mask.any():
+                touched.add(int(out.index[child_mask][0]))
+    return out, touched
+
+
+def zero_bundled_po_when_sheet_children_present(
+    po_df: pd.DataFrame,
+    ep: pd.DataFrame | None,
+    breakdown_cols: list[str] | None = None,
+    *,
+    canonical_fn=None,
+) -> pd.DataFrame:
+    """Bundled listing rows must not keep PO_Qty when per-size sheet children exist."""
+    if po_df is None or po_df.empty or ep is None or ep.empty:
+        return po_df
+    breakdown = list(
+        breakdown_cols
+        or [c for c in _PIPELINE_COALESCE_COLS if c in ep.columns]
+    )
+    if not breakdown:
+        return po_df
+    merge_key = canonical_fn or existing_po_merge_key
+    ep_idx = ep.set_index("OMS_SKU")
+    out = po_df.copy()
+    po_skus = set(out["OMS_SKU"].astype(str).str.strip())
+    is_bundled = out["OMS_SKU"].astype(str).map(_normalize_sku_text).map(is_bundled_size_range_sku)
+    for idx, row in out[is_bundled].iterrows():
+        sku = _normalize_sku_text(row.get("OMS_SKU"))
+        children = _split_bundled_po_sku(sku)
+        if len(children) < 2:
+            continue
+        sheet_children = [
+            merge_key(c)
+            for c in (_normalize_sku_text(ch) for ch in children)
+            if _ep_row_has_pipeline(ep_idx, merge_key(c), breakdown)
+        ]
+        if not sheet_children or not any(ck in po_skus for ck in sheet_children):
+            continue
+        bundled_key = merge_key(sku)
+        if _ep_row_has_pipeline(ep_idx, bundled_key, breakdown):
+            continue
+        po_qty = int(pd.to_numeric(row.get("PO_Qty"), errors="coerce") or 0)
+        gross = int(pd.to_numeric(row.get("Gross_PO_Qty"), errors="coerce") or 0)
+        if po_qty <= 0 and gross <= 0:
+            continue
+        out.at[idx, "PO_Qty"] = 0
+        out.at[idx, "Gross_PO_Qty"] = 0
+    return out
+
+
 def zero_bundled_pipeline_when_children_carry_qty(
     po_df: pd.DataFrame,
     ep: pd.DataFrame | None = None,
