@@ -435,6 +435,14 @@ def ensure_po_return_overlay_from_server(sess) -> bool:
     """Load saved return overlay from warm cache or disk when the session is empty or stale."""
     cur = getattr(sess, "po_return_overlay_df", None)
     cur_n = _df_row_count(cur)
+    cur_units = 0
+    if cur_n > 0:
+        try:
+            cur_units = int(
+                pd.to_numeric(cur.get("Return_Units"), errors="coerce").fillna(0).sum()
+            )
+        except Exception:
+            cur_units = cur_n
     import backend.main as _main
 
     try:
@@ -443,15 +451,34 @@ def ensure_po_return_overlay_from_server(sess) -> bool:
         _log.exception("restore_po_sidecars_from_warm for return overlay failed")
     cur = getattr(sess, "po_return_overlay_df", None)
     cur_n = _df_row_count(cur)
+    if cur_n > 0:
+        try:
+            cur_units = int(
+                pd.to_numeric(cur.get("Return_Units"), errors="coerce").fillna(0).sum()
+            )
+        except Exception:
+            cur_units = cur_n
 
     path = _warm_cache_dir() / "po_return_overlay_df.parquet"
     disk_n = 0
+    disk_units = 0
     if path.is_file():
         try:
-            disk_n = _df_row_count(pd.read_parquet(path))
+            disk_df = pd.read_parquet(path)
+            disk_n = _df_row_count(disk_df)
+            disk_units = int(
+                pd.to_numeric(disk_df.get("Return_Units"), errors="coerce").fillna(0).sum()
+            )
         except Exception:
             _log.exception("count po_return_overlay_df.parquet failed")
-    if cur_n > 0 and cur_n >= disk_n:
+    meta_units = 0
+    try:
+        from .po_return_import import load_return_overlay_meta_from_disk
+
+        meta_units = int(load_return_overlay_meta_from_disk().get("return_overlay_units") or 0)
+    except Exception:
+        meta_units = 0
+    if cur_n > 0 and cur_units >= max(disk_units, meta_units) * 0.99:
         try:
             from .po_return_import import ensure_return_overlay_meta_hydrated
 
@@ -460,6 +487,14 @@ def ensure_po_return_overlay_from_server(sess) -> bool:
             _log.exception("return overlay meta hydrate failed (session already loaded)")
         return False
     if not path.is_file():
+        return False
+    if disk_units < meta_units * 0.9 and cur_units >= disk_units:
+        try:
+            from .po_return_import import ensure_return_overlay_meta_hydrated
+
+            ensure_return_overlay_meta_hydrated(sess)
+        except Exception:
+            pass
         return False
     try:
         df = pd.read_parquet(path)

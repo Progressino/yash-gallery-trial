@@ -3312,9 +3312,9 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
     if light:
         _apply_light_coverage_hydrate(sess)
         try:
-            from ..services.po_session_hydrate import ensure_po_return_overlay_from_server
+            from ..services.po_return_import import ensure_return_overlay_coverage_light
 
-            ensure_po_return_overlay_from_server(sess)
+            ensure_return_overlay_coverage_light(sess)
         except Exception:
             pass
 
@@ -3349,10 +3349,22 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
     _po_ledger_ok = _po_ledger is not None and not getattr(_po_ledger, "empty", True)
     _ret_ov = getattr(sess, "po_return_overlay_df", None)
     _ret_ok = _ret_ov is not None and not getattr(_ret_ov, "empty", True)
+    _ret_meta_only = False
+    _ret_meta: dict = {}
+    if not _ret_ok and light:
+        try:
+            from ..services.po_return_import import load_return_overlay_meta_from_disk
+
+            _ret_meta = load_return_overlay_meta_from_disk()
+            if int(_ret_meta.get("return_overlay_units") or 0) > 0:
+                _ret_ok = True
+                _ret_meta_only = True
+        except Exception:
+            pass
     _ret_agg = None
     _ret_sources: list[dict] = []
     _ret_by_platform: list[dict] = []
-    if _ret_ok:
+    if _ret_ok and not _ret_meta_only:
         try:
             from ..services.po_return_import import (
                 aggregate_return_overlay_for_use,
@@ -3367,9 +3379,14 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
             if not _ret_sources:
                 _ret_sources = list(getattr(sess, "return_overlay_sources", None) or [])
             sess.return_overlay_sources = _ret_sources
-            _ret_by_platform = summarize_return_overlay_by_platform(_ret_ov)
+            if not light:
+                _ret_by_platform = summarize_return_overlay_by_platform(_ret_ov)
         except Exception:
             _ret_agg = _ret_ov
+    elif _ret_ok and _ret_meta_only:
+        _ret_sources = list(_ret_meta.get("return_overlay_sources") or [])
+        if not _ret_sources:
+            _ret_sources = list(getattr(sess, "return_overlay_sources", None) or [])
     _ingest = getattr(sess, "daily_auto_ingest_result", None) or {}
     _has_ingest = bool(_ingest)
     try:
@@ -3395,6 +3412,15 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
             _has_sku_map = bool((_main._warm_cache or {}).get("sku_mapping"))
         except Exception:
             pass
+    _returns_warnings = list(getattr(sess, "returns_import_warnings", None) or [])
+    try:
+        from ..services.po_return_import import return_overlay_meta_disk_mismatch_warning
+
+        mismatch = return_overlay_meta_disk_mismatch_warning()
+        if mismatch and mismatch not in _returns_warnings:
+            _returns_warnings.append(mismatch)
+    except Exception:
+        pass
     cov = CoverageResponse(
         sku_mapping=_has_sku_map,
         mtr=_plat_ok or frame_row_count("mtr_df", sess) > 0,
@@ -3464,20 +3490,38 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         ),
         po_raise_ledger_rows=int(len(_po_ledger)) if _po_ledger_ok else 0,
         return_sheet_skus=(
-            int(len(_ret_agg))
-            if _ret_ok and _ret_agg is not None and not getattr(_ret_agg, "empty", True)
-            else (int(len(_ret_ov)) if _ret_ok else 0)
+            int(_ret_meta.get("return_overlay_skus") or 0)
+            if _ret_ok and _ret_meta_only
+            else (
+                int(len(_ret_agg))
+                if _ret_ok and _ret_agg is not None and not getattr(_ret_agg, "empty", True)
+                else (int(len(_ret_ov)) if _ret_ok else 0)
+            )
         ),
         return_sheet_units=(
-            int(_ret_agg["Return_Units"].sum())
-            if _ret_ok and _ret_agg is not None and not getattr(_ret_agg, "empty", True)
-            else (int(_ret_ov["Return_Units"].sum()) if _ret_ok else 0)
+            int(_ret_meta.get("return_overlay_units") or 0)
+            if _ret_ok and _ret_meta_only
+            else (
+                int(_ret_agg["Return_Units"].sum())
+                if _ret_ok and _ret_agg is not None and not getattr(_ret_agg, "empty", True)
+                else (int(_ret_ov["Return_Units"].sum()) if _ret_ok else 0)
+            )
         ),
         return_overlay_uploaded_at=(
-            (getattr(sess, "return_overlay_uploaded_at", "") or None) or None
+            (
+                str(_ret_meta.get("return_overlay_uploaded_at") or "")
+                if _ret_meta_only
+                else (getattr(sess, "return_overlay_uploaded_at", "") or "")
+            )
+            or None
         ),
         return_overlay_filename=(
-            (getattr(sess, "return_overlay_filename", "") or None) or None
+            (
+                str(_ret_meta.get("return_overlay_filename") or "")
+                if _ret_meta_only
+                else (getattr(sess, "return_overlay_filename", "") or "")
+            )
+            or None
         ),
         return_overlay_sources=_ret_sources or None,
         return_overlay_by_platform=_ret_by_platform or None,
@@ -3485,7 +3529,7 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         returns_import_status=getattr(sess, "returns_import_status", "idle") or "idle",
         returns_import_message=getattr(sess, "returns_import_message", "") or "",
         returns_import_progress=int(getattr(sess, "returns_import_progress", 0) or 0),
-        returns_import_warnings=list(getattr(sess, "returns_import_warnings", None) or []) or None,
+        returns_import_warnings=_returns_warnings or None,
         sales_rebuild=getattr(sess, "sales_rebuild_status", "idle") or "idle",
         sales_rebuild_message=getattr(sess, "sales_rebuild_message", "") or "",
         sales_data_revision=int(getattr(sess, "sales_data_revision", 0) or 0),

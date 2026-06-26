@@ -325,6 +325,7 @@ export default function Upload() {
   const uploadReturnsFile = async (
     file: File,
     onProgress?: (p: { pct: number; msg: string; loaded?: number; total?: number }) => void,
+    opts?: { deferSalesRebuild?: boolean },
   ): Promise<UploadResponse> => {
     const data = await uploadPoReturnsImport(file, {
       replace: false,
@@ -348,36 +349,43 @@ export default function Upload() {
             })
           })
         }
-        if (data.sales_rebuild === 'pending') {
+        if (data.sales_rebuild === 'pending' && !opts?.deferSalesRebuild) {
           await waitForSalesRebuild(msg => setBuildingMsg(msg))
         }
       } catch {
         /* coverage poll will pick up rebuild */
       } finally {
-        setBuildingMsg('')
+        if (!opts?.deferSalesRebuild) {
+          setBuildingMsg('')
+        }
       }
     }
     const msg =
       data.ok && (data.returns_import === 'running' || data.sales_rebuild === 'pending')
         ? `${data.message} Return data saves automatically for PO — run Calculate PO when done.`
         : data.message
-    return { ok: data.ok, message: msg } as UploadResponse
+    return { ok: data.ok, message: msg, sales_rebuild: data.sales_rebuild } as UploadResponse & {
+      sales_rebuild?: string
+    }
   }
 
   const handleReturnsUpload = async (
     file: File,
     onProgress?: (p: { pct: number; msg: string; loaded?: number; total?: number }) => void,
-  ): Promise<UploadResponse> => {
+    opts?: { deferSalesRebuild?: boolean },
+  ): Promise<UploadResponse & { sales_rebuild?: string }> => {
     setL('returns_po', true)
     try {
-      let outcome: UploadResponse = { ok: false, message: 'Upload failed' }
+      let outcome: UploadResponse & { sales_rebuild?: string } = { ok: false, message: 'Upload failed' }
       await withUploadGuard(async () => {
-        const res = await uploadReturnsFile(file, onProgress)
+        const res = await uploadReturnsFile(file, onProgress, opts)
         outcome = res
         if (res.ok) {
           captureUploadAlerts('returns_po', res)
-          showToast('success', res.message)
-          await refresh()
+          if (!opts?.deferSalesRebuild) {
+            showToast('success', res.message)
+            await refresh()
+          }
         } else {
           showToast('error', res.message)
         }
@@ -388,7 +396,9 @@ export default function Upload() {
       showToast('error', msg)
       return { ok: false, message: msg }
     } finally {
-      setL('returns_po', false)
+      if (!opts?.deferSalesRebuild) {
+        setL('returns_po', false)
+      }
     }
   }
 
@@ -1963,6 +1973,12 @@ export default function Upload() {
             coverage={coverage}
             uploading={loading['returns_po']}
             onUpload={handleReturnsUpload}
+            onBatchComplete={async () => {
+              setL('returns_po', false)
+              setBuildingMsg('')
+              await refresh()
+              showToast('success', 'Return files imported — saved for PO.')
+            }}
           />
         </UploadCard>
 
@@ -2547,13 +2563,16 @@ function ReturnsUploadPanel({
   coverage,
   uploading,
   onUpload,
+  onBatchComplete,
 }: {
   coverage: CoverageResponse
   uploading: boolean
   onUpload: (
     file: File,
     onProgress?: (p: { pct: number; msg: string; loaded?: number; total?: number }) => void,
-  ) => Promise<UploadResponse>
+    opts?: { deferSalesRebuild?: boolean },
+  ) => Promise<UploadResponse & { sales_rebuild?: string }>
+  onBatchComplete?: () => Promise<void>
 }) {
   const [queued, setQueued] = useState<File[]>([])
   const [progress, setProgress] = useState<{
@@ -2596,12 +2615,24 @@ function ReturnsUploadPanel({
         pct: 2,
         msg: `Starting ${i + 1}/${queued.length}: ${file.name}`,
       })
-      const res = await onUpload(file, p => setProgress(p))
-      if (!res.ok) break
+      const res = await onUpload(file, p => setProgress(p), { deferSalesRebuild: true })
+      if (!res.ok) {
+        setQueued([])
+        setProgress(null)
+        await onBatchComplete?.()
+        return
+      }
       setProgress({ pct: 100, msg: `Finished ${file.name}` })
+    }
+    try {
+      const { waitForSalesRebuild } = await import('../api/client')
+      await waitForSalesRebuild(msg => setProgress({ pct: 95, msg }))
+    } catch {
+      /* coverage poll will pick up rebuild */
     }
     setQueued([])
     setProgress(null)
+    await onBatchComplete?.()
   }
 
   return (

@@ -1,6 +1,7 @@
 """Parse marketplace return reports (CSV / Excel / RAR / ZIP) for PO return overlay."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from contextlib import contextmanager
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
 
@@ -1500,14 +1502,233 @@ def clear_return_overlay_meta(sess) -> None:
 
         if isinstance(_main._warm_cache, dict):
             _main._warm_cache.pop(_main._RETURN_OVERLAY_META_WARM_KEY, None)
+            _main._warm_cache.pop("po_return_overlay_df", None)
     except Exception:
         pass
-    path = os.path.join(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"), "return_overlay_meta.json")
-    if os.path.isfile(path):
+    root = os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
+    for name in ("return_overlay_meta.json", "po_return_overlay_df.parquet"):
+        path = os.path.join(root, name)
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                _log.warning("failed to remove %s", name)
+
+
+def _return_overlay_parquet_path() -> str:
+    return os.path.join(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"), "po_return_overlay_df.parquet")
+
+
+def _return_overlay_lock_path() -> str:
+    return os.path.join(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"), ".po_return_overlay.lock")
+
+
+def _overlay_row_count(df: pd.DataFrame | None) -> int:
+    if df is None or getattr(df, "empty", True):
+        return 0
+    return int(len(df))
+
+
+def _overlay_unit_total(df: pd.DataFrame | None) -> int:
+    if df is None or getattr(df, "empty", True):
+        return 0
+    return int(pd.to_numeric(df.get("Return_Units"), errors="coerce").fillna(0).sum())
+
+
+@contextmanager
+def _return_overlay_disk_lock():
+    """Serialize return-overlay writes across workers (lost-update safe)."""
+    root = os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
+    os.makedirs(root, exist_ok=True)
+    lock_path = _return_overlay_lock_path()
+    with open(lock_path, "a+", encoding="utf-8") as lock_fh:
         try:
-            os.remove(path)
-        except OSError:
-            _log.warning("failed to remove return_overlay_meta.json")
+            import fcntl
+
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            pass
+        try:
+            yield
+        finally:
+            try:
+                import fcntl
+
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+
+
+def load_return_overlay_df_from_disk() -> pd.DataFrame:
+    path = _return_overlay_parquet_path()
+    if not os.path.isfile(path):
+        return pd.DataFrame()
+    try:
+        return pd.read_parquet(path)
+    except Exception:
+        _log.exception("load_return_overlay_df_from_disk failed")
+        return pd.DataFrame()
+
+
+def _load_return_overlay_sources_from_disk_meta() -> list[dict]:
+    meta = load_return_overlay_meta_from_disk()
+    raw = meta.get("return_overlay_sources")
+    if isinstance(raw, list):
+        return [s for s in raw if isinstance(s, dict)]
+    return []
+
+
+def persist_return_overlay_df_to_disk(df: pd.DataFrame, *, allow_shrink: bool = False) -> bool:
+    """Write overlay parquet; refuse to replace a larger snapshot with a smaller one."""
+    if df is None or getattr(df, "empty", True):
+        return False
+    path = _return_overlay_parquet_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    new_rows = _overlay_row_count(df)
+    new_units = _overlay_unit_total(df)
+    if os.path.isfile(path) and not allow_shrink:
+        try:
+            old = pd.read_parquet(path)
+            old_rows = _overlay_row_count(old)
+            old_units = _overlay_unit_total(old)
+            if new_rows < int(old_rows * 0.9) or new_units < int(old_units * 0.9):
+                _log.warning(
+                    "Refusing to shrink return overlay parquet (%s→%s rows, %s→%s units)",
+                    old_rows,
+                    new_rows,
+                    old_units,
+                    new_units,
+                )
+                return False
+        except Exception:
+            pass
+    try:
+        from .helpers import _coerce_df_for_parquet
+
+        _coerce_df_for_parquet(df).to_parquet(path, index=False)
+        return True
+    except Exception:
+        _log.exception("persist_return_overlay_df_to_disk failed")
+        return False
+
+
+def _merge_overlay_import_locked(
+    prepared: pd.DataFrame,
+    *,
+    file_key: str,
+    replace: bool,
+    uploaded_at: str,
+) -> tuple[pd.DataFrame, list[dict]]:
+    if replace:
+        merged = prepared.copy()
+        sources = [_source_entry_from_overlay(file_key, prepared, uploaded_at=uploaded_at)]
+        return merged, sources
+
+    base = load_return_overlay_df_from_disk()
+    sources = _load_return_overlay_sources_from_disk_meta()
+    if base is None or getattr(base, "empty", True):
+        base = pd.DataFrame()
+    elif not sources and "Source_File" in base.columns:
+        sources = [
+            _source_entry_from_overlay(
+                str(fn),
+                base[base["Source_File"].astype(str) == fn],
+                uploaded_at="",
+            )
+            for fn in sorted(base["Source_File"].astype(str).unique())
+            if str(fn).strip()
+        ]
+    if file_key and not base.empty and "Source_File" in base.columns:
+        base = base[base["Source_File"].astype(str) != file_key]
+        sources = [
+            s
+            for s in sources
+            if _normalize_source_filename(str(s.get("filename") or "")) != file_key
+        ]
+    merged = pd.concat([base, prepared], ignore_index=True) if not base.empty else prepared.copy()
+    sources.append(_source_entry_from_overlay(file_key, prepared, uploaded_at=uploaded_at))
+    return merged, sources
+
+
+def persist_return_overlay_bundle(sess, df: pd.DataFrame, sources: list[dict]) -> None:
+    """Atomically persist overlay dataframe + metadata to warm cache."""
+    if df is None or getattr(df, "empty", True):
+        return
+    if not persist_return_overlay_df_to_disk(df):
+        df = load_return_overlay_df_from_disk()
+        if df is None or getattr(df, "empty", True):
+            return
+        sources = _load_return_overlay_sources_from_disk_meta() or sources
+    sess.po_return_overlay_df = df.copy()
+    sess.return_overlay_sources = list(sources)
+    skus, units = _overlay_aggregate_totals(df)
+    meta = {
+        "return_overlay_uploaded_at": str(getattr(sess, "return_overlay_uploaded_at", "") or ""),
+        "return_overlay_filename": str(getattr(sess, "return_overlay_filename", "") or ""),
+        "return_overlay_skus": skus,
+        "return_overlay_units": units,
+        "return_overlay_sources": sources,
+    }
+    try:
+        import backend.main as _main
+
+        if not isinstance(_main._warm_cache, dict):
+            _main._warm_cache = {}
+        _main._warm_cache["po_return_overlay_df"] = df.copy()
+        _main._warm_cache[_main._RETURN_OVERLAY_META_WARM_KEY] = dict(meta)
+        root = os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")
+        os.makedirs(root, exist_ok=True)
+        with open(os.path.join(root, "return_overlay_meta.json"), "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False)
+    except Exception:
+        _log.exception("persist_return_overlay_bundle meta failed")
+
+
+def return_overlay_meta_disk_mismatch_warning() -> str | None:
+    """Warn when saved meta claims more return units than the on-disk parquet."""
+    meta = load_return_overlay_meta_from_disk()
+    meta_units = int(meta.get("return_overlay_units") or 0)
+    if meta_units <= 0:
+        return None
+    disk = load_return_overlay_df_from_disk()
+    disk_units = _overlay_unit_total(disk)
+    if disk_units >= int(meta_units * 0.9):
+        return None
+    return (
+        f"Return overlay on disk ({disk_units:,} units) is smaller than the last upload "
+        f"({meta_units:,} units). Re-upload your return files to restore the full total."
+    )
+
+
+def ensure_return_overlay_coverage_light(sess) -> None:
+    """Fast coverage path: meta + counts from disk without loading the full overlay parquet."""
+    cur = getattr(sess, "po_return_overlay_df", None)
+    if cur is not None and not getattr(cur, "empty", True):
+        try:
+            ensure_return_overlay_meta_hydrated(sess)
+        except Exception:
+            pass
+        return
+    meta = load_return_overlay_meta_from_disk()
+    if not meta:
+        return
+    apply_return_overlay_meta_to_session(sess, meta)
+    sources = list(getattr(sess, "return_overlay_sources", None) or [])
+    if sources:
+        return
+    skus = int(meta.get("return_overlay_skus") or 0)
+    units = int(meta.get("return_overlay_units") or 0)
+    if skus > 0 or units > 0:
+        sess.return_overlay_sources = [
+            {
+                "filename": str(meta.get("return_overlay_filename") or "Return data"),
+                "uploaded_at": str(meta.get("return_overlay_uploaded_at") or ""),
+                "platform": "unknown",
+                "brand": "",
+                "skus": skus,
+                "units": units,
+            }
+        ]
 
 
 def apply_return_overlay_import(
@@ -1525,42 +1746,28 @@ def apply_return_overlay_import(
     prepared = _stamp_overlay_source_file(_finalize_return_overlay_df(overlay_df), filename)
     file_key = _normalize_source_filename(filename)
     uploaded_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    if replace:
-        sess.po_return_overlay_df = prepared.copy()
-        sess.return_overlay_sources = [
-            _source_entry_from_overlay(file_key, prepared, uploaded_at=uploaded_at)
-        ]
-    else:
-        base = getattr(sess, "po_return_overlay_df", pd.DataFrame())
-        sources = list(getattr(sess, "return_overlay_sources", None) or [])
-        if base is not None and not getattr(base, "empty", True) and file_key:
-            if "Source_File" in base.columns:
-                base = base[base["Source_File"].astype(str) != file_key]
-            sources = [
-                s
-                for s in sources
-                if _normalize_source_filename(str(s.get("filename") or "")) != file_key
-            ]
-        sess.po_return_overlay_df = pd.concat([base, prepared], ignore_index=True)
-        sources.append(_source_entry_from_overlay(file_key, prepared, uploaded_at=uploaded_at))
-        sess.return_overlay_sources = sources
-    as_of = infer_return_overlay_as_of(filename, overlay_df)
-    if not as_of and (
-        overlay_df is None
-        or "Return_Date" not in overlay_df.columns
-        or overlay_df["Return_Date"].astype(str).str.len().lt(10).all()
-    ):
-        # Legacy bundle with no per-row dates — anchor refunds to prior IST day.
-        as_of = (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=1)).isoformat()
-    sess.return_overlay_as_of = as_of or ""
-    sess.return_overlay_uploaded_at = uploaded_at
-    sess.return_overlay_filename = file_key
+
+    with _return_overlay_disk_lock():
+        merged, sources = _merge_overlay_import_locked(
+            prepared,
+            file_key=file_key,
+            replace=replace,
+            uploaded_at=uploaded_at,
+        )
+        as_of = infer_return_overlay_as_of(filename, overlay_df)
+        if not as_of and (
+            overlay_df is None
+            or "Return_Date" not in overlay_df.columns
+            or overlay_df["Return_Date"].astype(str).str.len().lt(10).all()
+        ):
+            as_of = (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=1)).isoformat()
+        sess.return_overlay_as_of = as_of or ""
+        sess.return_overlay_uploaded_at = uploaded_at
+        sess.return_overlay_filename = file_key
+        persist_return_overlay_bundle(sess, merged, sources)
+
     file_skus, file_units = _overlay_aggregate_totals(prepared)
     n, units = _overlay_aggregate_totals(sess.po_return_overlay_df)
-    try:
-        persist_return_overlay_meta(sess)
-    except Exception:
-        _log.exception("persist_return_overlay_meta after import failed")
     sess._quarterly_cache.clear()
     action = "Replaced" if replace else "Added"
     return {

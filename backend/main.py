@@ -495,6 +495,8 @@ def persist_po_sidecars_to_disk() -> None:
     import json
     import os
 
+    import pandas as pd
+
     if not _warm_cache:
         return
     try:
@@ -521,6 +523,30 @@ def persist_po_sidecars_to_disk() -> None:
                 continue
             from .services.helpers import _coerce_df_for_parquet
 
+            if key == "po_return_overlay_df" and os.path.exists(path):
+                try:
+                    from .services.po_return_import import (
+                        _overlay_row_count,
+                        _overlay_unit_total,
+                    )
+
+                    old = pd.read_parquet(path)
+                    new_rows = _overlay_row_count(df)
+                    new_units = _overlay_unit_total(df)
+                    old_rows = _overlay_row_count(old)
+                    old_units = _overlay_unit_total(old)
+                    if new_rows < int(old_rows * 0.9) or new_units < int(old_units * 0.9):
+                        log.warning(
+                            "Skipping PO sidecar persist: would shrink return overlay "
+                            "(%s→%s rows, %s→%s units)",
+                            old_rows,
+                            new_rows,
+                            old_units,
+                            new_units,
+                        )
+                        continue
+                except Exception:
+                    pass
             _coerce_df_for_parquet(df).to_parquet(path, index=False)
             keys.add(key)
         manifest["keys"] = sorted(keys)
@@ -550,11 +576,32 @@ def merge_po_optional_sheets_into_warm_cache(sess) -> None:
     for key in _PO_SIDECAR_KEYS:
         df = getattr(sess, key, None)
         if df is None or not hasattr(df, "empty"):
-            _warm_cache[key] = pd.DataFrame()
+            df = pd.DataFrame()
         elif df.empty:
-            _warm_cache[key] = pd.DataFrame()
-        else:
-            _warm_cache[key] = df.copy()
+            df = pd.DataFrame()
+        if key == "po_return_overlay_df" and not df.empty:
+            cur = _warm_cache.get(key)
+            if cur is not None and not getattr(cur, "empty", True):
+                try:
+                    from .services.po_return_import import (
+                        _overlay_row_count,
+                        _overlay_unit_total,
+                    )
+
+                    new_rows = _overlay_row_count(df)
+                    new_units = _overlay_unit_total(df)
+                    old_rows = _overlay_row_count(cur)
+                    old_units = _overlay_unit_total(cur)
+                    if new_rows < int(old_rows * 0.9) or new_units < int(old_units * 0.9):
+                        log.warning(
+                            "Keeping warm-cache return overlay (%s units); session has %s units",
+                            old_units,
+                            new_units,
+                        )
+                        df = cur.copy()
+                except Exception:
+                    pass
+        _warm_cache[key] = df.copy() if not df.empty else pd.DataFrame()
     try:
         persist_po_sidecars_to_disk()
     except Exception:
