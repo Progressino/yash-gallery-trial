@@ -11,6 +11,7 @@ import api, { cacheHydrateWarm, cacheLoad, getCoverage, getJobStatus, invalidate
 import CoverageProvider from './components/CoverageProvider'
 import PoHydrationGate from './components/PoHydrationGate'
 import { canSkipHeavyServerRestore, poOperationalReady, poOperationalLoaded, poPageHydrationReady, PO_OPERATIONAL_TOTAL, readLocalSessionHint } from './lib/localSessionHint'
+import { isErpModulePath } from './lib/erpModulePaths'
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
@@ -109,6 +110,7 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 function ProtectedRoute() {
   const location = useLocation()
   const onIntelligenceHome = location.pathname === '/' || location.pathname === ''
+  const erpModuleRoute = isErpModulePath(location.pathname)
   const setCoverage = useSession(s => s.setCoverage)
   const invUploadRunning = useSession(s => s.inventory_upload_status === 'running')
   const setUser = useAuth(s => s.setUser)
@@ -215,14 +217,15 @@ function ProtectedRoute() {
       }
       return true
     },
-    enabled: !!activeUser && !isKarigar && !hrmOnly,
+    enabled: !!activeUser && !isKarigar && !hrmOnly && !erpModuleRoute,
     retry: 1,
     retryDelay: 5_000,
     staleTime: Infinity,
   })
 
-  const pollCoverage = !!activeUser && !isKarigar && !hrmOnly
+  const pollCoverage = !!activeUser && !isKarigar && !hrmOnly && !erpModuleRoute
   const dataStillLoading = useSession(s => {
+    if (erpModuleRoute) return false
     const loaded = poOperationalLoaded(s)
     // Avoid flashing 0/7 before the first coverage poll returns.
     if (loaded === 0) return false
@@ -259,7 +262,7 @@ function ProtectedRoute() {
           </button>
         </div>
       )}
-      {isRestoring && !isKarigar && !invUploadRunning && (
+      {isRestoring && !isKarigar && !invUploadRunning && !erpModuleRoute && (
         <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
           <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -268,7 +271,7 @@ function ProtectedRoute() {
           Syncing your data…
         </div>
       )}
-      {!isRestoring && dataStillLoading && !isKarigar && !invUploadRunning && (
+      {!isRestoring && dataStillLoading && !isKarigar && !invUploadRunning && !erpModuleRoute && (
         <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
           <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />

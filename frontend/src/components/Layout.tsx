@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useSession } from '../store/session'
 import { cacheLoad, cacheSave, cacheReloadFresh, resetAllAppData, getCoverage, invalidateDataQueries } from '../api/client'
@@ -8,6 +8,7 @@ import { useAuth, mayResetSharedData, mayUploadHistorical, canAccessModule, isHr
 import type { ModuleKey } from '../lib/modules'
 import { FixedTopLoadingBar } from './LoadingProgressBar'
 import { clearLocalSessionHint, formatLocalHintAge, readLocalSessionHint } from '../lib/localSessionHint'
+import { isErpModulePath } from '../lib/erpModulePaths'
 
 type NavItem = { to: string; label: string; module: ModuleKey; short?: string }
 
@@ -246,6 +247,8 @@ function CacheToolsPanel({
 }
 
 export default function Layout() {
+  const location = useLocation()
+  const erpModuleRoute = isErpModulePath(location.pathname)
   const { sku_mapping, mtr, sales, myntra, meesho, flipkart, snapdeal, inventory, setCoverage } =
     useSession()
   const qc = useQueryClient()
@@ -551,7 +554,7 @@ export default function Layout() {
             )}
           </button>
 
-          {!hrmOnly && (
+          {!hrmOnly && !erpModuleRoute && (
             <>
               <LoadedDataPanel datasets={datasets} open={loadedPanelOpen} onToggle={toggleLoaded} />
               <CacheToolsPanel

@@ -2431,6 +2431,17 @@ def _session_skip_heavy_warm(path: str) -> bool:
         "/api/cache/hydrate-warm",
     ):
         return True
+    if path.startswith(
+        (
+            "/api/purchase/",
+            "/api/production/",
+            "/api/sales/",
+            "/api/items/",
+            "/api/grey/",
+            "/api/tna/",
+        )
+    ):
+        return True
     if path.startswith("/api/po/daily-inventory-history"):
         return True
     return path.startswith(
@@ -2481,7 +2492,18 @@ def _session_po_calculate_light(path: str, method: str) -> bool:
 
 def _session_uses_stitching_db_only(path: str) -> bool:
     """SQLite-only modules — do not block on forecast session blobs."""
-    return path.startswith("/api/stitching/") or path.startswith("/api/hrm/")
+    if path.startswith("/api/stitching/") or path.startswith("/api/hrm/"):
+        return True
+    return path.startswith(
+        (
+            "/api/purchase/",
+            "/api/production/",
+            "/api/sales/",
+            "/api/items/",
+            "/api/grey/",
+            "/api/tna/",
+        )
+    )
 
 # ── Auth middleware (outermost — runs first) ──────────────────
 _AUTH_EXEMPT = {
