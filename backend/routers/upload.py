@@ -918,6 +918,29 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
     sess = _resolve_upload_session(session_id)
     if sess is None:
         return
+    try:
+        from ..services.upload_file_sniff import check_files_for_upload_target
+
+        wrong = check_files_for_upload_target("daily_sales", file_parts)
+        if wrong:
+            err_payload = {
+                "ok": False,
+                "wrong_upload_target": True,
+                "message": wrong,
+                "detected_platforms": [],
+                "warnings": [wrong],
+                "processed_files": len(file_parts),
+                "detected_files": 0,
+                "unknown_files": len(file_parts),
+            }
+            _store_daily_auto_ingest_result(sess, err_payload)
+            sess.daily_auto_ingest_status = "error"
+            sess.daily_auto_ingest_message = wrong
+            sess.sales_rebuild_status = "idle"
+            sess.sales_rebuild_message = ""
+            return
+    except Exception:
+        _log.exception("daily-auto worker upload sniff failed")
     sess.daily_auto_ingest_status = "running"
     sess.daily_auto_ingest_started = time.time()
     n = len(file_parts)
@@ -2892,6 +2915,14 @@ async def upload_existing_po(
             )
         file_bytes = await file.read()
         orig_fn = file.filename or "existing_po.xlsx"
+        try:
+            from ..services.upload_file_sniff import check_upload_target
+
+            wrong = check_upload_target("existing_po", file_bytes, orig_fn)
+            if wrong:
+                return UploadResponse(ok=False, message=wrong)
+        except Exception:
+            _log.exception("existing-po upload sniff failed")
         sid = getattr(request.state, "session_id", None)
         if sid:
             sess.existing_po_upload_status = "running"
@@ -3875,6 +3906,27 @@ async def upload_daily_auto(
             },
             status_code=400,
         )
+
+    try:
+        from ..services.upload_file_sniff import check_files_for_upload_target
+
+        wrong = check_files_for_upload_target("daily_sales", file_parts)
+        if wrong:
+            return JSONResponse(
+                content={
+                    "ok": False,
+                    "wrong_upload_target": True,
+                    "suggested_section": "returns",
+                    "message": wrong,
+                    "detected_platforms": [],
+                    "warnings": [wrong],
+                    "processed_files": n_files,
+                    "detected_files": 0,
+                    "unknown_files": n_files,
+                }
+            )
+    except Exception:
+        _log.exception("daily-auto upload sniff failed")
 
     msg = (
         "Upload accepted — parsing daily files on the server. "

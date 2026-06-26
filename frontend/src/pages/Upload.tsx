@@ -26,10 +26,10 @@ import { useAuth, mayUploadHistorical, mayResetSharedData, mayUploadPoBaseline, 
 import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner'
 import { downloadReconciliationReportCsv } from '../utils/reconciliationReportExport'
 import {
-  findMisplacedHistoryFiles,
-  findMisplacedSnapshotFile,
-  sniffUploadFilename,
-  WRONG_TARGET_MESSAGES,
+  checkFileForUploadTarget,
+  checkFilesForUploadTarget,
+  classifyUploadFilename,
+  misplacedFilesForTarget,
 } from '../lib/uploadFileSniff'
 
 type Toast = { type: 'success' | 'error'; msg: string }
@@ -380,6 +380,11 @@ export default function Upload() {
     onProgress?: (p: { pct: number; msg: string; loaded?: number; total?: number }) => void,
     opts?: { deferSalesRebuild?: boolean },
   ): Promise<UploadResponse & { sales_rebuild?: string }> => {
+    const wrong = checkFileForUploadTarget(file.name, 'returns')
+    if (wrong) {
+      showToast('error', wrong, 14000)
+      return { ok: false, message: wrong }
+    }
     setL('returns_po', true)
     try {
       let outcome: UploadResponse & { sales_rebuild?: string } = { ok: false, message: 'Upload failed' }
@@ -519,6 +524,11 @@ export default function Upload() {
   }
 
   const handleDailyAuto = async (files: File[]) => {
+    const wrong = checkFilesForUploadTarget(files, 'daily_sales')
+    if (wrong) {
+      showToast('error', wrong, 14000)
+      return
+    }
     setL('daily', true)
     setBuildingMsg('')
     setChunkProgress(null)
@@ -1176,6 +1186,11 @@ export default function Upload() {
               'text/csv': ['.csv'],
             }}
             onUpload={async (file: File) => {
+              const wrong = checkFileForUploadTarget(file.name, 'existing_po')
+              if (wrong) {
+                showToast('error', wrong, 14000)
+                return
+              }
               setL('existingpo', true)
               const startedAt = Date.now()
               setExistingPoProgress({ pct: 0, msg: `Uploading ${file.name}…`, phase: 'upload', startedAt })
@@ -1435,6 +1450,11 @@ export default function Upload() {
                     'application/octet-stream': ['.xlsx', '.xls'],
                   }}
                   onUpload={async (file: File) => {
+                    const wrong = checkFileForUploadTarget(file.name, 'sku_status_lead')
+                    if (wrong) {
+                      showToast('error', wrong, 14000)
+                      return
+                    }
                     setL('po_sku_status', true)
                     try {
                       await withUploadGuard(async () => {
@@ -1479,8 +1499,9 @@ export default function Upload() {
                     'application/octet-stream': ['.xlsx', '.xls'],
                   }}
                   onUpload={async (file: File) => {
-                    if (findMisplacedSnapshotFile(file)) {
-                      showToast('error', WRONG_TARGET_MESSAGES.snapshotOnHistory(file.name), 12000)
+                    const wrong = checkFileForUploadTarget(file.name, 'daily_inventory_history')
+                    if (wrong) {
+                      showToast('error', wrong, 14000)
                       return
                     }
                     setL('po_daily_inv', true)
@@ -1849,9 +1870,9 @@ export default function Upload() {
             disabled={!coverage.sku_mapping || coverage.inventory_upload_status === 'running'}
             uploading={loading['inv']}
             onUpload={async (files) => {
-              const misplaced = findMisplacedHistoryFiles(files)
-              if (misplaced.length > 0) {
-                showToast('error', WRONG_TARGET_MESSAGES.historyOnSnapshot(misplaced[0].name), 12000)
+              const wrong = checkFilesForUploadTarget(files, 'snapshot_inventory')
+              if (wrong) {
+                showToast('error', wrong, 14000)
                 return
               }
               invWaitAbortRef.current = false
@@ -2607,6 +2628,8 @@ function ReturnsUploadPanel({
     total?: number
   } | null>(null)
 
+  const misplaced = misplacedFilesForTarget(queued, 'returns')
+
   const sources = coverage.return_overlay_sources ?? []
   const byPlatform = coverage.return_overlay_by_platform ?? []
 
@@ -2634,6 +2657,7 @@ function ReturnsUploadPanel({
 
   const submit = async () => {
     if (!queued.length) return
+    if (misplaced.length > 0) return
     for (let i = 0; i < queued.length; i++) {
       const file = queued[i]
       setProgress({
@@ -2662,6 +2686,14 @@ function ReturnsUploadPanel({
 
   return (
     <div className="space-y-3">
+      {misplaced.length > 0 && (
+        <WrongUploadTargetBanner
+          message={
+            checkFileForUploadTarget(misplaced[0].name, 'returns')
+            || `“${misplaced[0].name}” does not belong in Returns (for PO).`
+          }
+        />
+      )}
       {sources.length > 0 ? (
         <div className="rounded-lg border border-emerald-100 bg-emerald-50/40 p-2.5 space-y-2">
           <p className="text-[11px] font-semibold text-emerald-900">
@@ -2772,9 +2804,11 @@ function ReturnsUploadPanel({
             Queued ({queued.length} file{queued.length > 1 ? 's' : ''})
           </p>
           <ul className="text-[11px] text-gray-600 space-y-0.5 max-h-24 overflow-y-auto">
-            {queued.map(f => (
-              <li key={f.name} className="flex justify-between gap-2">
-                <span className="truncate">{f.name}</span>
+            {queued.map(f => {
+              const bad = misplaced.some(m => m.name === f.name)
+              return (
+              <li key={f.name} className={`flex justify-between gap-2 ${bad ? 'text-rose-800 font-medium' : ''}`}>
+                <span className="truncate">{bad ? '⚠️ ' : ''}{f.name}</span>
                 <button
                   type="button"
                   className="text-red-500 hover:underline shrink-0"
@@ -2783,12 +2817,13 @@ function ReturnsUploadPanel({
                   remove
                 </button>
               </li>
-            ))}
+              )
+            })}
           </ul>
           <button
             type="button"
             className="w-full text-sm font-medium rounded-lg bg-[#002B5B] text-white py-2 hover:bg-[#003d7a] disabled:opacity-50"
-            disabled={uploading}
+            disabled={uploading || misplaced.length > 0}
             onClick={submit}
           >
             Upload {queued.length} return file{queued.length > 1 ? 's' : ''}
@@ -2806,6 +2841,8 @@ function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
   onReject?: (message: string) => void
 }) {
   const [queued, setQueued] = useState<File[]>([])
+
+  const misplaced = misplacedFilesForTarget(queued, 'daily_sales')
 
   const onDrop = useCallback((accepted: File[]) => {
     const sales = accepted.filter(f => !_isJunkUploadFile(f.name))
@@ -2858,12 +2895,21 @@ function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
 
   const submit = async () => {
     if (!queued.length) return
+    if (misplaced.length > 0) return
     await onUpload(queued)
     setQueued([])
   }
 
   return (
     <div className="space-y-2">
+      {misplaced.length > 0 && (
+        <WrongUploadTargetBanner
+          message={
+            checkFileForUploadTarget(misplaced[0].name, 'daily_sales')
+            || `“${misplaced[0].name}” does not belong in Daily order upload.`
+          }
+        />
+      )}
       <div
         {...getRootProps()}
         className={`border-2 border-dashed rounded-lg px-6 py-5 text-center cursor-pointer transition-colors
@@ -2911,15 +2957,25 @@ function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
       </div>
       {queued.length > 0 && (
         <div className="space-y-1">
-          {queued.map(f => (
-            <div key={f.name} className="flex items-center justify-between bg-gray-50 rounded px-3 py-1.5 text-xs">
-              <span className="text-gray-700 truncate max-w-xs">{f.name}</span>
+          {queued.map(f => {
+            const bad = misplaced.some(m => m.name === f.name)
+            return (
+            <div
+              key={f.name}
+              className={`flex items-center justify-between rounded px-3 py-1.5 text-xs ${
+                bad ? 'bg-rose-50 border border-rose-200' : 'bg-gray-50'
+              }`}
+            >
+              <span className={`truncate max-w-xs ${bad ? 'text-rose-800 font-medium' : 'text-gray-700'}`}>
+                {bad ? '⚠️ ' : ''}{f.name}
+              </span>
               <button onClick={() => remove(f.name)} className="text-gray-400 hover:text-red-500 ml-2 shrink-0">✕</button>
             </div>
-          ))}
+            )
+          })}
           <button
             onClick={submit}
-            disabled={uploading}
+            disabled={uploading || misplaced.length > 0}
             className="w-full mt-1 py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
           >
             {uploading ? 'Uploading…' : `⬆ Upload ${queued.length} file${queued.length > 1 ? 's' : ''}`}
@@ -3041,6 +3097,15 @@ function DailyHistory({ allowDelete = false }: { allowDelete?: boolean }) {
   )
 }
 
+function WrongUploadTargetBanner({ message }: { message: string }) {
+  return (
+    <div className="rounded-lg border-2 border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-900">
+      <p className="font-semibold">Wrong upload section</p>
+      <p className="mt-1">{message}</p>
+    </div>
+  )
+}
+
 function InventoryDropzone({ disabled, uploading, onUpload }: {
   disabled: boolean
   uploading: boolean
@@ -3048,7 +3113,7 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
 }) {
   const [queued, setQueued] = useState<File[]>([])
 
-  const misplacedHistory = findMisplacedHistoryFiles(queued)
+  const misplaced = misplacedFilesForTarget(queued, 'snapshot_inventory')
 
   const onDrop = useCallback((accepted: File[]) => {
     setQueued(prev => {
@@ -3074,23 +3139,20 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
 
   const submit = async () => {
     if (!queued.length) return
-    if (misplacedHistory.length > 0) return
+    if (misplaced.length > 0) return
     await onUpload(queued)
     setQueued([])
   }
 
   return (
     <div className="space-y-2">
-      {misplacedHistory.length > 0 && (
-        <div className="rounded-lg border-2 border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-900">
-          <p className="font-semibold">Wrong upload section</p>
-          <p className="mt-1">
-            {WRONG_TARGET_MESSAGES.historyOnSnapshot(misplacedHistory[0].name)}
-          </p>
-          <p className="mt-1 text-rose-800">
-            Open the <strong>History &amp; setup</strong> tab → <strong>Daily inventory history matrix (PO)</strong>.
-          </p>
-        </div>
+      {misplaced.length > 0 && (
+        <WrongUploadTargetBanner
+          message={
+            checkFileForUploadTarget(misplaced[0].name, 'snapshot_inventory')
+            || `“${misplaced[0].name}” does not belong in Snapshot inventory.`
+          }
+        />
       )}
       <div
         {...getRootProps()}
@@ -3112,17 +3174,17 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
       {queued.length > 0 && (
         <ul className="text-xs space-y-1">
           {queued.map(f => {
-            const misplaced = sniffUploadFilename(f.name).likelyHistoryMatrix
-              && !sniffUploadFilename(f.name).likelySnapshot
+            const detected = classifyUploadFilename(f.name)
+            const bad = detected !== 'neutral' && misplaced.some(m => m.name === f.name)
             return (
             <li
               key={f.name}
               className={`flex items-center justify-between rounded px-2 py-1 ${
-                misplaced ? 'bg-rose-50 border border-rose-200' : 'bg-gray-50'
+                bad ? 'bg-rose-50 border border-rose-200' : 'bg-gray-50'
               }`}
             >
-              <span className={`truncate ${misplaced ? 'text-rose-800 font-medium' : 'text-gray-700'}`}>
-                {misplaced ? '⚠️ ' : ''}{f.name}
+              <span className={`truncate ${bad ? 'text-rose-800 font-medium' : 'text-gray-700'}`}>
+                {bad ? '⚠️ ' : ''}{f.name}
               </span>
               <button onClick={() => remove(f.name)} className="ml-2 text-gray-400 hover:text-red-500">✕</button>
             </li>
@@ -3132,7 +3194,7 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
       )}
       <button
         onClick={submit}
-        disabled={!queued.length || uploading || disabled || misplacedHistory.length > 0}
+        disabled={!queued.length || uploading || disabled || misplaced.length > 0}
         className="w-full py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
       >
         {uploading ? 'Uploading…' : `Upload Inventory${queued.length ? ` (${queued.length} file${queued.length > 1 ? 's' : ''})` : ''}`}

@@ -215,6 +215,14 @@ async def po_upload_sku_status_lead(
     if not raw:
         return {"ok": False, "message": "Empty file."}
     try:
+        from ..services.upload_file_sniff import check_upload_target
+
+        wrong = check_upload_target("sku_status_lead", raw, file.filename or "")
+        if wrong:
+            return {"ok": False, "wrong_upload_target": True, "message": wrong}
+    except Exception:
+        pass
+    try:
         df = parse_sku_status_lead_upload(
             BytesIO(raw),
             file.filename or "sku_status.xlsx",
@@ -1040,6 +1048,19 @@ async def po_returns_import_file(
     raw = await file.read()
     if not raw:
         return {"ok": False, "message": "Empty file."}
+    try:
+        from ..services.upload_file_sniff import check_upload_target
+
+        wrong = check_upload_target("returns", raw, file.filename or "")
+        if wrong:
+            return {
+                "ok": False,
+                "wrong_upload_target": True,
+                "suggested_section": "daily_sales",
+                "message": wrong,
+            }
+    except Exception:
+        logging.getLogger(__name__).exception("returns upload sniff failed")
     gbp = str(group_by_parent).strip().lower() in ("1", "true", "yes", "on")
     rep = str(replace).strip().lower() in ("1", "true", "yes", "on")
     session_id = getattr(request.state, "session_id", None) or getattr(sess, "_persist_sid", None)
