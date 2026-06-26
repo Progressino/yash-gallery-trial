@@ -385,6 +385,20 @@ async def po_upload_daily_inventory_history(
     if not raw:
         return {"ok": False, "message": "Empty file."}
 
+    try:
+        from ..services.upload_file_sniff import check_file_for_daily_inventory_history
+
+        wrong = check_file_for_daily_inventory_history(raw, file.filename or "")
+        if wrong:
+            return {
+                "ok": False,
+                "wrong_upload_target": True,
+                "suggested_section": "snapshot_inventory",
+                "message": wrong.replace("**", ""),
+            }
+    except Exception:
+        logging.getLogger(__name__).exception("daily inventory history upload sniff failed")
+
     from ..concurrency import HEAVY_EXECUTOR
     from ..services.daily_inventory_upload_run import background_daily_inventory_upload
 

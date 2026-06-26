@@ -2361,6 +2361,22 @@ def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, 
     sess = _resolve_upload_session(session_id)
     if sess is None:
         return
+    try:
+        from ..services.upload_file_sniff import check_files_for_snapshot_upload
+
+        wrong = check_files_for_snapshot_upload(file_parts)
+        if wrong:
+            sess.inventory_upload_status = "error"
+            sess.inventory_upload_progress = 0
+            sess.inventory_upload_message = wrong.replace("**", "")
+            sess.inventory_upload_result = {
+                "ok": False,
+                "wrong_upload_target": True,
+                "message": wrong.replace("**", ""),
+            }
+            return
+    except Exception:
+        _log.exception("inventory-auto worker upload sniff failed")
     fnames = ", ".join(n[:36] + "…" if len(n) > 36 else n for n, _ in file_parts[:3])
     if len(file_parts) > 3:
         fnames += f" (+{len(file_parts) - 3} more)"
@@ -2514,6 +2530,22 @@ async def upload_inventory_auto(
     except Exception as e:
         _log.exception("inventory-auto read files in request")
         return JSONResponse(content={"ok": False, "message": str(e)})
+
+    try:
+        from ..services.upload_file_sniff import check_files_for_snapshot_upload
+
+        wrong = check_files_for_snapshot_upload(file_parts)
+        if wrong:
+            return JSONResponse(
+                content={
+                    "ok": False,
+                    "wrong_upload_target": True,
+                    "suggested_section": "history_daily_inventory_matrix",
+                    "message": wrong.replace("**", ""),
+                }
+            )
+    except Exception:
+        _log.exception("inventory-auto upload sniff failed")
 
     sid = getattr(request.state, "session_id", None)
     if sid:
@@ -4183,6 +4215,20 @@ async def _accept_inventory_auto_file_parts(
             "ok": False,
             "message": "An inventory upload is still processing. Wait for it to finish, then try again.",
         }
+
+    try:
+        from ..services.upload_file_sniff import check_files_for_snapshot_upload
+
+        wrong = check_files_for_snapshot_upload(file_parts)
+        if wrong:
+            return {
+                "ok": False,
+                "wrong_upload_target": True,
+                "suggested_section": "history_daily_inventory_matrix",
+                "message": wrong.replace("**", ""),
+            }
+    except Exception:
+        _log.exception("chunked inventory-auto upload sniff failed")
 
     _mark_inventory_upload_running(sess, "Chunks assembled — starting parse…")
     INVENTORY_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)

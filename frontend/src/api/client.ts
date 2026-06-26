@@ -427,6 +427,8 @@ export async function uploadInventoryAuto(
   message: string
   ingest_async?: boolean
   chunked?: boolean
+  wrong_upload_target?: boolean
+  suggested_section?: string
   rows?: number
   debug?: Record<string, unknown>
   detected?: string[]
@@ -890,6 +892,8 @@ export type DailyInventoryUploadResult = {
   ok: boolean
   status?: string
   message?: string
+  wrong_upload_target?: boolean
+  suggested_section?: string
   rows?: number
   skus?: number
   days?: number

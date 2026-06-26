@@ -25,6 +25,12 @@ import { useUploadActivity } from '../store/uploadActivity'
 import { useAuth, mayUploadHistorical, mayResetSharedData, mayUploadPoBaseline, mayDeleteDailyUploadFile, mayClearPlatformData } from '../store/auth'
 import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner'
 import { downloadReconciliationReportCsv } from '../utils/reconciliationReportExport'
+import {
+  findMisplacedHistoryFiles,
+  findMisplacedSnapshotFile,
+  sniffUploadFilename,
+  WRONG_TARGET_MESSAGES,
+} from '../lib/uploadFileSniff'
 
 type Toast = { type: 'success' | 'error'; msg: string }
 type UploadAlert = {
@@ -1458,7 +1464,7 @@ export default function Upload() {
               </UploadCard>
               <UploadCard
                 title="Daily inventory history matrix (PO)"
-                subtitle="Wide Excel: rows = SKUs, columns = daily snapshot totals (OMS / Amazon Inventory sheets). For speed, the server keeps only the latest 30 calendar days of history (set env DAILY_INV_MAX_DAYS to keep more)."
+                subtitle="Wide Excel: rows = SKUs, columns = daily snapshot totals (OMS / Amazon Inventory sheets). For speed, the server keeps only the latest 30 calendar days of history (set env DAILY_INV_MAX_DAYS to keep more). Not for today's OMS RAR/CSV — use Daily uploads → Snapshot inventory for that."
                 loaded={!!coverage.daily_inventory_history}
                 rows={coverage.daily_inventory_history_rows}
                 alert={showImportCompleteness ? uploadAlertsBySource['po_daily_inv'] : undefined}
@@ -1473,6 +1479,10 @@ export default function Upload() {
                     'application/octet-stream': ['.xlsx', '.xls'],
                   }}
                   onUpload={async (file: File) => {
+                    if (findMisplacedSnapshotFile(file)) {
+                      showToast('error', WRONG_TARGET_MESSAGES.snapshotOnHistory(file.name), 12000)
+                      return
+                    }
                     setL('po_daily_inv', true)
                     setBuildingMsg('')
                     try {
@@ -1493,7 +1503,11 @@ export default function Upload() {
                           })
                           await refresh({ light: true })
                         } else {
-                          showToast('error', result.message || 'Upload failed')
+                          showToast(
+                            'error',
+                            result.message || 'Upload failed',
+                            result.wrong_upload_target ? 14_000 : 8000,
+                          )
                         }
                       })
                     } catch (e: unknown) {
@@ -1763,7 +1777,7 @@ export default function Upload() {
 
         <UploadCard
           title="📦 Snapshot inventory"
-          subtitle="Drop the daily RAR plus any separate files. Include OMS CSV, Amazon, Flipkart & Myntra PPMP inventory CSVs inside the bundle for full marketplace stock."
+          subtitle="Today's stock only — OMS CSV/XLSX, Flipkart & Myntra PPMP CSVs, Amazon RAR. Not the wide multi-day history matrix (use History & setup → Daily inventory history matrix)."
           loaded={coverage.inventory}
           onClear={mayClearPlatform ? handleClear('inventory') : undefined}
           clearing={loading['clear_inventory']}
@@ -1835,6 +1849,11 @@ export default function Upload() {
             disabled={!coverage.sku_mapping || coverage.inventory_upload_status === 'running'}
             uploading={loading['inv']}
             onUpload={async (files) => {
+              const misplaced = findMisplacedHistoryFiles(files)
+              if (misplaced.length > 0) {
+                showToast('error', WRONG_TARGET_MESSAGES.historyOnSnapshot(misplaced[0].name), 12000)
+                return
+              }
               invWaitAbortRef.current = false
               setL('inv', true)
               setBuildingMsg('Uploading inventory files…')
@@ -1902,7 +1921,13 @@ export default function Upload() {
                     }
                     await refresh({ light: true })
                     qc.invalidateQueries({ queryKey: ['inventory'] })
-                  } else showToast('error', res.message)
+                  } else {
+                    showToast(
+                      'error',
+                      res.message,
+                      res.wrong_upload_target ? 14_000 : 8000,
+                    )
+                  }
                 })
               } catch (e: unknown) {
                 const { isUploadRequestInterrupted, waitForInventoryUpload } = await import('../api/client')
@@ -3023,6 +3048,8 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
 }) {
   const [queued, setQueued] = useState<File[]>([])
 
+  const misplacedHistory = findMisplacedHistoryFiles(queued)
+
   const onDrop = useCallback((accepted: File[]) => {
     setQueued(prev => {
       const names = new Set(prev.map(f => f.name))
@@ -3047,12 +3074,24 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
 
   const submit = async () => {
     if (!queued.length) return
+    if (misplacedHistory.length > 0) return
     await onUpload(queued)
     setQueued([])
   }
 
   return (
     <div className="space-y-2">
+      {misplacedHistory.length > 0 && (
+        <div className="rounded-lg border-2 border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-900">
+          <p className="font-semibold">Wrong upload section</p>
+          <p className="mt-1">
+            {WRONG_TARGET_MESSAGES.historyOnSnapshot(misplacedHistory[0].name)}
+          </p>
+          <p className="mt-1 text-rose-800">
+            Open the <strong>History &amp; setup</strong> tab → <strong>Daily inventory history matrix (PO)</strong>.
+          </p>
+        </div>
+      )}
       <div
         {...getRootProps()}
         className={`border-2 border-dashed rounded-lg p-5 text-center cursor-pointer transition-colors
@@ -3072,17 +3111,28 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
       </div>
       {queued.length > 0 && (
         <ul className="text-xs space-y-1">
-          {queued.map(f => (
-            <li key={f.name} className="flex items-center justify-between bg-gray-50 rounded px-2 py-1">
-              <span className="truncate text-gray-700">{f.name}</span>
+          {queued.map(f => {
+            const misplaced = sniffUploadFilename(f.name).likelyHistoryMatrix
+              && !sniffUploadFilename(f.name).likelySnapshot
+            return (
+            <li
+              key={f.name}
+              className={`flex items-center justify-between rounded px-2 py-1 ${
+                misplaced ? 'bg-rose-50 border border-rose-200' : 'bg-gray-50'
+              }`}
+            >
+              <span className={`truncate ${misplaced ? 'text-rose-800 font-medium' : 'text-gray-700'}`}>
+                {misplaced ? '⚠️ ' : ''}{f.name}
+              </span>
               <button onClick={() => remove(f.name)} className="ml-2 text-gray-400 hover:text-red-500">✕</button>
             </li>
-          ))}
+            )
+          })}
         </ul>
       )}
       <button
         onClick={submit}
-        disabled={!queued.length || uploading || disabled}
+        disabled={!queued.length || uploading || disabled || misplacedHistory.length > 0}
         className="w-full py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
       >
         {uploading ? 'Uploading…' : `Upload Inventory${queued.length ? ` (${queued.length} file${queued.length > 1 ? 's' : ''})` : ''}`}
