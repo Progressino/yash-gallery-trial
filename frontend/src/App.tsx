@@ -184,10 +184,16 @@ function ProtectedRoute() {
           try {
             if (!serverWarmCacheReady) {
               await waitForWarmCacheReady({ maxWaitMs: 45_000, pollMs: 2_000 })
+              try {
+                const js = await getJobStatus()
+                serverWarmCacheReady = js.warm_cache && js.warm_cache_generation >= 1
+              } catch {
+                /* optional */
+              }
             }
-            if (!serverWarmCacheReady) {
-              await withTimeout(cacheHydrateWarm(), 30_000)
-            }
+            // Warm cache may be ready server-side while this browser session is still empty —
+            // always run hydrate-warm; shared-frame attach on coverage alone is not enough.
+            await withTimeout(cacheHydrateWarm(), 30_000)
             coverage = await getCoverage({ light: true, timeout: 45_000 })
             setCoverage(coverage)
             if (poOperationalReady(coverage)) {

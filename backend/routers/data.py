@@ -3269,7 +3269,9 @@ def _apply_light_coverage_hydrate(sess: AppSession) -> None:
 
         if not _main._warm_cache:
             _main.bootstrap_warm_cache_if_empty()
-        else:
+        elif _main.session_needs_warm_cache_topup(sess):
+            # Do not re-read every parquet from disk on each 3–8s coverage poll — that
+            # saturates I/O and blocks session hydrate workers (users stay at 0/8).
             _main._top_up_warm_cache_from_disk()
         if not _main._warm_cache:
             return
@@ -3327,19 +3329,20 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         existing_po_pipeline_sku_count,
     )
 
-    from ..services.existing_po import ensure_existing_po_hydrated
+    if not light:
+        from ..services.existing_po import ensure_existing_po_hydrated
 
-    try:
-        ensure_existing_po_hydrated(sess)
-    except Exception:
-        pass
+        try:
+            ensure_existing_po_hydrated(sess)
+        except Exception:
+            pass
 
-    try:
-        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
+        try:
+            from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
 
-        ensure_po_sidecars_hydrated(sess)
-    except Exception:
-        pass
+            ensure_po_sidecars_hydrated(sess)
+        except Exception:
+            pass
 
     if not light:
         from ..services.daily_store import get_summary
@@ -4102,6 +4105,7 @@ def _get_coverage_sync(request: Request, light: bool = False) -> CoverageRespons
 
     if light:
         _apply_light_coverage_hydrate(sess)
+        _maybe_queue_full_restore_when_empty(sess, sid or None)
         if not _shared_frames_operational(sess):
             _maybe_queue_light_session_hydrate(sess, sid or None)
             _maybe_queue_unified_sales_build(sess, sid or None)
