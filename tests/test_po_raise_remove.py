@@ -127,10 +127,27 @@ def test_remove_raise_ledger_day_blocks_auto_import(tmp_path, monkeypatch):
 
 
 def test_clear_raise_ledger_all(tmp_path, monkeypatch):
+    import backend.services.po_raise_archive as arch
+    from backend.services.po_raise_archive import save_archive, try_auto_import_recent_ledgers
+
+    archive_root = tmp_path / "arch"
+    archive_root.mkdir()
+    monkeypatch.setattr(arch, "_ARCHIVE_DIR", str(archive_root))
+    arch._resolved_archive_root = None
+
     db = tmp_path / "po_raised_clear.db"
     monkeypatch.setattr(po_raised_db, "DB_PATH", str(db))
     po_raised_db.init_db()
     po_raised_db.record_raises([{"oms_sku": "X", "qty": 1}])
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "po_recommendation_16-5-26.csv"
+    day = "2026-05-21"
+    if fixture.is_file():
+        save_archive(
+            "sess-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            pd.Timestamp(day),
+            fixture.read_bytes(),
+        )
 
     sess = AppSession()
     sess.po_raise_ledger_df = pd.DataFrame(
@@ -140,3 +157,14 @@ def test_clear_raise_ledger_all(tmp_path, monkeypatch):
     assert out["ok"] is True
     assert sess.po_raise_ledger_df.empty
     assert po_raised_db.list_raises(limit=10) == []
+    assert po_raised_db.is_raise_date_suppressed(day)
+
+    if fixture.is_file():
+        fresh = AppSession()
+        auto = try_auto_import_recent_ledgers(
+            fresh,
+            "sess-bbbb-cccc-dddd-eeee-ffffffffff",
+            "2026-05-25",
+            lookback_days=14,
+        )
+        assert auto is None or day not in (auto.get("imported_days") or [])

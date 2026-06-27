@@ -359,6 +359,37 @@ def inventory_history_view_end_date(
     return str(end.date())
 
 
+def inventory_history_authoritative_cap_date(sess) -> pd.Timestamp:
+    """Last day with real uploaded inventory — never fabricate tomorrow without a snapshot."""
+    df = getattr(sess, "daily_inventory_history_df", None)
+    sheet_max = inventory_history_max_date(df)
+    snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
+    meta = read_daily_inventory_history_disk_meta() or {}
+    meta_max = str(meta.get("daily_inventory_history_max_date") or "").strip()[:10]
+
+    trusted: list[pd.Timestamp] = []
+    if len(meta_max) == 10:
+        try:
+            trusted.append(pd.Timestamp(meta_max).normalize())
+        except Exception:
+            pass
+    if len(snap) == 10:
+        try:
+            trusted.append(pd.Timestamp(snap).normalize())
+        except Exception:
+            pass
+    if trusted:
+        cap = max(trusted)
+        if sheet_max is not None and pd.notna(sheet_max):
+            sm = pd.Timestamp(sheet_max).normalize()
+            if sm <= cap:
+                return max(cap, sm)
+        return cap
+    if sheet_max is not None and pd.notna(sheet_max):
+        return pd.Timestamp(sheet_max).normalize()
+    return today_ist_timestamp()
+
+
 def inventory_history_is_newer_than(
     incoming: pd.DataFrame | None,
     existing: pd.DataFrame | None,
@@ -476,14 +507,15 @@ def refresh_inventory_history_rollforward(
     sales = sales_df if sales_df is not None else _sales_for_inventory_rollforward(sess)
 
     snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
+    sheet_max = inventory_history_max_date(hist)
     if cap_date is not None:
         cap_ts = pd.Timestamp(cap_date).normalize()
     elif len(snap) == 10:
         cap_ts = pd.Timestamp(snap).normalize()
+    elif sheet_max is not None:
+        cap_ts = pd.Timestamp(sheet_max).normalize()
     else:
-        cap_ts = today_ist_timestamp()
-
-    sheet_max = inventory_history_max_date(hist)
+        cap_ts = inventory_history_authoritative_cap_date(sess)
     extended = hist
     rolled = False
     if sheet_max is not None and sheet_max < cap_ts - pd.Timedelta(days=0):

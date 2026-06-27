@@ -110,19 +110,43 @@ def remove_raise_ledger_skus(sess, raised_date: str, oms_skus: Iterable[str]) ->
 
 
 def clear_raise_ledger_all(sess) -> dict:
-    """Wipe session ledger and durable SQLite store."""
+    """Wipe session ledger, durable SQLite store, archives, and block auto-import."""
     import pandas as pd
 
-    from ..db.po_raised_db import clear_all
+    from ..db.po_raised_db import clear_all, list_raises, suppress_raise_date
+    from ..services.po_raise_archive import _archive_csv_dates, delete_all_archives
 
     n_sess = int(len(getattr(sess, "po_raise_ledger_df", pd.DataFrame())))
+    ledger = getattr(sess, "po_raise_ledger_df", pd.DataFrame())
+    if ledger is not None and not ledger.empty and "Raised_Date" in ledger.columns:
+        rd = pd.to_datetime(ledger["Raised_Date"], errors="coerce").dt.normalize()
+        for d in rd.dropna().unique():
+            suppress_raise_date(str(pd.Timestamp(d).date()), note="cleared all via PO dashboard")
+    for row in list_raises(limit=50_000):
+        day = str(row.get("raised_date") or "")[:10]
+        if day:
+            suppress_raise_date(day, note="cleared all via PO dashboard")
+    for day in sorted(_archive_csv_dates()):
+        suppress_raise_date(day, note="cleared all via PO dashboard")
     n_db = clear_all()
+    archives_removed = delete_all_archives()
     sess.po_raise_ledger_df = pd.DataFrame()
     invalidate_po_calculate_result(sess)
+    try:
+        import backend.main as _main
+
+        _main.merge_po_optional_sheets_into_warm_cache(sess)
+    except Exception:
+        pass
+    msg = f"PO raise ledger cleared ({max(n_sess, n_db):,} row(s) removed)."
+    if archives_removed:
+        msg += f" {archives_removed} archive file(s) deleted."
+    msg += " Auto-import is blocked for all prior raise dates." + _RECALC_HINT
     return {
         "ok": True,
-        "message": f"PO raise ledger cleared ({max(n_sess, n_db):,} row(s) removed).{_RECALC_HINT}",
+        "message": msg,
         "removed": max(n_sess, n_db),
+        "archives_removed": archives_removed,
         "recalculate_required": True,
     }
 

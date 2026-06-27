@@ -168,6 +168,55 @@ def test_tier3_deeper_than_session_uses_streaming(monkeypatch):
     assert int(row["Oct-Dec 2024"]) == 400
 
 
+def test_platform_path_merges_unified_sales(monkeypatch):
+    """When platform frames exist, quarterly must still include session sales_df."""
+    from backend.session import AppSession
+
+    sess = AppSession()
+    sess.sales_df = pd.DataFrame(
+        {
+            "Sku": ["UNIFIED-SKU"],
+            "TxnDate": pd.to_datetime(["2026-06-15"]),
+            "Transaction Type": ["Shipment"],
+            "Quantity": [42],
+        }
+    )
+    sess.mtr_df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-06-10"]),
+            "SKU": ["UNIFIED-SKU"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [10],
+        }
+    )
+    seen: dict = {}
+
+    def _fake_quarterly(**kwargs):
+        seen["sales_empty"] = kwargs.get("sales_df") is None or kwargs["sales_df"].empty
+        return pd.DataFrame({"OMS_SKU": ["UNIFIED-SKU"], "Apr-Jun 2026": [52]})
+
+    monkeypatch.setattr(
+        "backend.services.po_engine.calculate_quarterly_history",
+        _fake_quarterly,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup.platform_frames_span_days",
+        lambda _s: 900,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._session_has_platform_rows",
+        lambda _s: True,
+    )
+    monkeypatch.setattr(
+        "backend.services.platform_session_window.session_platform_shorter_than_tier3",
+        lambda _s: False,
+    )
+
+    out = build_quarterly_payload(sess, n_quarters=8)
+    assert seen.get("sales_empty") is False
+    assert out["rows"][0]["OMS_SKU"] == "UNIFIED-SKU"
+
+
 def test_hydrate_is_noop(monkeypatch):
     from backend.services import daily_store
 

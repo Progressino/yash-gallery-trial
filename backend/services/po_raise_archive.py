@@ -180,6 +180,53 @@ def list_global_archive_dates(
     return sorted(set(out), reverse=True)
 
 
+def _archive_csv_dates() -> set[str]:
+    """Calendar days referenced by archived PO export filenames."""
+    root = archive_dir()
+    days: set[str] = set()
+    paths: list[Path] = []
+    gdir = root / _GLOBAL_SUBDIR
+    if gdir.is_dir():
+        paths.extend(gdir.glob("*.csv"))
+    if root.is_dir():
+        for sub in root.iterdir():
+            if sub.is_dir() and sub.name != _GLOBAL_SUBDIR:
+                paths.extend(sub.glob("*.csv"))
+    for p in paths:
+        try:
+            days.add(str(pd.Timestamp(pd.to_datetime(p.stem).normalize().date())))
+        except Exception:
+            parsed = parse_raise_date_from_filename(p.name)
+            if parsed is not None and pd.notna(parsed):
+                days.add(str(pd.Timestamp(parsed).normalize().date()))
+    return days
+
+
+def delete_all_archives() -> int:
+    """Remove every archived PO export so auto-import cannot resurrect deleted raises."""
+    root = archive_dir()
+    removed = 0
+    gdir = root / _GLOBAL_SUBDIR
+    if gdir.is_dir():
+        for p in gdir.glob("*.csv"):
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+    if root.is_dir():
+        for sub in root.iterdir():
+            if not sub.is_dir() or sub.name == _GLOBAL_SUBDIR:
+                continue
+            for p in sub.glob("*.csv"):
+                try:
+                    p.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
 def parse_raise_date_from_filename(filename: str) -> Optional[pd.Timestamp]:
     """e.g. ``po_recommendation 16-5-26.csv`` or ``Po 24-Jun-26.xlsx`` → 2026-06-24."""
     name = (filename or "").strip()

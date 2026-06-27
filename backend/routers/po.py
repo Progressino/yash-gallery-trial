@@ -1290,6 +1290,7 @@ def po_dashboard(request: Request, body: PODashboardRequest):
         low_run_days=body.low_run_days,
         max_rows_per_section=body.max_rows_per_section,
         lead_time_default=body.lead_time,
+        existing_po_df=getattr(sess, "existing_po_df", None),
     )
 
     from ..services.po_raise_ledger import summarize_raise_ledger_for_dashboard

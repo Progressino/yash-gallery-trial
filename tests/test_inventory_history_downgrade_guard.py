@@ -84,3 +84,36 @@ def test_overlay_updates_total_inventory_only():
     assert meta["applied"] is True
     assert float(out.loc[0, "Total_Inventory"]) == 5.0
     assert float(out.loc[0, "OMS_Inventory"]) == 10.0
+
+
+def test_authoritative_cap_date_never_exceeds_upload_end():
+    from backend.session import AppSession
+    from backend.services.daily_inventory_history import inventory_history_authoritative_cap_date
+
+    sess = AppSession()
+    sess.daily_inventory_history_df = _hist("A", "2026-06-26", 5)
+    sess.inventory_snapshot_date = "2026-06-26"
+    cap = inventory_history_authoritative_cap_date(sess)
+    assert str(cap.date()) == "2026-06-26"
+
+
+def test_ensure_inventory_history_trims_beyond_cap(monkeypatch):
+    from backend.session import AppSession
+    from backend.services.po_session_hydrate import ensure_inventory_history_authoritative_for_read
+
+    sess = AppSession()
+    sess.daily_inventory_history_df = _hist("A", "2026-06-27", 3)
+    sess.inventory_snapshot_date = "2026-06-26"
+
+    monkeypatch.setattr(
+        "backend.services.po_session_hydrate.ensure_po_sidecars_hydrated",
+        lambda _s: None,
+    )
+    monkeypatch.setattr(
+        "backend.services.daily_inventory_history.read_daily_inventory_history_disk_meta",
+        lambda: {"daily_inventory_history_max_date": "2026-06-26"},
+    )
+
+    out = ensure_inventory_history_authoritative_for_read(sess)
+    mx = out["Date"].max().normalize()
+    assert str(mx.date()) == "2026-06-26"

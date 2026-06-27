@@ -862,41 +862,34 @@ def _apply_existing_po_df_to_session(sess, df: pd.DataFrame, meta: Optional[dict
 
 
 def restore_existing_po_from_warm_cache(sess) -> bool:
-    """Prefer shared warm-cache Existing PO when it is newer or has more per-size rows."""
+    """Prefer shared warm-cache Existing PO when it is newer than the session copy."""
     try:
         import backend.main as _main
 
         wc = _main._warm_cache.get("existing_po_df")
+        wc_meta = _main._warm_cache.get(_main._EXISTING_PO_META_WARM_KEY)
     except Exception:
         return False
     if wc is None or getattr(wc, "empty", True):
         return False
     cur = getattr(sess, "existing_po_df", None)
-    wc_per = count_per_size_pipeline_skus(wc)
-    cur_per = count_per_size_pipeline_skus(cur) if cur is not None else 0
-    meta = None
-    try:
-        import backend.main as _main
-
-        meta = _main._warm_cache.get(_main._EXISTING_PO_META_WARM_KEY)
-    except Exception:
-        pass
-    newer = False
-    if isinstance(meta, dict):
-        try:
-            from .daily_inventory_history import upload_timestamp_epoch
-
-            mg = int(meta.get("existing_po_generation") or 0)
-            sg = int(getattr(sess, "existing_po_generation", 0) or 0)
-            ma = upload_timestamp_epoch(str(meta.get("existing_po_uploaded_at") or ""))
-            sa = upload_timestamp_epoch(str(getattr(sess, "existing_po_uploaded_at", "") or ""))
-            newer = mg > sg or ma > sa + 0.5
-        except Exception:
-            pass
-    if not newer and wc_per <= cur_per + 200:
+    sess_meta = {
+        "existing_po_generation": int(getattr(sess, "existing_po_generation", 0) or 0),
+        "existing_po_uploaded_at": str(getattr(sess, "existing_po_uploaded_at", "") or ""),
+    }
+    if not existing_po_frame_is_newer_than(
+        wc,
+        cur,
+        incoming_meta=wc_meta if isinstance(wc_meta, dict) else None,
+        existing_meta=sess_meta,
+    ):
         return False
-    _apply_existing_po_df_to_session(sess, wc.copy(), meta if isinstance(meta, dict) else None)
-    _log.info("Existing PO restored from warm cache: %s per-size pipeline SKUs", wc_per)
+    _apply_existing_po_df_to_session(sess, wc.copy(), wc_meta if isinstance(wc_meta, dict) else None)
+    _log.info(
+        "Existing PO restored from warm cache (gen %s→%s)",
+        sess_meta.get("existing_po_generation"),
+        (wc_meta or {}).get("existing_po_generation") if isinstance(wc_meta, dict) else "?",
+    )
     return True
 
 
@@ -907,49 +900,25 @@ def restore_existing_po_from_disk(sess) -> bool:
     if df is None:
         return False
 
-    disk_gen = int(meta.get("existing_po_generation") or 0)
-    disk_rows = int(meta.get("existing_po_rows") or len(df))
-    sess_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
     ep = getattr(sess, "existing_po_df", None)
-    sess_rows = int(len(ep)) if ep is not None and not getattr(ep, "empty", True) else 0
-    disk_per = count_per_size_pipeline_skus(df)
-    sess_per = count_per_size_pipeline_skus(ep) if ep is not None else 0
-    disk_fn = str(meta.get("existing_po_filename") or "").strip()
-    sess_fn = str(getattr(sess, "existing_po_filename", "") or "").strip()
-    try:
-        from .daily_inventory_history import upload_timestamp_epoch
-
-        disk_at = upload_timestamp_epoch(str(meta.get("existing_po_uploaded_at") or ""))
-        sess_at = upload_timestamp_epoch(str(getattr(sess, "existing_po_uploaded_at", "") or ""))
-    except Exception:
-        disk_at = 0.0
-        sess_at = 0.0
-
-    newer_gen = disk_gen > sess_gen
-    newer_upload = disk_at > sess_at + 0.5
-    partial_session = sess_rows > 0 and disk_rows > sess_rows + 50
-    same_gen_partial = disk_gen == sess_gen and sess_rows > 0 and disk_rows > sess_rows + 50
-    empty_session = sess_rows == 0 and disk_rows > 0
-    aggregated_session = sess_rows > 0 and disk_per > sess_per + 200
-    filename_changed = bool(disk_fn and sess_fn and disk_fn != sess_fn)
-    if not (
-        newer_gen
-        or newer_upload
-        or partial_session
-        or same_gen_partial
-        or empty_session
-        or aggregated_session
-        or filename_changed
+    sess_meta = {
+        "existing_po_generation": int(getattr(sess, "existing_po_generation", 0) or 0),
+        "existing_po_uploaded_at": str(getattr(sess, "existing_po_uploaded_at", "") or ""),
+    }
+    if not existing_po_frame_is_newer_than(
+        df,
+        ep,
+        incoming_meta=meta,
+        existing_meta=sess_meta,
     ):
         return False
 
     _apply_existing_po_df_to_session(sess, df, meta)
     _log.info(
-        "Existing PO restored from disk: %s rows, %s per-size pipeline (gen %s→%s)",
-        disk_rows,
-        disk_per,
-        sess_gen,
-        disk_gen,
+        "Existing PO restored from disk: %s rows (gen %s→%s)",
+        int(meta.get("existing_po_rows") or len(df)),
+        sess_meta.get("existing_po_generation"),
+        meta.get("existing_po_generation"),
     )
     return True
 
@@ -1979,7 +1948,7 @@ def audit_existing_po_upload(
     """
     out: dict = {
         "sku_rows": int(len(parsed)),
-        "pipeline_units": int(pd.to_numeric(parsed.get("PO_Pipeline_Total"), errors="coerce").fillna(0).sum()),
+        "pipeline_units": existing_po_pipeline_totals(parsed)[0],
         "pending_cutting_units": int(
             pd.to_numeric(parsed.get("Pending_Cutting"), errors="coerce").fillna(0).sum()
         )

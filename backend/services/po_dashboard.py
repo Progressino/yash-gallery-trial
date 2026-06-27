@@ -92,6 +92,7 @@ def build_dashboard_payload(
     low_run_days: float = 40.0,
     max_rows_per_section: int = 80,
     lead_time_default: int = 30,
+    existing_po_df: pd.DataFrame | None = None,
 ) -> Dict[str, Any]:
     """Return structured sections + summary for the PO dashboard UI."""
     if po_df is None or po_df.empty:
@@ -249,13 +250,20 @@ def build_dashboard_payload(
     running_tight = _rows(tight_df, tight_cols)
 
     inv = pd.to_numeric(p.get("Total_Inventory", 0), errors="coerce").fillna(0)
+    from .existing_po import existing_po_pipeline_totals
+
+    ep_pipe_units, _ep_pipe_skus = existing_po_pipeline_totals(existing_po_df)
+    if ep_pipe_units > 0:
+        total_pipeline_units = ep_pipe_units
+    else:
+        total_pipeline_units = int(p["PO_Pipeline_Total"].sum())
     summary = {
         "sku_rows": int(len(p)),
         "in_production_skus": int(pipe.sum()),
         "open_po_skus": int(poq.sum()),
         "spike_attention_skus": int(spike_mask.sum()),
         "running_tight_skus": int(tight_mask.sum()),
-        "total_pipeline_units": int(p["PO_Pipeline_Total"].sum()),
+        "total_pipeline_units": total_pipeline_units,
         "total_sheet_pipeline_units": int(p["Pipeline_From_Sheet"].sum()),
         "total_raised_recent_units": int(p["Raised_Recently_Units"].sum()),
         "total_open_po_units": int(pd.to_numeric(p.get("PO_Qty", 0), errors="coerce").fillna(0).sum()),

@@ -341,11 +341,11 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
 
     from .daily_inventory_history import (
         apply_daily_inventory_history_meta,
+        inventory_history_authoritative_cap_date,
         inventory_history_max_date,
         read_daily_inventory_history_disk_meta,
         recanonicalize_inventory_history_skus,
         refresh_inventory_history_rollforward,
-        today_ist_timestamp,
     )
 
     mapping = getattr(sess, "sku_mapping", None) or (_main._warm_cache or {}).get("sku_mapping") or {}
@@ -361,9 +361,15 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
                 _main._warm_cache["daily_inventory_history_df"] = df.copy()
 
     mx = inventory_history_max_date(df)
-    if mx is not None and (today_ist_timestamp() - mx).days > 1:
+    cap = inventory_history_authoritative_cap_date(sess)
+    snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
+    snap_ts = pd.Timestamp(snap).normalize() if len(snap) == 10 else None
+    # Only fill a real gap between uploaded matrix end and snapshot — never extend to today.
+    if mx is not None and snap_ts is not None and snap_ts > mx:
         try:
-            result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+            result = refresh_inventory_history_rollforward(
+                sess, cap_date=snap_ts, include_snapshot=True
+            )
             if result.get("ok"):
                 df = getattr(sess, "daily_inventory_history_df", None)
                 try:
@@ -372,6 +378,20 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
                     pass
         except Exception:
             _log.exception("inventory history roll-forward on read failed")
+    elif mx is not None and mx.normalize() > cap.normalize():
+        # Trim any synthetic rows beyond authoritative upload end (e.g. prior today roll-forward).
+        from .daily_inventory_history import filter_inventory_history_window
+
+        trimmed = filter_inventory_history_window(
+            df,
+            days=3650,
+            end_date=str(cap.date()),
+        )
+        if _df_row_count(trimmed) > 0 and inventory_history_max_date(trimmed) != mx:
+            sess.daily_inventory_history_df = trimmed
+            if not _main._warm_cache:
+                _main._warm_cache = {}
+            _main._warm_cache["daily_inventory_history_df"] = trimmed.copy()
 
     disk_meta = read_daily_inventory_history_disk_meta()
     if isinstance(disk_meta, dict) and disk_meta.get("daily_inventory_history_uploaded_at"):

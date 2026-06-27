@@ -296,7 +296,7 @@ def build_quarterly_payload(
             sess,
             group_by_parent=group_by_parent,
             n_quarters=n_quarters,
-            include_sales=False,
+            include_sales=True,
         )
         out = _pivot_to_payload(pivot, n_quarters=n_quarters)
         if out.get("loaded") and out.get("rows"):
