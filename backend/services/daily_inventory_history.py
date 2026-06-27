@@ -27,13 +27,6 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from .helpers import (
-    clean_sku,
-    collapse_duplicate_trailing_size_suffix,
-    normalize_id_token_for_mapping,
-)
-from .sku_status_lead import _strip_pl_sku
-
 _IST = ZoneInfo("Asia/Kolkata")
 _DEFAULT_VIEW_DAYS = int(os.environ.get("DAILY_INV_VIEW_DAYS", "30"))
 
@@ -274,6 +267,27 @@ def _trim_date_map_to_window(
     }
 
 
+def drop_zero_derived_rows(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Drop sales-derived zero rows for SKUs that never had uploaded on-hand."""
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame(columns=_TALL_COLS)
+    if "Source" not in df.columns:
+        return df
+    qty = pd.to_numeric(df["Qty"], errors="coerce").fillna(0.0)
+    uploaded = df["Source"].astype(str) != "derived"
+    stocked_skus = set(
+        df.loc[uploaded & (qty > 0), "OMS_SKU"].astype(str).str.strip()
+    )
+    drop = (
+        (df["Source"].astype(str) == "derived")
+        & (qty <= 0)
+        & (~df["OMS_SKU"].astype(str).isin(stocked_skus))
+    )
+    if not bool(drop.any()):
+        return df
+    return df.loc[~drop].reset_index(drop=True)
+
+
 def merge_inventory_history(
     existing: Optional[pd.DataFrame],
     incoming: pd.DataFrame,
@@ -293,7 +307,7 @@ def merge_inventory_history(
     combined = combined.dropna(subset=["Qty"])
     if combined.empty:
         return pd.DataFrame(columns=_TALL_COLS)
-    return (
+    return drop_zero_derived_rows(
         combined.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"]
         .max()
         .sort_values(["OMS_SKU", "Date"])
@@ -713,15 +727,10 @@ def _parse_one_sheet(
     if tall.empty:
         return pd.DataFrame(columns=_TALL_COLS)
 
-    def _canon(v: str) -> str:
-        tok = normalize_id_token_for_mapping(v)
-        clean = clean_sku(tok or v)
-        if not clean:
-            clean = str(v).strip().upper()
-        return collapse_duplicate_trailing_size_suffix(_strip_pl_sku(clean, mapping))
+    from .po_engine import canonical_oms_key
 
     unique_raw = tall["_raw_sku"].unique()
-    canon_map = {r: _canon(r) for r in unique_raw}
+    canon_map = {r: canonical_oms_key(r, mapping) for r in unique_raw}
     tall["OMS_SKU"] = tall["_raw_sku"].map(canon_map)
     tall = tall[tall["OMS_SKU"].astype(str).str.len() > 0]
     tall["Qty"] = pd.to_numeric(tall["Qty"], errors="coerce")
@@ -1135,17 +1144,25 @@ def extend_history_with_sales(
     for di, d in enumerate(days):
         net_d = net_matrix[:, di]
         new_qty = np.maximum(0.0, prev_qty - net_d)
-        derived_rows.append(
-            pd.DataFrame(
-                {
-                    "OMS_SKU": sku_list,
-                    "Date": pd.Timestamp(d),
-                    "Qty": new_qty,
-                    "Source": "derived",
-                }
+        # Only materialize rows for SKUs that had on-hand stock or net sales this day.
+        # Writing explicit Qty=0 for every OOS SKU on every sales day poisoned the
+        # wide matrix (all dashes) and forced Eff_Days_Inventory to 0 after merges.
+        active = (prev_qty > 0) | (np.abs(net_d) > 1e-9)
+        if np.any(active):
+            derived_rows.append(
+                pd.DataFrame(
+                    {
+                        "OMS_SKU": sku_list[active],
+                        "Date": pd.Timestamp(d),
+                        "Qty": new_qty[active],
+                        "Source": "derived",
+                    }
+                )
             )
-        )
         prev_qty = new_qty
+
+    if not derived_rows:
+        return base[out_cols].reset_index(drop=True)
 
     derived = pd.concat(derived_rows, ignore_index=True)
     full = pd.concat([base[out_cols], derived[out_cols]], ignore_index=True)
@@ -1515,6 +1532,7 @@ __all__ = [
     "refresh_inventory_history_rollforward",
     "append_snapshot_inventory_to_history",
     "recanonicalize_inventory_history_skus",
+    "drop_zero_derived_rows",
     "inventory_history_view_end_date",
     "inventory_history_is_newer_than",
     "filter_inventory_history_window",

@@ -68,7 +68,13 @@ def execute_daily_inventory_upload(
     *,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    from .daily_inventory_history import filter_inventory_history_window, merge_inventory_history, parse_daily_inventory_history_upload
+    from .daily_inventory_history import (
+        filter_inventory_history_window,
+        merge_inventory_history,
+        parse_daily_inventory_history_upload,
+        recanonicalize_inventory_history_skus,
+        drop_zero_derived_rows,
+    )
 
     def _progress(msg: str) -> None:
         if on_progress is not None:
@@ -91,6 +97,12 @@ def execute_daily_inventory_upload(
             "column 2 = parent (optional), then daily snapshot columns whose first row is the date.",
         }
 
+    from .daily_inventory_history import recanonicalize_inventory_history_skus
+
+    if sess.sku_mapping:
+        df = recanonicalize_inventory_history_skus(df, sess.sku_mapping)
+    df = drop_zero_derived_rows(df)
+
     from .daily_inventory_history import inventory_history_max_date
 
     sheet_max = inventory_history_max_date(df)
@@ -106,16 +118,25 @@ def execute_daily_inventory_upload(
         incoming_dates = set(
             pd.to_datetime(df["Date"], errors="coerce").dt.normalize().dropna().unique()
         )
-        if incoming_dates:
-            ex_dates = pd.to_datetime(existing["Date"], errors="coerce").dt.normalize()
-            ex_date_set = set(ex_dates.dropna().unique())
-            if incoming_dates >= ex_date_set:
-                # Full matrix re-upload — skip slow merge/groupby.
-                pass
-            else:
-                _progress("Merging with saved history…")
-                kept = existing.loc[~ex_dates.isin(incoming_dates)]
-                df = merge_inventory_history(kept, df)
+        ex_dates = pd.to_datetime(existing["Date"], errors="coerce").dt.normalize()
+        ex_date_set = set(ex_dates.dropna().unique())
+        in_max = inventory_history_max_date(df)
+        ex_max = inventory_history_max_date(existing)
+        in_skus = int(df["OMS_SKU"].astype(str).nunique())
+        ex_skus = int(existing["OMS_SKU"].astype(str).nunique())
+        full_reupload = (
+            in_max is not None
+            and ex_max is not None
+            and in_max >= ex_max
+            and in_skus >= max(500, int(ex_skus * 0.85))
+        )
+        if full_reupload or (incoming_dates and incoming_dates >= ex_date_set):
+            # Full wide-matrix re-upload — skip merge with stale derived/zero rows.
+            pass
+        elif incoming_dates:
+            _progress("Merging with saved history…")
+            kept = existing.loc[~ex_dates.isin(incoming_dates)]
+            df = merge_inventory_history(kept, df)
         else:
             df = merge_inventory_history(existing, df)
         sheet_max = inventory_history_max_date(df)

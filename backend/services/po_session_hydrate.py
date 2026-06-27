@@ -400,7 +400,9 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
     df = getattr(sess, "daily_inventory_history_df", None)
     if df is None or getattr(df, "empty", True):
         return pd.DataFrame()
-    return df
+    from .daily_inventory_history import drop_zero_derived_rows
+
+    return drop_zero_derived_rows(df)
 
 
 _MIN_STATUS_ROWS_FOR_LARGE_CATALOG = 100
