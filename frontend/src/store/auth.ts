@@ -148,3 +148,10 @@ export function mayUploadPoBaseline(user: AuthUser | null | undefined): boolean 
 export function mayDeleteDailyUploadFile(user: AuthUser | null | undefined): boolean {
   return mayDeleteUploadData(user)
 }
+
+/** Karigar attendance row delete — Manager role or Himanshu user. */
+export function mayDeleteStitchingAttendance(user: AuthUser | null | undefined): boolean {
+  if (!user) return false
+  if (user.role === 'Manager') return true
+  return String(user.username || '').trim().toLowerCase() === 'himanshu'
+}

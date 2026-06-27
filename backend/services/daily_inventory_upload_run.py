@@ -150,6 +150,8 @@ def execute_daily_inventory_upload(
     sess.daily_inventory_history_df = df
     sess.daily_inventory_history_uploaded_at = datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S")
     sess.daily_inventory_history_filename = filename or ""
+    if end_anchor:
+        sess.daily_inventory_history_matrix_max_date = end_anchor
     sess._quarterly_cache.clear()
     skus = int(df["OMS_SKU"].nunique())
     dates_norm = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()

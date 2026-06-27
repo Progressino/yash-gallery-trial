@@ -32,6 +32,7 @@ DATA_KEYS = (
     "karigar_attendance",
     "operating_attendance",
     "karigar_expenses",
+    "challan_deposit_log",
 )
 
 HOUR_COLS = [
@@ -123,6 +124,7 @@ DEFAULT_SHEETS: dict[str, list[dict]] = {
     "karigar_attendance": [],
     "operating_attendance": [],
     "karigar_expenses": [],
+    "challan_deposit_log": [],
 }
 
 

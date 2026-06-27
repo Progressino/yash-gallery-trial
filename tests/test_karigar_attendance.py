@@ -53,7 +53,7 @@ def test_overtime_same_hourly_rate_after_grace():
     )
     assert out["OT_Hours"] == 1.0
     assert out["OT_Pay"] == 57.5
-    assert out["Total_Pay"] == round(out["Normal_Pay"] + out["OT_Pay"], 2)
+    assert out["Total_Pay"] == 518
 
 
 def test_overtime_manoj_807_9_to_2059():
@@ -324,8 +324,8 @@ def test_employee_845_late_arrival_reduces_normal_pay():
     assert out["Late_Deduction_Hrs"] == 0.35
     assert out["Late_Deduction_Rs"] == 14.44
     assert out["Normal_Pay"] == 294.94
-    assert out["OT_Pay"] == 41.25
-    assert out["Total_Pay"] == 336.19
+    assert out["OT_Pay"] == 20.62
+    assert out["Total_Pay"] == 316
     assert out["Payable_Hrs"] == 7.15
 
 
@@ -513,3 +513,19 @@ def test_import_biometric_attendance_xls():
     assert len(pl2[pl2["Date"].astype(str) == "2026-05-20"]) == len(
         pl[pl["Date"].astype(str) == "2026-05-20"]
     )
+
+
+@pytest.mark.parametrize(
+    "daily_rate,tin,tout,expected",
+    [
+        (520, time(8, 55), time(18, 34), 553),
+        (450, time(8, 45), time(10, 0), 56),
+        (400, time(9, 4), time(13, 33), 200),
+        (400, time(8, 55), time(18, 29), 425),
+        (200, time(9, 39), time(18, 2), 184),
+    ],
+)
+def test_manual_salary_sheet_examples_jun_26(daily_rate, tin, tout, expected):
+    """Regression: manual salary sheet 26-Jun-2024 examples."""
+    out = att.calc_salary_from_punches([(tin, tout)], float(daily_rate), on_date="2026-06-26")
+    assert out["Total_Pay"] == expected

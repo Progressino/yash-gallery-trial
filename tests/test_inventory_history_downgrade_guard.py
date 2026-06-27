@@ -97,6 +97,45 @@ def test_authoritative_cap_date_never_exceeds_upload_end():
     assert str(cap.date()) == "2026-06-26"
 
 
+def test_authoritative_cap_ignores_newer_snapshot_than_matrix():
+    from backend.session import AppSession
+    import backend.services.daily_inventory_history as dih
+
+    sess = AppSession()
+    sess.daily_inventory_history_df = _hist("A", "2026-06-27", 5)
+    sess.inventory_snapshot_date = "2026-06-27"
+    orig = dih.read_daily_inventory_history_disk_meta
+    dih.read_daily_inventory_history_disk_meta = lambda: {
+        "daily_inventory_history_matrix_max_date": "2026-06-26",
+        "daily_inventory_history_max_date": "2026-06-26",
+    }
+    try:
+        cap = dih.inventory_history_authoritative_cap_date(sess)
+        assert str(cap.date()) == "2026-06-26"
+    finally:
+        dih.read_daily_inventory_history_disk_meta = orig
+
+
+def test_snapshot_append_does_not_inflate_sku_count():
+    from backend.session import AppSession
+    from backend.services.daily_inventory_history import refresh_inventory_history_rollforward
+
+    sess = AppSession()
+    sess.daily_inventory_history_df = _hist("MATRIX-SKU", "2026-06-26", 10)
+    sess.daily_inventory_history_matrix_max_date = "2026-06-26"
+    sess.inventory_snapshot_date = "2026-06-26"
+    sess.inventory_df_variant = pd.DataFrame(
+        {
+            "OMS_SKU": [f"EXTRA-{i}" for i in range(500)] + ["MATRIX-SKU"],
+            "Total_Inventory": [1] * 500 + [12],
+        }
+    )
+    out = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+    assert out.get("ok") is True
+    skus = sess.daily_inventory_history_df["OMS_SKU"].astype(str).nunique()
+    assert skus == 1
+
+
 def test_ensure_inventory_history_trims_beyond_cap(monkeypatch):
     from backend.session import AppSession
     from backend.services.po_session_hydrate import ensure_inventory_history_authoritative_for_read

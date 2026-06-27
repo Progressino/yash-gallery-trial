@@ -53,3 +53,12 @@ def karigar_may_access_api(path: str, method: str) -> bool:
 
 def may_access_erp_admin(role_name: str) -> bool:
     return role_name in _ERP_ADMIN_ROLES
+
+
+def may_delete_stitching_attendance(role_name: str | None, username: str | None = None) -> bool:
+    """Managers and Himanshu may delete karigar attendance rows."""
+    if (role_name or "").strip() == "Manager":
+        return True
+    if str(username or "").strip().lower() == "himanshu":
+        return True
+    return False

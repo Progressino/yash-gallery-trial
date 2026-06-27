@@ -54,6 +54,65 @@ def test_upload_fixture_has_stock_for_8xl(mapping):
     assert by_sku.get(_SKU, 0) >= 5
 
 
+_USER_CSV = Path("/Users/samraisinghani/Downloads/inventory-matrix (6).csv")
+_USER_XLSX = Path("/Users/samraisinghani/Downloads/eff days 100 sku.xlsx")
+_USER_SKU = "1488YKWHITE-XS-S"
+
+
+@pytest.mark.skipif(not _USER_CSV.is_file(), reason="user inventory-matrix csv not present")
+def test_user_matrix_eff_days_match_po_calculation(mapping):
+    from backend.services.po_engine import calculate_po_base
+
+    hist = parse_daily_inventory_history_upload(
+        _USER_CSV.read_bytes(), _USER_CSV.name, sku_mapping=mapping, max_days=30
+    )
+    assert not hist.empty
+    sub = hist[hist["OMS_SKU"].astype(str) == _USER_SKU]
+    assert len(sub) >= 20
+    end = pd.Timestamp(sub["Date"].max()).normalize()
+    eff = effective_days_from_history(sub, end - pd.Timedelta(days=29), end)
+    inv_days = int(eff.iloc[0]["Eff_Days_Inventory"]) if not eff.empty else 0
+    assert inv_days >= 20
+
+    inv_row = None
+    if _USER_XLSX.is_file():
+        exp = pd.read_excel(_USER_XLSX)
+        hit = exp[exp["OMS_SKU"].astype(str) == _USER_SKU]
+        if not hit.empty:
+            inv_row = float(hit.iloc[0]["Total_Inventory"])
+    inv = pd.DataFrame(
+        {"OMS_SKU": [_USER_SKU], "Total_Inventory": [inv_row or 417]},
+    )
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "1001YKBEIGE-3XL",
+                "TxnDate": end,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+        ]
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=hist,
+        sku_mapping=mapping,
+        planning_date=str(end.date()),
+    )
+    row = po[po["OMS_SKU"].astype(str) == _USER_SKU].iloc[0]
+    assert int(row["Eff_Days_Inventory"]) == inv_days
+    assert int(row["Eff_Days"]) == inv_days
+
+
 def test_extend_does_not_materialize_zero_rows_for_oos_skus():
     baseline = pd.DataFrame(
         {

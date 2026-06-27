@@ -364,8 +364,8 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
     cap = inventory_history_authoritative_cap_date(sess)
     snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
     snap_ts = pd.Timestamp(snap).normalize() if len(snap) == 10 else None
-    # Only fill a real gap between uploaded matrix end and snapshot — never extend to today.
-    if mx is not None and snap_ts is not None and snap_ts > mx:
+    # Only fill a gap up to the matrix upload end — never add a column after the wide sheet.
+    if mx is not None and snap_ts is not None and snap_ts > mx and snap_ts <= cap:
         try:
             result = refresh_inventory_history_rollforward(
                 sess, cap_date=snap_ts, include_snapshot=True

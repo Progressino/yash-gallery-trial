@@ -373,34 +373,38 @@ def inventory_history_view_end_date(
     return str(end.date())
 
 
-def inventory_history_authoritative_cap_date(sess) -> pd.Timestamp:
-    """Last day with real uploaded inventory — never fabricate tomorrow without a snapshot."""
+def inventory_history_matrix_cap_date(sess) -> pd.Timestamp | None:
+    """Last date from the wide matrix upload — not extended by daily snapshot roll-forward."""
+    meta = read_daily_inventory_history_disk_meta() or {}
+    matrix_max = str(
+        meta.get("daily_inventory_history_matrix_max_date")
+        or getattr(sess, "daily_inventory_history_matrix_max_date", "")
+        or meta.get("daily_inventory_history_max_date")
+        or ""
+    ).strip()[:10]
+    if len(matrix_max) == 10:
+        try:
+            return pd.Timestamp(matrix_max).normalize()
+        except Exception:
+            pass
     df = getattr(sess, "daily_inventory_history_df", None)
     sheet_max = inventory_history_max_date(df)
-    snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
-    meta = read_daily_inventory_history_disk_meta() or {}
-    meta_max = str(meta.get("daily_inventory_history_max_date") or "").strip()[:10]
-
-    trusted: list[pd.Timestamp] = []
-    if len(meta_max) == 10:
-        try:
-            trusted.append(pd.Timestamp(meta_max).normalize())
-        except Exception:
-            pass
-    if len(snap) == 10:
-        try:
-            trusted.append(pd.Timestamp(snap).normalize())
-        except Exception:
-            pass
-    if trusted:
-        cap = max(trusted)
-        if sheet_max is not None and pd.notna(sheet_max):
-            sm = pd.Timestamp(sheet_max).normalize()
-            if sm <= cap:
-                return max(cap, sm)
-        return cap
     if sheet_max is not None and pd.notna(sheet_max):
         return pd.Timestamp(sheet_max).normalize()
+    return None
+
+
+def inventory_history_authoritative_cap_date(sess) -> pd.Timestamp:
+    """Last day with real uploaded matrix data — daily snapshot must not add later columns."""
+    matrix_cap = inventory_history_matrix_cap_date(sess)
+    if matrix_cap is not None:
+        return matrix_cap
+    snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
+    if len(snap) == 10:
+        try:
+            return pd.Timestamp(snap).normalize()
+        except Exception:
+            pass
     return today_ist_timestamp()
 
 
@@ -530,6 +534,9 @@ def refresh_inventory_history_rollforward(
         cap_ts = pd.Timestamp(sheet_max).normalize()
     else:
         cap_ts = inventory_history_authoritative_cap_date(sess)
+    matrix_cap = inventory_history_matrix_cap_date(sess)
+    if matrix_cap is not None:
+        cap_ts = min(cap_ts, matrix_cap)
     extended = hist
     rolled = False
     if sheet_max is not None and sheet_max < cap_ts - pd.Timedelta(days=0):
@@ -542,27 +549,33 @@ def refresh_inventory_history_rollforward(
         variant = getattr(sess, "inventory_df_variant", None)
         if variant is not None and not getattr(variant, "empty", True) and "OMS_SKU" in variant.columns:
             snap_date = snap if len(snap) == 10 else str(cap_ts.date())
-            work = variant.copy()
-            work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
-            qty_col = "Total_Inventory" if "Total_Inventory" in work.columns else None
-            if qty_col:
-                work["Qty"] = pd.to_numeric(work[qty_col], errors="coerce").fillna(0.0)
-                work = work[work["OMS_SKU"].str.len() > 0]
-                if not work.empty:
-                    snap_ts = pd.Timestamp(snap_date).normalize()
-                    incoming = pd.DataFrame(
-                        {
-                            "OMS_SKU": work["OMS_SKU"],
-                            "Date": snap_ts,
-                            "Qty": work["Qty"],
-                        }
-                    )
-                    if "Source" in merged.columns:
-                        merged = merged[
-                            ~((merged["Date"] == snap_ts) & (merged["Source"] == "derived"))
-                        ]
-                    merged = merge_inventory_history(merged, incoming)
-                    snapshot_appended = True
+            matrix_cap = inventory_history_matrix_cap_date(sess)
+            snap_ts = pd.Timestamp(snap_date).normalize()
+            if matrix_cap is not None and snap_ts > matrix_cap:
+                include_snapshot = False
+            else:
+                work = variant.copy()
+                work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+                qty_col = "Total_Inventory" if "Total_Inventory" in work.columns else None
+                if qty_col:
+                    work["Qty"] = pd.to_numeric(work[qty_col], errors="coerce").fillna(0.0)
+                    work = work[work["OMS_SKU"].str.len() > 0]
+                    hist_skus = set(merged["OMS_SKU"].astype(str).str.strip().str.upper())
+                    work = work[work["OMS_SKU"].isin(hist_skus)]
+                    if not work.empty:
+                        incoming = pd.DataFrame(
+                            {
+                                "OMS_SKU": work["OMS_SKU"],
+                                "Date": snap_ts,
+                                "Qty": work["Qty"],
+                            }
+                        )
+                        if "Source" in merged.columns:
+                            merged = merged[
+                                ~((merged["Date"] == snap_ts) & (merged["Source"] == "derived"))
+                            ]
+                        merged = merge_inventory_history(merged, incoming)
+                        snapshot_appended = True
 
     end_anchor = inventory_history_max_date(merged)
     end_s = str(end_anchor.date()) if end_anchor is not None else None
@@ -1422,9 +1435,13 @@ def daily_inventory_history_meta_bundle(sess) -> dict:
     rows = int(len(df)) if df is not None and not getattr(df, "empty", True) else 0
     skus = int(df["OMS_SKU"].astype(str).nunique()) if rows and "OMS_SKU" in df.columns else 0
     mx = inventory_history_max_date(df)
-    mn = None
+    matrix_cap = inventory_history_matrix_cap_date(sess) or inventory_history_authoritative_cap_date(sess)
+    min_d = None
     if df is not None and not getattr(df, "empty", True) and "Date" in df.columns:
-        mn = pd.to_datetime(df["Date"], errors="coerce").min()
+        min_d = pd.to_datetime(df["Date"], errors="coerce").min()
+    matrix_max_s = str(matrix_cap.date()) if matrix_cap is not None else ""
+    if not matrix_max_s and mx is not None:
+        matrix_max_s = str(pd.Timestamp(mx).date())
     return {
         "daily_inventory_history_uploaded_at": str(
             getattr(sess, "daily_inventory_history_uploaded_at", "") or ""
@@ -1434,8 +1451,9 @@ def daily_inventory_history_meta_bundle(sess) -> dict:
         ),
         "daily_inventory_history_rows": rows,
         "daily_inventory_history_skus": skus,
-        "daily_inventory_history_max_date": str(pd.Timestamp(mx).date()) if mx is not None else "",
-        "daily_inventory_history_min_date": str(pd.Timestamp(mn).date()) if pd.notna(mn) else "",
+        "daily_inventory_history_max_date": matrix_max_s,
+        "daily_inventory_history_matrix_max_date": matrix_max_s,
+        "daily_inventory_history_min_date": str(pd.Timestamp(min_d).date()) if pd.notna(min_d) else "",
     }
 
 
@@ -1534,6 +1552,7 @@ __all__ = [
     "recanonicalize_inventory_history_skus",
     "drop_zero_derived_rows",
     "inventory_history_view_end_date",
+    "inventory_history_matrix_cap_date",
     "inventory_history_is_newer_than",
     "filter_inventory_history_window",
     "inventory_history_summary",

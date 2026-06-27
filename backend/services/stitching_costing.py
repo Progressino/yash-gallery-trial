@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from ..db.stitching_db import DATA_KEYS, DEFAULT_SHEETS, HOUR_COLS, get_all_sheets, get_sheet_df, save_sheet_df
@@ -276,7 +277,7 @@ def list_karigar_directory() -> list[dict[str, str]]:
     if not km.empty and "Karigar_ID" in km.columns:
         for _, row in km.iterrows():
             key = clean_key(row.get("Karigar_ID"))
-            if key and str(row.get("Active", "")).strip().lower() in ("0", "false", "no", "inactive"):
+            if key and _is_karigar_inactive(row):
                 inactive.add(key)
             _add(row.get("Karigar_ID"), row.get("Name", ""))
 
@@ -348,8 +349,7 @@ def list_archived_karigars() -> list[dict]:
         return []
     rows = []
     for _, row in km.iterrows():
-        active_val = str(row.get("Active", "")).strip().lower()
-        if active_val in ("0", "false", "no", "inactive"):
+        if _is_karigar_inactive(row):
             rows.append({
                 "Karigar_ID": str(row.get("Karigar_ID", "")).strip(),
                 "Name": str(row.get("Name", "")).strip(),
@@ -1126,6 +1126,48 @@ def clean_key(val: Any) -> str:
         return str(val).strip()
 
 
+def _active_bool_from_cell(val: Any) -> bool | None:
+    if val is True or val == 1:
+        return True
+    if val is False or val == 0:
+        return False
+    s = str(val).strip().lower()
+    if s in ("1", "true", "yes", "active", "y"):
+        return True
+    if s in ("0", "false", "no", "inactive", "resigned", "n"):
+        return False
+    return None
+
+
+def _is_karigar_inactive(row: dict | pd.Series) -> bool:
+    active = _active_bool_from_cell(row.get("Active", ""))
+    resign = str(row.get("Resign_Date", "") or "").strip()
+    has_resign = bool(resign) and resign.lower() not in ("nan", "nat", "none", "")
+    if active is False:
+        return True
+    if active is True:
+        return False
+    return has_resign
+
+
+def filter_non_karigar_employees(rows: list[dict]) -> list[dict]:
+    """Exclude karigars that belong in karigar master from employee master list."""
+    km = get_sheet_df("karigar_master")
+    karigar_ids: set[str] = set()
+    if not km.empty and "Karigar_ID" in km.columns:
+        karigar_ids = {clean_key(x) for x in km["Karigar_ID"] if clean_key(x)}
+    out: list[dict] = []
+    for row in rows:
+        ecode = clean_key(row.get("E_Code", ""))
+        typ = str(row.get("Type", "") or "").strip().lower()
+        if ecode and ecode in karigar_ids:
+            continue
+        if typ in ("karigar", "stitching"):
+            continue
+        out.append(row)
+    return out
+
+
 def calc_salary(in_str: str, out_str: str, daily_rate: float, ot_mult: float = 1.0) -> dict:
     """Karigar attendance policy — see ``karigar_attendance`` module."""
     from .karigar_attendance import calc_salary as _calc
@@ -1624,6 +1666,12 @@ def style_costing_report(
     cm_sc["Cost_vs_Target_%"] = (
         cm_sc["Actual_Labour_Rs"] / cm_sc["Target_Labour_Rs"].replace(0, 1) * 100
     ).round(1)
+    recv_qty = safe_num(cm_sc["Received_Qty"]).astype(float)
+    total_qty = safe_num(cm_sc["Total_Qty"]).astype(float)
+    actual_lab = safe_num(cm_sc["Actual_Labour_Rs"]).astype(float)
+    target_lab = safe_num(cm_sc["Target_Labour_Rs"]).astype(float)
+    cm_sc["Actual_Cost"] = np.where(recv_qty > 0, np.round(actual_lab / recv_qty, 2), 0.0)
+    cm_sc["Target_Cost"] = np.where(total_qty > 0, np.round(target_lab / total_qty, 2), 0.0)
 
     summary = {
         "challans": len(cm_sc),
@@ -1802,6 +1850,200 @@ def challan_detail_report(challan_no: str) -> dict[str, Any]:
         },
         "expenses": expenses,
         "expense_total_rs": expense_total,
+    }
+
+
+def record_challan_deposit(
+    challan_no: str,
+    deposit_date: str,
+    qty: int,
+    deposit_rs: float = 0.0,
+) -> dict[str, Any]:
+    """Log a material deposit with date and update challan received qty."""
+    cn_raw = str(challan_no or "").strip()
+    cn_key = clean_key(cn_raw)
+    if not cn_key:
+        return {"ok": False, "message": "Challan number required"}
+    dep_date = str(deposit_date or "").strip()[:10]
+    if not dep_date:
+        return {"ok": False, "message": "Deposit date is required"}
+    add_qty = max(0, int(qty))
+    if add_qty <= 0:
+        return {"ok": False, "message": "Enter quantity deposited"}
+
+    cm = get_sheet_df("challan_master")
+    if cm.empty or "Challan_No" not in cm.columns:
+        return {"ok": False, "message": f"Challan {cn_raw} not found"}
+    mask = cm["Challan_No"].astype(str).map(clean_key) == cn_key
+    if not mask.any():
+        return {"ok": False, "message": f"Challan {cn_raw} not found"}
+    idx = cm[mask].index[-1]
+    total = int(safe_num(pd.Series([cm.at[idx, "Total_Qty"]])).iloc[0])
+    received = int(safe_num(pd.Series([cm.at[idx, "Received_Qty"]])).iloc[0]) if "Received_Qty" in cm.columns else 0
+    pending = max(0, total - received)
+    if pending <= 0:
+        return {"ok": False, "message": "Challan is already fully received"}
+    new_received = min(total, received + add_qty)
+    add_rs = max(0.0, float(deposit_rs or 0))
+    current_deposit = float(cm.at[idx, "Deposit_Rs"] or 0) if "Deposit_Rs" in cm.columns else 0.0
+    cm.at[idx, "Received_Qty"] = new_received
+    if "Deposit_Rs" in cm.columns:
+        cm.at[idx, "Deposit_Rs"] = round(current_deposit + add_rs, 2)
+    save_sheet_df("challan_master", cm)
+
+    log = get_sheet_df("challan_deposit_log")
+    entry = {
+        "Challan_No": str(cm.at[idx, "Challan_No"]),
+        "Style": str(cm.at[idx, "Style"] if "Style" in cm.columns else ""),
+        "Party": str(cm.at[idx, "Party"] if "Party" in cm.columns else ""),
+        "Deposit_Date": dep_date,
+        "Qty": add_qty,
+        "Deposit_Rs": round(add_rs, 2),
+        "Received_After": new_received,
+        "Recorded_At": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    log = pd.concat([log, pd.DataFrame([entry])], ignore_index=True) if not log.empty else pd.DataFrame([entry])
+    save_sheet_df("challan_deposit_log", log)
+    return {
+        "ok": True,
+        "message": f"Challan {cn_raw}: received {new_received} of {total} (+{add_qty} on {dep_date}).",
+        "received_qty": new_received,
+        "deposit_entry": entry,
+    }
+
+
+def challan_deposit_summary(date_from: str, date_to: str) -> dict[str, Any]:
+    """Pieces deposited per challan in a date range (for weekly/monthly reports)."""
+    log = get_sheet_df("challan_deposit_log")
+    if log.empty:
+        return {"date_from": date_from, "date_to": date_to, "rows": [], "summary": {"total_qty": 0, "deposit_count": 0}}
+    work = log.copy()
+    work["Deposit_Date_dt"] = pd.to_datetime(work["Deposit_Date"], errors="coerce")
+    d0, d1 = pd.Timestamp(date_from), pd.Timestamp(date_to)
+    work = work[(work["Deposit_Date_dt"] >= d0) & (work["Deposit_Date_dt"] <= d1)]
+    if work.empty:
+        return {"date_from": date_from, "date_to": date_to, "rows": [], "summary": {"total_qty": 0, "deposit_count": 0}}
+    work["Qty"] = safe_num(work["Qty"])
+    work["Deposit_Rs"] = safe_num(work.get("Deposit_Rs", 0))
+    by_challan = (
+        work.groupby(work["Challan_No"].astype(str).str.strip(), as_index=False)
+        .agg(
+            Challan_No=("Challan_No", "first"),
+            Style=("Style", "first"),
+            Party=("Party", "first"),
+            Deposits=("Qty", "count"),
+            Total_Qty_Deposited=("Qty", "sum"),
+            Total_Deposit_Rs=("Deposit_Rs", "sum"),
+            First_Deposit=("Deposit_Date", "min"),
+            Last_Deposit=("Deposit_Date", "max"),
+        )
+    )
+    detail = work.sort_values("Deposit_Date", ascending=False).fillna("").to_dict(orient="records")
+    rows = by_challan.fillna("").to_dict(orient="records")
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "rows": rows,
+        "detail": detail,
+        "summary": {
+            "deposit_count": int(len(work)),
+            "total_qty": int(work["Qty"].sum()),
+            "total_deposit_rs": round(float(work["Deposit_Rs"].sum()), 2),
+            "challan_count": len(rows),
+        },
+    }
+
+
+def karigar_detail_report(karigar_id: str, date_from: str, date_to: str) -> dict[str, Any]:
+    """Monthly karigar snapshot: master, attendance, production, payroll, expenses."""
+    kid = clean_key(karigar_id)
+    if not kid:
+        return {"ok": False, "message": "Karigar ID required"}
+
+    master: dict[str, Any] = {}
+    km = get_sheet_df("karigar_master")
+    if not km.empty and "Karigar_ID" in km.columns:
+        hit = km[km["Karigar_ID"].astype(str).map(clean_key) == kid]
+        if not hit.empty:
+            master = hit.iloc[-1].fillna("").to_dict()
+
+    att_rows: list[dict[str, Any]] = []
+    att = get_sheet_df("karigar_attendance")
+    if not att.empty and "E_Code" in att.columns:
+        aw = att[att["E_Code"].astype(str).map(clean_key) == kid].copy()
+        if not aw.empty and "Date" in aw.columns:
+            aw["Date_dt"] = pd.to_datetime(aw["Date"], errors="coerce")
+            d0, d1 = pd.Timestamp(date_from), pd.Timestamp(date_to)
+            aw = aw[(aw["Date_dt"] >= d0) & (aw["Date_dt"] <= d1)]
+            att_rows = aw.sort_values("Date", ascending=False).fillna("").to_dict(orient="records")
+
+    prod_rows: list[dict[str, Any]] = []
+    prod_summary = {"pieces": 0, "piece_value_rs": 0.0, "operations": 0, "challans": 0}
+    work = _production_log_in_range(date_from, date_to)
+    if not work.empty and "Karigar_ID" in work.columns:
+        pw = work[work["Karigar_ID"].astype(str).map(clean_key) == kid].copy()
+        if not pw.empty:
+            for c in ("Total_Pieces", "Piece_Value_Rs", "PL_Rs"):
+                if c in pw.columns:
+                    pw[c] = safe_num(pw[c])
+            prod_summary = {
+                "pieces": int(safe_num(pw.get("Total_Pieces", 0)).sum()),
+                "piece_value_rs": round(float(safe_num(pw.get("Piece_Value_Rs", 0)).sum()), 2),
+                "operations": int(pw["Operation"].nunique()) if "Operation" in pw.columns else 0,
+                "challans": int(pw["Challan_No"].nunique()) if "Challan_No" in pw.columns else 0,
+            }
+            prod_cols = [
+                c for c in [
+                    "Date", "Challan_No", "Style", "Operation", "Total_Pieces",
+                    "Piece_Value_Rs", "PL_Rs", "Avg_Efficiency_%",
+                ] if c in pw.columns
+            ]
+            prod_rows = pw.sort_values("Date", ascending=False)[prod_cols].fillna("").to_dict(orient="records")
+
+    payroll_rows = payroll_report(date_from, date_to).get("rows", [])
+    payroll = next((r for r in payroll_rows if clean_key(str(r.get("Karigar_ID", ""))) == kid), {})
+
+    exp_rows: list[dict[str, Any]] = []
+    exp_total = 0.0
+    exp = get_sheet_df("karigar_expenses")
+    if not exp.empty and "Karigar_ID" in exp.columns:
+        ex = exp[exp["Karigar_ID"].astype(str).map(clean_key) == kid].copy()
+        if not ex.empty and "Date" in ex.columns:
+            ex["Date_dt"] = pd.to_datetime(ex["Date"], errors="coerce")
+            d0, d1 = pd.Timestamp(date_from), pd.Timestamp(date_to)
+            ex = ex[(ex["Date_dt"] >= d0) & (ex["Date_dt"] <= d1)]
+            if not ex.empty and "Amount_Rs" in ex.columns:
+                ex["Amount_Rs"] = safe_num(ex["Amount_Rs"])
+                exp_total = round(float(ex["Amount_Rs"].sum()), 2)
+                exp_cols = [c for c in ["Date", "Challan_No", "Style", "Task_Type", "Description", "Amount_Rs"] if c in ex.columns]
+                exp_rows = ex.sort_values("Date", ascending=False)[exp_cols].fillna("").to_dict(orient="records")
+
+    piece_val = float(prod_summary.get("piece_value_rs", 0))
+    paid = float(payroll.get("Total", 0) or 0)
+    pl = round(piece_val - paid - exp_total, 2)
+    status = "Profit" if pl > 0.01 else ("Loss" if pl < -0.01 else "Break-even")
+
+    return {
+        "ok": True,
+        "karigar_id": kid,
+        "date_from": date_from,
+        "date_to": date_to,
+        "master": master,
+        "summary": {
+            "days_worked": int(payroll.get("Days", 0) or 0),
+            "total_payroll": round(paid, 2),
+            "pieces": prod_summary["pieces"],
+            "piece_value_rs": prod_summary["piece_value_rs"],
+            "operations": prod_summary["operations"],
+            "challans": prod_summary["challans"],
+            "expense_rs": exp_total,
+            "profit_loss_rs": pl,
+            "status": status,
+        },
+        "attendance": att_rows,
+        "production": prod_rows,
+        "payroll": payroll,
+        "expenses": exp_rows,
     }
 
 
@@ -3755,6 +3997,7 @@ def stitching_reports_hub(date_from: str, date_to: str) -> dict:
         "karigar_hourly_pl": karigar_hourly_pl_report(date_from, date_to),
         "karigar_salary": karigar_salary_report(date_from, date_to),
         "challan_wise": challan_wise_summary_report(date_from, date_to),
+        "challan_deposits": challan_deposit_summary(date_from, date_to),
     }
 
 

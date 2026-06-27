@@ -19,7 +19,7 @@ import {
   formatProductionEntrySaveError,
   saveProductionEntry,
 } from '../lib/productionEntrySave'
-import { useAuth } from '../store/auth'
+import { useAuth, mayDeleteStitchingAttendance } from '../store/auth'
 
 type TabId =
   | 'dashboard'
@@ -1612,8 +1612,33 @@ function ChallanTab({ onFlash }: { onFlash: (type: 'ok' | 'err', text: string) =
 
   const rows = (data?.rows ?? []) as Record<string, unknown>[]
 
+  const downloadChallanReport = async () => {
+    try {
+      const { data: rep } = await api.get('/stitching/style-costing', { params: { month: 'All', style: 'All' } })
+      downloadReportCsv(
+        `challan_costing_${todayStr()}.csv`,
+        (rep?.rows ?? []) as Record<string, unknown>[],
+        [
+          'Challan_No', 'Style', 'Party', 'Total_Qty', 'Received_Qty', 'Pending',
+          'Party_Value_Rs', 'Actual_Labour_Rs', 'Target_Labour_Rs', 'Actual_Cost', 'Target_Cost', 'PL_Rs',
+        ],
+      )
+    } catch {
+      onFlash('err', 'Could not download challan report.')
+    }
+  }
+
   return (
     <div className="space-y-4">
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => void downloadChallanReport()}
+          className="px-3 py-1.5 border rounded-lg text-sm font-semibold text-[#002B5B] hover:bg-sky-50"
+        >
+          Download challan report
+        </button>
+      </div>
       <SheetUploadBar
         sheetKey="challan_master"
         label="Import challans"
@@ -1693,6 +1718,7 @@ function ChallanDepositSection({
   onSaved: () => void
 }) {
   const [challanNo, setChallanNo] = useState('')
+  const [depositDate, setDepositDate] = useState(todayStr())
   const [depositQty, setDepositQty] = useState(0)
   const [addDepositRs, setAddDepositRs] = useState(0)
   const [saving, setSaving] = useState(false)
@@ -1737,21 +1763,25 @@ function ChallanDepositSection({
       onFlash('err', 'Enter quantity received in this deposit.')
       return
     }
+    if (!depositDate.trim()) {
+      onFlash('err', 'Enter the date material was deposited.')
+      return
+    }
     if (pending <= 0) {
       onFlash('err', 'This challan is already fully received.')
       return
     }
     const newReceived = Math.min(total, received + add)
-    const newDepositRs = currentDepositRs + Math.max(0, addDepositRs)
     setSaving(true)
     try {
-      await api.patch(`/stitching/challans/${encodeURIComponent(challanNo)}`, {
-        Received_Qty: newReceived,
-        Deposit_Rs: newDepositRs,
+      await api.post(`/stitching/challans/${encodeURIComponent(challanNo)}/deposit`, {
+        Deposit_Date: depositDate,
+        Qty: add,
+        Deposit_Rs: Math.max(0, addDepositRs),
       })
       onFlash(
         'ok',
-        `Challan ${challanNo}: received ${newReceived} of ${total} (+${add} this deposit).`,
+        `Challan ${challanNo}: received ${newReceived} of ${total} (+${add} on ${depositDate}).`,
       )
       setDepositQty(0)
       setAddDepositRs(0)
@@ -1766,7 +1796,7 @@ function ChallanDepositSection({
   return (
     <Section title="Record material deposit (update received qty)">
       <p className="text-xs text-gray-600 mb-3">
-        When party sends the <strong>remaining quantity</strong>, select the challan, enter how many pieces arrived in this
+        When party sends the <strong>remaining quantity</strong>, select the challan, enter the <strong>deposit date</strong> and how many pieces arrived in this
         deposit, and apply. <strong>Received</strong> increases (capped at ordered qty). Optional: add to{' '}
         <strong>Deposit ₹</strong> for this receipt.
       </p>
@@ -1798,6 +1828,16 @@ function ChallanDepositSection({
             )}
           </div>
         )}
+        <label>
+          <span className="font-semibold text-gray-700">Deposit date</span>
+          <input
+            type="date"
+            className="mt-1 w-full border rounded-lg px-3 py-2"
+            value={depositDate}
+            onChange={e => setDepositDate(e.target.value)}
+            disabled={!challanNo}
+          />
+        </label>
         <label>
           <span className="font-semibold text-gray-700">Qty this deposit</span>
           <input
@@ -2055,6 +2095,124 @@ function ComparisonDashboardTab() {
   )
 }
 
+function KarigarDetailModal({
+  karigarId,
+  karigarName,
+  onClose,
+}: {
+  karigarId: string
+  karigarName: string
+  onClose: () => void
+}) {
+  const [from, setFrom] = useState(() => {
+    const d = new Date()
+    d.setDate(1)
+    return d.toISOString().slice(0, 10)
+  })
+  const [to, setTo] = useState(todayStr())
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['stitching-karigar-detail', karigarId, from, to],
+    queryFn: () =>
+      api
+        .get(`/stitching/master/karigar/${encodeURIComponent(karigarId)}/detail`, {
+          params: { date_from: from, date_to: to },
+        })
+        .then(r => r.data),
+    enabled: !!karigarId,
+  })
+  const master = (data?.master ?? {}) as Record<string, unknown>
+  const summary = (data?.summary ?? {}) as Record<string, unknown>
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 overflow-y-auto"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Karigar ${karigarName} details`}
+    >
+      <div
+        className="bg-white rounded-xl shadow-xl max-w-5xl w-full my-8 p-4 space-y-4"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex flex-wrap items-start justify-between gap-2 border-b pb-3">
+          <div>
+            <p className="text-lg font-bold text-[#002B5B]">
+              {karigarName} <span className="text-sm font-normal text-gray-500">({karigarId})</span>
+            </p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {String(master.Skill ?? 'Karigar')}
+              {master.Daily_Rate_Rs != null ? ` · ₹${master.Daily_Rate_Rs}/day` : ''}
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="px-3 py-1.5 border rounded-lg text-sm">
+            Close
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs items-end">
+          <label>
+            From
+            <input type="date" className="block border rounded mt-1 px-2 py-1" value={from} onChange={e => setFrom(e.target.value)} />
+          </label>
+          <label>
+            To
+            <input type="date" className="block border rounded mt-1 px-2 py-1" value={to} onChange={e => setTo(e.target.value)} />
+          </label>
+        </div>
+        {isLoading && <p className="text-sm text-gray-500">Loading karigar details…</p>}
+        {isError && <p className="text-sm text-red-600">Could not load karigar details.</p>}
+        {data?.ok && (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+              {(
+                [
+                  ['Days worked', String(summary.days_worked ?? '—')],
+                  ['Payroll paid', summary.total_payroll != null ? `₹${Number(summary.total_payroll).toLocaleString()}` : '—'],
+                  ['Pieces', String(summary.pieces ?? '—')],
+                  ['Piece value', summary.piece_value_rs != null ? `₹${Number(summary.piece_value_rs).toLocaleString()}` : '—'],
+                  ['Challans', String(summary.challans ?? '—')],
+                  ['Operations', String(summary.operations ?? '—')],
+                  ['Other expenses', summary.expense_rs != null ? `₹${Number(summary.expense_rs).toLocaleString()}` : '—'],
+                  ['Status', String(summary.status ?? '—')],
+                ] as const
+              ).map(([l, v]) => (
+                <div key={l} className="bg-gray-50 border rounded-lg p-2.5">
+                  <p className="text-[10px] text-gray-500">{l}</p>
+                  <p className="font-semibold text-[#2c5aa0]">{v}</p>
+                </div>
+              ))}
+            </div>
+            {(data.attendance?.length ?? 0) > 0 && (
+              <Section title="Attendance">
+                <DataTable
+                  rows={data.attendance as Record<string, unknown>[]}
+                  cols={['Date', 'In_Punch', 'Out_Punch', 'Payable_Hrs', 'Normal_Pay', 'OT_Pay', 'Total_Pay']}
+                />
+              </Section>
+            )}
+            {(data.production?.length ?? 0) > 0 && (
+              <Section title="Production">
+                <DataTable
+                  rows={data.production as Record<string, unknown>[]}
+                  cols={['Date', 'Challan_No', 'Style', 'Operation', 'Total_Pieces', 'Piece_Value_Rs', 'PL_Rs']}
+                />
+              </Section>
+            )}
+            {(data.expenses?.length ?? 0) > 0 && (
+              <Section title="Other expenses">
+                <DataTable
+                  rows={data.expenses as Record<string, unknown>[]}
+                  cols={['Date', 'Challan_No', 'Style', 'Task_Type', 'Description', 'Amount_Rs']}
+                />
+              </Section>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose: () => void }) {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['stitching-challan-detail', challanNo],
@@ -2111,6 +2269,8 @@ function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose
                   ['Delivery by', String(master.Delivery_By ?? '—')],
                   ['Party value', costing.Party_Value_Rs != null ? `₹${Number(costing.Party_Value_Rs).toLocaleString()}` : '—'],
                   ['Net P&L', costing.PL_Rs != null ? `₹${Number(costing.PL_Rs).toLocaleString()}` : '—'],
+                  ['Actual cost/pc', costing.Actual_Cost != null ? `₹${Number(costing.Actual_Cost).toFixed(2)}` : '—'],
+                  ['Target cost/pc', costing.Target_Cost != null ? `₹${Number(costing.Target_Cost).toFixed(2)}` : '—'],
                 ] as const
               ).map(([l, v]) => (
                 <div key={l} className="bg-gray-50 border rounded-lg p-2.5">
@@ -2135,6 +2295,8 @@ function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose
                     'Party_Value_Rs',
                     'Actual_Labour_Rs',
                     'Target_Labour_Rs',
+                    'Actual_Cost',
+                    'Target_Cost',
                     'Deposit_Rs',
                     'Total_Expense_Rs',
                     'PL_Rs',
@@ -2285,6 +2447,23 @@ function StyleCostingTab() {
       <div className="flex flex-wrap gap-2">
         <input className="border rounded px-2 py-1 text-sm" placeholder="Month YYYY-MM or All" value={month} onChange={e => setMonth(e.target.value)} />
         <input className="border rounded px-2 py-1 text-sm" placeholder="Style or All" value={style} onChange={e => setStyle(e.target.value)} />
+        <button
+          type="button"
+          className="px-3 py-1.5 border rounded-lg text-sm font-semibold text-[#002B5B] hover:bg-sky-50"
+          onClick={() =>
+            downloadReportCsv(
+              `style_costing_${month}_${style}.csv`,
+              (data?.rows ?? []) as Record<string, unknown>[],
+              [
+                'Challan_No', 'Style', 'Party', 'Total_Qty', 'Received_Qty', 'Pending',
+                'Party_Value_Rs', 'Actual_Labour_Rs', 'Target_Labour_Rs', 'Actual_Cost', 'Target_Cost',
+                'PL_Rs', 'Margin_%',
+              ],
+            )
+          }
+        >
+          Download challan report
+        </button>
       </div>
       {s && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
@@ -2317,6 +2496,8 @@ function StyleCostingTab() {
             'Party_Value_Rs',
             'Actual_Labour_Rs',
             'Target_Labour_Rs',
+            'Actual_Cost',
+            'Target_Cost',
             'PL_Rs',
             'Margin_%',
           ]}
@@ -2859,6 +3040,32 @@ function StitchingReportsTab() {
                   {Number(data.challan_wise.summary.total_cost).toLocaleString()} · Net P&amp;L: ₹
                   {Number(data.challan_wise.summary.total_pl).toLocaleString()} · Margin:{' '}
                   {data.challan_wise.summary.overall_margin_pct}%
+                </p>
+              )}
+            </>
+          ) : null}
+          {data.challan_deposits?.rows?.length ? (
+            <>
+              <ReportTableSection
+                title="Material deposits by challan (pieces received in period)"
+                rows={(data.challan_deposits.rows ?? []) as Record<string, unknown>[]}
+                cols={[
+                  'Challan_No',
+                  'Style',
+                  'Party',
+                  'Deposits',
+                  'Total_Qty_Deposited',
+                  'Total_Deposit_Rs',
+                  'First_Deposit',
+                  'Last_Deposit',
+                ]}
+                downloadName={`challan_deposits_${from}_${to}`}
+              />
+              {data.challan_deposits.summary && (
+                <p className="text-xs text-gray-500">
+                  {data.challan_deposits.summary.deposit_count} deposit(s) ·{' '}
+                  {data.challan_deposits.summary.total_qty} pcs · ₹
+                  {Number(data.challan_deposits.summary.total_deposit_rs ?? 0).toLocaleString()}
                 </p>
               )}
             </>
@@ -3731,6 +3938,8 @@ function parsePunchPairsFromRow(r: Record<string, unknown>): PunchPairDraft[] {
 
 function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
   const qc = useQueryClient()
+  const authUser = useAuth(s => s.user)
+  const canDeleteAttendance = type === 'karigar' && mayDeleteStitchingAttendance(authUser)
   const sheet = type === 'karigar' ? 'karigar_attendance' : 'operating_attendance'
   const { data, refetch } = useQuery({
     queryKey: ['stitching-sheet', sheet],
@@ -3739,10 +3948,23 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
   const { data: em } = useQuery({
     queryKey: ['stitching-sheet', 'employee_master'],
     queryFn: () => api.get('/stitching/sheets/employee_master').then(r => r.data),
+    enabled: type === 'operating',
   })
-  const employees = ((em?.rows ?? []) as { E_Code: string; Name: string; Type: string }[]).filter(
-    e => type === 'karigar' ? e.Type === 'Karigar' : e.Type === 'Operating',
-  )
+  const { data: km } = useQuery({
+    queryKey: ['stitching-sheet', 'karigar_master'],
+    queryFn: () => api.get('/stitching/sheets/karigar_master').then(r => r.data),
+    enabled: type === 'karigar',
+  })
+  const employees =
+    type === 'karigar'
+      ? ((km?.rows ?? []) as { Karigar_ID: string; Name: string }[]).map(k => ({
+          E_Code: String(k.Karigar_ID),
+          Name: String(k.Name),
+          Type: 'Karigar',
+        }))
+      : ((em?.rows ?? []) as { E_Code: string; Name: string; Type: string }[]).filter(
+          e => e.Type === 'Operating',
+        )
   const [form, setForm] = useState({ Date: todayStr(), E_Code: '', In_Punch: '09:00', Out_Punch: '18:00' })
   const [uploadMsg, setUploadMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [uploadBusy, setUploadBusy] = useState(false)
@@ -4189,6 +4411,20 @@ function AttendanceTab({ type }: { type: 'karigar' | 'operating' }) {
               E_Code: String(r.E_Code ?? ''),
               In_Punch: String(r.In_Punch ?? '09:00'),
             })}
+            onDelete={
+              canDeleteAttendance
+                ? async (r) => {
+                    const date = String(r.Date ?? '').slice(0, 10)
+                    const code = String(r.E_Code ?? '')
+                    if (!date || !code) return
+                    if (!window.confirm(`Delete attendance for ${code} on ${date}?`)) return
+                    await api.delete('/stitching/attendance/karigar', { data: { Date: date, E_Code: code } })
+                    qc.invalidateQueries({ queryKey: ['stitching-sheet', sheet] })
+                    qc.invalidateQueries({ queryKey: ['stitching-payroll'] })
+                    await refetch()
+                  }
+                : undefined
+            }
           />
         ) : (
           <DataTable
@@ -4734,6 +4970,7 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
   const [editEmployee, setEditEmployee] = useState<Record<string, unknown> | null>(null)
   const [editStyleRow, setEditStyleRow] = useState<Record<string, unknown> | null>(null)
   const [showArchived, setShowArchived] = useState(false)
+  const [detailKarigar, setDetailKarigar] = useState<{ id: string; name: string } | null>(null)
   const { data: archivedData, refetch: refetchArchived } = useQuery({
     queryKey: ['stitching-archived-karigars'],
     queryFn: () => api.get('/stitching/master/karigar/archived').then(r => r.data),
@@ -4763,6 +5000,28 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
   })
 
   const rows = (data?.rows ?? []) as Record<string, unknown>[]
+
+  const { data: karigarMasterData } = useQuery({
+    queryKey: ['stitching-sheet', 'karigar_master'],
+    queryFn: () => api.get('/stitching/sheets/karigar_master').then(r => r.data),
+    enabled: active === 'employee_master',
+  })
+  const displayRows = useMemo(() => {
+    if (active !== 'employee_master') return rows
+    const karigarIds = new Set(
+      ((karigarMasterData?.rows ?? []) as { Karigar_ID: string }[]).map(r =>
+        String(r.Karigar_ID ?? '').trim(),
+      ),
+    )
+    return rows.filter(r => {
+      const ecode = String(r.E_Code ?? '').trim()
+      const typ = String(r.Type ?? '').trim().toLowerCase()
+      if (ecode && karigarIds.has(ecode)) return false
+      if (typ === 'karigar' || typ === 'stitching') return false
+      return true
+    })
+  }, [active, rows, karigarMasterData])
+
   const cols = (data?.columns as string[]) ?? []
 
   const styleReportOptions = useMemo((): SearchSelectOption[] => {
@@ -5271,7 +5530,7 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
         </div>
       )}
       <MasterDataTable
-        rows={rows}
+        rows={displayRows}
         cols={cols}
         sheet={active}
         selected={selected}
@@ -5279,6 +5538,15 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
         onToggleAll={toggleAll}
         onDeleteOne={deleteOne}
         onEditKarigar={active === 'karigar_master' ? openKarigarEdit : undefined}
+        onKarigarDetail={
+          active === 'karigar_master' && !showArchived
+            ? (r) =>
+                setDetailKarigar({
+                  id: String(r.Karigar_ID ?? ''),
+                  name: String(r.Name ?? r.Karigar_ID ?? ''),
+                })
+            : undefined
+        }
         onEditEmployee={active === 'employee_master' ? openEmployeeEdit : undefined}
         onEditStyle={active === 'style_master' ? openStyleEdit : undefined}
         onStyleReport={active === 'style_master' ? setReportFocusStyle : undefined}
@@ -5292,15 +5560,20 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
             >
               {deleteMut.isPending ? 'Deleting…' : `Delete selected (${selected.size})`}
             </button>
-            <span className="text-xs text-gray-500">{rows.length} row(s)</span>
+            <span className="text-xs text-gray-500">{displayRows.length} row(s)</span>
           </div>
         }
       />
+      {detailKarigar && (
+        <KarigarDetailModal
+          karigarId={detailKarigar.id}
+          karigarName={detailKarigar.name}
+          onClose={() => setDetailKarigar(null)}
+        />
+      )}
     </div>
   )
 }
-
-function MasterDataTable({
   rows,
   cols,
   sheet,
@@ -5309,6 +5582,7 @@ function MasterDataTable({
   onToggleAll,
   onDeleteOne,
   onEditKarigar,
+  onKarigarDetail,
   onEditEmployee,
   onEditStyle,
   onStyleReport,
@@ -5322,6 +5596,7 @@ function MasterDataTable({
   onToggleAll: () => void
   onDeleteOne: (row: Record<string, unknown>) => void
   onEditKarigar?: (row: Record<string, unknown>) => void
+  onKarigarDetail?: (row: Record<string, unknown>) => void
   onEditEmployee?: (row: Record<string, unknown>) => void
   onEditStyle?: (row: Record<string, unknown>) => void
   onStyleReport?: (style: string) => void
@@ -5368,6 +5643,14 @@ function MasterDataTable({
                           type="button"
                           className="text-[#2c5aa0] font-medium hover:underline text-left"
                           onClick={() => onStyleReport(String(r[c] ?? '').trim())}
+                        >
+                          {String(r[c] ?? '')}
+                        </button>
+                      ) : sheet === 'karigar_master' && c === 'Name' && onKarigarDetail ? (
+                        <button
+                          type="button"
+                          className="text-[#2c5aa0] font-semibold hover:underline text-left"
+                          onClick={() => onKarigarDetail(r)}
                         >
                           {String(r[c] ?? '')}
                         </button>
@@ -5835,10 +6118,12 @@ function AttendanceRecordsTable({
   rows,
   cols,
   onEarlyUpdate,
+  onDelete,
 }: {
   rows: Record<string, unknown>[]
   cols: string[]
   onEarlyUpdate?: (row: Record<string, unknown>) => void
+  onDelete?: (row: Record<string, unknown>) => void | Promise<void>
 }) {
   if (!rows.length) return <p className="text-sm text-gray-400 text-center py-4">No rows for this date</p>
   return (
@@ -5852,6 +6137,7 @@ function AttendanceRecordsTable({
               </th>
             ))}
             {onEarlyUpdate && <th className="px-2 py-2 w-20" />}
+            {onDelete && <th className="px-2 py-2 w-16" />}
           </tr>
         </thead>
         <tbody>
@@ -5907,6 +6193,17 @@ function AttendanceRecordsTable({
                         Update time
                       </button>
                     )}
+                  </td>
+                )}
+                {onDelete && (
+                  <td className="px-2 py-1.5 whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => void onDelete(r)}
+                      className="text-red-600 hover:underline text-[11px]"
+                    >
+                      Delete
+                    </button>
                   </td>
                 )}
               </tr>

@@ -468,7 +468,10 @@ def _prepare_inventory_history(
         _series_as_dates,
         _trim_history_to_recent,
     )
-    from .po_session_hydrate import ensure_po_sidecars_hydrated
+    from .po_session_hydrate import (
+        ensure_inventory_history_authoritative_for_read,
+        ensure_po_sidecars_hydrated,
+    )
 
     period = int(body.get("period_days", 30))
     try:
@@ -480,7 +483,11 @@ def _prepare_inventory_history(
     except Exception:
         logger.exception("ensure daily inventory history before PO pipeline failed")
 
-    raw_ih = getattr(sess, "daily_inventory_history_df", None)
+    try:
+        raw_ih = ensure_inventory_history_authoritative_for_read(sess)
+    except Exception:
+        logger.exception("authoritative inventory history hydrate failed")
+        raw_ih = getattr(sess, "daily_inventory_history_df", None)
     inv_history_for_calc: pd.DataFrame | None = None
     rows_dropped = 0
 

@@ -60,6 +60,12 @@ class ChallanUpdateBody(BaseModel):
     Rate_Per_Pc: Optional[float] = None
 
 
+class ChallanDepositBody(BaseModel):
+    Deposit_Date: str
+    Qty: int
+    Deposit_Rs: float = 0.0
+
+
 class AttendanceBody(BaseModel):
     Date: str
     E_Code: str
@@ -84,6 +90,11 @@ class AttendancePatchBody(BaseModel):
     Waive_Tea_Break: bool = False
     Lunch_Break_Minutes: Optional[float] = None
     Tea_Break_Minutes: Optional[float] = None
+
+
+class AttendanceDeleteBody(BaseModel):
+    Date: str
+    E_Code: str
 
 
 class StyleOpBody(BaseModel):
@@ -204,7 +215,10 @@ def get_sheet(key: str):
     if key not in DATA_KEYS:
         raise HTTPException(404, f"Unknown sheet {key}")
     df = get_sheet_df(key)
-    return {"key": key, "rows": df.fillna("").to_dict(orient="records"), "columns": list(df.columns)}
+    rows = df.fillna("").to_dict(orient="records")
+    if key == "employee_master":
+        rows = svc.filter_non_karigar_employees(rows)
+    return {"key": key, "rows": rows, "columns": list(df.columns)}
 
 
 @router.put("/sheets/{key}")
@@ -642,6 +656,19 @@ def update_challan(challan_no: str, body: ChallanUpdateBody):
     return {"ok": True}
 
 
+@router.post("/challans/{challan_no}/deposit")
+def post_challan_deposit(challan_no: str, body: ChallanDepositBody):
+    out = svc.record_challan_deposit(
+        challan_no,
+        body.Deposit_Date,
+        body.Qty,
+        body.Deposit_Rs,
+    )
+    if not out.get("ok"):
+        raise HTTPException(400, out.get("message", "Deposit failed"))
+    return out
+
+
 @router.post("/attendance/karigar")
 def add_karigar_attendance(body: AttendanceBody):
     from ..services import karigar_attendance as att_svc
@@ -697,6 +724,20 @@ def patch_karigar_attendance(body: AttendancePatchBody):
         )
     except Exception as e:
         raise HTTPException(400, str(e)) from e
+
+
+@router.delete("/attendance/karigar")
+def delete_karigar_attendance(body: AttendanceDeleteBody, request: Request):
+    from ..services import karigar_attendance as att_svc
+    from ..services.permissions import may_delete_stitching_attendance
+
+    auth = getattr(request.state, "auth", None) or {}
+    if not may_delete_stitching_attendance(str(auth.get("role") or ""), str(auth.get("sub") or "")):
+        raise HTTPException(403, "Only Manager or Himanshu may delete attendance.")
+    out = att_svc.delete_karigar_attendance_row(on_date=body.Date, e_code=body.E_Code)
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Delete failed"))
+    return out
 
 
 class EarlyUpdateBody(BaseModel):
@@ -941,6 +982,14 @@ def delete_master_rows(body: MasterDeleteBody):
 @router.get("/master/karigar/archived")
 def list_archived_karigars():
     return {"rows": svc.list_archived_karigars()}
+
+
+@router.get("/master/karigar/{karigar_id}/detail")
+def get_karigar_detail(karigar_id: str, date_from: str, date_to: str):
+    out = svc.karigar_detail_report(karigar_id, date_from, date_to)
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Karigar not found"))
+    return out
 
 
 @router.get("/master/karigar/{karigar_id}/rate-history")

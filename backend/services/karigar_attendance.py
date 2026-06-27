@@ -32,6 +32,12 @@ OT_MIN_MINUTES = 25
 OT_BREAK_MINUTES = 15
 STANDARD_PAY_MINUTES = 8 * 60  # salary based on 8 working hours
 EARLY_LEAVE_GRACE_MINUTES = 5  # ignore tiny early-outs (e.g. 17:58 vs 18:00)
+# Half-day: left by 14:00 after working the morning (manual salary sheet).
+HALF_DAY_LATEST_OUT = time(14, 0)
+HALF_DAY_MIN_WORK_MINUTES = 120
+# Short morning shift (e.g. 08:45–10:00) — pay at least one hourly unit.
+SHORT_SHIFT_MAX_OUT = time(12, 0)
+SHORT_SHIFT_MIN_WORK_MINUTES = 45
 def _late_arrival_grace_minutes() -> int:
     """Minutes late (after 09:00) with no salary cut — factory rulebook default 17."""
     try:
@@ -167,6 +173,14 @@ def _late_deduction_hrs_display(late_min: float) -> float:
     if lm < 10:
         return round(lm / 100.0, 2)
     return round(late_min / 60.0, 2)
+
+
+def _billable_ot_hours(ot_minutes: float) -> float:
+    """Bill OT in 0.5h steps (34m → 0.5h), matching manual salary sheets."""
+    if ot_minutes <= OT_MIN_MINUTES:
+        return 0.0
+    ot_minutes = min(ot_minutes, 180.0)
+    return round(ot_minutes / 30.0) / 2.0
 
 
 def _overlap_minutes(a_start: datetime, a_end: datetime, b_start: datetime, b_end: datetime) -> float:
@@ -450,7 +464,7 @@ def calc_salary_from_punches(
         ot_hrs_bill = 0.0
     else:
         ot_minutes = min(ot_minutes, 180.0)
-        ot_hrs_bill = float(math.ceil(ot_minutes / 60.0 - 1e-9))
+        ot_hrs_bill = _billable_ot_hours(ot_minutes)
     ot_hrs = ot_hrs_bill
     ot_pay = round(ot_hrs_bill * hourly, 2)
 
@@ -467,6 +481,19 @@ def calc_salary_from_punches(
 
     work_net_minutes = max(work_minutes - lunch_penalty - tea_penalty, 0.0)
 
+    half_day = (
+        not pol.get("is_sunday")
+        and ot_minutes <= OT_MIN_MINUTES
+        and last_out <= HALF_DAY_LATEST_OUT
+        and work_minutes >= HALF_DAY_MIN_WORK_MINUTES
+    )
+    short_shift = (
+        not pol.get("is_sunday")
+        and ot_minutes <= OT_MIN_MINUTES
+        and last_out <= SHORT_SHIFT_MAX_OUT
+        and SHORT_SHIFT_MIN_WORK_MINUTES <= work_minutes < 240
+    )
+
     # Full shift + OT with only grace-level lateness → master daily rate + OT (manual sheet).
     full_day_with_ot = (
         ot_hrs_bill > 0
@@ -477,12 +504,29 @@ def calc_salary_from_punches(
     if full_day_with_ot:
         payable_minutes = float(pol["standard_pay_minutes"])
         normal_pay = round(float(daily_rate), 2)
+    elif half_day:
+        payable_minutes = float(pol["standard_pay_minutes"]) / 2.0
+        normal_pay = round(float(daily_rate) / 2.0, 2)
+    elif short_shift:
+        payable_minutes = 60.0
+        normal_pay = round(hourly, 0)
+    elif (
+        not pol.get("is_sunday")
+        and ot_minutes <= OT_MIN_MINUTES
+        and work_minutes < pol["near_full_block_minutes"]
+        and (pol["near_full_block_minutes"] - work_minutes) > grace
+        and late_min_raw > grace
+    ):
+        # Just under block hours with lateness: deduct raw late minutes from daily rate (manual sheet).
+        normal_pay = round(float(daily_rate) - (late_min_raw / 60.0) * hourly, 2)
+        payable_minutes = round(normal_pay / hourly, 2) if hourly > 0 else 0.0
     elif late_min > 0 or work_minutes < NEAR_FULL_BLOCK_MINUTES:
+        late_for_pay = late_min_raw if late_min_raw > grace else late_min
         shift_net_minutes = max(
             float(pol["standard_pay_minutes"])
             - lunch_penalty
             - tea_penalty
-            - late_min
+            - late_for_pay
             - early_min_payable
             - early_16_penalty,
             0.0,
@@ -530,7 +574,7 @@ def calc_salary_from_punches(
         "Normal_Pay": normal_pay,
         "OT_Hours": ot_hrs,
         "OT_Pay": ot_pay,
-        "Total_Pay": round(normal_pay + ot_pay, 2),
+        "Total_Pay": int(math.floor(normal_pay + ot_pay + 0.5)),
         "Lunch_Deduction_Hrs": round((lunch_penalty_display or lunch_penalty) / 60.0, 2),
         "Tea_Deduction_Hrs": round(tea_penalty / 60.0, 2),
         "Break_Penalty_Hrs": round((lunch_penalty + tea_penalty) / 60.0, 2),
@@ -627,6 +671,21 @@ def update_karigar_attendance_row(
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     save_sheet_df("karigar_attendance", df)
     return {"ok": True, "message": "Attendance updated and payroll recalculated.", "row": row}
+
+
+def delete_karigar_attendance_row(*, on_date: str, e_code: str) -> dict[str, Any]:
+    """Remove one karigar attendance row for a date."""
+    df = get_sheet_df("karigar_attendance")
+    if df.empty:
+        return {"ok": False, "message": "No attendance records.", "removed": 0}
+    mask = (df["Date"].astype(str).str.strip() == str(on_date).strip()) & (
+        df["E_Code"].astype(str).map(clean_key) == clean_key(e_code)
+    )
+    removed = int(mask.sum())
+    if removed <= 0:
+        return {"ok": False, "message": f"No attendance row for {e_code} on {on_date}.", "removed": 0}
+    save_sheet_df("karigar_attendance", df[~mask])
+    return {"ok": True, "message": f"Deleted attendance for {e_code} on {on_date}.", "removed": removed}
 
 
 def calc_salary(in_str: str, out_str: str, daily_rate: float, ot_mult: float = 1.0) -> dict:
