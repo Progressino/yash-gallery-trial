@@ -450,7 +450,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
 
   const result = mrpResult?.result || lastMRP?.result || {}
   const materials = Object.entries(result) as [string, any][]
-  const requiredMaterials = materials.filter(([, mat]) => (mat?.net_req ?? 0) > 0)
+  const materialsToProcure = materials.filter(([, mat]) => (mat?.net_req ?? 0) > 0)
   const warnings: string[] = (mrpResult?.warnings || lastMRP?.warnings || []) as string[]
   const matchedSOs: string[] = (mrpResult?.matched_sos || lastMRP?.matched_sos || []) as string[]
   const showWarnings = warnings.length > 0 && (mrpResult || lastMRP?.run_time)
@@ -503,19 +503,22 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
         </div>
       )}
 
-      {materials.length > 0 && requiredMaterials.length === 0 && (mrpResult || lastMRP?.run_time) && (
-        <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-sm text-green-800">
-          All material requirements are covered by available stock — nothing to procure for this planning run.
-        </div>
-      )}
-
-      {/* MRP Results */}
-      {requiredMaterials.length > 0 && (
+      {materials.length > 0 && (mrpResult || lastMRP?.run_time) && (
         <div className="bg-white rounded-xl border overflow-hidden">
           <div className="px-4 py-3 bg-[#002B5B] text-white flex justify-between items-center">
-            <span className="font-semibold">Material requirements — {requiredMaterials.length} materials to procure</span>
+            <span className="font-semibold">
+              Material requirements — {materials.length} material{materials.length === 1 ? '' : 's'}
+              {materialsToProcure.length > 0
+                ? ` (${materialsToProcure.length} to procure)`
+                : ' (all covered by stock)'}
+            </span>
             <span className="text-blue-200 text-xs">{mrpResult?.run_time || lastMRP?.run_time}</span>
           </div>
+          {materialsToProcure.length === 0 && (
+            <p className="px-4 py-2 text-xs text-green-700 bg-green-50 border-b border-green-100">
+              All material requirements are covered by available stock — nothing to procure for this planning run.
+            </p>
+          )}
           <table className="w-full text-sm">
             <thead className="text-gray-400 text-xs uppercase bg-gray-50">
               <tr>
@@ -529,7 +532,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
               </tr>
             </thead>
             <tbody>
-              {requiredMaterials.sort((a,b) => (b[1].net_req||0) - (a[1].net_req||0)).map(([code, mat]) => {
+              {materials.sort((a,b) => (b[1].net_req||0) - (a[1].net_req||0)).map(([code, mat]) => {
                 const firstSo = (mat.breakdown?.[0]?.so_no as string) || activeSONumbers[0] || ''
                 const netReq = mat.net_req ?? 0
                 const isFabric = (mat.unit || '').toUpperCase() === 'MTR' || ['GF', 'RM', 'SFG', 'Fabric'].some(t => (mat.type || '').toUpperCase().includes(t))
