@@ -1627,7 +1627,11 @@ def calculate_po_base(
     )
     _zero_demand = pd.to_numeric(_window_demand, errors="coerce").fillna(0) <= 0
     _oos_restock_pre = _oos_restock_mask(po_df)
-    po_df.loc[_zero_demand & (~_oos_restock_pre), "Eff_Days"] = 0
+    _inv_eff_days = pd.to_numeric(po_df.get("Eff_Days_Inventory"), errors="coerce").fillna(0)
+    po_df.loc[
+        _zero_demand & (~_oos_restock_pre) & (_inv_eff_days <= 0),
+        "Eff_Days",
+    ] = 0
 
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
     po_df["Recent_ADS"] = np.where(

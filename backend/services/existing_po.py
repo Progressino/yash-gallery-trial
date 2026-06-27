@@ -572,6 +572,46 @@ def existing_po_meta_bundle(sess) -> dict:
     }
 
 
+def existing_po_frame_is_newer_than(
+    incoming: pd.DataFrame | None,
+    existing: pd.DataFrame | None,
+    *,
+    incoming_meta: dict | None = None,
+    existing_meta: dict | None = None,
+) -> bool:
+    """True when ``incoming`` Existing PO should replace ``existing`` (never downgrade uploads)."""
+    if incoming is None or getattr(incoming, "empty", True):
+        return False
+    if existing is None or getattr(existing, "empty", True):
+        return True
+    in_meta = incoming_meta if isinstance(incoming_meta, dict) else {}
+    ex_meta = existing_meta if isinstance(existing_meta, dict) else {}
+    try:
+        from .daily_inventory_history import upload_timestamp_epoch
+
+        in_gen = int(in_meta.get("existing_po_generation") or 0)
+        ex_gen = int(ex_meta.get("existing_po_generation") or 0)
+        if in_gen > ex_gen:
+            return True
+        if ex_gen > in_gen:
+            return False
+        in_at = upload_timestamp_epoch(str(in_meta.get("existing_po_uploaded_at") or ""))
+        ex_at = upload_timestamp_epoch(str(ex_meta.get("existing_po_uploaded_at") or ""))
+        if in_at > ex_at + 0.5:
+            return True
+        if ex_at > in_at + 0.5:
+            return False
+    except Exception:
+        pass
+    in_per = count_per_size_pipeline_skus(incoming)
+    ex_per = count_per_size_pipeline_skus(existing)
+    if in_per > ex_per + 200:
+        return True
+    if ex_per > in_per + 200:
+        return False
+    return len(incoming) >= len(existing)
+
+
 def persist_manual_raise_skus(sess) -> None:
     """Sidecar list of SKUs on the latest manual Existing PO raise sheet."""
     skus = getattr(sess, "existing_po_manual_raise_skus", None)
@@ -763,10 +803,12 @@ def seed_existing_po_warm_cache_from_disk() -> bool:
         wc_meta = _main._warm_cache.get(_main._EXISTING_PO_META_WARM_KEY)
         wc_gen = int((wc_meta or {}).get("existing_po_generation") or 0) if isinstance(wc_meta, dict) else 0
         should_seed = (
-            wc_rows == 0
-            or disk_gen > wc_gen
-            or disk_rows > wc_rows + 50
-            or disk_per > wc_per + 200
+            existing_po_frame_is_newer_than(
+                df,
+                wc,
+                incoming_meta=meta,
+                existing_meta=wc_meta if isinstance(wc_meta, dict) else None,
+            )
             or existing_po_looks_aggregated_bundled_only(wc)
         )
         if not should_seed:

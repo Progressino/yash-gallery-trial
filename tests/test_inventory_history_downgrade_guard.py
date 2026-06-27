@@ -21,6 +21,50 @@ def test_inventory_history_is_newer_than_prefers_later_max_date():
     assert not inventory_history_is_newer_than(old, new)
 
 
+def test_inventory_history_is_newer_than_wins_with_fewer_rows():
+    """June upload trimmed to 30d must beat May blob with more rows."""
+    may = _hist("A", "2026-05-30", 30)
+    june = _hist("A", "2026-06-26", 10)
+    assert len(may) > len(june)
+    assert inventory_history_is_newer_than(june, may)
+    assert not inventory_history_is_newer_than(may, june)
+
+
+def test_recanonicalize_inventory_history_skus_maps_aliases():
+    from backend.services.daily_inventory_history import recanonicalize_inventory_history_skus
+
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["OLD-SKU", "OLD-SKU"],
+            "Date": pd.to_datetime(["2026-06-25", "2026-06-26"]),
+            "Qty": [3.0, 5.0],
+        }
+    )
+    mapping = {"OLD-SKU": "NEW-SKU"}
+    out = recanonicalize_inventory_history_skus(df, mapping)
+    assert set(out["OMS_SKU"].astype(str)) == {"NEW-SKU"}
+    assert len(out) == 2
+
+
+def test_existing_po_frame_is_newer_than_prefers_generation():
+    from backend.services.existing_po import existing_po_frame_is_newer_than
+
+    old = pd.DataFrame({"OMS_SKU": ["A"] * 500, "PO_Pipeline_Total": [1.0] * 500})
+    new = pd.DataFrame({"OMS_SKU": ["A"], "PO_Pipeline_Total": [1.0]})
+    assert existing_po_frame_is_newer_than(
+        new,
+        old,
+        incoming_meta={"existing_po_generation": 3, "existing_po_uploaded_at": "2026-06-26T10:00:00"},
+        existing_meta={"existing_po_generation": 2, "existing_po_uploaded_at": "2026-05-01T10:00:00"},
+    )
+    assert not existing_po_frame_is_newer_than(
+        old,
+        new,
+        incoming_meta={"existing_po_generation": 2},
+        existing_meta={"existing_po_generation": 3},
+    )
+
+
 def test_view_end_date_anchors_on_matrix_when_behind_today():
     df = _hist("A", "2026-05-30", 3)
     assert inventory_history_view_end_date(df) == "2026-05-30"

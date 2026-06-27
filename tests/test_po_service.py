@@ -3335,7 +3335,7 @@ def test_unbundled_per_size_rows_get_proportional_sales_not_bundled_eff_days():
 
 
 def test_eff_days_zero_when_no_sales_despite_inventory_history():
-    """Per-size rows with zero demand must not show active or extrapolated Eff_Days."""
+    """Per-size rows with zero demand still show inventory Eff_Days when history exists."""
     inv_hist = pd.DataFrame(
         {
             "OMS_SKU": ["ZERO-SALES"] * 25,
@@ -3375,7 +3375,7 @@ def test_eff_days_zero_when_no_sales_despite_inventory_history():
     row = po.loc[po["OMS_SKU"] == "ZERO-SALES"].iloc[0]
     assert int(row["Net_Units"]) == 0
     assert int(row["Eff_Days_Inventory"]) == 25
-    assert int(row["Eff_Days"]) == 0
+    assert int(row["Eff_Days"]) == 25
     assert float(row["Recent_ADS"]) == 0.0
 
 
@@ -3429,7 +3429,7 @@ def test_in_stock_sku_shows_inventory_eff_days_without_ads_window_sales():
     assert int(row["Sold_Units"]) == 0
     assert int(row["Ship_Units_150d"]) == 12
     assert int(row["Eff_Days_Inventory"]) >= 25
-    assert int(row["Eff_Days"]) == 0
+    assert int(row["Eff_Days"]) >= 25
     assert float(row["Recent_ADS"]) == 0.0
 
 
@@ -3485,8 +3485,8 @@ def test_eff_days_zero_when_no_sales_in_ads_window_despite_ship150_span():
     row = po.loc[po["OMS_SKU"] == "1037DPT19WHITE-4XL"].iloc[0]
     assert int(row["Sold_Units"]) == 0
     assert int(row["Ship_Units_150d"]) == 7
-    assert int(row["Eff_Days"]) == 0
     assert int(row["Eff_Days_Inventory"]) == 14
+    assert int(row["Eff_Days"]) == 14
     assert float(row["Recent_ADS"]) == 0.0
 
 

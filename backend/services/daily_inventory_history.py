@@ -308,6 +308,36 @@ def inventory_history_max_date(df: Optional[pd.DataFrame]) -> Optional[pd.Timest
     return pd.Timestamp(mx).normalize() if pd.notna(mx) else None
 
 
+def recanonicalize_inventory_history_skus(
+    df: pd.DataFrame | None,
+    sku_mapping: dict | None,
+) -> pd.DataFrame:
+    """Re-key history rows with the current SKU mapping (same keys PO engine uses)."""
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame(columns=_TALL_COLS)
+    mapping = sku_mapping if isinstance(sku_mapping, dict) else {}
+    if not mapping:
+        return df
+    from .po_engine import canonical_oms_key
+
+    out = df.copy()
+    out["OMS_SKU"] = out["OMS_SKU"].astype(str).map(lambda s: canonical_oms_key(s, mapping))
+    out = out[out["OMS_SKU"].astype(str).str.len() > 0]
+    if out.empty:
+        return pd.DataFrame(columns=_TALL_COLS)
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce").dt.normalize()
+    out["Qty"] = pd.to_numeric(out["Qty"], errors="coerce")
+    out = out.dropna(subset=["Date", "Qty", "OMS_SKU"])
+    if out.empty:
+        return pd.DataFrame(columns=_TALL_COLS)
+    return (
+        out.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"]
+        .max()
+        .sort_values(["OMS_SKU", "Date"])
+        .reset_index(drop=True)
+    )
+
+
 def today_ist_timestamp() -> pd.Timestamp:
     return pd.Timestamp.now(tz=_IST).normalize().tz_localize(None)
 
@@ -1452,6 +1482,7 @@ __all__ = [
     "should_skip_inventory_history_extend",
     "refresh_inventory_history_rollforward",
     "append_snapshot_inventory_to_history",
+    "recanonicalize_inventory_history_skus",
     "inventory_history_view_end_date",
     "inventory_history_is_newer_than",
     "filter_inventory_history_window",

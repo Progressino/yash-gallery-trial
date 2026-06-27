@@ -78,6 +78,38 @@ def test_authoritative_history_uses_full_in_stock_eff_days():
     assert float(row["ADS"]) == pytest.approx(8 / 30, rel=0.05)
 
 
+def test_zero_sales_keeps_inventory_eff_days():
+    """SKUs with no ADS-window sales must still show Eff_Days from inventory history."""
+    sku = "NO-SALES-SKU"
+    ih = _full_stock_history(sku, days=20, end="2026-06-26")
+    inv = pd.DataFrame({"OMS_SKU": [sku, "OTHER-SKU"], "Total_Inventory": [12.0, 1.0]})
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "OTHER-SKU",
+                "TxnDate": pd.Timestamp("2026-06-20"),
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+            }
+        ]
+    )
+
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=135,
+        planning_date="2026-06-26",
+        inventory_history_df=ih,
+    )
+    row = po.loc[po["OMS_SKU"] == sku].iloc[0]
+    assert int(row["Sold_Units"]) == 0
+    assert int(row["Eff_Days_Inventory"]) == 20
+    assert int(row["Eff_Days"]) == 20
+
+
 def test_po_csv_fixture_sku_stock_matches_history_overlay():
     """Regression: 1001YKBEIGE-3XL should use matrix on-hand when snapshot missing."""
     sku = "1001YKBEIGE-3XL"

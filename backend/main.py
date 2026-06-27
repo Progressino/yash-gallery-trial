@@ -516,13 +516,46 @@ def restore_po_sidecars_from_warm(sess) -> bool:
                 if wc_max is not None and cur_max is not None and wc_max < cur_max:
                     # Session already has newer matrix — do not merge older warm-cache rows in.
                     pass
-                else:
-                    from .services.daily_inventory_history import merge_inventory_history
+                elif wc_max is not None and cur_max is not None and wc_max == cur_max:
+                    from .services.daily_inventory_history import inventory_history_is_newer_than
 
-                    merged = merge_inventory_history(cur, wc)
-                    if len(merged) != len(cur) or not merged.equals(cur):
-                        setattr(sess, key, merged)
-                        changed = True
+                    warm_meta = _warm_cache.get(_DAILY_INV_META_WARM_KEY)
+                    if inventory_history_is_newer_than(
+                        wc,
+                        cur,
+                        incoming_uploaded_at=str(
+                            (warm_meta or {}).get("daily_inventory_history_uploaded_at") or ""
+                        ),
+                        existing_uploaded_at=str(
+                            getattr(sess, "daily_inventory_history_uploaded_at", "") or ""
+                        ),
+                    ):
+                        from .services.daily_inventory_history import merge_inventory_history
+
+                        merged = merge_inventory_history(cur, wc)
+                        if len(merged) != len(cur) or not merged.equals(cur):
+                            setattr(sess, key, merged)
+                            changed = True
+                else:
+                    from .services.daily_inventory_history import inventory_history_is_newer_than
+
+                    warm_meta = _warm_cache.get(_DAILY_INV_META_WARM_KEY)
+                    if inventory_history_is_newer_than(
+                        wc,
+                        cur,
+                        incoming_uploaded_at=str(
+                            (warm_meta or {}).get("daily_inventory_history_uploaded_at") or ""
+                        ),
+                        existing_uploaded_at=str(
+                            getattr(sess, "daily_inventory_history_uploaded_at", "") or ""
+                        ),
+                    ):
+                        from .services.daily_inventory_history import merge_inventory_history
+
+                        merged = merge_inventory_history(cur, wc)
+                        if len(merged) != len(cur) or not merged.equals(cur):
+                            setattr(sess, key, merged)
+                            changed = True
             else:
                 setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
                 changed = True
@@ -1327,7 +1360,48 @@ def _top_up_warm_cache_from_disk() -> None:
             continue
         cur = _warm_cache.get(key)
         cur_rows = int(len(cur)) if cur is not None and hasattr(cur, "__len__") else 0
-        if cur_rows <= 0 or cur_rows < int(disk_rows * 0.9):
+        replace = cur_rows <= 0 or cur_rows < int(disk_rows * 0.9)
+        if key == "daily_inventory_history_df":
+            try:
+                from .services.daily_inventory_history import (
+                    inventory_history_is_newer_than,
+                    read_daily_inventory_history_disk_meta,
+                )
+
+                disk_meta = read_daily_inventory_history_disk_meta() or {}
+                warm_meta = _warm_cache.get(_DAILY_INV_META_WARM_KEY)
+                replace = inventory_history_is_newer_than(
+                    val,
+                    cur if isinstance(cur, pd.DataFrame) else None,
+                    incoming_uploaded_at=str(disk_meta.get("daily_inventory_history_uploaded_at") or ""),
+                    existing_uploaded_at=str(
+                        (warm_meta or {}).get("daily_inventory_history_uploaded_at") or ""
+                    ),
+                )
+                if replace and disk_meta:
+                    _warm_cache[_DAILY_INV_META_WARM_KEY] = dict(disk_meta)
+            except Exception:
+                pass
+        elif key == "existing_po_df":
+            try:
+                from .services.existing_po import (
+                    existing_po_frame_is_newer_than,
+                    read_existing_po_disk_meta,
+                )
+
+                disk_meta = read_existing_po_disk_meta() or {}
+                warm_meta = _warm_cache.get(_EXISTING_PO_META_WARM_KEY)
+                replace = existing_po_frame_is_newer_than(
+                    val,
+                    cur if isinstance(cur, pd.DataFrame) else None,
+                    incoming_meta=disk_meta,
+                    existing_meta=warm_meta if isinstance(warm_meta, dict) else None,
+                )
+                if replace and disk_meta:
+                    _warm_cache[_EXISTING_PO_META_WARM_KEY] = dict(disk_meta)
+            except Exception:
+                pass
+        if replace:
             _warm_cache[key] = val
             topped += 1
             log.info(

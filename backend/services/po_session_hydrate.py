@@ -277,6 +277,7 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
                 from .daily_inventory_history import (
                     apply_daily_inventory_history_meta,
                     read_daily_inventory_history_disk_meta,
+                    recanonicalize_inventory_history_skus,
                 )
 
                 warm_meta = _main._warm_cache.get(_main._DAILY_INV_META_WARM_KEY)
@@ -287,6 +288,18 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
                         if isinstance(warm_meta, dict):
                             _main._warm_cache[_main._DAILY_INV_META_WARM_KEY] = dict(meta)
                         break
+                mapping = getattr(sess, "sku_mapping", None) or wc.get("sku_mapping") or {}
+                if mapping and _df_row_count(best) > 0:
+                    recan = recanonicalize_inventory_history_skus(best, mapping)
+                    if _df_row_count(recan) > 0:
+                        sku_changed = set(recan["OMS_SKU"].astype(str)) != set(
+                            best["OMS_SKU"].astype(str)
+                        )
+                        if sku_changed or _df_row_count(recan) != _df_row_count(best):
+                            best = recan
+                            _main._warm_cache[key] = best.copy()
+                            setattr(sess, key, best.copy())
+                            changed = True
             except Exception:
                 _log.exception("apply daily inventory history meta failed")
         stats[key] = _df_row_count(best)
@@ -305,6 +318,69 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
         sess._quarterly_cache.clear()
 
     return stats
+
+
+def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
+    """Load newest on-disk matrix, re-key SKUs, and roll forward stale history."""
+    import backend.main as _main
+
+    ensure_po_sidecars_hydrated(sess)
+    try:
+        from .sku_mapping import restore_sku_mapping_to_session
+
+        restore_sku_mapping_to_session(sess)
+    except Exception:
+        pass
+
+    df = getattr(sess, "daily_inventory_history_df", None)
+    if df is None or getattr(df, "empty", True):
+        wc = (_main._warm_cache or {}).get("daily_inventory_history_df")
+        if wc is not None and not getattr(wc, "empty", True):
+            df = wc.copy()
+            sess.daily_inventory_history_df = df
+
+    from .daily_inventory_history import (
+        apply_daily_inventory_history_meta,
+        inventory_history_max_date,
+        read_daily_inventory_history_disk_meta,
+        recanonicalize_inventory_history_skus,
+        refresh_inventory_history_rollforward,
+        today_ist_timestamp,
+    )
+
+    mapping = getattr(sess, "sku_mapping", None) or (_main._warm_cache or {}).get("sku_mapping") or {}
+    if df is not None and not getattr(df, "empty", True) and mapping:
+        recan = recanonicalize_inventory_history_skus(df, mapping)
+        if _df_row_count(recan) > 0:
+            sku_changed = set(recan["OMS_SKU"].astype(str)) != set(df["OMS_SKU"].astype(str))
+            if sku_changed or _df_row_count(recan) != _df_row_count(df):
+                df = recan
+                sess.daily_inventory_history_df = df
+                if not _main._warm_cache:
+                    _main._warm_cache = {}
+                _main._warm_cache["daily_inventory_history_df"] = df.copy()
+
+    mx = inventory_history_max_date(df)
+    if mx is not None and (today_ist_timestamp() - mx).days > 1:
+        try:
+            result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+            if result.get("ok"):
+                df = getattr(sess, "daily_inventory_history_df", None)
+                try:
+                    _main.sync_daily_inventory_history_sidecar(sess)
+                except Exception:
+                    pass
+        except Exception:
+            _log.exception("inventory history roll-forward on read failed")
+
+    disk_meta = read_daily_inventory_history_disk_meta()
+    if isinstance(disk_meta, dict) and disk_meta.get("daily_inventory_history_uploaded_at"):
+        apply_daily_inventory_history_meta(sess, disk_meta)
+
+    df = getattr(sess, "daily_inventory_history_df", None)
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+    return df
 
 
 _MIN_STATUS_ROWS_FOR_LARGE_CATALOG = 100
@@ -384,11 +460,25 @@ def _assign_frame(target: dict | object, key: str, val: Any, *, is_dict: bool) -
         setattr(target, key, frame)
 
 
-def _should_replace_warm_frame(cur: Any, incoming: Any) -> bool:
+def _should_replace_warm_frame(cur: Any, incoming: Any, *, key: str = "") -> bool:
     if incoming is None or not hasattr(incoming, "empty") or incoming.empty:
         return False
     if cur is None or not hasattr(cur, "empty") or cur.empty:
         return True
+    if key == "daily_inventory_history_df":
+        try:
+            from .daily_inventory_history import inventory_history_is_newer_than
+
+            return inventory_history_is_newer_than(incoming, cur)
+        except Exception:
+            pass
+    if key == "existing_po_df":
+        try:
+            from .existing_po import existing_po_frame_is_newer_than
+
+            return existing_po_frame_is_newer_than(incoming, cur)
+        except Exception:
+            pass
     return _df_row_count(incoming) > _df_row_count(cur)
 
 
@@ -470,7 +560,7 @@ def ensure_po_calc_server_data_in_warm_cache() -> bool:
                     changed = True
             continue
         cur = _main._warm_cache.get(key)
-        if _should_replace_warm_frame(cur, val):
+        if _should_replace_warm_frame(cur, val, key=key):
             _assign_frame(_main._warm_cache, key, val, is_dict=True)
             changed = True
 

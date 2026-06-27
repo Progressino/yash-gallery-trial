@@ -23,6 +23,12 @@ _IST = ZoneInfo("Asia/Kolkata")
 def _inventory_history_df_for_read(sess) -> pd.DataFrame:
     """Load daily inventory matrix from warm cache / disk — no full session PG restore."""
     try:
+        from ..services.po_session_hydrate import ensure_inventory_history_authoritative_for_read
+
+        return ensure_inventory_history_authoritative_for_read(sess)
+    except Exception:
+        pass
+    try:
         import backend.main as _main
 
         _main.bootstrap_warm_cache_if_empty()
