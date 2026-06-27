@@ -796,7 +796,10 @@ export default function Purchase() {
       }
       setCreatedPOs(created)
       qc.invalidateQueries({ queryKey: ['prs'] }); qc.invalidateQueries({ queryKey: ['pos'] }); qc.invalidateQueries({ queryKey: ['jwos'] }); invalidate()
-    } catch { alert('Failed to create orders.') }
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      alert(detail ? `Failed to create orders: ${detail}` : 'Failed to create orders.')
+    }
   }
 
   // ── NEW: GRN Auto-fill from PO/JWO ────────────────────────────────────────

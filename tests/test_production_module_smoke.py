@@ -1379,3 +1379,28 @@ def test_document_chain_audit_api(isolated_module_dbs, client):
     data = r.json()
     assert data["so_number"] == "SO-AUDIT"
     assert any(m["material_code"] == "FAB-X" for m in data["materials"])
+
+
+def test_mrp_commitment_aggregates_breakdown_slices(isolated_module_dbs):
+    from backend.db import production_db
+
+    production_db.sync_mrp_commitments_from_run(
+        ["SO-MULTI"],
+        {
+            "GF-SLUB": {
+                "name": "Slub 20x20 48\"",
+                "unit": "MTR",
+                "type": "GF",
+                "total_req": 100.0,
+                "net_req": 40.0,
+                "breakdown": [
+                    {"so_no": "SO-MULTI", "sku": "SKU-A", "qty_req": 25.0},
+                    {"so_no": "SO-MULTI", "sku": "SKU-B", "qty_req": 25.0},
+                    {"so_no": "SO-MULTI", "sku": "SKU-C", "qty_req": 50.0},
+                ],
+            }
+        },
+    )
+    commits = production_db.get_mrp_commitments_for_so("SO-MULTI")
+    slub = next(c for c in commits if c["material_code"] == "GF-SLUB")
+    assert float(slub["mrp_qty"]) == pytest.approx(40.0, abs=0.01)

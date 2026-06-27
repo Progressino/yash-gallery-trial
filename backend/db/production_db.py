@@ -1058,50 +1058,77 @@ def _commitment_status(mrp_qty: float, po_qty: float, jo_qty: float) -> str:
     return "Partially Processed"
 
 
+def _so_material_qty_from_breakdown(mat: dict, *, so_no: str) -> float:
+    """Net requirement for one SO — sum all BOM breakdown lines (not last line only)."""
+    total_req = float(mat.get("total_req") or 0)
+    net_req = float(mat.get("net_req_with_soft", mat.get("net_req", 0)) or 0)
+    gross = sum(
+        float(bd.get("qty_req") or 0)
+        for bd in (mat.get("breakdown") or [])
+        if (bd.get("so_no") or "").strip() == so_no
+    )
+    if gross <= 0:
+        return 0.0
+    if total_req > 1e-9 and net_req > 0:
+        return round(net_req * (gross / total_req), 3)
+    return round(gross, 3)
+
+
 def sync_mrp_commitments_from_run(so_numbers: list, materials: dict) -> None:
     """Upsert per-SO material requirements from normalized MRP payload."""
     conn = _connect()
+    # Aggregate across all BOM breakdown rows — one material/SO can appear on many SKUs.
+    aggregated: dict[tuple[str, str], float] = {}
+    meta: dict[tuple[str, str], dict] = {}
     for mat_code, mat in (materials or {}).items():
-        total_req = float(mat.get("total_req") or 0)
-        net_req = float(mat.get("net_req_with_soft", mat.get("net_req", 0)) or 0)
         for bd in mat.get("breakdown") or []:
             so_no = (bd.get("so_no") or "").strip()
-            if so_no and so_numbers and so_no not in so_numbers:
-                continue
             if not so_no:
+                continue
+            if so_numbers and so_no not in so_numbers:
                 continue
             gross = float(bd.get("qty_req") or 0)
             if gross <= 0:
                 continue
+            total_req = float(mat.get("total_req") or 0)
+            net_req = float(mat.get("net_req_with_soft", mat.get("net_req", 0)) or 0)
             if total_req > 1e-9 and net_req > 0:
-                qty = round(net_req * (gross / total_req), 3)
+                slice_qty = round(net_req * (gross / total_req), 6)
             else:
-                qty = gross
-            row = conn.execute(
-                "SELECT id, po_committed_qty, jo_committed_qty FROM mrp_material_commitments WHERE so_number=? AND material_code=?",
-                (so_no, mat_code),
-            ).fetchone()
-            if row:
-                po_c = float(row["po_committed_qty"] or 0)
-                jo_c = float(row["jo_committed_qty"] or 0)
-                conn.execute(
-                    """UPDATE mrp_material_commitments SET material_name=?, unit=?, mrp_qty=?,
-                    status=?, updated_at=datetime('now') WHERE id=?""",
-                    (
-                        mat.get("name", mat_code),
-                        mat.get("unit", "PCS"),
-                        qty,
-                        _commitment_status(qty, po_c, jo_c),
-                        row["id"],
-                    ),
-                )
-            else:
-                conn.execute(
-                    """INSERT INTO mrp_material_commitments
-                    (so_number, material_code, material_name, unit, mrp_qty, status)
-                    VALUES(?,?,?,?,?,?)""",
-                    (so_no, mat_code, mat.get("name", mat_code), mat.get("unit", "PCS"), qty, "Open"),
-                )
+                slice_qty = gross
+            key = (so_no, mat_code)
+            aggregated[key] = aggregated.get(key, 0.0) + slice_qty
+            meta[key] = mat
+    for (so_no, mat_code), qty in aggregated.items():
+        qty = round(qty, 3)
+        if qty <= 0:
+            continue
+        mat = meta.get((so_no, mat_code), {})
+        row = conn.execute(
+            "SELECT id, po_committed_qty, jo_committed_qty FROM mrp_material_commitments WHERE so_number=? AND material_code=?",
+            (so_no, mat_code),
+        ).fetchone()
+        if row:
+            po_c = float(row["po_committed_qty"] or 0)
+            jo_c = float(row["jo_committed_qty"] or 0)
+            conn.execute(
+                """UPDATE mrp_material_commitments SET material_name=?, unit=?, mrp_qty=?,
+                status=?, updated_at=datetime('now') WHERE id=?""",
+                (
+                    mat.get("name", mat_code),
+                    mat.get("unit", "PCS"),
+                    qty,
+                    _commitment_status(qty, po_c, jo_c),
+                    row["id"],
+                ),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO mrp_material_commitments
+                (so_number, material_code, material_name, unit, mrp_qty, status)
+                VALUES(?,?,?,?,?,?)""",
+                (so_no, mat_code, mat.get("name", mat_code), mat.get("unit", "PCS"), qty, "Open"),
+            )
     conn.commit()
     conn.close()
 

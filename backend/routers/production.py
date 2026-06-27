@@ -670,13 +670,21 @@ def get_mrp_lines_for_so(so_number: str = ''):
         net_req = round(float(mat.get('net_req_with_soft', mat.get('net_req', 0)) or 0), 3)
         if net_req <= 1e-9:
             continue
+        total_req = round(float(mat.get('total_req') or 0), 3)
+        so_net_req = (
+            round(net_req * (so_gross / total_req), 3)
+            if so_number and total_req > 1e-9
+            else net_req
+        )
         commit = commitments.get(code, {})
         po_c = float(commit.get('po_committed_qty') or 0)
         jo_c = float(commit.get('jo_committed_qty') or 0)
-        remaining = round(max(0.0, net_req - po_c - jo_c), 3)
+        mrp_qty = float(commit.get('mrp_qty') or 0)
+        if mrp_qty <= 0:
+            mrp_qty = so_net_req
+        remaining = round(max(0.0, mrp_qty - po_c - jo_c), 3)
         if remaining <= 1e-9:
             continue
-        total_req = round(float(mat.get('total_req') or 0), 3)
         stock = round(float(mat.get('stock') or 0), 3)
         reserved = round(float(mat.get('reserved') or 0), 3)
         available = round(float(mat.get('available') or max(0.0, stock - reserved)), 3)
@@ -689,8 +697,8 @@ def get_mrp_lines_for_so(so_number: str = ''):
             'stock': stock,
             'available': available,
             'unit': mat['unit'],
-            'net_req': net_req,
-            'mrp_qty': net_req,
+            'net_req': so_net_req,
+            'mrp_qty': mrp_qty,
             'po_committed_qty': round(po_c, 3),
             'jo_committed_qty': round(jo_c, 3),
             'remaining_qty': remaining,
@@ -710,6 +718,17 @@ def mrp_commitments(so_number: str = ''):
     if not so_number:
         raise HTTPException(400, 'so_number is required')
     return get_mrp_commitments_for_so(so_number)
+
+
+@router.post("/mrp/resync-commitments")
+def mrp_resync_commitments():
+    """Rebuild per-SO commitment totals from the last MRP snapshot."""
+    data = get_last_mrp_result()
+    if not data:
+        return {"ok": False, "message": "No MRP run on file."}
+    norm = _normalize_mrp_payload(data.get("result"))
+    sync_mrp_commitments_from_run(data.get("so_numbers") or [], norm.get("materials") or {})
+    return {"ok": True, "so_numbers": data.get("so_numbers") or []}
 
 
 @router.get("/mrp/audit-chain")
