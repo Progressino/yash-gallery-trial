@@ -763,6 +763,33 @@ def test_mrp_lines_for_so_skip_zero_net_requirement(isolated_module_dbs, client)
     assert "FAB-CTN" not in codes
 
 
+def test_mrp_lines_for_so_net_req_matches_production_net(isolated_module_dbs, client):
+    """Purchase From MRP must show net_req = total_req − available stock (same as Production)."""
+    import sqlite3
+
+    _seed_parent_with_bom(isolated_module_dbs["ITEM_DB_PATH"], parent_code="STYLE-NET")
+    conn = sqlite3.connect(isolated_module_dbs["ITEM_DB_PATH"])
+    conn.execute("UPDATE items SET stock=5 WHERE item_code='FAB-CTN'")
+    conn.commit()
+    conn.close()
+
+    so = _create_so_with_sku(client, "STYLE-NET-XL", qty=10)
+    run = client.post("/api/production/mrp/run", json={"so_numbers": [so]})
+    assert run.status_code == 200
+    fab = run.json()["result"]["FAB-CTN"]
+    assert fab["total_req"] == 15.0
+    assert fab["net_req"] == 10.0
+
+    lines = client.get(f"/api/production/mrp/lines-for-so?so_number={so}")
+    assert lines.status_code == 200
+    item = next(i for i in lines.json()["purchase_items"] if i["material_code"] == "FAB-CTN")
+    assert item["total_req"] == 15.0
+    assert item["available"] == 5.0
+    assert item["net_req"] == 10.0
+    assert item["mrp_qty"] == 10.0
+    assert item["remaining_qty"] == 10.0
+
+
 # ── /api/items ────────────────────────────────────────────────────────────────
 
 

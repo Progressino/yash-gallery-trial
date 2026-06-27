@@ -46,6 +46,7 @@ interface GRNLine { id: number; material_code: string; material_name?: string; r
 interface MRPLineItem {
   material_code: string; material_name: string; material_type: string
   required_qty: number; net_req: number; unit: string
+  total_req?: number; stock?: number; available?: number
   mrp_qty?: number; po_committed_qty?: number; jo_committed_qty?: number
   remaining_qty?: number; can_create_po?: boolean; can_create_jo?: boolean
   inputs?: { material_code: string; material_name: string; quantity: number; unit: string }[]
@@ -1312,7 +1313,7 @@ export default function Purchase() {
                                     onChange={e => setSelectedPurchaseItems(e.target.checked ? new Set(mrpLinesData.purchase_items.map(i => i.material_code)) : new Set())} />
                                 </th>
                                 <th className="px-3 py-2 text-left">Code</th><th className="px-3 py-2 text-left">Name</th>
-                                <th className="px-3 py-2 text-left">Type</th><th className="px-3 py-2 text-right">Planned Qty</th><th className="px-3 py-2 text-right">Committed</th><th className="px-3 py-2 text-right">Remaining</th><th className="px-3 py-2 text-right">Unit</th>
+                                <th className="px-3 py-2 text-left">Type</th><th className="px-3 py-2 text-right">Total Req</th><th className="px-3 py-2 text-right">Available</th><th className="px-3 py-2 text-right">Net Req</th><th className="px-3 py-2 text-right">Committed</th><th className="px-3 py-2 text-right">Remaining</th><th className="px-3 py-2 text-right">Unit</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -1325,9 +1326,11 @@ export default function Purchase() {
                                   <td className="px-3 py-2 font-medium text-gray-800">{item.material_code}</td>
                                   <td className="px-3 py-2 text-gray-600">{item.material_name}</td>
                                   <td className="px-3 py-2"><span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">{item.material_type}</span></td>
-                                  <td className="px-3 py-2 text-right text-gray-700">{item.mrp_qty ?? item.required_qty}</td>
+                                  <td className="px-3 py-2 text-right text-gray-700">{item.total_req ?? item.required_qty}</td>
+                                  <td className="px-3 py-2 text-right text-green-700">{item.available ?? 0}</td>
+                                  <td className="px-3 py-2 text-right font-semibold text-red-700">{item.net_req}</td>
                                   <td className="px-3 py-2 text-right text-amber-700">{(item.po_committed_qty ?? 0) + (item.jo_committed_qty ?? 0)}</td>
-                                  <td className="px-3 py-2 text-right font-semibold text-green-700">{item.remaining_qty ?? item.required_qty}</td>
+                                  <td className="px-3 py-2 text-right font-semibold text-green-700">{item.remaining_qty ?? item.net_req}</td>
                                   <td className="px-3 py-2 text-right text-gray-500">{item.unit}</td>
                                 </tr>
                               ))}
@@ -1363,7 +1366,7 @@ export default function Purchase() {
                                   </td>
                                   <td className="px-3 py-2 font-medium text-gray-800">{item.material_code}</td>
                                   <td className="px-3 py-2 text-gray-600">{item.material_name}</td>
-                                  <td className="px-3 py-2 text-right font-semibold text-gray-800">{item.net_req || item.required_qty}</td>
+                                  <td className="px-3 py-2 text-right font-semibold text-gray-800">{item.net_req ?? item.remaining_qty ?? item.required_qty}</td>
                                   <td className="px-3 py-2 text-right text-gray-500">{item.unit}</td>
                                   <td className="px-3 py-2 text-xs text-blue-600">{(item.inputs || []).map(inp => `${inp.material_code} (${inp.quantity} ${inp.unit})`).join(', ') || '—'}</td>
                                 </tr>

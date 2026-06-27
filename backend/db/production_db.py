@@ -1062,15 +1062,21 @@ def sync_mrp_commitments_from_run(so_numbers: list, materials: dict) -> None:
     """Upsert per-SO material requirements from normalized MRP payload."""
     conn = _connect()
     for mat_code, mat in (materials or {}).items():
+        total_req = float(mat.get("total_req") or 0)
+        net_req = float(mat.get("net_req_with_soft", mat.get("net_req", 0)) or 0)
         for bd in mat.get("breakdown") or []:
             so_no = (bd.get("so_no") or "").strip()
             if so_no and so_numbers and so_no not in so_numbers:
                 continue
             if not so_no:
                 continue
-            qty = float(bd.get("qty_req") or 0)
-            if qty <= 0:
+            gross = float(bd.get("qty_req") or 0)
+            if gross <= 0:
                 continue
+            if total_req > 1e-9 and net_req > 0:
+                qty = round(net_req * (gross / total_req), 3)
+            else:
+                qty = gross
             row = conn.execute(
                 "SELECT id, po_committed_qty, jo_committed_qty FROM mrp_material_commitments WHERE so_number=? AND material_code=?",
                 (so_no, mat_code),

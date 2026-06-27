@@ -660,25 +660,44 @@ def get_mrp_lines_for_so(so_number: str = ''):
     commitments = {c['material_code']: c for c in get_mrp_commitments_for_so(so_number)} if so_number else {}
     purchase_items, sfg_items = [], []
     for code, mat in result.items():
-        so_qty = (sum(bd['qty_req'] for bd in mat.get('breakdown',[]) if bd.get('so_no')==so_number) if so_number else mat['total_req'])
-        if so_qty <= 0:
+        so_gross = (
+            sum(bd['qty_req'] for bd in mat.get('breakdown', []) if bd.get('so_no') == so_number)
+            if so_number
+            else mat['total_req']
+        )
+        if so_gross <= 0:
             continue
         net_req = round(float(mat.get('net_req_with_soft', mat.get('net_req', 0)) or 0), 3)
         if net_req <= 1e-9:
             continue
         commit = commitments.get(code, {})
-        remaining = min(float(commit.get('remaining_qty', net_req) or 0), net_req)
+        po_c = float(commit.get('po_committed_qty') or 0)
+        jo_c = float(commit.get('jo_committed_qty') or 0)
+        remaining = round(max(0.0, net_req - po_c - jo_c), 3)
         if remaining <= 1e-9:
             continue
-        item_data = {'material_code': code, 'material_name': mat['name'], 'material_type': mat.get('type','RM'),
-                     'required_qty': round(so_qty,3), 'unit': mat['unit'], 'net_req': net_req,
-                     'mrp_qty': round(float(commit.get('mrp_qty') or net_req), 3),
-                     'po_committed_qty': round(float(commit.get('po_committed_qty') or 0), 3),
-                     'jo_committed_qty': round(float(commit.get('jo_committed_qty') or 0), 3),
-                     'remaining_qty': round(float(remaining), 3),
-                     'can_create_po': bool(commit.get('can_create_po', remaining > 0)),
-                     'can_create_jo': bool(commit.get('can_create_jo', remaining > 0)),
-                     'commitment_status': commit.get('status', 'Open')}
+        total_req = round(float(mat.get('total_req') or 0), 3)
+        stock = round(float(mat.get('stock') or 0), 3)
+        reserved = round(float(mat.get('reserved') or 0), 3)
+        available = round(float(mat.get('available') or max(0.0, stock - reserved)), 3)
+        item_data = {
+            'material_code': code,
+            'material_name': mat['name'],
+            'material_type': mat.get('type', 'RM'),
+            'required_qty': round(so_gross, 3),
+            'total_req': total_req,
+            'stock': stock,
+            'available': available,
+            'unit': mat['unit'],
+            'net_req': net_req,
+            'mrp_qty': net_req,
+            'po_committed_qty': round(po_c, 3),
+            'jo_committed_qty': round(jo_c, 3),
+            'remaining_qty': remaining,
+            'can_create_po': bool(commit.get('can_create_po', remaining > 0)),
+            'can_create_jo': bool(commit.get('can_create_jo', remaining > 0)),
+            'commitment_status': commit.get('status', 'Open'),
+        }
         if mat.get('type','').upper() == 'SFG':
             sfg_items.append(item_data)
         else:
