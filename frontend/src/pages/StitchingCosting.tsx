@@ -5574,6 +5574,8 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
     </div>
   )
 }
+
+function MasterDataTable({
   rows,
   cols,
   sheet,
