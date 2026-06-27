@@ -3323,6 +3323,8 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         count_per_size_pipeline_skus,
         existing_po_looks_aggregated_bundled_only,
         existing_po_needs_recalc as _existing_po_needs_recalc,
+        existing_po_new_order_sku_count,
+        existing_po_pipeline_sku_count,
     )
 
     from ..services.existing_po import ensure_existing_po_hydrated
@@ -3622,6 +3624,8 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         ),
         existing_po_needs_recalc=_existing_po_needs_recalc(sess),
         existing_po_per_size_skus=count_per_size_pipeline_skus(getattr(sess, "existing_po_df", None)),
+        existing_po_pipeline_skus=existing_po_pipeline_sku_count(getattr(sess, "existing_po_df", None)),
+        existing_po_new_order_skus=existing_po_new_order_sku_count(getattr(sess, "existing_po_df", None)),
         existing_po_looks_aggregated=existing_po_looks_aggregated_bundled_only(
             getattr(sess, "existing_po_df", None)
         ),

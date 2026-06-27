@@ -559,13 +559,50 @@ def existing_po_meta_bundle(sess) -> dict:
     sku_n = 0
     if ep is not None and not getattr(ep, "empty", True) and "OMS_SKU" in ep.columns:
         sku_n = int(ep["OMS_SKU"].astype(str).nunique())
+    manual_skus = getattr(sess, "existing_po_manual_raise_skus", None) or []
     return {
         "existing_po_generation": int(getattr(sess, "existing_po_generation", 0) or 0),
         "existing_po_uploaded_at": str(getattr(sess, "existing_po_uploaded_at", "") or ""),
         "existing_po_filename": str(getattr(sess, "existing_po_filename", "") or ""),
         "existing_po_rows": rows,
         "existing_po_skus": sku_n,
+        "existing_po_manual_raise_date": str(getattr(sess, "existing_po_manual_raise_date", "") or ""),
+        "existing_po_manual_raise_skus_count": int(len(manual_skus)),
+        "existing_po_manual_upload": bool(getattr(sess, "existing_po_manual_upload", False)),
     }
+
+
+def persist_manual_raise_skus(sess) -> None:
+    """Sidecar list of SKUs on the latest manual Existing PO raise sheet."""
+    skus = getattr(sess, "existing_po_manual_raise_skus", None)
+    if not skus:
+        return
+    try:
+        path = _existing_po_disk_dir() / "existing_po_manual_raise_skus.json"
+        path.write_text(json.dumps(list(skus), ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        _log.exception("persist_manual_raise_skus failed")
+
+
+def load_manual_raise_skus_into_session(sess) -> None:
+    path = _existing_po_disk_dir() / "existing_po_manual_raise_skus.json"
+    if not path.is_file():
+        return
+    try:
+        skus = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(skus, list) and skus:
+            sess.existing_po_manual_raise_skus = [str(s).strip().upper() for s in skus if str(s).strip()]
+    except Exception:
+        _log.exception("load_manual_raise_skus_into_session failed")
+
+
+def manual_existing_po_raise_skus(sess) -> set[str]:
+    skus = getattr(sess, "existing_po_manual_raise_skus", None)
+    if skus:
+        return {str(s).strip().upper() for s in skus if str(s).strip()}
+    load_manual_raise_skus_into_session(sess)
+    skus = getattr(sess, "existing_po_manual_raise_skus", None) or []
+    return {str(s).strip().upper() for s in skus if str(s).strip()}
 
 
 def apply_existing_po_session_meta(sess, meta: dict) -> None:
@@ -578,6 +615,10 @@ def apply_existing_po_session_meta(sess, meta: dict) -> None:
     for key in ("existing_po_uploaded_at", "existing_po_filename"):
         if meta.get(key):
             setattr(sess, key, str(meta[key]))
+    if meta.get("existing_po_manual_raise_date"):
+        sess.existing_po_manual_raise_date = str(meta["existing_po_manual_raise_date"])[:10]
+    sess.existing_po_manual_upload = bool(meta.get("existing_po_manual_upload"))
+    load_manual_raise_skus_into_session(sess)
 
 
 def persist_existing_po_to_disk(sess) -> bool:
@@ -596,6 +637,7 @@ def persist_existing_po_to_disk(sess) -> bool:
             json.dumps(meta, default=str),
             encoding="utf-8",
         )
+        persist_manual_raise_skus(sess)
         manifest_path = root / "_manifest.json"
         manifest: dict = {}
         if manifest_path.is_file():
@@ -646,6 +688,20 @@ def count_per_size_pipeline_skus(ep: pd.DataFrame) -> int:
     pipe = pd.to_numeric(ep.get("PO_Pipeline_Total"), errors="coerce").fillna(0) > 0
     bundled = skus.map(is_bundled_size_range_sku)
     return int((~bundled & pipe).sum())
+
+
+def existing_po_pipeline_sku_count(ep: pd.DataFrame | None) -> int:
+    if ep is None or getattr(ep, "empty", True):
+        return 0
+    pipe = pd.to_numeric(ep.get("PO_Pipeline_Total"), errors="coerce").fillna(0)
+    return int((pipe > 0).sum())
+
+
+def existing_po_new_order_sku_count(ep: pd.DataFrame | None) -> int:
+    if ep is None or getattr(ep, "empty", True) or "PO_Qty_Ordered" not in ep.columns:
+        return 0
+    ordered = pd.to_numeric(ep["PO_Qty_Ordered"], errors="coerce").fillna(0)
+    return int((ordered > 0).sum())
 
 
 def session_should_keep_existing_po(sess, warm_df: Optional[pd.DataFrame] = None) -> bool:
@@ -1944,3 +2000,31 @@ def audit_existing_po_upload(
     except Exception as exc:
         out["warnings"].append(f"Could not read sheet Total row for audit: {exc}")
     return out
+
+
+def existing_po_pipeline_totals(ep: pd.DataFrame | None) -> tuple[int, int]:
+    """Authoritative pipeline units/SKU count from the uploaded Existing PO sheet."""
+    if ep is None or getattr(ep, "empty", True):
+        return 0, 0
+    cols = [
+        c
+        for c in (
+            "OMS_SKU",
+            "PO_Pipeline_Total",
+            "Pending_Cutting",
+            "Balance_to_Dispatch",
+            "PO_Qty_Ordered",
+        )
+        if c in ep.columns
+    ]
+    if "OMS_SKU" not in cols or "PO_Pipeline_Total" not in cols:
+        return 0, 0
+    shell = ep[cols].copy()
+    for c in shell.columns:
+        if c == "OMS_SKU":
+            continue
+        shell[c] = pd.to_numeric(shell[c], errors="coerce").fillna(0)
+    shell["Total_Inventory"] = 0
+    deduped = zero_bundled_pipeline_when_children_carry_qty(shell, ep)
+    pipe = pd.to_numeric(deduped["PO_Pipeline_Total"], errors="coerce").fillna(0)
+    return int(pipe.sum()), int((pipe > 0).sum())

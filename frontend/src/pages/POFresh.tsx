@@ -754,8 +754,23 @@ function POFreshInner() {
             <span className="text-xs font-semibold text-amber-700">{coverageError}</span>
           )}
           {coverageDetail?.existing_po ? (
-            <span className="inline-flex items-center gap-2 rounded-full bg-[var(--po-surface-container)] px-3 py-1.5 text-xs font-semibold text-[var(--po-on-primary-container)]">
-              Existing PO: {(coverageDetail.existing_po_rows ?? 0).toLocaleString()} SKUs
+            <span
+              className="inline-flex items-center gap-2 rounded-full bg-[var(--po-surface-container)] px-3 py-1.5 text-xs font-semibold text-[var(--po-on-primary-container)]"
+              title="Manufacturing / pipeline sheet (not a list of today's PO raises). Pipeline SKUs reduce New PO via projected cover; New Order rows seed the raise ledger for the sheet date."
+            >
+              Existing PO: {(coverageDetail.existing_po_rows ?? 0).toLocaleString()} tracked
+              {(coverageDetail.existing_po_pipeline_skus ?? 0) > 0 && (
+                <>
+                  {' '}
+                  · {(coverageDetail.existing_po_pipeline_skus ?? 0).toLocaleString()} w/ pipeline
+                </>
+              )}
+              {(coverageDetail.existing_po_new_order_skus ?? 0) > 0 && (
+                <>
+                  {' '}
+                  · {(coverageDetail.existing_po_new_order_skus ?? 0).toLocaleString()} new order
+                </>
+              )}
               {coverageDetail.existing_po_filename ? ` · ${coverageDetail.existing_po_filename}` : ''}
             </span>
           ) : (
@@ -1043,7 +1058,7 @@ function POFreshInner() {
               value={kpis.pipelineUnits.toLocaleString()}
               hint={`${kpis.pipeline.toLocaleString()} SKUs in pipeline`}
               accent="text-[var(--po-secondary)]"
-              help="Sum of Total Pipeline (from uploaded existing PO sheet) across the filtered rows."
+              help="Total open pipeline from the uploaded Existing PO sheet (deduped at source — not added to New PO)."
             />
           </div>
         )}

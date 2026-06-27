@@ -111,6 +111,20 @@ def main() -> int:
 
     main_mod.restore_po_sidecars_from_warm(sess)
     ensure_existing_po_hydrated(sess)
+    try:
+        from backend.services.existing_po import (
+            apply_existing_po_session_meta,
+            load_manual_raise_skus_into_session,
+            read_existing_po_disk_meta,
+        )
+
+        ep_meta = read_existing_po_disk_meta() or {}
+        apply_existing_po_session_meta(sess, ep_meta)
+        if ep_meta.get("existing_po_manual_raise_date"):
+            sess.existing_po_manual_upload = bool(ep_meta.get("existing_po_manual_upload", True))
+        load_manual_raise_skus_into_session(sess)
+    except Exception:
+        pass
 
     if sess.sales_df.empty or sess.inventory_df_variant.empty:
         print(json.dumps({"ok": False, "error": "missing_sales_or_inventory"}))

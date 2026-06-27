@@ -386,52 +386,156 @@ def filter_inventory_history_window(
     return work.loc[mask].reset_index(drop=True)
 
 
+def should_skip_inventory_history_extend(
+    sheet_max: pd.Timestamp | None,
+    inv_window_end: pd.Timestamp,
+    coverage_in_window: int,
+    *,
+    ads_window: int = 90,
+) -> bool:
+    """Whether PO calc can use the uploaded sheet without sales roll-forward.
+
+    Partial-coverage sheets that still reach the window end may skip extend, but
+    a sheet whose last column is weeks behind ``inv_window_end`` must roll forward
+    even when it has 30+ snapshot days in the ADS window (stale May data vs June sales).
+    """
+    if pd.isna(sheet_max):
+        return False
+    sheet_max = pd.Timestamp(sheet_max).normalize()
+    inv_window_end = pd.Timestamp(inv_window_end).normalize()
+    sheet_covers_end = sheet_max >= inv_window_end - pd.Timedelta(days=1)
+    if sheet_covers_end:
+        return True
+    sheet_stale_vs_window = sheet_max < inv_window_end - pd.Timedelta(days=1)
+    if sheet_stale_vs_window:
+        return False
+    return coverage_in_window >= min(int(ads_window), 14)
+
+
+def _sales_for_inventory_rollforward(sess) -> pd.DataFrame | None:
+    sales = getattr(sess, "sales_df", None)
+    if sales is not None and not getattr(sales, "empty", True):
+        return sales
+    try:
+        from .po_calculate_run import _build_platform_sales_df
+
+        built = _build_platform_sales_df(sess)
+        if built is not None and not built.empty:
+            return built
+    except Exception:
+        pass
+    return None
+
+
+def refresh_inventory_history_rollforward(
+    sess,
+    *,
+    cap_date: str | pd.Timestamp | None = None,
+    sales_df: pd.DataFrame | None = None,
+    include_snapshot: bool = True,
+    max_history_days: int | None = None,
+) -> dict:
+    """Extend uploaded history with sales activity and optional daily snapshot."""
+    from .daily_inventory_upload_run import _MAX_HISTORY_DAYS
+
+    hist = getattr(sess, "daily_inventory_history_df", None)
+    if hist is None or getattr(hist, "empty", True):
+        return {"ok": False, "reason": "empty_history"}
+
+    span = int(max_history_days if max_history_days is not None else _MAX_HISTORY_DAYS)
+    sales = sales_df if sales_df is not None else _sales_for_inventory_rollforward(sess)
+
+    snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
+    if cap_date is not None:
+        cap_ts = pd.Timestamp(cap_date).normalize()
+    elif len(snap) == 10:
+        cap_ts = pd.Timestamp(snap).normalize()
+    else:
+        cap_ts = today_ist_timestamp()
+
+    sheet_max = inventory_history_max_date(hist)
+    extended = hist
+    rolled = False
+    if sheet_max is not None and sheet_max < cap_ts - pd.Timedelta(days=0):
+        extended = extend_history_with_sales(hist, sales_df=sales, cap_date=cap_ts)
+        rolled = True
+
+    merged = extended
+    snapshot_appended = False
+    if include_snapshot:
+        variant = getattr(sess, "inventory_df_variant", None)
+        if variant is not None and not getattr(variant, "empty", True) and "OMS_SKU" in variant.columns:
+            snap_date = snap if len(snap) == 10 else str(cap_ts.date())
+            work = variant.copy()
+            work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+            qty_col = "Total_Inventory" if "Total_Inventory" in work.columns else None
+            if qty_col:
+                work["Qty"] = pd.to_numeric(work[qty_col], errors="coerce").fillna(0.0)
+                work = work[work["OMS_SKU"].str.len() > 0]
+                if not work.empty:
+                    snap_ts = pd.Timestamp(snap_date).normalize()
+                    incoming = pd.DataFrame(
+                        {
+                            "OMS_SKU": work["OMS_SKU"],
+                            "Date": snap_ts,
+                            "Qty": work["Qty"],
+                        }
+                    )
+                    if "Source" in merged.columns:
+                        merged = merged[
+                            ~((merged["Date"] == snap_ts) & (merged["Source"] == "derived"))
+                        ]
+                    merged = merge_inventory_history(merged, incoming)
+                    snapshot_appended = True
+
+    end_anchor = inventory_history_max_date(merged)
+    end_s = str(end_anchor.date()) if end_anchor is not None else None
+    merged = filter_inventory_history_window(merged, days=span, end_date=end_s)
+    sess.daily_inventory_history_df = merged
+    sess._quarterly_cache.clear()
+
+    dates_norm = pd.to_datetime(merged["Date"], errors="coerce").dt.normalize()
+    min_d = dates_norm.min()
+    max_d = dates_norm.max()
+    return {
+        "ok": True,
+        "rolled_forward": rolled,
+        "snapshot_appended": snapshot_appended,
+        "rows": int(len(merged)),
+        "skus": int(merged["OMS_SKU"].nunique()) if not merged.empty else 0,
+        "days": int(dates_norm.nunique()) if not merged.empty else 0,
+        "min_date": str(pd.Timestamp(min_d).date()) if pd.notna(min_d) else "",
+        "max_date": str(pd.Timestamp(max_d).date()) if pd.notna(max_d) else "",
+        "cap_date": str(cap_ts.date()),
+    }
+
+
 def append_snapshot_inventory_to_history(sess) -> dict:
     """
-    After a daily snapshot inventory upload, append one SKU-day column to history.
-
-    Uses ``Total_Inventory`` per variant SKU and the inferred snapshot date.
+    After a daily snapshot inventory upload, roll history forward with sales and
+    append the snapshot column (authoritative on-hand for that day).
     """
-    import pandas as pd
-
     variant = getattr(sess, "inventory_df_variant", None)
     if variant is None or getattr(variant, "empty", True):
         return {"appended": False, "reason": "empty_snapshot"}
-    snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
-    if len(snap) != 10:
-        snap = str(today_ist_timestamp().date())
-
-    work = variant.copy()
-    if "OMS_SKU" not in work.columns:
+    if "OMS_SKU" not in variant.columns:
         return {"appended": False, "reason": "no_sku_column"}
-    work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
-    qty_col = "Total_Inventory" if "Total_Inventory" in work.columns else None
+    qty_col = "Total_Inventory" if "Total_Inventory" in variant.columns else None
     if not qty_col:
         return {"appended": False, "reason": "no_total_inventory"}
-    work["Qty"] = pd.to_numeric(work[qty_col], errors="coerce").fillna(0.0)
-    work = work[work["OMS_SKU"].str.len() > 0]
-    if work.empty:
-        return {"appended": False, "reason": "no_rows"}
 
-    incoming = pd.DataFrame(
-        {
-            "OMS_SKU": work["OMS_SKU"],
-            "Date": pd.Timestamp(snap),
-            "Qty": work["Qty"],
-            "Source": "daily_snapshot",
-        }
-    )
-    existing = getattr(sess, "daily_inventory_history_df", None)
-    merged = merge_inventory_history(existing, incoming)
-    merged = filter_inventory_history_window(merged, days=_DEFAULT_VIEW_DAYS)
-    sess.daily_inventory_history_df = merged
-    sess._quarterly_cache.clear()
+    result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+    if not result.get("ok"):
+        return {"appended": False, "reason": result.get("reason", "refresh_failed")}
+    snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
     return {
-        "appended": True,
-        "snapshot_date": snap,
-        "rows": int(len(merged)),
-        "skus": int(merged["OMS_SKU"].nunique()) if not merged.empty else 0,
-        "days": int(merged["Date"].nunique()) if not merged.empty else 0,
+        "appended": bool(result.get("snapshot_appended")),
+        "rolled_forward": bool(result.get("rolled_forward")),
+        "snapshot_date": snap or result.get("max_date") or "",
+        "rows": result.get("rows", 0),
+        "skus": result.get("skus", 0),
+        "days": result.get("days", 0),
+        "max_date": result.get("max_date", ""),
     }
 
 
@@ -1345,6 +1449,8 @@ __all__ = [
     "overlay_inventory_variant_from_history",
     "coverage_days_within",
     "extend_history_with_sales",
+    "should_skip_inventory_history_extend",
+    "refresh_inventory_history_rollforward",
     "append_snapshot_inventory_to_history",
     "inventory_history_view_end_date",
     "inventory_history_is_newer_than",

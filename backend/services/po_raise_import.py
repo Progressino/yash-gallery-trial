@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import csv
+import logging
 from io import BytesIO, StringIO
 from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
 from .po_raise_ledger import append_raise_confirm_rows
+
+_log = logging.getLogger(__name__)
 
 
 def strip_suppressed_ledger_rows(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -48,7 +51,7 @@ def sync_ledger_to_durable_db(sess, raised_date: pd.Timestamp) -> None:
         ]
         replace_raises_for_date(str(d.date()), items)
     except Exception:
-        pass
+        _log.exception("sync_ledger_to_durable_db failed for %s", raised_date)
 
 
 def hydrate_session_ledger_from_db(
@@ -348,3 +351,149 @@ def apply_ledger_import(
             f"— ledger now {n:,} SKU-day row(s)."
         ),
     }
+
+
+def bootstrap_all_archives_to_db() -> dict:
+    """Import every archived PO export CSV into durable SQLite (org-wide recovery)."""
+    from pathlib import Path
+
+    from ..db.po_raised_db import ledger_rows_as_dataframe, replace_raises_for_date
+    from .po_raise_archive import archive_dir, decode_csv_bytes, parse_raise_date_from_filename
+
+    root = archive_dir()
+    by_date: dict[str, dict[str, int]] = {}
+    files_loaded = 0
+    for csv_path in sorted(root.glob("*/*.csv")):
+        if csv_path.parent.name == "global":
+            pass
+        day_s = csv_path.stem.strip()
+        try:
+            pd.Timestamp(pd.to_datetime(day_s).normalize())
+        except Exception:
+            alt = parse_raise_date_from_filename(csv_path.name)
+            if alt is None:
+                continue
+            day_s = str(alt.date())
+        try:
+            text = decode_csv_bytes(csv_path.read_bytes())
+            accum, err = parse_ledger_csv_text(text)
+        except Exception:
+            _log.exception("bootstrap archive read failed: %s", csv_path)
+            continue
+        if err or not accum:
+            continue
+        files_loaded += 1
+        bucket = by_date.setdefault(day_s, {})
+        for sku, qty in accum.items():
+            bucket[sku] = bucket.get(sku, 0) + int(qty)
+
+    imported_days: list[str] = []
+    total_units = 0
+    for day_s in sorted(by_date):
+        items = [{"oms_sku": k, "qty": int(v)} for k, v in by_date[day_s].items() if int(v) > 0]
+        if not items:
+            continue
+        replace_raises_for_date(day_s, items)
+        imported_days.append(day_s)
+        total_units += int(sum(i["qty"] for i in items))
+
+    after = ledger_rows_as_dataframe()
+    return {
+        "ok": True,
+        "files_loaded": files_loaded,
+        "imported_days": imported_days,
+        "total_units": total_units,
+        "ledger_rows": int(len(after)) if after is not None and not after.empty else 0,
+    }
+
+
+def _raised_qty_from_existing_po_row(row: pd.Series) -> int:
+    """Best single raise qty for a manual Existing PO upload row."""
+    parts: list[float] = []
+    for col in (
+        "PO_Qty_Ordered",
+        "PO_Pipeline_Total",
+        "Pending_Cutting",
+        "Balance_to_Dispatch",
+    ):
+        if col in row.index:
+            parts.append(float(pd.to_numeric(row.get(col), errors="coerce") or 0))
+    if len(parts) >= 2 and "Pending_Cutting" in row.index and "Balance_to_Dispatch" in row.index:
+        pc = float(pd.to_numeric(row.get("Pending_Cutting"), errors="coerce") or 0)
+        bd = float(pd.to_numeric(row.get("Balance_to_Dispatch"), errors="coerce") or 0)
+        parts.append(pc + bd)
+    return int(max(parts)) if parts else 0
+
+
+def seed_ledger_from_manual_existing_po_upload(
+    sess,
+    *,
+    raised_date: pd.Timestamp | None = None,
+    replace_day: bool = True,
+) -> dict:
+    """
+    Manual Existing PO upload = confirmed PO raise for the sheet date.
+
+    Records every SKU on the sheet in the raise ledger (qty = max of new order /
+    pipeline components) and marks the full SKU list so Calculate PO does not
+    re-recommend raises for those lines within the raise lookback window.
+    """
+    from ..db.po_raised_db import ledger_rows_as_dataframe
+    from .po_raise_archive import parse_raise_date_from_filename
+
+    ep = getattr(sess, "existing_po_df", None)
+    if ep is None or getattr(ep, "empty", True) or "OMS_SKU" not in ep.columns:
+        return {"ok": False, "reason": "empty_existing_po"}
+
+    if raised_date is None:
+        fn = str(getattr(sess, "existing_po_filename", "") or "")
+        parsed = parse_raise_date_from_filename(fn)
+        if parsed is None:
+            return {"ok": False, "reason": "no_filename_date"}
+        raised_date = parsed
+    raised_date = pd.Timestamp(raised_date).normalize()
+    day_s = str(raised_date.date())
+
+    if not replace_day:
+        existing = ledger_rows_as_dataframe(start_date=day_s, end_date=day_s)
+        if existing is not None and not existing.empty:
+            if int(pd.to_numeric(existing["Raised_Qty"], errors="coerce").fillna(0).sum()) > 0:
+                return {"ok": False, "reason": "ledger_already_has_day"}
+
+    accum: dict[str, int] = {}
+    raise_skus: list[str] = []
+    for _, row in ep.iterrows():
+        sku = str(row.get("OMS_SKU") or "").strip().upper()
+        if not sku:
+            continue
+        raise_skus.append(sku)
+        qty = _raised_qty_from_existing_po_row(row)
+        if qty > 0:
+            accum[sku] = max(int(accum.get(sku, 0)), qty)
+
+    sess.existing_po_manual_raise_date = day_s
+    sess.existing_po_manual_raise_skus = sorted(set(raise_skus))
+    sess.existing_po_manual_upload = True
+
+    if not accum:
+        return {
+            "ok": True,
+            "ledger_seeded": False,
+            "raise_skus": len(sess.existing_po_manual_raise_skus),
+            "raised_date": day_s,
+            "message": (
+                f"Manual Existing PO raise recorded for {day_s} "
+                f"({len(sess.existing_po_manual_raise_skus):,} SKUs on sheet; no positive qty columns)."
+            ),
+        }
+
+    out = apply_ledger_import(sess, accum, raised_date, replace_day=replace_day)
+    out["raise_skus"] = len(sess.existing_po_manual_raise_skus)
+    out["ledger_seeded"] = True
+    out["manual_raise"] = True
+    return out
+
+
+def seed_ledger_from_existing_po_ordered(sess, *, raised_date: pd.Timestamp | None = None) -> dict:
+    """Backward-compatible alias — manual uploads use the full-sheet raise path."""
+    return seed_ledger_from_manual_existing_po_upload(sess, raised_date=raised_date, replace_day=True)

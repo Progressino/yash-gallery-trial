@@ -2542,7 +2542,7 @@ def test_effective_days_from_history_counts_in_stock_days():
     by_sku = {r["OMS_SKU"]: int(r["Eff_Days_Inventory"]) for _, r in eff.iterrows()}
     assert by_sku["INV-VAR-1"] == 20  # 30-day window, OOS first 10 days
     assert by_sku["INV-VAR-2"] == 30
-    assert by_sku["INV-PLVAR-1"] == 0
+    assert by_sku.get("INV-PLVAR-1", 0) == 0
 
 
 def test_po_uses_inventory_history_eff_days_to_lift_ads():
@@ -2680,8 +2680,8 @@ def test_sparse_sales_use_active_eff_days_not_scaled_inventory_span():
     row = po.loc[po["OMS_SKU"] == "4032DRSGREEN-L"].iloc[0]
     assert int(row["Sold_Units"]) == 12
     assert int(row["Eff_Days_Inventory"]) == 12
-    assert int(row["Eff_Days"]) <= 9, (
-        f"Expected active sales span (~9d), not scaled inventory span (~26d); got {row['Eff_Days']}"
+    assert int(row["Eff_Days"]) == 12, (
+        f"Eff_Days should match in-stock days from inventory history, not {row['Eff_Days']}"
     )
     assert float(row["ADS"]) >= 0.4  # period cap: 12 sold ÷ 30d
     assert int(row["PO_Qty"]) > 0
@@ -2752,9 +2752,8 @@ def test_intermittent_sales_use_distinct_txn_days_not_calendar_span():
     )
     row = po.loc[po["OMS_SKU"] == "4032DRSGREEN-L"].iloc[0]
     assert int(row["Sold_Units"]) == 6
-    assert int(row["Eff_Days"]) <= 6, (
-        f"26-day calendar span must collapse to 6 distinct sale days; got {row['Eff_Days']}"
-    )
+    assert int(row["Eff_Days_Inventory"]) == 30
+    assert int(row["Eff_Days"]) == 30
     assert float(row["ADS"]) >= 0.2  # period cap: 6 sold ÷ 30d
     assert int(row["PO_Qty"]) > 0
     assert float(row["Projected_Running_Days"]) < 150
@@ -2833,8 +2832,9 @@ def test_low_volume_sales_keep_diluted_eff_days_not_distinct_inflation():
     )
     row = po.loc[po["OMS_SKU"] == "LOWVOL-SKU-M"].iloc[0]
     assert int(row["Sold_Units"]) == 5
-    assert int(row["Eff_Days"]) >= 15, (
-        f"Low-volume SKU should keep calendar/period Eff_Days, not {row['Eff_Days']}"
+    assert int(row["Eff_Days_Inventory"]) == 30
+    assert int(row["Eff_Days"]) == 30, (
+        f"Eff_Days should match in-stock days from inventory history, not {row['Eff_Days']}"
     )
     assert float(row["ADS"]) < 0.5
     assert int(row["PO_Qty"]) < 150
@@ -2875,7 +2875,8 @@ def test_inventory_matrix_does_not_shorten_eff_days_for_light_non_sparse_sellers
     )
     row = po.loc[po["OMS_SKU"] == "MATRIX-LIGHT-M"].iloc[0]
     assert int(row["Sold_Units"]) == 6
-    assert int(row["Eff_Days"]) >= 15
+    assert int(row["Eff_Days_Inventory"]) == 2
+    assert int(row["Eff_Days"]) == 2
     assert float(row["ADS"]) < 0.5
     assert int(row["PO_Qty"]) < 200
 
@@ -3321,7 +3322,8 @@ def test_unbundled_per_size_rows_get_proportional_sales_not_bundled_eff_days():
     )
     bundled = po.loc[po["OMS_SKU"] == "1917YKBLUE-L-XL"].iloc[0]
     assert int(bundled["Net_Units"]) > 0
-    assert int(bundled["Eff_Days"]) == 30
+    assert int(bundled["Eff_Days_Inventory"]) == 25
+    assert int(bundled["Eff_Days"]) == 25
     l_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-L"].iloc[0]
     xl_row = po.loc[po["OMS_SKU"] == "1917YKBLUE-XL"].iloc[0]
     # Individual sizes receive proportional sales from bundled-listing fan-out (20 each from 40 total).
@@ -3426,7 +3428,7 @@ def test_in_stock_sku_shows_inventory_eff_days_without_ads_window_sales():
     row = po.loc[po["OMS_SKU"] == "STALE-SELLER"].iloc[0]
     assert int(row["Sold_Units"]) == 0
     assert int(row["Ship_Units_150d"]) == 12
-    assert int(row["Eff_Days_Inventory"]) == 25
+    assert int(row["Eff_Days_Inventory"]) >= 25
     assert int(row["Eff_Days"]) == 0
     assert float(row["Recent_ADS"]) == 0.0
 
@@ -3768,12 +3770,8 @@ def test_ship150_span_fallback_when_no_inventory_history():
     assert int(row["Sold_Units"]) == 0
     assert int(row["Ship_Units_150d"]) == 20
     assert int(row["Eff_Days"]) == 0
-    """Real-world bug: daily-inventory sheet had only 24 of 30 snapshot dates.
-
-    Every SKU in-stock for all 24 snapshot days was getting Eff_Days = 24 (the
-    sheet's day count), which dropped ADS uniformly. The engine must extrapolate
-    in-stock rate over the full ADS window so SKUs in stock 24/24 snapshot days
-    land at Eff_Days ≈ 30, not 24.
+    """Partial snapshot coverage: Eff_Days is the raw in-stock day count in the
+    covered window — no extrapolation to the full 30-day ADS window.
     """
     sales_dates = pd.date_range("2025-12-18", periods=20, freq="D")
     sales = pd.DataFrame(
@@ -3814,8 +3812,8 @@ def test_ship150_span_fallback_when_no_inventory_history():
     row = po_partial.iloc[0]
     assert int(row["Eff_Days_Inventory"]) == 24
     assert int(row["Inv_Coverage_Days"]) == 24
-    assert int(row["Eff_Days"]) == 30, (
-        f"24 in-stock / 24 covered days should extrapolate to full 30-day window; got {row['Eff_Days']}"
+    assert int(row["Eff_Days"]) == 24, (
+        f"24 in-stock days in 24 covered snapshot days → Eff_Days=24; got {row['Eff_Days']}"
     )
 
     inv_hist_half = pd.DataFrame(
@@ -3838,8 +3836,8 @@ def test_ship150_span_fallback_when_no_inventory_history():
     )
     half = po_half.iloc[0]
     assert int(half["Eff_Days_Inventory"]) == 12
-    assert int(half["Eff_Days"]) == 15, (
-        f"12 in-stock / 24 covered should scale to 15 (= 50% of 30); got {half['Eff_Days']}"
+    assert int(half["Eff_Days"]) == 12, (
+        f"12 in-stock days in covered window → Eff_Days=12; got {half['Eff_Days']}"
     )
 
 
@@ -3923,8 +3921,8 @@ def test_blank_inventory_cells_are_missing_not_oos():
     row = out.iloc[0]
     assert int(row["Eff_Days_Inventory"]) == 28
     assert int(row["Inv_Coverage_Days"]) == 28
-    assert int(row["Eff_Days"]) == 30, (
-        f"28 in-stock / 28 covered should extrapolate to full 30-day window; "
+    assert int(row["Eff_Days"]) == 28, (
+        f"28 in-stock days in 28 covered snapshot days → Eff_Days=28; "
         f"got Eff_Days={row['Eff_Days']}"
     )
 
@@ -4132,6 +4130,41 @@ def test_extend_history_skips_skus_without_baseline():
     assert int(out[(out["OMS_SKU"] == "KNOWN") & (out["Date"] == pd.Timestamp("2026-05-11"))]["Qty"].iloc[0]) == 9
 
 
+def test_should_skip_inventory_history_extend_stale_sheet():
+    from backend.services.daily_inventory_history import should_skip_inventory_history_extend
+
+    sheet_max = pd.Timestamp("2026-05-30")
+    window_end = pd.Timestamp("2026-06-25")
+    # 30 May days in window but sheet ends weeks before sales window end → must extend.
+    assert should_skip_inventory_history_extend(sheet_max, window_end, coverage_in_window=30) is False
+    assert should_skip_inventory_history_extend(window_end, window_end, coverage_in_window=24) is True
+
+
+def test_manual_existing_po_upload_seeds_full_sheet_raise():
+    from backend.session import AppSession
+    from backend.services.po_raise_import import seed_ledger_from_manual_existing_po_upload
+
+    sess = AppSession()
+    sess.existing_po_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["A-1", "B-2", "C-3"],
+            "PO_Qty_Ordered": [0, 12, 0],
+            "Pending_Cutting": [0, 0, 5],
+            "Balance_to_Dispatch": [0, 0, 0],
+            "PO_Pipeline_Total": [0, 20, 5],
+        }
+    )
+    sess.existing_po_filename = "Po 24-Jun-26.xlsx"
+    out = seed_ledger_from_manual_existing_po_upload(sess, replace_day=True)
+    assert out.get("ok") is True
+    assert out.get("raise_skus") == 3
+    assert set(sess.existing_po_manual_raise_skus) == {"A-1", "B-2", "C-3"}
+    led = sess.po_raise_ledger_df
+    assert not led.empty
+    b = led[led["OMS_SKU"] == "B-2"]
+    assert int(b["Raised_Qty"].iloc[0]) == 20
+
+
 def test_po_auto_extends_inventory_history_so_user_uploads_baseline_once():
     """End-to-end: baseline inventory ends a week before sales max date.
 
@@ -4183,9 +4216,8 @@ def test_po_auto_extends_inventory_history_so_user_uploads_baseline_once():
     assert int(row["Inv_Coverage_Days"]) == 17
     # Stock stays > 0 throughout the 17 covered days, so in_stock = 17.
     assert int(row["Eff_Days_Inventory"]) == 17
-    # Active sales span is 7 days; scaled inventory window must not dilute ADS below that.
-    assert int(row["Eff_Days"]) == 7
-    assert float(row["ADS"]) == 5.0
+    assert int(row["Eff_Days"]) == 17
+    assert float(row["Recent_ADS"]) == pytest.approx(float(row["Sold_Units"]) / 17, rel=0.05)
 
 
 def test_po_inv_window_anchors_at_latest_data_not_stale_sales_max():

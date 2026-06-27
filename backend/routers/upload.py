@@ -2826,6 +2826,18 @@ def _parse_existing_po_into_session(sess, file_bytes: bytes, orig_fn: str) -> Up
     sess.existing_po_df = df
     sess.existing_po_filename = orig_fn
     sess.existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0) + 1
+    seed: dict = {}
+    try:
+        from ..services.po_raise_import import seed_ledger_from_manual_existing_po_upload
+
+        seed = seed_ledger_from_manual_existing_po_upload(sess, replace_day=True)
+        if seed.get("ok"):
+            _log.info(
+                "Manual Existing PO raise recorded: %s",
+                seed.get("message") or seed,
+            )
+    except Exception:
+        _log.exception("seed_ledger_from_manual_existing_po_upload failed")
     try:
         import datetime as _dt
 
@@ -2863,6 +2875,16 @@ def _parse_existing_po_into_session(sess, file_bytes: bytes, orig_fn: str) -> Up
         msg += "."
     if not audit.get("totals_match", True):
         msg += " ⚠ Parsed totals differ from sheet Total row — review before Calculate PO."
+    if seed.get("ok") and seed.get("manual_raise"):
+        qty_note = (
+            f", {int(seed.get('imported_skus', 0)):,} with qty"
+            if seed.get("ledger_seeded")
+            else ""
+        )
+        msg += (
+            f" Recorded manual raise for {seed.get('raised_date', '?')} "
+            f"({int(seed.get('raise_skus', 0)):,} SKUs on sheet{qty_note})."
+        )
     return UploadResponse(
         ok=True,
         message=msg,

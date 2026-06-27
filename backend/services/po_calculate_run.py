@@ -211,6 +211,14 @@ def execute_po_calculate(
     try:
         _lt_raw = body.get("lead_time")
         _lead_time = 0 if _lt_raw in (None, "") else int(_lt_raw or 0)
+        from .existing_po import manual_existing_po_raise_skus
+
+        _manual_raise_skus = (
+            manual_existing_po_raise_skus(sess)
+            if bool(getattr(sess, "existing_po_manual_upload", False))
+            else set()
+        )
+        _manual_raise_date = str(getattr(sess, "existing_po_manual_raise_date", "") or "")[:10] or None
         po_df = calculate_po_base(
             sales_df=_ads_source,
             inv_df=inv_df,
@@ -241,6 +249,8 @@ def execute_po_calculate(
             urgent_all_sizes_days=int(body.get("urgent_all_sizes_days", 45)),
             use_ly_fallback=bool(body.get("use_ly_fallback", True)),
             stage_timer=stage_timer,
+            manual_existing_po_raise_skus=_manual_raise_skus or None,
+            manual_existing_po_raise_date=_manual_raise_date,
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}
@@ -337,6 +347,14 @@ def execute_po_calculate(
     _pipe = _num_col("PO_Pipeline_Total")
     _ordered = _num_col("PO_Qty_Ordered")
     _ep_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
+    ep_src = getattr(sess, "existing_po_df", None)
+    if ep_src is not None and not getattr(ep_src, "empty", True):
+        from .existing_po import existing_po_pipeline_totals
+
+        _pipe_sum, _pipe_skus = existing_po_pipeline_totals(ep_src)
+    else:
+        _pipe_sum = int(_pipe.sum())
+        _pipe_skus = int((_pipe > 0).sum())
     from .po_shared_cache import PO_MERGE_LOGIC_VERSION
 
     return {
@@ -355,8 +373,8 @@ def execute_po_calculate(
         "summary": {
             "new_po_qty_sum": int(_po_qty.sum()),
             "new_po_sku_count": int((_po_qty > 0).sum()),
-            "pipeline_qty_sum": int(_pipe.sum()),
-            "pipeline_sku_count": int((_pipe > 0).sum()),
+            "pipeline_qty_sum": _pipe_sum,
+            "pipeline_sku_count": _pipe_skus,
             "sheet_po_ordered_sum": int(_ordered.sum()),
             "existing_po_applied": _ep_gen > 0 and int((_pipe > 0).sum()) > 0,
             "existing_po_generation": _ep_gen,

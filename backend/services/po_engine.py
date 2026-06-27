@@ -954,6 +954,8 @@ def calculate_po_base(
     urgent_all_sizes_days: int = 45,
     use_ly_fallback: bool = True,
     stage_timer: Any = None,
+    manual_existing_po_raise_skus: Optional[set[str]] = None,
+    manual_existing_po_raise_date: Optional[str] = None,
 ) -> pd.DataFrame:
     import time as _time
 
@@ -1468,6 +1470,7 @@ def calculate_po_base(
                 coverage_days_within,
                 effective_days_from_history,
                 extend_history_with_sales,
+                should_skip_inventory_history_extend,
                 trim_inventory_history_for_po,
             )
 
@@ -1516,10 +1519,12 @@ def calculate_po_base(
 
                 sheet_max = pd.to_datetime(ih["Date"], errors="coerce").max()
                 coverage_in_window = coverage_days_within(ih, inv_window_start, inv_window_end)
-                skip_extend = bool(
-                    pd.notna(sheet_max)
-                    and sheet_max >= inv_window_end - timedelta(days=1)
-                ) or coverage_in_window >= min(int(ADS_WINDOW), 14)
+                skip_extend = should_skip_inventory_history_extend(
+                    sheet_max,
+                    inv_window_end,
+                    coverage_in_window,
+                    ads_window=int(ADS_WINDOW),
+                )
 
                 if skip_extend:
                     ih_work = ih
@@ -1536,72 +1541,18 @@ def calculate_po_base(
 
                 eff_inv = effective_days_from_history(ih_work, inv_window_start, inv_window_end)
                 coverage_days = coverage_days_within(ih_work, inv_window_start, inv_window_end)
-                history_authoritative = bool(
-                    skip_extend
-                    and pd.notna(sheet_max)
-                    and sheet_max >= inv_window_end - timedelta(days=1)
-                    and coverage_days >= min(int(ADS_WINDOW) - 2, 28)
-                )
                 if not eff_inv.empty and coverage_days > 0:
                     po_df = po_df.merge(eff_inv, on="OMS_SKU", how="left")
                     inv_days = pd.to_numeric(po_df["Eff_Days_Inventory"], errors="coerce")
-                    scale = float(ADS_WINDOW) / float(coverage_days) if coverage_days else 1.0
-                    _has_demand = (
-                        po_df["Net_Units"].fillna(0) > 0
-                        if demand_basis == "Net"
-                        else po_df["Sold_Units"].fillna(0) > 0
+                    # Match inventory-history UI: Eff_Days = days with Qty >= 1 in the ADS
+                    # window (no sales-span override, no extrapolation over missing snapshots).
+                    _has_inv_hist = inv_days.notna()
+                    po_df.loc[_has_inv_hist, "Eff_Days"] = (
+                        inv_days[_has_inv_hist]
+                        .clip(lower=0, upper=float(ADS_WINDOW))
+                        .astype(int)
                     )
-                    _oos_restock = _oos_restock_mask(po_df)
-                    _ship150 = pd.to_numeric(po_df.get("Ship_Units_150d"), errors="coerce").fillna(0) > 0
-                    _has_stock = pd.to_numeric(po_df.get("Total_Inventory"), errors="coerce").fillna(0) > 0
-                    # Apply in-stock-day denominator when the SKU is active (demand/OOS restock),
-                    # has recent shipment context, or still carries inventory with history.
-                    use_inv = (
-                        inv_days.notna()
-                        & (inv_days > 0)
-                        & (~_low_vol)
-                        & (_has_demand | _oos_restock | _ship150 | _has_stock)
-                    )
-                    inv_eff = (inv_days * scale).round()
-                    inv_clipped = inv_eff.clip(lower=1.0, upper=float(ADS_WINDOW))
-                    _active_eff = pd.to_numeric(po_df["Eff_Days"], errors="coerce").fillna(0)
-                    _sparse_flag = po_df["_sparse_intermittent"].fillna(False).astype(bool)
-                    _sold_for_inv = pd.to_numeric(_sold_eff, errors="coerce").fillna(0)
-                    _density = np.where(_active_eff > 0, _sold_for_inv / _active_eff, 0.0)
-                    # Inventory matrix may only shorten Eff_Days (raise ADS) when stock
-                    # was the real bottleneck — sparse/intermittent sellers (4032) or
-                    # sustained sellers with OOS gaps (INV-OVR). Applying matrix in-stock
-                    # counts to every SKU crushed Eff_Days to 1–3 on noise and blew PO up.
-                    _allow_inv_shorten = _sparse_flag | (
-                        (_sold_for_inv >= 8) & (_density >= 0.35)
-                    )
-                    # Sparse sales inside a long in-stock window: do not dilute ADS.
-                    # When stock was the bottleneck (inv < active span), keep inv-based days.
-                    if history_authoritative:
-                        _eff_from_inv = inv_clipped
-                        _apply_inv = use_inv
-                    else:
-                        _eff_from_inv = np.where(
-                            _has_demand & (_active_eff > 0),
-                            np.where(
-                                inv_clipped < _active_eff,
-                                inv_clipped,
-                                np.where(
-                                    inv_clipped >= _active_eff * 2,
-                                    _active_eff.clip(lower=1.0),
-                                    inv_clipped,
-                                ),
-                            ),
-                            inv_clipped,
-                        )
-                        _apply_inv = use_inv & (
-                            _allow_inv_shorten | _oos_restock
-                        )
-                    po_df["Eff_Days"] = np.where(
-                        _apply_inv,
-                        _eff_from_inv,
-                        po_df["Eff_Days"],
-                    )
+                    po_df["_has_inv_hist"] = _has_inv_hist
                     po_df["Eff_Days_Inventory"] = inv_days.fillna(0).astype(int)
                     po_df["Inv_Coverage_Days"] = int(coverage_days)
                 else:
@@ -1620,18 +1571,25 @@ def calculate_po_base(
         po_df["Inv_Coverage_Days"] = 0
 
     if bool(_low_vol.any()) and "_cal_span_days" in po_df.columns:
-        _cal_floor = pd.to_numeric(po_df["_cal_span_days"], errors="coerce").fillna(0)
-        _span_floor = np.where(
-            _cal_floor >= float(min_denominator),
-            _cal_floor,
-            float(ADS_WINDOW),
-        )
-        _eff_lv = pd.to_numeric(po_df.loc[_low_vol, "Eff_Days"], errors="coerce").fillna(0).to_numpy()
-        _floor_lv = pd.Series(_span_floor, index=po_df.index).loc[_low_vol].to_numpy()
-        po_df.loc[_low_vol, "Eff_Days"] = np.clip(
-            np.maximum(_eff_lv, _floor_lv), 0, float(ADS_WINDOW)
-        )
-    po_df.drop(columns=["_cal_span_days"], inplace=True, errors="ignore")
+        _has_inv_hist = po_df.get("_has_inv_hist", pd.Series(False, index=po_df.index)).fillna(False)
+        _low_vol_floor = _low_vol & (~_has_inv_hist)
+        if bool(_low_vol_floor.any()):
+            _cal_floor = pd.to_numeric(po_df["_cal_span_days"], errors="coerce").fillna(0)
+            _span_floor = np.where(
+                _cal_floor >= float(min_denominator),
+                _cal_floor,
+                float(ADS_WINDOW),
+            )
+            _eff_lv = (
+                pd.to_numeric(po_df.loc[_low_vol_floor, "Eff_Days"], errors="coerce")
+                .fillna(0)
+                .to_numpy()
+            )
+            _floor_lv = pd.Series(_span_floor, index=po_df.index).loc[_low_vol_floor].to_numpy()
+            po_df.loc[_low_vol_floor, "Eff_Days"] = np.clip(
+                np.maximum(_eff_lv, _floor_lv), 0, float(ADS_WINDOW)
+            )
+    po_df.drop(columns=["_cal_span_days", "_has_inv_hist"], inplace=True, errors="ignore")
 
     # SKUs with no ADS-window sales may still show Eff_Days from the 150d ship context
     # when inventory history is missing (common for SKUs not in the daily snapshot file).
@@ -1667,7 +1625,9 @@ def calculate_po_base(
     _window_demand = (
         po_df["Net_Units"].fillna(0) if demand_basis == "Net" else po_df["Sold_Units"].fillna(0)
     )
-    po_df.loc[pd.to_numeric(_window_demand, errors="coerce").fillna(0) <= 0, "Eff_Days"] = 0
+    _zero_demand = pd.to_numeric(_window_demand, errors="coerce").fillna(0) <= 0
+    _oos_restock_pre = _oos_restock_mask(po_df)
+    po_df.loc[_zero_demand & (~_oos_restock_pre), "Eff_Days"] = 0
 
     ads_demand = po_df["ADS_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["ADS_Sold_Units"]
     po_df["Recent_ADS"] = np.where(
@@ -2783,6 +2743,38 @@ def calculate_po_base(
 
     po_df["PO_Qty"] = np.vectorize(round_po_pack)(_po_final.to_numpy(dtype=float)).astype(int)
     po_df["Gross_PO_Qty"] = po_df["PO_Qty"]
+
+    # Manual Existing PO upload = confirmed raise for the sheet date — do not
+    # re-recommend SKUs that appear on that upload within the raise lookback window.
+    if manual_existing_po_raise_skus and manual_existing_po_raise_date:
+        try:
+            _plan_mr = _plan if _plan is not None else pd.Timestamp.now().normalize()
+            _raise_mr = pd.Timestamp(str(manual_existing_po_raise_date).strip()[:10]).normalize()
+            _lb_mr = max(1, int(raise_ledger_lookback_days))
+            _win_start_mr = _plan_mr - pd.Timedelta(days=_lb_mr)
+            if _win_start_mr <= _raise_mr <= _plan_mr:
+                _sku_keys = po_df["OMS_SKU"].astype(str).str.strip().str.upper()
+                _on_manual_sheet = _sku_keys.isin(manual_existing_po_raise_skus)
+                _had_po = pd.to_numeric(po_df["PO_Qty"], errors="coerce").fillna(0) > 0
+                _block_mr = _on_manual_sheet & _had_po
+                if bool(_block_mr.any()):
+                    _msg_mr = (
+                        f"On manual Existing PO raise sheet ({_raise_mr.date()}) — "
+                        "already raised via uploaded Po sheet"
+                    )
+                    po_df.loc[_block_mr, "PO_Qty"] = 0
+                    po_df.loc[_block_mr, "Gross_PO_Qty"] = 0
+                    br_mr = po_df.loc[_block_mr, "PO_Block_Reason"].astype(str).str.strip()
+                    po_df.loc[_block_mr, "PO_Block_Reason"] = np.where(
+                        br_mr.eq("") | br_mr.eq("nan"),
+                        _msg_mr,
+                        br_mr + "; " + _msg_mr,
+                    )
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception("manual existing PO raise block failed")
+
     if "Total_Inventory" in po_df.columns:
         _inv_final = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0.0)
     else:

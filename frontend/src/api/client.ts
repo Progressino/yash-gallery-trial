@@ -163,6 +163,8 @@ export interface CoverageResponse {
   existing_po_rows?: number
   existing_po_needs_recalc?: boolean
   existing_po_per_size_skus?: number
+  existing_po_pipeline_skus?: number
+  existing_po_new_order_skus?: number
   existing_po_looks_aggregated?: boolean
   existing_po_upload_status?: 'idle' | 'running' | 'done' | 'error'
   existing_po_upload_message?: string

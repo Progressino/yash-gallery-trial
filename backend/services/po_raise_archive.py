@@ -26,6 +26,24 @@ _FILENAME_DATE_RE = re.compile(
     r"(?:po[_\s-]*recommendation|raise[_\s-]*po)?[^\d]*(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})",
     re.I,
 )
+_PO_SHEET_DATE_RE = re.compile(
+    r"\bpo\s*(\d{1,2})[-\s]+([a-z]{3})[-\s]+(\d{2,4})\b",
+    re.I,
+)
+_MONTH_MAP = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
 _resolved_archive_root: Optional[Path] = None
 
 
@@ -104,15 +122,37 @@ def delete_archives_for_date(
     return removed
 
 
-def load_archive(session_id: str, day: pd.Timestamp) -> Optional[bytes]:
-    """Prefer org-wide global archive, then per-session file."""
+def find_org_archive_bytes(day: pd.Timestamp) -> Optional[bytes]:
+    """Return archived PO export bytes for ``day`` from global or any session folder."""
     d = pd.Timestamp(day).normalize()
     gpath = global_archive_path(d)
     if gpath.is_file():
         return gpath.read_bytes()
+    stem = f"{d.date()}.csv"
+    root = archive_dir()
+    newest: tuple[float, Path] | None = None
+    for sub in root.iterdir():
+        if not sub.is_dir() or sub.name == _GLOBAL_SUBDIR:
+            continue
+        candidate = sub / stem
+        if not candidate.is_file():
+            continue
+        mtime = candidate.stat().st_mtime
+        if newest is None or mtime > newest[0]:
+            newest = (mtime, candidate)
+    if newest is not None:
+        return newest[1].read_bytes()
+    return None
+
+
+def load_archive(session_id: str, day: pd.Timestamp) -> Optional[bytes]:
+    """Prefer org-wide global archive, then per-session file, then any session folder."""
+    raw = find_org_archive_bytes(day)
+    if raw is not None:
+        return raw
     if session_id:
         try:
-            path = archive_path(session_id, d)
+            path = archive_path(session_id, day)
             if path.is_file():
                 return path.read_bytes()
         except ValueError:
@@ -141,10 +181,22 @@ def list_global_archive_dates(
 
 
 def parse_raise_date_from_filename(filename: str) -> Optional[pd.Timestamp]:
-    """e.g. ``po_recommendation 16-5-26.csv`` → 2026-05-16."""
+    """e.g. ``po_recommendation 16-5-26.csv`` or ``Po 24-Jun-26.xlsx`` → 2026-06-24."""
     name = (filename or "").strip()
     if not name:
         return None
+    m_po = _PO_SHEET_DATE_RE.search(name.replace("_", " "))
+    if m_po:
+        d = int(m_po.group(1))
+        mo = _MONTH_MAP.get(m_po.group(2).lower()[:3])
+        y = int(m_po.group(3))
+        if y < 100:
+            y += 2000
+        if mo:
+            try:
+                return pd.Timestamp(year=y, month=mo, day=d).normalize()
+            except Exception:
+                pass
     m = _FILENAME_DATE_RE.search(name.replace("_", " "))
     if not m:
         return None
