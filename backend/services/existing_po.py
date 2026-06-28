@@ -640,17 +640,44 @@ def manual_existing_po_raise_skus(sess) -> set[str]:
     """SKUs blocked from re-raise — positive ``PO_Qty_Ordered`` on manual upload only."""
     if not getattr(sess, "existing_po_manual_upload", False):
         return set()
-    ep = getattr(sess, "existing_po_df", None)
-    if ep is not None and not getattr(ep, "empty", True) and "OMS_SKU" in ep.columns:
+
+    def _from_existing_po_df(ep) -> set[str]:
+        if ep is None or getattr(ep, "empty", True) or "OMS_SKU" not in ep.columns:
+            return set()
         from .po_raise_import import manual_raise_block_skus_from_existing_po
 
         return manual_raise_block_skus_from_existing_po(ep)
-    skus = getattr(sess, "existing_po_manual_raise_skus", None)
-    if skus:
-        return {str(s).strip().upper() for s in skus if str(s).strip()}
-    load_manual_raise_skus_into_session(sess)
-    skus = getattr(sess, "existing_po_manual_raise_skus", None) or []
-    return {str(s).strip().upper() for s in skus if str(s).strip()}
+
+    ep = getattr(sess, "existing_po_df", None)
+    block = _from_existing_po_df(ep)
+    if block:
+        _sync_manual_raise_block_skus(sess, block)
+        return block
+
+    try:
+        ensure_existing_po_hydrated(sess)
+    except Exception:
+        _log.exception("ensure_existing_po_hydrated during manual raise block lookup failed")
+    ep = getattr(sess, "existing_po_df", None)
+    block = _from_existing_po_df(ep)
+    if block:
+        _sync_manual_raise_block_skus(sess, block)
+        return block
+
+    # Never fall back to stale sidecar JSON (may list every SKU on the sheet).
+    return set()
+
+
+def _sync_manual_raise_block_skus(sess, block: set[str]) -> None:
+    """Keep session + disk sidecar aligned with ordered-qty block list."""
+    ordered = sorted(block)
+    prev = getattr(sess, "existing_po_manual_raise_skus", None) or []
+    if sorted(str(s).strip().upper() for s in prev if str(s).strip()) != ordered:
+        sess.existing_po_manual_raise_skus = ordered
+        try:
+            persist_manual_raise_skus(sess)
+        except Exception:
+            _log.exception("persist_manual_raise_skus during reconcile failed")
 
 
 def apply_existing_po_session_meta(sess, meta: dict) -> None:
@@ -666,7 +693,6 @@ def apply_existing_po_session_meta(sess, meta: dict) -> None:
     if meta.get("existing_po_manual_raise_date"):
         sess.existing_po_manual_raise_date = str(meta["existing_po_manual_raise_date"])[:10]
     sess.existing_po_manual_upload = bool(meta.get("existing_po_manual_upload"))
-    load_manual_raise_skus_into_session(sess)
 
 
 def persist_existing_po_to_disk(sess) -> bool:

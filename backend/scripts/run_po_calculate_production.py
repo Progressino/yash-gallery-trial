@@ -114,7 +114,6 @@ def main() -> int:
     try:
         from backend.services.existing_po import (
             apply_existing_po_session_meta,
-            load_manual_raise_skus_into_session,
             read_existing_po_disk_meta,
         )
 
@@ -122,7 +121,6 @@ def main() -> int:
         apply_existing_po_session_meta(sess, ep_meta)
         if ep_meta.get("existing_po_manual_raise_date"):
             sess.existing_po_manual_upload = bool(ep_meta.get("existing_po_manual_upload", True))
-        load_manual_raise_skus_into_session(sess)
     except Exception:
         pass
 

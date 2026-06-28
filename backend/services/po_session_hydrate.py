@@ -400,7 +400,12 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
     df = getattr(sess, "daily_inventory_history_df", None)
     if df is None or getattr(df, "empty", True):
         return pd.DataFrame()
-    from .daily_inventory_history import drop_zero_derived_rows
+    from .daily_inventory_history import drop_zero_derived_rows, reconcile_daily_inventory_meta_if_session_newer
+
+    try:
+        reconcile_daily_inventory_meta_if_session_newer(sess)
+    except Exception:
+        _log.exception("reconcile_daily_inventory_meta_if_session_newer failed")
 
     return drop_zero_derived_rows(df)
 

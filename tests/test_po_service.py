@@ -4232,6 +4232,30 @@ def test_pipeline_only_existing_po_does_not_block_new_po_qty():
         assert "manual Existing PO" not in str(row.get("PO_Block_Reason") or "")
 
 
+def test_stale_manual_raise_json_never_blocks_pipeline_skus():
+    """Stale sidecar JSON listing every sheet SKU must not drive PO blocks."""
+    from backend.session import AppSession
+    from backend.services.existing_po import manual_existing_po_raise_skus
+
+    skus = ["PIPE-A", "PIPE-B", "ORDERED-C"]
+    sess = AppSession()
+    sess.existing_po_manual_upload = True
+    sess.existing_po_manual_raise_date = "2026-06-27"
+    sess.existing_po_manual_raise_skus = skus  # stale: all rows on sheet
+    sess.existing_po_df = pd.DataFrame(
+        {
+            "OMS_SKU": skus,
+            "PO_Qty_Ordered": [0, 0, 15],
+            "PO_Pipeline_Total": [8, 4, 15],
+        }
+    )
+    block = manual_existing_po_raise_skus(sess)
+    assert block == {"ORDERED-C"}
+    assert sess.existing_po_manual_raise_skus == ["ORDERED-C"]
+    assert "PIPE-A" not in block
+    assert "PIPE-B" not in block
+
+
 def test_po_auto_extends_inventory_history_so_user_uploads_baseline_once():
     """End-to-end: baseline inventory ends a week before sales max date.
 

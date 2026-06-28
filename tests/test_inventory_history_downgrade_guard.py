@@ -138,6 +138,55 @@ def test_matrix_cap_prefers_session_over_stale_disk_placeholder():
         dih.read_daily_inventory_history_disk_meta = orig
 
 
+def test_matrix_cap_infers_from_session_df_without_matrix_max_date():
+    from backend.session import AppSession
+    import backend.services.daily_inventory_history as dih
+
+    sess = AppSession()
+    dates = pd.date_range("2026-06-01", "2026-06-27", freq="D")
+    rows = []
+    for i in range(60):
+        sku = f"BULK-SKU-{i}"
+        for d in dates:
+            rows.append({"OMS_SKU": sku, "Date": d, "Qty": 5})
+    sess.daily_inventory_history_df = pd.DataFrame(rows)
+    orig = dih.read_daily_inventory_history_disk_meta
+    dih.read_daily_inventory_history_disk_meta = lambda: {
+        "daily_inventory_history_matrix_max_date": "2026-05-30",
+        "daily_inventory_history_rows": 1,
+        "daily_inventory_history_skus": 1,
+    }
+    try:
+        cap = dih.inventory_history_matrix_cap_date(sess)
+        assert str(cap.date()) == "2026-06-27"
+    finally:
+        dih.read_daily_inventory_history_disk_meta = orig
+
+
+def test_reconcile_disk_meta_overwrites_placeholder(monkeypatch, tmp_path):
+    from backend.session import AppSession
+    import backend.services.daily_inventory_history as dih
+
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+    (tmp_path / "daily_inventory_history_meta.json").write_text(
+        '{"daily_inventory_history_rows":1,"daily_inventory_history_skus":1,'
+        '"daily_inventory_history_matrix_max_date":"2026-05-30"}',
+        encoding="utf-8",
+    )
+    sess = AppSession()
+    dates = pd.date_range("2026-06-01", "2026-06-27", freq="D")
+    rows = []
+    for i in range(80):
+        for d in dates:
+            rows.append({"OMS_SKU": f"SKU-{i}", "Date": d, "Qty": 3})
+    sess.daily_inventory_history_df = pd.DataFrame(rows)
+    sess.daily_inventory_history_uploaded_at = "2026-06-28T10:00:00"
+    assert dih.reconcile_daily_inventory_meta_if_session_newer(sess) is True
+    meta = dih.read_daily_inventory_history_disk_meta()
+    assert int(meta["daily_inventory_history_skus"]) == 80
+    assert meta["daily_inventory_history_matrix_max_date"] == "2026-06-27"
+
+
 def test_authoritative_read_keeps_full_matrix_when_disk_meta_stale(monkeypatch):
     from backend.session import AppSession
     from backend.services.po_session_hydrate import ensure_inventory_history_authoritative_for_read

@@ -373,6 +373,27 @@ def inventory_history_view_end_date(
     return str(end.date())
 
 
+def disk_inventory_meta_looks_placeholder(meta: dict | None) -> bool:
+    """True when on-disk meta is a tiny stub (e.g. 1 row / 1 SKU) rather than the real matrix."""
+    if not isinstance(meta, dict) or not meta:
+        return True
+    rows = int(meta.get("daily_inventory_history_rows") or 0)
+    skus = int(meta.get("daily_inventory_history_skus") or 0)
+    return rows < 100 or skus < 50
+
+
+def session_inventory_matrix_stats(sess) -> tuple[int, int, pd.Timestamp | None]:
+    """Row count, SKU count, and max date from the session matrix (if any)."""
+    df = getattr(sess, "daily_inventory_history_df", None)
+    if df is None or getattr(df, "empty", True) or "OMS_SKU" not in df.columns:
+        return 0, 0, None
+    rows = int(len(df))
+    skus = int(df["OMS_SKU"].astype(str).nunique())
+    mx = inventory_history_max_date(df)
+    df_ts = pd.Timestamp(mx).normalize() if mx is not None and pd.notna(mx) else None
+    return rows, skus, df_ts
+
+
 def inventory_history_matrix_cap_date(sess) -> pd.Timestamp | None:
     """Last date from the wide matrix upload — not extended by daily snapshot roll-forward."""
     meta = read_daily_inventory_history_disk_meta() or {}
@@ -392,9 +413,9 @@ def inventory_history_matrix_cap_date(sess) -> pd.Timestamp | None:
         or meta.get("daily_inventory_history_max_date")
         or ""
     )
-    disk_rows = int(meta.get("daily_inventory_history_rows") or 0)
-    disk_skus = int(meta.get("daily_inventory_history_skus") or 0)
-    disk_looks_real = disk_rows >= 100 and disk_skus >= 50
+    disk_looks_real = not disk_inventory_meta_looks_placeholder(meta)
+    _, sess_skus, df_ts = session_inventory_matrix_stats(sess)
+    session_matrix_real = df_ts is not None and sess_skus >= 50
 
     if sess_ts is not None and disk_ts is not None:
         if sess_ts >= disk_ts:
@@ -404,13 +425,13 @@ def inventory_history_matrix_cap_date(sess) -> pd.Timestamp | None:
         return sess_ts
     if sess_ts is not None:
         return sess_ts
+    if session_matrix_real and disk_ts is not None:
+        if not disk_looks_real or df_ts >= disk_ts:
+            return df_ts
     if disk_ts is not None and disk_looks_real:
         return disk_ts
-
-    df = getattr(sess, "daily_inventory_history_df", None)
-    sheet_max = inventory_history_max_date(df)
-    if sheet_max is not None and pd.notna(sheet_max):
-        return pd.Timestamp(sheet_max).normalize()
+    if df_ts is not None:
+        return df_ts
     return None
 
 
@@ -1452,16 +1473,21 @@ def _warm_cache_dir() -> "Path":
 def daily_inventory_history_meta_bundle(sess) -> dict:
     """Serializable metadata for warm-cache / disk restore (shared across users)."""
     df = getattr(sess, "daily_inventory_history_df", None)
-    rows = int(len(df)) if df is not None and not getattr(df, "empty", True) else 0
-    skus = int(df["OMS_SKU"].astype(str).nunique()) if rows and "OMS_SKU" in df.columns else 0
+    rows, skus, df_ts = session_inventory_matrix_stats(sess)
     mx = inventory_history_max_date(df)
-    matrix_cap = inventory_history_matrix_cap_date(sess) or inventory_history_authoritative_cap_date(sess)
     min_d = None
     if df is not None and not getattr(df, "empty", True) and "Date" in df.columns:
         min_d = pd.to_datetime(df["Date"], errors="coerce").min()
-    matrix_max_s = str(matrix_cap.date()) if matrix_cap is not None else ""
-    if not matrix_max_s and mx is not None:
+    sess_cap = str(getattr(sess, "daily_inventory_history_matrix_max_date", "") or "").strip()[:10]
+    if len(sess_cap) == 10:
+        matrix_max_s = sess_cap
+    elif df_ts is not None:
+        matrix_max_s = str(df_ts.date())
+    elif mx is not None:
         matrix_max_s = str(pd.Timestamp(mx).date())
+    else:
+        matrix_cap = inventory_history_matrix_cap_date(sess) or inventory_history_authoritative_cap_date(sess)
+        matrix_max_s = str(matrix_cap.date()) if matrix_cap is not None else ""
     return {
         "daily_inventory_history_uploaded_at": str(
             getattr(sess, "daily_inventory_history_uploaded_at", "") or ""
@@ -1499,6 +1525,19 @@ def read_daily_inventory_history_disk_meta() -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def reconcile_daily_inventory_meta_if_session_newer(sess) -> bool:
+    """Overwrite stale placeholder disk meta when the session holds the real matrix."""
+    sess_rows, sess_skus, _ = session_inventory_matrix_stats(sess)
+    if sess_skus < 50 or sess_rows < 500:
+        return False
+    disk = read_daily_inventory_history_disk_meta() or {}
+    if not disk_inventory_meta_looks_placeholder(disk):
+        disk_rows = int(disk.get("daily_inventory_history_rows") or 0)
+        if disk_rows >= int(sess_rows * 0.9):
+            return False
+    return persist_daily_inventory_history_meta(sess)
 
 
 def persist_daily_inventory_history_meta(sess) -> bool:
@@ -1573,6 +1612,9 @@ __all__ = [
     "drop_zero_derived_rows",
     "inventory_history_view_end_date",
     "inventory_history_matrix_cap_date",
+    "disk_inventory_meta_looks_placeholder",
+    "session_inventory_matrix_stats",
+    "reconcile_daily_inventory_meta_if_session_newer",
     "inventory_history_is_newer_than",
     "filter_inventory_history_window",
     "inventory_history_summary",
