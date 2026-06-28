@@ -70,8 +70,10 @@ def execute_daily_inventory_upload(
 ) -> dict[str, Any]:
     from .daily_inventory_history import (
         filter_inventory_history_window,
+        inventory_sheet_end_date_from_filename,
         merge_inventory_history,
         parse_daily_inventory_history_upload,
+        promote_daily_inventory_matrix_max_date,
         recanonicalize_inventory_history_skus,
         drop_zero_derived_rows,
     )
@@ -107,6 +109,9 @@ def execute_daily_inventory_upload(
 
     sheet_max = inventory_history_max_date(df)
     end_anchor = str(sheet_max.date()) if sheet_max is not None else None
+    fn_end = inventory_sheet_end_date_from_filename(filename or "")
+    if fn_end and (not end_anchor or fn_end > end_anchor):
+        end_anchor = fn_end
     df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS, end_date=end_anchor)
     trim_note = (
         f"Kept last {_MAX_HISTORY_DAYS} calendar days ending "
@@ -141,6 +146,9 @@ def execute_daily_inventory_upload(
             df = merge_inventory_history(existing, df)
         sheet_max = inventory_history_max_date(df)
         end_anchor = str(sheet_max.date()) if sheet_max is not None else end_anchor
+        fn_end = inventory_sheet_end_date_from_filename(filename or "")
+        if fn_end and (not end_anchor or fn_end > end_anchor):
+            end_anchor = fn_end
         df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS, end_date=end_anchor)
         trim_note = (
             f"Replaced overlapping dates; kept last {_MAX_HISTORY_DAYS} days ending "
@@ -151,7 +159,7 @@ def execute_daily_inventory_upload(
     sess.daily_inventory_history_uploaded_at = datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S")
     sess.daily_inventory_history_filename = filename or ""
     if end_anchor:
-        sess.daily_inventory_history_matrix_max_date = end_anchor
+        promote_daily_inventory_matrix_max_date(sess, end_anchor)
     sess._quarterly_cache.clear()
     skus = int(df["OMS_SKU"].nunique())
     dates_norm = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()

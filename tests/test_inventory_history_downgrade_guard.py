@@ -124,6 +124,34 @@ def test_authoritative_cap_ignores_newer_snapshot_than_matrix():
         dih.read_daily_inventory_history_disk_meta = orig
 
 
+def test_inventory_sheet_end_date_from_filename():
+    from backend.services.daily_inventory_history import inventory_sheet_end_date_from_filename
+
+    assert inventory_sheet_end_date_from_filename("Daily Inventory History 1-May To 25-Jun-26.xlsx") == "2026-06-25"
+    assert inventory_sheet_end_date_from_filename("history through 30-apr-2026.xlsx") == "2026-04-30"
+    assert inventory_sheet_end_date_from_filename("no-date.xlsx") == ""
+
+
+def test_matrix_cap_uses_filename_when_meta_stale():
+    from backend.session import AppSession
+    import backend.services.daily_inventory_history as dih
+
+    sess = AppSession()
+    orig = dih.read_daily_inventory_history_disk_meta
+    dih.read_daily_inventory_history_disk_meta = lambda: {
+        "daily_inventory_history_matrix_max_date": "2026-05-30",
+        "daily_inventory_history_max_date": "2026-05-30",
+        "daily_inventory_history_filename": "Daily Inventory History 1-May To 25-Jun-26.xlsx",
+        "daily_inventory_history_rows": 280000,
+        "daily_inventory_history_skus": 9000,
+    }
+    try:
+        cap = dih.inventory_history_matrix_cap_date(sess)
+        assert str(cap.date()) == "2026-06-25"
+    finally:
+        dih.read_daily_inventory_history_disk_meta = orig
+
+
 def test_matrix_cap_prefers_session_over_stale_disk_placeholder():
     from backend.session import AppSession
     import backend.services.daily_inventory_history as dih

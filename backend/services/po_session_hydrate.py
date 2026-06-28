@@ -324,6 +324,9 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
     """Load newest on-disk matrix, re-key SKUs, and roll forward stale history."""
     import backend.main as _main
 
+    from .daily_inventory_history import ensure_latest_daily_inventory_authoritative
+
+    ensure_latest_daily_inventory_authoritative(sess)
     ensure_po_sidecars_hydrated(sess)
     try:
         from .sku_mapping import restore_sku_mapping_to_session

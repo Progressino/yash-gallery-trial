@@ -240,6 +240,13 @@ jobs:
           cd /root/app
           bash scripts/reconcile-existing-po-production.sh
 
+      - name: Reconcile latest inventory history on disk
+        continue-on-error: true
+        run: |
+          set -eu
+          cd /root/app
+          bash scripts/reconcile-inventory-history-production.sh
+
       - name: Warm shared PO cache (PO Fresh defaults)
         continue-on-error: true
         run: |

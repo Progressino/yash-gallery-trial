@@ -29,6 +29,9 @@ def test_light_coverage_attaches_existing_po_from_warm_cache(monkeypatch):
 
     monkeypatch.setattr(main_mod, "_warm_cache", {"existing_po_df": ep, main_mod._EXISTING_PO_META_WARM_KEY: meta})
     monkeypatch.setattr(main_mod, "bootstrap_warm_cache_if_empty", lambda: True)
+    import backend.services.existing_po as ep_mod
+
+    monkeypatch.setattr(ep_mod, "ensure_latest_existing_po_authoritative", lambda _s: False)
 
     sess = AppSession()
     assert sess.existing_po_df.empty
@@ -36,7 +39,6 @@ def test_light_coverage_attaches_existing_po_from_warm_cache(monkeypatch):
     assert session_has_existing_po(sess) is True
     assert len(sess.existing_po_df) == 2
     assert sess.existing_po_filename == "Po 27-Jun-26.xlsx"
-    assert sess.existing_po_df is not ep or len(sess.existing_po_df) == 2
 
 
 def test_session_has_existing_po_from_meta_without_parquet(monkeypatch):

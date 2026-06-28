@@ -270,10 +270,17 @@ def augment_coverage(sess, cov: CoverageResponse, *, light: bool = False) -> Cov
 
 def _attach_inventory_staleness(sess, data: dict) -> None:
     from .daily_inventory_history import (
+        ensure_latest_daily_inventory_authoritative,
         inventory_history_matrix_cap_date,
+        promote_daily_inventory_matrix_max_date,
         read_daily_inventory_history_disk_meta,
     )
     from .inventory_staleness import build_inventory_staleness, daily_inventory_history_bounds
+
+    try:
+        ensure_latest_daily_inventory_authoritative(sess)
+    except Exception:
+        pass
 
     hist_df = getattr(sess, "daily_inventory_history_df", None)
     min_d, max_d = daily_inventory_history_bounds(hist_df)
@@ -281,6 +288,7 @@ def _attach_inventory_staleness(sess, data: dict) -> None:
     cap_ts = inventory_history_matrix_cap_date(sess)
     if cap_ts is not None:
         cap_s = str(cap_ts.date())
+        promote_daily_inventory_matrix_max_date(sess, cap_s)
         if not max_d or cap_s > str(max_d)[:10]:
             max_d = cap_s
             hist_loaded = True
