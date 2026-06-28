@@ -233,6 +233,13 @@ jobs:
           echo "ERROR: health check failed after retries"
           exit 1
 
+      - name: Reconcile latest Existing PO on disk
+        continue-on-error: true
+        run: |
+          set -eu
+          cd /root/app
+          bash scripts/reconcile-existing-po-production.sh
+
       - name: Warm shared PO cache (PO Fresh defaults)
         continue-on-error: true
         run: |

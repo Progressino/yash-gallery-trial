@@ -2828,7 +2828,12 @@ def _parse_existing_po_into_session(sess, file_bytes: bytes, orig_fn: str) -> Up
     apply_existing_po_upload_audit(sess, audit)
     sess.existing_po_df = df
     sess.existing_po_filename = orig_fn
-    sess.existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0) + 1
+    from ..services.existing_po import read_existing_po_disk_meta
+
+    disk_meta = read_existing_po_disk_meta() or {}
+    disk_gen = int(disk_meta.get("existing_po_generation") or 0)
+    sess_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
+    sess.existing_po_generation = max(sess_gen, disk_gen) + 1
     seed: dict = {}
     try:
         from ..services.po_raise_import import seed_ledger_from_manual_existing_po_upload

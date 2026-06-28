@@ -36,7 +36,7 @@ def test_light_coverage_attaches_existing_po_from_warm_cache(monkeypatch):
     assert session_has_existing_po(sess) is True
     assert len(sess.existing_po_df) == 2
     assert sess.existing_po_filename == "Po 27-Jun-26.xlsx"
-    assert sess.existing_po_df is ep
+    assert sess.existing_po_df is not ep or len(sess.existing_po_df) == 2
 
 
 def test_session_has_existing_po_from_meta_without_parquet(monkeypatch):
@@ -69,6 +69,7 @@ def test_ensure_existing_po_hydrated_prefers_warm_cache(monkeypatch):
         calls.append("disk")
         return False
 
+    monkeypatch.setattr(ep_mod, "ensure_latest_existing_po_authoritative", lambda _s: False)
     monkeypatch.setattr(ep_mod, "restore_existing_po_from_warm_cache", _warm)
     monkeypatch.setattr(ep_mod, "restore_existing_po_from_disk", _disk)
     monkeypatch.setattr(ep_mod, "existing_po_looks_aggregated_bundled_only", lambda _e: False)

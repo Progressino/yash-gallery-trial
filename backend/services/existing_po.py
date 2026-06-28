@@ -559,7 +559,14 @@ def existing_po_meta_bundle(sess) -> dict:
     sku_n = 0
     if ep is not None and not getattr(ep, "empty", True) and "OMS_SKU" in ep.columns:
         sku_n = int(ep["OMS_SKU"].astype(str).nunique())
-    manual_skus = getattr(sess, "existing_po_manual_raise_skus", None) or []
+    manual_count = 0
+    if getattr(sess, "existing_po_manual_upload", False) and ep is not None and not getattr(ep, "empty", True):
+        try:
+            from .po_raise_import import manual_raise_block_skus_from_existing_po
+
+            manual_count = len(manual_raise_block_skus_from_existing_po(ep))
+        except Exception:
+            manual_count = len(getattr(sess, "existing_po_manual_raise_skus", None) or [])
     return {
         "existing_po_generation": int(getattr(sess, "existing_po_generation", 0) or 0),
         "existing_po_uploaded_at": str(getattr(sess, "existing_po_uploaded_at", "") or ""),
@@ -571,7 +578,7 @@ def existing_po_meta_bundle(sess) -> dict:
         "existing_po_new_order_skus": existing_po_new_order_sku_count(ep),
         "existing_po_looks_aggregated": existing_po_looks_aggregated_bundled_only(ep),
         "existing_po_manual_raise_date": str(getattr(sess, "existing_po_manual_raise_date", "") or ""),
-        "existing_po_manual_raise_skus_count": int(len(manual_skus)),
+        "existing_po_manual_raise_skus_count": int(manual_count),
         "existing_po_manual_upload": bool(getattr(sess, "existing_po_manual_upload", False)),
         "existing_po_sheet_pipeline_units": int(
             getattr(sess, "existing_po_sheet_pipeline_units", 0) or 0
@@ -715,6 +722,9 @@ def persist_existing_po_to_disk(sess) -> bool:
     try:
         from .helpers import _coerce_df_for_parquet
 
+        ep = finalize_existing_po_dataframe(ep)
+        sess.existing_po_df = ep
+        reconcile_existing_po_manual_raise_sidecar(sess)
         root = _existing_po_disk_dir()
         root.mkdir(parents=True, exist_ok=True)
         _coerce_df_for_parquet(ep).to_parquet(root / "existing_po_df.parquet", index=False)
@@ -760,7 +770,9 @@ def _load_existing_po_df_from_disk() -> Optional[pd.DataFrame]:
         if not path.is_file():
             return None
         df = pd.read_parquet(path)
-        return df if not getattr(df, "empty", True) else None
+        if df is None or getattr(df, "empty", True):
+            return None
+        return finalize_existing_po_dataframe(df)
     except Exception:
         _log.exception("load existing_po_df from disk failed")
         return None
@@ -899,7 +911,7 @@ def existing_po_looks_aggregated_bundled_only(ep: pd.DataFrame) -> bool:
 
 def _apply_existing_po_df_to_session(sess, df: pd.DataFrame, meta: Optional[dict] = None) -> None:
     old_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
-    sess.existing_po_df = df
+    sess.existing_po_df = finalize_existing_po_dataframe(df)
     if meta:
         apply_existing_po_session_meta(sess, meta)
     new_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
@@ -990,10 +1002,11 @@ def restore_existing_po_from_warm_cache_light(sess) -> bool:
 
 def ensure_existing_po_coverage_light(sess) -> bool:
     """Fast Existing PO attach for light coverage polls — warm cache first, one disk read max."""
+    ensure_latest_existing_po_authoritative(sess)
     ep = getattr(sess, "existing_po_df", None)
     if ep is not None and not getattr(ep, "empty", True):
         if not existing_po_looks_aggregated_bundled_only(ep):
-            return False
+            return True
     try:
         import backend.main as _main
 
@@ -1074,7 +1087,7 @@ def restore_existing_po_from_disk(sess) -> bool:
 
 def ensure_existing_po_hydrated(sess) -> bool:
     """Before PO calculate, guarantee the full per-size uploaded sheet is in memory."""
-    changed = False
+    changed = ensure_latest_existing_po_authoritative(sess)
     ep = getattr(sess, "existing_po_df", None)
     if existing_po_looks_aggregated_bundled_only(ep):
         changed = restore_existing_po_from_warm_cache(sess) or changed
@@ -1156,26 +1169,12 @@ def prepare_existing_po_for_merge(
     """
     if existing_po_df is None or existing_po_df.empty:
         return pd.DataFrame()
-    ep = existing_po_df.copy()
-    if "PO_Pipeline_Total" not in ep.columns:
+    ep = finalize_existing_po_dataframe(existing_po_df)
+    if ep.empty or "PO_Pipeline_Total" not in ep.columns:
         return pd.DataFrame()
-    ep["OMS_SKU"] = (
-        ep["OMS_SKU"].astype(str).map(existing_po_merge_key).astype(str).str.strip().str.upper()
-    )
-    ep = ep[ep["OMS_SKU"].str.len() > 0]
-    breakdown = [
-        c
-        for c in ("PO_Qty_Ordered", "Pending_Cutting", "Balance_to_Dispatch", "PO_Pipeline_Total")
-        if c in ep.columns
-    ]
-    if breakdown:
-        for c in breakdown:
-            ep[c] = pd.to_numeric(ep[c], errors="coerce").fillna(0)
-        ep = ep.groupby("OMS_SKU", as_index=False)[breakdown].sum()
-    else:
-        ep = ep.drop_duplicates(subset=["OMS_SKU"], keep="last")
-    if not ep.empty and any(is_bundled_size_range_sku(s) for s in ep["OMS_SKU"].astype(str)):
+    if any(is_bundled_size_range_sku(s) for s in ep["OMS_SKU"].astype(str)):
         ep = _expand_bundled_po_rows_without_children(ep, inventory_skus=inventory_skus)
+        ep = finalize_existing_po_dataframe(ep)
     return ep
 
 
@@ -1777,6 +1776,102 @@ def zero_bundled_pipeline_when_children_carry_qty(
     return out
 
 
+_EXISTING_PO_BREAKDOWN_COLS = (
+    "PO_Qty_Ordered",
+    "Pending_Cutting",
+    "Balance_to_Dispatch",
+    "PO_Pipeline_Total",
+)
+
+
+def finalize_existing_po_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Canonical Existing PO — one row per SKU, summed breakdown cols, bundled band dedupe.
+
+    Applied on parse, disk load, session apply, and persist so pipeline/cutting never double-count.
+    """
+    if df is None or getattr(df, "empty", True) or "OMS_SKU" not in df.columns:
+        return pd.DataFrame(columns=["OMS_SKU", "PO_Pipeline_Total"])
+    ep = df.copy()
+    ep["OMS_SKU"] = ep["OMS_SKU"].astype(str).map(existing_po_merge_key)
+    ep = ep[ep["OMS_SKU"].str.len() > 0]
+    ep = ep[~ep["OMS_SKU"].map(_is_summary_sku)]
+    breakdown = [c for c in _EXISTING_PO_BREAKDOWN_COLS if c in ep.columns]
+    if not breakdown:
+        if "PO_Pipeline_Total" not in ep.columns:
+            ep["PO_Pipeline_Total"] = 0
+        breakdown = ["PO_Pipeline_Total"]
+    for c in breakdown:
+        ep[c] = pd.to_numeric(ep[c], errors="coerce").fillna(0)
+    ep = ep.groupby("OMS_SKU", as_index=False)[breakdown].sum()
+    ep = zero_bundled_pipeline_when_children_carry_qty(ep, ep)
+    for c in breakdown:
+        if c in ep.columns:
+            ep[c] = ep[c].clip(lower=0).astype(int)
+    return ep.reset_index(drop=True)
+
+
+def reconcile_existing_po_manual_raise_sidecar(sess) -> None:
+    """Align manual-raise block list with ordered qty on the latest Existing PO sheet."""
+    if not getattr(sess, "existing_po_manual_upload", False):
+        prev = getattr(sess, "existing_po_manual_raise_skus", None) or []
+        if prev:
+            sess.existing_po_manual_raise_skus = []
+            try:
+                path = _existing_po_disk_dir() / "existing_po_manual_raise_skus.json"
+                path.write_text("[]", encoding="utf-8")
+            except Exception:
+                pass
+        return
+    manual_existing_po_raise_skus(sess)
+
+
+def ensure_latest_existing_po_authoritative(sess) -> bool:
+    """
+    Use only the latest Existing PO upload — full replace from disk/warm, never merge generations.
+    """
+    changed = False
+    sess_meta = {
+        "existing_po_generation": int(getattr(sess, "existing_po_generation", 0) or 0),
+        "existing_po_uploaded_at": str(getattr(sess, "existing_po_uploaded_at", "") or ""),
+    }
+    disk_meta = read_existing_po_disk_meta() or {}
+    disk_gen = int(disk_meta.get("existing_po_generation") or 0)
+    sess_gen = int(sess_meta["existing_po_generation"])
+
+    if disk_gen > sess_gen:
+        changed = restore_existing_po_from_disk(sess) or changed
+    elif disk_gen == sess_gen and disk_gen > 0:
+        disk_df = _load_existing_po_df_from_disk()
+        ep = getattr(sess, "existing_po_df", None)
+        if disk_df is not None and existing_po_frame_is_newer_than(
+            disk_df,
+            ep,
+            incoming_meta=disk_meta,
+            existing_meta=sess_meta,
+        ):
+            changed = restore_existing_po_from_disk(sess) or changed
+    else:
+        ep = getattr(sess, "existing_po_df", None)
+        if ep is None or getattr(ep, "empty", True):
+            changed = restore_existing_po_from_warm_cache(sess) or changed
+            if not session_has_existing_po(sess):
+                changed = restore_existing_po_from_disk(sess) or changed
+
+    ep = getattr(sess, "existing_po_df", None)
+    if ep is not None and not getattr(ep, "empty", True):
+        fin = finalize_existing_po_dataframe(ep)
+        if len(fin) != len(ep) or ep["OMS_SKU"].astype(str).duplicated().any():
+            sess.existing_po_df = fin
+            changed = True
+
+    try:
+        reconcile_existing_po_manual_raise_sidecar(sess)
+    except Exception:
+        _log.exception("reconcile_existing_po_manual_raise_sidecar failed")
+    return changed
+
+
 def bundled_band_redundant_with_child_pipeline(
     bundled_sku: str,
     po_df: pd.DataFrame,
@@ -2073,14 +2168,16 @@ def parse_existing_po(file_bytes: bytes, filename: str) -> pd.DataFrame:
                         f"Cannot find a quantity/balance column. Columns seen: {cols[:25]}"
                     )
 
-    return _build_po_dataframe(
-        raw,
-        sku_col,
-        ordered_col=ordered_col,
-        cutting_col=cutting_col,
-        dispatch_col=dispatch_col,
-        total_col=total_col,
-        fallback_col=fallback_col,
+    return finalize_existing_po_dataframe(
+        _build_po_dataframe(
+            raw,
+            sku_col,
+            ordered_col=ordered_col,
+            cutting_col=cutting_col,
+            dispatch_col=dispatch_col,
+            total_col=total_col,
+            fallback_col=fallback_col,
+        )
     )
 
 
@@ -2211,6 +2308,7 @@ def existing_po_pipeline_totals(ep: pd.DataFrame | None) -> tuple[int, int]:
     ]
     if "OMS_SKU" not in cols or "PO_Pipeline_Total" not in cols:
         return 0, 0
+    ep = finalize_existing_po_dataframe(ep)
     shell = ep[cols].copy()
     for c in shell.columns:
         if c == "OMS_SKU":

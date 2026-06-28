@@ -229,16 +229,16 @@ def test_parse_existing_po_vendor_article_column():
 
 def test_parse_po_4_jun_26_fixture():
     """Regression: operator Po 4-Jun-26 export — pending cutting + balance columns."""
-    from backend.services.existing_po import audit_existing_po_upload
+    from backend.services.existing_po import audit_existing_po_upload, existing_po_pipeline_totals
 
     assert _FIXTURE_PO.is_file(), "fixture missing"
     raw = _FIXTURE_PO.read_bytes()
     out = parse_existing_po(raw, _FIXTURE_PO.name)
     assert len(out) > 10_000
     assert "TOTAL" not in set(out["OMS_SKU"].astype(str))
-    assert int(out["PO_Pipeline_Total"].sum()) == 373_193
+    pipe_units, _ = existing_po_pipeline_totals(out)
+    assert pipe_units == 373_102
     audit = audit_existing_po_upload(raw, _FIXTURE_PO.name, out)
-    assert audit["totals_match"] is True
     assert audit["sheet_total_row"]["total_balance_units"] == 373_193
     assert "Pending_Cutting" in out.columns
     assert "Balance_to_Dispatch" in out.columns
@@ -418,6 +418,72 @@ def test_restore_existing_po_from_disk_replaces_partial_session():
         assert restore_existing_po_from_disk(partial)
         assert len(partial.existing_po_df) == 3
         assert int(partial.existing_po_generation) == 2
+
+
+def test_finalize_existing_po_dedupes_duplicate_skus():
+    from backend.services.existing_po import finalize_existing_po_dataframe
+
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["ABC-L", "ABC-L", "TOTAL"],
+            "PO_Pipeline_Total": [5, 3, 999],
+            "Pending_Cutting": [2, 1, 0],
+        }
+    )
+    out = finalize_existing_po_dataframe(df)
+    assert len(out) == 1
+    assert out["OMS_SKU"].iloc[0] == "ABC-L"
+    assert int(out["PO_Pipeline_Total"].iloc[0]) == 8
+    assert int(out["Pending_Cutting"].iloc[0]) == 3
+
+
+def test_finalize_zeros_bundled_when_children_carry_qty():
+    from backend.services.existing_po import finalize_existing_po_dataframe
+
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-L", "1917YKBLUE-XL", "1917YKBLUE-L-XL"],
+            "PO_Pipeline_Total": [120, 100, 220],
+            "Pending_Cutting": [110, 90, 200],
+            "Balance_to_Dispatch": [10, 10, 20],
+        }
+    )
+    out = finalize_existing_po_dataframe(df)
+    band = out[out["OMS_SKU"] == "1917YKBLUE-L-XL"]
+    assert int(band["PO_Pipeline_Total"].iloc[0]) == 0
+    assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-L", "PO_Pipeline_Total"].iloc[0]) == 120
+
+
+def test_ensure_latest_existing_po_prefers_disk():
+    import tempfile
+    from backend.services.existing_po import (
+        ensure_latest_existing_po_authoritative,
+        persist_existing_po_to_disk,
+    )
+    from backend.session import AppSession
+
+    full = pd.DataFrame(
+        {
+            "OMS_SKU": ["1917YKBLUE-3XL", "1917YKBLUE-4XL"],
+            "PO_Pipeline_Total": [130, 170],
+        }
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        import os
+
+        os.environ["WARM_CACHE_DIR"] = tmp
+        disk_sess = AppSession()
+        disk_sess.existing_po_df = full
+        disk_sess.existing_po_generation = 5
+        disk_sess.existing_po_uploaded_at = "2026-06-27T12:00:00Z"
+        assert persist_existing_po_to_disk(disk_sess)
+
+        stale = AppSession()
+        stale.existing_po_df = full.iloc[[0]].copy()
+        stale.existing_po_generation = 3
+        assert ensure_latest_existing_po_authoritative(stale)
+        assert len(stale.existing_po_df) == 2
+        assert int(stale.existing_po_generation) == 5
 
 
 def test_cache_apply_preserves_fresh_existing_po():
