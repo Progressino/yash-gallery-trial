@@ -1232,7 +1232,7 @@ function POFreshInner() {
                     )}
                     rows={quarterPageRows}
                     quarterCols={quarterCols}
-                    quarterMap={{}}
+                    quarterMap={quarterMap}
                     periodDays={params.period_days}
                   />
                   <TableFooter
@@ -1439,7 +1439,9 @@ function PoTable({
                 )}
                 {cols.map(c => {
                   const qsku = poSkuKey(sku)
-                  const v = quarterCols.includes(c) ? quarterMap[qsku]?.[c] : r[c]
+                  const v = quarterCols.includes(c)
+                    ? (quarterMap[qsku]?.[c] ?? r[c])
+                    : r[c]
                   if (c === 'Priority') {
                     return (
                       <td key={c}>

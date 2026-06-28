@@ -13,7 +13,7 @@ from backend.session import AppSession
 
 
 def test_quarterly_cache_schema_bumped():
-    assert quarterly_cache_key(False, 8)[0] == 9
+    assert quarterly_cache_key(False, 8)[0] == 10
 
 
 def test_normalize_quarterly_payload_pads_missing_columns():
@@ -63,6 +63,55 @@ def test_calculate_quarterly_platform_primary_despite_wide_sales_span():
     assert int(row.get("Jan-Mar 2025", 0)) == 30
 
 
+def test_tier3_deep_history_prefers_streaming(monkeypatch):
+    """When Tier-3 spans 8 quarters, stream even if session platform span looks wide."""
+    from backend.session import AppSession
+
+    sess = AppSession()
+    streamed = {"called": False}
+
+    def _fake_stream(*a, **k):
+        streamed["called"] = True
+        return {
+            "loaded": True,
+            "columns": ["OMS_SKU", "Oct-Dec 2024"],
+            "rows": [{"OMS_SKU": "OLD-SKU", "Oct-Dec 2024": 40}],
+        }
+
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._ensure_session_operational_frames",
+        lambda _s: None,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._build_via_streaming",
+        lambda *a, **k: _fake_stream(),
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup.platform_frames_span_days",
+        lambda _s: 900,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup.sales_df_span_days",
+        lambda _df: 900,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._session_has_platform_rows",
+        lambda _s: True,
+    )
+    monkeypatch.setattr(
+        "backend.services.platform_session_window.session_platform_shorter_than_tier3",
+        lambda _s: False,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._tier3_covers_quarterly_window",
+        lambda _n: True,
+    )
+
+    out = build_quarterly_payload(sess, n_quarters=8)
+    assert streamed["called"] is True
+    assert out.get("loaded") is True
+
+
 def test_short_session_span_skips_partial_quarterly_and_streams(monkeypatch):
     """A 90-day session must not satisfy quarterly — Tier-3 streaming is used."""
     from backend.session import AppSession
@@ -109,6 +158,10 @@ def test_short_session_span_skips_partial_quarterly_and_streams(monkeypatch):
     monkeypatch.setattr(
         "backend.services.platform_session_window.session_platform_shorter_than_tier3",
         lambda _s: False,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._tier3_covers_quarterly_window",
+        lambda _n: False,
     )
 
     out = build_quarterly_payload(sess, n_quarters=8)

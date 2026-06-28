@@ -349,9 +349,9 @@ def execute_po_calculate(
     _ep_gen = int(getattr(sess, "existing_po_generation", 0) or 0)
     ep_src = getattr(sess, "existing_po_df", None)
     if ep_src is not None and not getattr(ep_src, "empty", True):
-        from .existing_po import existing_po_pipeline_totals
+        from .existing_po import existing_po_pipeline_totals, pipeline_summary_for_po
 
-        _pipe_sum, _pipe_skus = existing_po_pipeline_totals(ep_src)
+        _pipe_sum, _pipe_skus = pipeline_summary_for_po(sess, ep_src)
     else:
         _pipe_sum = int(_pipe.sum())
         _pipe_skus = int((_pipe > 0).sum())

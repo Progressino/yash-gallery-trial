@@ -2823,6 +2823,9 @@ def _parse_existing_po_into_session(sess, file_bytes: bytes, orig_fn: str) -> Up
 
     df = parse_existing_po(file_bytes, orig_fn)
     audit = audit_existing_po_upload(file_bytes, orig_fn, df)
+    from ..services.existing_po import apply_existing_po_upload_audit
+
+    apply_existing_po_upload_audit(sess, audit)
     sess.existing_po_df = df
     sess.existing_po_filename = orig_fn
     sess.existing_po_generation = int(getattr(sess, "existing_po_generation", 0) or 0) + 1

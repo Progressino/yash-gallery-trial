@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 9
+QUARTERLY_CACHE_SCHEMA = 10
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
@@ -251,6 +251,29 @@ def _build_via_streaming(
         _UPLOAD_MEMORY_LOCK.release()
 
 
+def _tier3_covers_quarterly_window(n_quarters: int) -> bool:
+    """True when Tier-3 SQLite holds platform uploads spanning the quarterly window."""
+    import datetime as _dt
+
+    from .daily_store import get_summary
+
+    try:
+        summary = get_summary()
+    except Exception:
+        return False
+    need_start = (
+        _dt.date.today() - _dt.timedelta(days=max(750, int(n_quarters) * 92 + 90))
+    ).isoformat()
+    for plat, _attr in _PLATFORM_ATTRS:
+        plat_sum = summary.get(plat) or {}
+        if int(plat_sum.get("file_count") or 0) <= 0:
+            continue
+        tier_min = str(plat_sum.get("min_date") or "").strip()[:10]
+        if tier_min and tier_min <= need_start:
+            return True
+    return False
+
+
 def build_quarterly_payload(
     sess,
     *,
@@ -269,10 +292,12 @@ def build_quarterly_payload(
     sales_span = sales_df_span_days(getattr(sess, "sales_df", None))
     span_ok = plat_span >= min_span - 60 or sales_span >= min_span - 60
     tier3_deeper = session_platform_shorter_than_tier3(sess)
+    tier3_deep = _tier3_covers_quarterly_window(n_quarters)
 
-    # Tier-3 SQLite / daily uploads often hold older FY quarters than the warm-cache
-    # platform copy in memory — streaming avoids zeros for top sellers in 2024/2025.
-    if tier3_deeper:
+    # Tier-3 SQLite holds full FY history — always stream when available so older
+    # quarters are not zero for top sellers (warm-cache session span can look wide
+    # while per-SKU history is shallow).
+    if tier3_deeper or tier3_deep:
         if progress_cb:
             progress_cb(
                 12,

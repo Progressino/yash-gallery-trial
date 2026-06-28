@@ -573,6 +573,10 @@ def existing_po_meta_bundle(sess) -> dict:
         "existing_po_manual_raise_date": str(getattr(sess, "existing_po_manual_raise_date", "") or ""),
         "existing_po_manual_raise_skus_count": int(len(manual_skus)),
         "existing_po_manual_upload": bool(getattr(sess, "existing_po_manual_upload", False)),
+        "existing_po_sheet_pipeline_units": int(
+            getattr(sess, "existing_po_sheet_pipeline_units", 0) or 0
+        ),
+        "existing_po_totals_match": bool(getattr(sess, "existing_po_totals_match", True)),
     }
 
 
@@ -697,6 +701,10 @@ def apply_existing_po_session_meta(sess, meta: dict) -> None:
     if meta.get("existing_po_manual_raise_date"):
         sess.existing_po_manual_raise_date = str(meta["existing_po_manual_raise_date"])[:10]
     sess.existing_po_manual_upload = bool(meta.get("existing_po_manual_upload"))
+    if meta.get("existing_po_sheet_pipeline_units") is not None:
+        sess.existing_po_sheet_pipeline_units = int(meta.get("existing_po_sheet_pipeline_units") or 0)
+    if "existing_po_totals_match" in meta:
+        sess.existing_po_totals_match = bool(meta.get("existing_po_totals_match"))
 
 
 def persist_existing_po_to_disk(sess) -> bool:
@@ -2152,6 +2160,38 @@ def audit_existing_po_upload(
     except Exception as exc:
         out["warnings"].append(f"Could not read sheet Total row for audit: {exc}")
     return out
+
+
+def apply_existing_po_upload_audit(sess, audit: dict | None) -> None:
+    """Persist sheet Total-row pipeline units for KPI / summary display."""
+    if not isinstance(audit, dict):
+        return
+    sheet = audit.get("sheet_total_row")
+    if isinstance(sheet, dict):
+        total = sheet.get("total_balance_units") or sheet.get("pipeline_units")
+        if total is not None:
+            sess.existing_po_sheet_pipeline_units = int(total)
+    sess.existing_po_totals_match = bool(audit.get("totals_match", True))
+
+
+def pipeline_summary_for_po(sess, ep: pd.DataFrame | None) -> tuple[int, int]:
+    """
+    Pipeline units for PO summary KPIs.
+
+    When parsed row-sum exceeds the sheet's own Total row (double-count from
+    bundled + per-size rows), prefer the Total row — applies to all SKUs globally.
+    """
+    units, sku_n = existing_po_pipeline_totals(ep)
+    sheet_units = getattr(sess, "existing_po_sheet_pipeline_units", None)
+    if sheet_units is None:
+        meta = read_existing_po_disk_meta() or {}
+        sheet_units = meta.get("existing_po_sheet_pipeline_units")
+    if sheet_units is not None:
+        sheet_units = int(sheet_units)
+        tol = max(50, int(sheet_units * 0.02))
+        if sheet_units > 0 and units > sheet_units + tol:
+            return sheet_units, sku_n
+    return units, sku_n
 
 
 def existing_po_pipeline_totals(ep: pd.DataFrame | None) -> tuple[int, int]:
