@@ -275,9 +275,7 @@ function POFreshInner() {
     }
   }, [refreshDataStatus])
 
-  const existingPoUploadBusy =
-    coverageDetail?.existing_po_upload_status === 'running' ||
-    coverageDetail?.existing_po_upload_status === 'parsing'
+  const existingPoUploadBusy = coverageDetail?.existing_po_upload_status === 'running'
 
   /** Hint when a matching shared PO run exists (same planning date + settings). */
   useEffect(() => {
