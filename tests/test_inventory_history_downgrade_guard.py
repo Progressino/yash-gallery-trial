@@ -89,12 +89,18 @@ def test_overlay_updates_total_inventory_only():
 def test_authoritative_cap_date_never_exceeds_upload_end():
     from backend.session import AppSession
     from backend.services.daily_inventory_history import inventory_history_authoritative_cap_date
+    import backend.services.daily_inventory_history as dih
 
     sess = AppSession()
     sess.daily_inventory_history_df = _hist("A", "2026-06-26", 5)
     sess.inventory_snapshot_date = "2026-06-26"
-    cap = inventory_history_authoritative_cap_date(sess)
-    assert str(cap.date()) == "2026-06-26"
+    orig = dih.read_daily_inventory_history_disk_meta
+    dih.read_daily_inventory_history_disk_meta = lambda: None
+    try:
+        cap = inventory_history_authoritative_cap_date(sess)
+        assert str(cap.date()) == "2026-06-26"
+    finally:
+        dih.read_daily_inventory_history_disk_meta = orig
 
 
 def test_authoritative_cap_ignores_newer_snapshot_than_matrix():

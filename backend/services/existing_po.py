@@ -566,6 +566,10 @@ def existing_po_meta_bundle(sess) -> dict:
         "existing_po_filename": str(getattr(sess, "existing_po_filename", "") or ""),
         "existing_po_rows": rows,
         "existing_po_skus": sku_n,
+        "existing_po_pipeline_skus": existing_po_pipeline_sku_count(ep),
+        "existing_po_per_size_skus": count_per_size_pipeline_skus(ep),
+        "existing_po_new_order_skus": existing_po_new_order_sku_count(ep),
+        "existing_po_looks_aggregated": existing_po_looks_aggregated_bundled_only(ep),
         "existing_po_manual_raise_date": str(getattr(sess, "existing_po_manual_raise_date", "") or ""),
         "existing_po_manual_raise_skus_count": int(len(manual_skus)),
         "existing_po_manual_upload": bool(getattr(sess, "existing_po_manual_upload", False)),
@@ -895,6 +899,109 @@ def _apply_existing_po_df_to_session(sess, df: pd.DataFrame, meta: Optional[dict
         sess.po_calculate_existing_po_generation = -1
 
 
+def _existing_po_meta_for_coverage(sess) -> dict:
+    """Warm-cache or disk meta for coverage UI without reading parquet."""
+    try:
+        import backend.main as _main
+
+        wc_meta = (_main._warm_cache or {}).get(_main._EXISTING_PO_META_WARM_KEY)
+        if isinstance(wc_meta, dict) and int(wc_meta.get("existing_po_rows") or 0) > 0:
+            return wc_meta
+    except Exception:
+        pass
+    disk = read_existing_po_disk_meta()
+    return disk if isinstance(disk, dict) else {}
+
+
+def session_has_existing_po(sess) -> bool:
+    """True when Existing PO is in session, warm cache, or on-disk meta."""
+    ep = getattr(sess, "existing_po_df", None)
+    if ep is not None and not getattr(ep, "empty", True):
+        return True
+    try:
+        import backend.main as _main
+
+        wc = (_main._warm_cache or {}).get("existing_po_df")
+        if wc is not None and not getattr(wc, "empty", True):
+            return True
+    except Exception:
+        pass
+    meta = _existing_po_meta_for_coverage(sess)
+    return int(meta.get("existing_po_rows") or 0) > 0
+
+
+def existing_po_coverage_counts(sess) -> dict[str, int]:
+    """Row / SKU counts for coverage — prefer session df, else persisted meta."""
+    ep = getattr(sess, "existing_po_df", None)
+    if ep is not None and not getattr(ep, "empty", True):
+        return {
+            "rows": int(len(ep)),
+            "pipeline_skus": existing_po_pipeline_sku_count(ep),
+            "per_size_skus": count_per_size_pipeline_skus(ep),
+            "new_order_skus": existing_po_new_order_sku_count(ep),
+        }
+    meta = _existing_po_meta_for_coverage(sess)
+    return {
+        "rows": int(meta.get("existing_po_rows") or 0),
+        "pipeline_skus": int(meta.get("existing_po_pipeline_skus") or 0),
+        "per_size_skus": int(meta.get("existing_po_per_size_skus") or 0),
+        "new_order_skus": int(meta.get("existing_po_new_order_skus") or 0),
+    }
+
+
+def restore_existing_po_from_warm_cache_light(sess) -> bool:
+    """Attach warm-cache Existing PO for coverage — no copy, no cache invalidation."""
+    try:
+        import backend.main as _main
+
+        wc = _main._warm_cache.get("existing_po_df")
+        wc_meta = _main._warm_cache.get(_main._EXISTING_PO_META_WARM_KEY)
+    except Exception:
+        return False
+    if wc is None or getattr(wc, "empty", True):
+        return False
+    ep = getattr(sess, "existing_po_df", None)
+    ep_empty = ep is None or getattr(ep, "empty", True)
+    if not ep_empty and not existing_po_looks_aggregated_bundled_only(ep):
+        sess_meta = {
+            "existing_po_generation": int(getattr(sess, "existing_po_generation", 0) or 0),
+            "existing_po_uploaded_at": str(getattr(sess, "existing_po_uploaded_at", "") or ""),
+        }
+        if not existing_po_frame_is_newer_than(
+            wc,
+            ep,
+            incoming_meta=wc_meta if isinstance(wc_meta, dict) else None,
+            existing_meta=sess_meta,
+        ):
+            return False
+    sess.existing_po_df = wc
+    if isinstance(wc_meta, dict) and wc_meta:
+        apply_existing_po_session_meta(sess, wc_meta)
+    return True
+
+
+def ensure_existing_po_coverage_light(sess) -> bool:
+    """Fast Existing PO attach for light coverage polls — warm cache first, one disk read max."""
+    ep = getattr(sess, "existing_po_df", None)
+    if ep is not None and not getattr(ep, "empty", True):
+        if not existing_po_looks_aggregated_bundled_only(ep):
+            return False
+    try:
+        import backend.main as _main
+
+        if not _main._warm_cache:
+            _main.bootstrap_warm_cache_if_empty()
+        if restore_existing_po_from_warm_cache_light(sess):
+            return True
+        meta = read_existing_po_disk_meta()
+        if meta and int(meta.get("existing_po_rows") or 0) > 0:
+            if seed_existing_po_warm_cache_from_disk():
+                return restore_existing_po_from_warm_cache_light(sess)
+    except Exception:
+        _log.exception("ensure_existing_po_coverage_light failed")
+    return session_has_existing_po(sess)
+
+
 def restore_existing_po_from_warm_cache(sess) -> bool:
     """Prefer shared warm-cache Existing PO when it is newer than the session copy."""
     try:
@@ -962,14 +1069,14 @@ def ensure_existing_po_hydrated(sess) -> bool:
     changed = False
     ep = getattr(sess, "existing_po_df", None)
     if existing_po_looks_aggregated_bundled_only(ep):
-        changed = restore_existing_po_from_disk(sess) or changed
         changed = restore_existing_po_from_warm_cache(sess) or changed
-    else:
         changed = restore_existing_po_from_disk(sess) or changed
+    else:
+        changed = restore_existing_po_from_warm_cache(sess) or changed
         ep = getattr(sess, "existing_po_df", None)
         ep_empty = ep is None or getattr(ep, "empty", True)
         if existing_po_looks_aggregated_bundled_only(ep) or ep_empty:
-            changed = restore_existing_po_from_warm_cache(sess) or changed
+            changed = restore_existing_po_from_disk(sess) or changed
     if changed:
         try:
             if getattr(sess, "po_calculate_status", "idle") != "running":

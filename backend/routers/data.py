@@ -3314,6 +3314,18 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
     if light:
         _apply_light_coverage_hydrate(sess)
         try:
+            from ..services.existing_po import ensure_existing_po_coverage_light
+
+            ensure_existing_po_coverage_light(sess)
+        except Exception:
+            pass
+        try:
+            from ..services.daily_inventory_history import ensure_daily_inventory_coverage_light
+
+            ensure_daily_inventory_coverage_light(sess)
+        except Exception:
+            pass
+        try:
             from ..services.po_return_import import ensure_return_overlay_coverage_light
 
             ensure_return_overlay_coverage_light(sess)
@@ -3323,10 +3335,12 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
     paused = getattr(sess, "pause_auto_data_restore", False)
     from ..services.existing_po import (
         count_per_size_pipeline_skus,
+        existing_po_coverage_counts,
         existing_po_looks_aggregated_bundled_only,
         existing_po_needs_recalc as _existing_po_needs_recalc,
         existing_po_new_order_sku_count,
         existing_po_pipeline_sku_count,
+        session_has_existing_po,
     )
 
     if not light:
@@ -3433,6 +3447,7 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
             _returns_warnings.append(mismatch)
     except Exception:
         pass
+    _ep_counts = existing_po_coverage_counts(sess)
     cov = CoverageResponse(
         sku_mapping=_has_sku_map,
         mtr=_plat_ok or frame_row_count("mtr_df", sess) > 0,
@@ -3443,9 +3458,9 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         snapdeal=_plat_ok or frame_row_count("snapdeal_df", sess) > 0,
         inventory=not _inv.empty or frame_row_count("inventory_df_variant", sess) > 0,
         daily_orders=len(sess.daily_sales_sources) > 0 or tier3_any,
-        existing_po=not sess.existing_po_df.empty,
+        existing_po=session_has_existing_po(sess),
         sku_status_lead=not sess.sku_status_lead_df.empty,
-        daily_inventory_history=not sess.daily_inventory_history_df.empty,
+        daily_inventory_history=frame_row_count("daily_inventory_history_df", sess) > 0,
         manual_intransit_sheet=not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty,
         po_raise_ledger=bool(_po_ledger_ok),
         return_sheet=bool(_ret_ok),
@@ -3619,16 +3634,11 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         existing_po_uploaded_at=(getattr(sess, "existing_po_uploaded_at", "") or None) or None,
         existing_po_filename=(getattr(sess, "existing_po_filename", "") or None) or None,
         existing_po_generation=int(getattr(sess, "existing_po_generation", 0) or 0),
-        existing_po_rows=(
-            int(len(sess.existing_po_df))
-            if getattr(sess, "existing_po_df", None) is not None
-            and not getattr(sess.existing_po_df, "empty", True)
-            else 0
-        ),
+        existing_po_rows=_ep_counts.get("rows", 0),
         existing_po_needs_recalc=_existing_po_needs_recalc(sess),
-        existing_po_per_size_skus=count_per_size_pipeline_skus(getattr(sess, "existing_po_df", None)),
-        existing_po_pipeline_skus=existing_po_pipeline_sku_count(getattr(sess, "existing_po_df", None)),
-        existing_po_new_order_skus=existing_po_new_order_sku_count(getattr(sess, "existing_po_df", None)),
+        existing_po_per_size_skus=_ep_counts.get("per_size_skus", 0),
+        existing_po_pipeline_skus=_ep_counts.get("pipeline_skus", 0),
+        existing_po_new_order_skus=_ep_counts.get("new_order_skus", 0),
         existing_po_looks_aggregated=existing_po_looks_aggregated_bundled_only(
             getattr(sess, "existing_po_df", None)
         ),

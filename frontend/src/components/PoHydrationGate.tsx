@@ -86,8 +86,11 @@ export default function PoHydrationGate() {
   const ready = readiness?.po_ready === true || coveragePoReady
 
   useEffect(() => {
-    if (ready || hydrateRequested.current) return
-    if (readiness?.critical_restore_running) return
+    if (hydrateRequested.current) return
+    if (!ready) {
+      if (readiness?.critical_restore_running) return
+      return
+    }
     hydrateRequested.current = true
     void cacheHydrateWarm().catch(() => {
       hydrateRequested.current = false

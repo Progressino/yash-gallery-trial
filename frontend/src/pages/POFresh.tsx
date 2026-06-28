@@ -266,7 +266,18 @@ function POFreshInner() {
 
   useEffect(() => {
     void refreshDataStatus()
+    // Existing PO attaches async after hydrate-warm — retry briefly so the chip updates.
+    const id = window.setInterval(() => void refreshDataStatus(), 3000)
+    const stop = window.setTimeout(() => window.clearInterval(id), 30_000)
+    return () => {
+      window.clearInterval(id)
+      window.clearTimeout(stop)
+    }
   }, [refreshDataStatus])
+
+  const existingPoUploadBusy =
+    coverageDetail?.existing_po_upload_status === 'running' ||
+    coverageDetail?.existing_po_upload_status === 'parsing'
 
   /** Hint when a matching shared PO run exists (same planning date + settings). */
   useEffect(() => {
@@ -772,6 +783,13 @@ function POFreshInner() {
                 </>
               )}
               {coverageDetail.existing_po_filename ? ` · ${coverageDetail.existing_po_filename}` : ''}
+            </span>
+          ) : existingPoUploadBusy ? (
+            <span className="inline-flex items-center gap-2 rounded-full bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-800">
+              Loading existing PO sheet…
+              {coverageDetail?.existing_po_upload_progress
+                ? ` (${coverageDetail.existing_po_upload_progress}%)`
+                : ''}
             </span>
           ) : (
             <span className="inline-flex items-center gap-2 rounded-full bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800">

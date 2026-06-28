@@ -1527,6 +1527,50 @@ def read_daily_inventory_history_disk_meta() -> dict | None:
         return None
 
 
+def ensure_daily_inventory_coverage_light(sess) -> bool:
+    """Attach daily inventory matrix from warm cache for coverage / staleness checks."""
+    df = getattr(sess, "daily_inventory_history_df", None)
+    if df is not None and not getattr(df, "empty", True):
+        try:
+            reconcile_daily_inventory_meta_if_session_newer(sess)
+        except Exception:
+            pass
+        return True
+    try:
+        import backend.main as _main
+
+        if not _main._warm_cache:
+            _main.bootstrap_warm_cache_if_empty()
+        wc = (_main._warm_cache or {}).get("daily_inventory_history_df")
+        if wc is not None and not getattr(wc, "empty", True):
+            sess.daily_inventory_history_df = wc
+            meta = (_main._warm_cache or {}).get(_main._DAILY_INV_META_WARM_KEY)
+            if isinstance(meta, dict) and meta:
+                apply_daily_inventory_history_meta(sess, meta)
+                cap = str(
+                    meta.get("daily_inventory_history_matrix_max_date")
+                    or meta.get("daily_inventory_history_max_date")
+                    or ""
+                ).strip()[:10]
+                if len(cap) == 10:
+                    sess.daily_inventory_history_matrix_max_date = cap
+            return True
+    except Exception:
+        pass
+    disk = read_daily_inventory_history_disk_meta() or {}
+    if disk_inventory_meta_looks_placeholder(disk):
+        return False
+    cap = str(
+        disk.get("daily_inventory_history_matrix_max_date")
+        or disk.get("daily_inventory_history_max_date")
+        or ""
+    ).strip()[:10]
+    if len(cap) == 10:
+        sess.daily_inventory_history_matrix_max_date = cap
+    apply_daily_inventory_history_meta(sess, disk)
+    return int(disk.get("daily_inventory_history_rows") or 0) > 0
+
+
 def reconcile_daily_inventory_meta_if_session_newer(sess) -> bool:
     """Overwrite stale placeholder disk meta when the session holds the real matrix."""
     sess_rows, sess_skus, _ = session_inventory_matrix_stats(sess)
@@ -1615,6 +1659,7 @@ __all__ = [
     "disk_inventory_meta_looks_placeholder",
     "session_inventory_matrix_stats",
     "reconcile_daily_inventory_meta_if_session_newer",
+    "ensure_daily_inventory_coverage_light",
     "inventory_history_is_newer_than",
     "filter_inventory_history_window",
     "inventory_history_summary",

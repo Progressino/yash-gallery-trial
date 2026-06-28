@@ -269,15 +269,28 @@ def augment_coverage(sess, cov: CoverageResponse, *, light: bool = False) -> Cov
 
 
 def _attach_inventory_staleness(sess, data: dict) -> None:
-    from .daily_inventory_history import read_daily_inventory_history_disk_meta
+    from .daily_inventory_history import (
+        inventory_history_matrix_cap_date,
+        read_daily_inventory_history_disk_meta,
+    )
     from .inventory_staleness import build_inventory_staleness, daily_inventory_history_bounds
 
     hist_df = getattr(sess, "daily_inventory_history_df", None)
     min_d, max_d = daily_inventory_history_bounds(hist_df)
     hist_loaded = bool(data.get("daily_inventory_history")) or bool(max_d)
+    cap_ts = inventory_history_matrix_cap_date(sess)
+    if cap_ts is not None:
+        cap_s = str(cap_ts.date())
+        if not max_d or cap_s > str(max_d)[:10]:
+            max_d = cap_s
+            hist_loaded = True
+            data["daily_inventory_history"] = True
     if not max_d:
         disk_meta = read_daily_inventory_history_disk_meta()
-        if isinstance(disk_meta, dict):
+        if isinstance(disk_meta, dict) and not (
+            int(disk_meta.get("daily_inventory_history_rows") or 0) < 100
+            or int(disk_meta.get("daily_inventory_history_skus") or 0) < 50
+        ):
             max_d = str(disk_meta.get("daily_inventory_history_max_date") or "").strip()[:10]
             if not min_d:
                 min_d = str(disk_meta.get("daily_inventory_history_min_date") or "").strip()[:10]
