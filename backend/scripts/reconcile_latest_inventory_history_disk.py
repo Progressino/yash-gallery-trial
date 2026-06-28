@@ -53,6 +53,13 @@ def main() -> int:
         inv_meta = json.loads(inv_meta_path.read_text(encoding="utf-8"))
         sess.inventory_snapshot_date = str(inv_meta.get("inventory_snapshot_date") or "")
 
+    sales_path = cache / "sales_df.parquet"
+    if sales_path.is_file():
+        sess.sales_df = pd.read_parquet(sales_path)
+    inv_path = cache / "inventory_df_variant.parquet"
+    if inv_path.is_file():
+        sess.inventory_df_variant = pd.read_parquet(inv_path)
+
     fn = str(getattr(sess, "daily_inventory_history_filename", "") or "")
     fn_end = inventory_sheet_end_date_from_filename(fn)
     cap = inventory_history_matrix_cap_date(sess)
@@ -72,6 +79,13 @@ def main() -> int:
     _log.info("Rollforward: %s", result)
     if not result.get("ok"):
         return 1
+
+    end_anchor = str(result.get("max_date") or "")
+    if end_anchor:
+        promote_daily_inventory_matrix_max_date(sess, end_anchor)
+    cap = inventory_history_matrix_cap_date(sess)
+    if cap is not None:
+        promote_daily_inventory_matrix_max_date(sess, str(cap.date()))
 
     persist_daily_inventory_history_meta(sess)
     from backend.services.helpers import _coerce_df_for_parquet
