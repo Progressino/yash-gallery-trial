@@ -637,6 +637,14 @@ def load_manual_raise_skus_into_session(sess) -> None:
 
 
 def manual_existing_po_raise_skus(sess) -> set[str]:
+    """SKUs blocked from re-raise — positive ``PO_Qty_Ordered`` on manual upload only."""
+    if not getattr(sess, "existing_po_manual_upload", False):
+        return set()
+    ep = getattr(sess, "existing_po_df", None)
+    if ep is not None and not getattr(ep, "empty", True) and "OMS_SKU" in ep.columns:
+        from .po_raise_import import manual_raise_block_skus_from_existing_po
+
+        return manual_raise_block_skus_from_existing_po(ep)
     skus = getattr(sess, "existing_po_manual_raise_skus", None)
     if skus:
         return {str(s).strip().upper() for s in skus if str(s).strip()}

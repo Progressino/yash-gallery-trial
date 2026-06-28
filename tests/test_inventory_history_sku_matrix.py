@@ -54,7 +54,7 @@ def test_upload_fixture_has_stock_for_8xl(mapping):
     assert by_sku.get(_SKU, 0) >= 5
 
 
-_USER_CSV = Path("/Users/samraisinghani/Downloads/inventory-matrix (6).csv")
+_USER_CSV = Path("/Users/samraisinghani/Downloads/inventory-matrix (7).csv")
 _USER_XLSX = Path("/Users/samraisinghani/Downloads/eff days 100 sku.xlsx")
 _USER_SKU = "1488YKWHITE-XS-S"
 

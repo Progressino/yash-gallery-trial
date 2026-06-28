@@ -376,17 +376,37 @@ def inventory_history_view_end_date(
 def inventory_history_matrix_cap_date(sess) -> pd.Timestamp | None:
     """Last date from the wide matrix upload — not extended by daily snapshot roll-forward."""
     meta = read_daily_inventory_history_disk_meta() or {}
-    matrix_max = str(
+
+    def _parse_cap(raw: str) -> pd.Timestamp | None:
+        s = str(raw or "").strip()[:10]
+        if len(s) != 10:
+            return None
+        try:
+            return pd.Timestamp(s).normalize()
+        except Exception:
+            return None
+
+    sess_ts = _parse_cap(getattr(sess, "daily_inventory_history_matrix_max_date", "") or "")
+    disk_ts = _parse_cap(
         meta.get("daily_inventory_history_matrix_max_date")
-        or getattr(sess, "daily_inventory_history_matrix_max_date", "")
         or meta.get("daily_inventory_history_max_date")
         or ""
-    ).strip()[:10]
-    if len(matrix_max) == 10:
-        try:
-            return pd.Timestamp(matrix_max).normalize()
-        except Exception:
-            pass
+    )
+    disk_rows = int(meta.get("daily_inventory_history_rows") or 0)
+    disk_skus = int(meta.get("daily_inventory_history_skus") or 0)
+    disk_looks_real = disk_rows >= 100 and disk_skus >= 50
+
+    if sess_ts is not None and disk_ts is not None:
+        if sess_ts >= disk_ts:
+            return sess_ts
+        if disk_looks_real:
+            return disk_ts
+        return sess_ts
+    if sess_ts is not None:
+        return sess_ts
+    if disk_ts is not None and disk_looks_real:
+        return disk_ts
+
     df = getattr(sess, "daily_inventory_history_df", None)
     sheet_max = inventory_history_max_date(df)
     if sheet_max is not None and pd.notna(sheet_max):

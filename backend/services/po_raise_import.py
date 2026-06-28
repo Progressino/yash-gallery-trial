@@ -425,6 +425,21 @@ def _raised_qty_from_existing_po_row(row: pd.Series) -> int:
     return int(max(parts)) if parts else 0
 
 
+def manual_raise_block_skus_from_existing_po(ep: pd.DataFrame) -> set[str]:
+    """SKUs with a positive new-order qty on a manual Existing PO raise upload."""
+    out: set[str] = set()
+    if ep is None or getattr(ep, "empty", True) or "OMS_SKU" not in ep.columns:
+        return out
+    for _, row in ep.iterrows():
+        ordered = int(pd.to_numeric(row.get("PO_Qty_Ordered"), errors="coerce") or 0)
+        if ordered <= 0:
+            continue
+        sku = str(row.get("OMS_SKU") or "").strip().upper()
+        if sku:
+            out.add(sku)
+    return out
+
+
 def seed_ledger_from_manual_existing_po_upload(
     sess,
     *,
@@ -434,9 +449,9 @@ def seed_ledger_from_manual_existing_po_upload(
     """
     Manual Existing PO upload = confirmed PO raise for the sheet date.
 
-    Records every SKU on the sheet in the raise ledger (qty = max of new order /
-    pipeline components) and marks the full SKU list so Calculate PO does not
-    re-recommend raises for those lines within the raise lookback window.
+    Records pipeline / new-order qty in the raise ledger. Only SKUs with
+    ``PO_Qty_Ordered > 0`` are blocked from re-recommendation within the lookback
+    window (pipeline-only rows stay eligible for new PO qty).
     """
     from ..db.po_raised_db import ledger_rows_as_dataframe
     from .po_raise_archive import parse_raise_date_from_filename
@@ -461,34 +476,33 @@ def seed_ledger_from_manual_existing_po_upload(
                 return {"ok": False, "reason": "ledger_already_has_day"}
 
     accum: dict[str, int] = {}
-    raise_skus: list[str] = []
     for _, row in ep.iterrows():
         sku = str(row.get("OMS_SKU") or "").strip().upper()
         if not sku:
             continue
-        raise_skus.append(sku)
         qty = _raised_qty_from_existing_po_row(row)
         if qty > 0:
             accum[sku] = max(int(accum.get(sku, 0)), qty)
 
+    block_skus = sorted(manual_raise_block_skus_from_existing_po(ep))
     sess.existing_po_manual_raise_date = day_s
-    sess.existing_po_manual_raise_skus = sorted(set(raise_skus))
+    sess.existing_po_manual_raise_skus = block_skus
     sess.existing_po_manual_upload = True
 
     if not accum:
         return {
             "ok": True,
             "ledger_seeded": False,
-            "raise_skus": len(sess.existing_po_manual_raise_skus),
+            "raise_skus": len(block_skus),
             "raised_date": day_s,
             "message": (
                 f"Manual Existing PO raise recorded for {day_s} "
-                f"({len(sess.existing_po_manual_raise_skus):,} SKUs on sheet; no positive qty columns)."
+                f"({len(block_skus):,} SKUs with new order qty; pipeline-only rows stay open)."
             ),
         }
 
     out = apply_ledger_import(sess, accum, raised_date, replace_day=replace_day)
-    out["raise_skus"] = len(sess.existing_po_manual_raise_skus)
+    out["raise_skus"] = len(block_skus)
     out["ledger_seeded"] = True
     out["manual_raise"] = True
     return out

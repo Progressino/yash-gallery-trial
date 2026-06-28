@@ -4157,12 +4157,79 @@ def test_manual_existing_po_upload_seeds_full_sheet_raise():
     sess.existing_po_filename = "Po 24-Jun-26.xlsx"
     out = seed_ledger_from_manual_existing_po_upload(sess, replace_day=True)
     assert out.get("ok") is True
-    assert out.get("raise_skus") == 3
-    assert set(sess.existing_po_manual_raise_skus) == {"A-1", "B-2", "C-3"}
+    assert out.get("raise_skus") == 1
+    assert set(sess.existing_po_manual_raise_skus) == {"B-2"}
     led = sess.po_raise_ledger_df
     assert not led.empty
     b = led[led["OMS_SKU"] == "B-2"]
     assert int(b["Raised_Qty"].iloc[0]) == 20
+    c = led[led["OMS_SKU"] == "C-3"]
+    assert not c.empty
+    assert int(c["Raised_Qty"].iloc[0]) == 5
+
+
+def test_pipeline_only_existing_po_does_not_block_new_po_qty():
+    """1310YKBLUE sizes: pipeline on sheet but PO_Qty_Ordered=0 must still get PO qty."""
+    from backend.session import AppSession
+    from backend.services.po_engine import calculate_po_base
+
+    skus = ["1310YKBLUE-4XL", "1310YKBLUE-5XL", "1310YKBLUE-6XL", "1310YKBLUE-L"]
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": skus,
+            "Total_Inventory": [6, 12, 3, 6],
+        }
+    )
+    existing = pd.DataFrame(
+        {
+            "OMS_SKU": skus,
+            "PO_Qty_Ordered": [0, 0, 0, 0],
+            "Pending_Cutting": [0, 0, 0, 0],
+            "Balance_to_Dispatch": [0, 0, 0, 0],
+            "PO_Pipeline_Total": [3, 0, 0, 0],
+        }
+    )
+    end = pd.Timestamp("2026-06-28")
+    sales_rows = []
+    ads = {"1310YKBLUE-4XL": 0.167, "1310YKBLUE-5XL": 0.4, "1310YKBLUE-6XL": 0.067, "1310YKBLUE-L": 0.067}
+    for sku, rate in ads.items():
+        for i in range(max(1, int(rate * 30))):
+            sales_rows.append(
+                {
+                    "Sku": sku,
+                    "TxnDate": end - pd.Timedelta(days=i % 20),
+                    "Transaction Type": "Shipment",
+                    "Quantity": 1,
+                    "Units_Effective": 1,
+                    "Source": "Amazon",
+                }
+            )
+    sales = pd.DataFrame(sales_rows)
+    from backend.services.po_raise_import import manual_raise_block_skus_from_existing_po
+
+    block_skus = manual_raise_block_skus_from_existing_po(existing)
+    assert block_skus == set()
+
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        existing_po_df=existing,
+        enforce_lead_time_release_gate=True,
+        planning_date="2026-06-28",
+        manual_existing_po_raise_skus=block_skus or None,
+        manual_existing_po_raise_date="2026-06-27",
+        raise_ledger_lookback_days=14,
+    )
+    for sku in skus:
+        row = po[po["OMS_SKU"] == sku].iloc[0]
+        assert int(row["PO_Qty"]) > 0, f"{sku} blocked: {row.get('PO_Block_Reason')}"
+        assert "manual Existing PO" not in str(row.get("PO_Block_Reason") or "")
 
 
 def test_po_auto_extends_inventory_history_so_user_uploads_baseline_once():

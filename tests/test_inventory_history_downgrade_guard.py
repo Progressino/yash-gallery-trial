@@ -108,12 +108,63 @@ def test_authoritative_cap_ignores_newer_snapshot_than_matrix():
     dih.read_daily_inventory_history_disk_meta = lambda: {
         "daily_inventory_history_matrix_max_date": "2026-06-26",
         "daily_inventory_history_max_date": "2026-06-26",
+        "daily_inventory_history_rows": 5000,
+        "daily_inventory_history_skus": 2000,
     }
     try:
         cap = dih.inventory_history_authoritative_cap_date(sess)
         assert str(cap.date()) == "2026-06-26"
     finally:
         dih.read_daily_inventory_history_disk_meta = orig
+
+
+def test_matrix_cap_prefers_session_over_stale_disk_placeholder():
+    from backend.session import AppSession
+    import backend.services.daily_inventory_history as dih
+
+    sess = AppSession()
+    sess.daily_inventory_history_matrix_max_date = "2026-06-27"
+    orig = dih.read_daily_inventory_history_disk_meta
+    dih.read_daily_inventory_history_disk_meta = lambda: {
+        "daily_inventory_history_matrix_max_date": "2026-05-30",
+        "daily_inventory_history_max_date": "2026-05-30",
+        "daily_inventory_history_rows": 1,
+        "daily_inventory_history_skus": 1,
+    }
+    try:
+        cap = dih.inventory_history_matrix_cap_date(sess)
+        assert str(cap.date()) == "2026-06-27"
+    finally:
+        dih.read_daily_inventory_history_disk_meta = orig
+
+
+def test_authoritative_read_keeps_full_matrix_when_disk_meta_stale(monkeypatch):
+    from backend.session import AppSession
+    from backend.services.po_session_hydrate import ensure_inventory_history_authoritative_for_read
+
+    sess = AppSession()
+    sess.daily_inventory_history_df = _hist("1488YKWHITE-XS-S", "2026-06-27", 30)
+    sess.daily_inventory_history_matrix_max_date = "2026-06-27"
+    sess.sku_mapping = {"1488YKWHITE-XS-S": "1488YKWHITE-XS-S"}
+
+    monkeypatch.setattr(
+        "backend.services.po_session_hydrate.ensure_po_sidecars_hydrated",
+        lambda _s: None,
+    )
+    monkeypatch.setattr(
+        "backend.services.daily_inventory_history.read_daily_inventory_history_disk_meta",
+        lambda: {
+            "daily_inventory_history_matrix_max_date": "2026-05-30",
+            "daily_inventory_history_max_date": "2026-05-30",
+            "daily_inventory_history_rows": 1,
+            "daily_inventory_history_skus": 1,
+        },
+    )
+
+    out = ensure_inventory_history_authoritative_for_read(sess)
+    sub = out[out["OMS_SKU"] == "1488YKWHITE-XS-S"]
+    assert len(sub) == 30
+    assert str(sub["Date"].max().date()) == "2026-06-27"
 
 
 def test_snapshot_append_does_not_inflate_sku_count():
@@ -150,7 +201,12 @@ def test_ensure_inventory_history_trims_beyond_cap(monkeypatch):
     )
     monkeypatch.setattr(
         "backend.services.daily_inventory_history.read_daily_inventory_history_disk_meta",
-        lambda: {"daily_inventory_history_max_date": "2026-06-26"},
+        lambda: {
+            "daily_inventory_history_max_date": "2026-06-26",
+            "daily_inventory_history_matrix_max_date": "2026-06-26",
+            "daily_inventory_history_rows": 5000,
+            "daily_inventory_history_skus": 2000,
+        },
     )
 
     out = ensure_inventory_history_authoritative_for_read(sess)
