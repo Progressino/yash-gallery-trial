@@ -112,8 +112,29 @@ def main() -> int:
     main_mod.restore_po_sidecars_from_warm(sess)
     ensure_existing_po_hydrated(sess)
     try:
+        from backend.services.daily_inventory_history import (
+            apply_daily_inventory_history_meta,
+            inventory_history_is_newer_than,
+            read_daily_inventory_history_disk_meta,
+        )
         from backend.services.po_session_hydrate import ensure_inventory_history_authoritative_for_read
 
+        disk_meta = read_daily_inventory_history_disk_meta() or {}
+        if disk_meta:
+            apply_daily_inventory_history_meta(sess, disk_meta)
+        hist_path = main_mod._DISK_CACHE_DIR + "/daily_inventory_history_df.parquet"
+        import os
+
+        if os.path.isfile(hist_path):
+            disk_df = pd.read_parquet(hist_path)
+            cur = getattr(sess, "daily_inventory_history_df", None)
+            if inventory_history_is_newer_than(
+                disk_df,
+                cur,
+                incoming_uploaded_at=str(disk_meta.get("daily_inventory_history_uploaded_at") or ""),
+                existing_uploaded_at=str(getattr(sess, "daily_inventory_history_uploaded_at", "") or ""),
+            ):
+                sess.daily_inventory_history_df = disk_df
         ensure_inventory_history_authoritative_for_read(sess)
         main_mod.sync_daily_inventory_history_sidecar(sess)
     except Exception:

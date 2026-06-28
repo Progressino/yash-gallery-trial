@@ -684,12 +684,22 @@ def sync_daily_inventory_history_sidecar(sess) -> None:
     disk_meta = read_daily_inventory_history_disk_meta() or {}
     sess_meta = daily_inventory_history_meta_bundle(sess)
 
-    if not inventory_history_is_newer_than(
+    from .daily_inventory_history import inventory_history_max_date
+
+    in_max = inventory_history_max_date(df)
+    warm_max = inventory_history_max_date(warm_df)
+    accept = True
+    if in_max is not None and warm_max is not None and in_max > warm_max:
+        accept = True
+    elif not inventory_history_is_newer_than(
         df,
         warm_df,
         incoming_uploaded_at=str(sess_meta.get("daily_inventory_history_uploaded_at") or ""),
         existing_uploaded_at=str((warm_meta or {}).get("daily_inventory_history_uploaded_at") or ""),
     ):
+        accept = False
+
+    if not accept:
         log.warning(
             "Skipping daily inventory warm-cache sync — session matrix is older than server copy"
         )
@@ -712,7 +722,9 @@ def sync_daily_inventory_history_sidecar(sess) -> None:
         if os.path.exists(path):
             try:
                 old = pd.read_parquet(path)
-                if not inventory_history_is_newer_than(
+                old_max = inventory_history_max_date(old)
+                allow = in_max is not None and old_max is not None and in_max > old_max
+                if not allow and not inventory_history_is_newer_than(
                     df,
                     old,
                     incoming_uploaded_at=str(meta.get("daily_inventory_history_uploaded_at") or ""),

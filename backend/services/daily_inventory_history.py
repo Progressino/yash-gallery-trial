@@ -1552,9 +1552,13 @@ def apply_daily_inventory_history_meta(sess, meta: dict) -> None:
     for key in (
         "daily_inventory_history_uploaded_at",
         "daily_inventory_history_filename",
+        "daily_inventory_history_matrix_max_date",
     ):
         if meta.get(key):
             setattr(sess, key, str(meta[key]))
+    cap = str(meta.get("daily_inventory_history_matrix_max_date") or meta.get("daily_inventory_history_max_date") or "")
+    if len(cap) >= 10:
+        promote_daily_inventory_matrix_max_date(sess, cap[:10])
 
 
 def read_daily_inventory_history_disk_meta() -> dict | None:
