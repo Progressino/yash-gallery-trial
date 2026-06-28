@@ -112,6 +112,13 @@ def main() -> int:
     main_mod.restore_po_sidecars_from_warm(sess)
     ensure_existing_po_hydrated(sess)
     try:
+        from backend.services.po_session_hydrate import ensure_inventory_history_authoritative_for_read
+
+        ensure_inventory_history_authoritative_for_read(sess)
+        main_mod.sync_daily_inventory_history_sidecar(sess)
+    except Exception:
+        pass
+    try:
         from backend.services.existing_po import (
             apply_existing_po_session_meta,
             read_existing_po_disk_meta,
