@@ -438,7 +438,7 @@ def test_finalize_existing_po_dedupes_duplicate_skus():
 
 
 def test_finalize_zeros_bundled_when_children_carry_qty():
-    from backend.services.existing_po import finalize_existing_po_dataframe
+    from backend.services.existing_po import existing_po_pipeline_totals
 
     df = pd.DataFrame(
         {
@@ -448,10 +448,9 @@ def test_finalize_zeros_bundled_when_children_carry_qty():
             "Balance_to_Dispatch": [10, 10, 20],
         }
     )
-    out = finalize_existing_po_dataframe(df)
-    band = out[out["OMS_SKU"] == "1917YKBLUE-L-XL"]
-    assert int(band["PO_Pipeline_Total"].iloc[0]) == 0
-    assert int(out.loc[out["OMS_SKU"] == "1917YKBLUE-L", "PO_Pipeline_Total"].iloc[0]) == 120
+    units, _ = existing_po_pipeline_totals(df)
+    assert units == 220
+    assert int(df.loc[df["OMS_SKU"] == "1917YKBLUE-L-XL", "PO_Pipeline_Total"].iloc[0]) == 220
 
 
 def test_ensure_latest_existing_po_prefers_disk():

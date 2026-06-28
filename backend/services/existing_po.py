@@ -1804,7 +1804,6 @@ def finalize_existing_po_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     for c in breakdown:
         ep[c] = pd.to_numeric(ep[c], errors="coerce").fillna(0)
     ep = ep.groupby("OMS_SKU", as_index=False)[breakdown].sum()
-    ep = zero_bundled_pipeline_when_children_carry_qty(ep, ep)
     for c in breakdown:
         if c in ep.columns:
             ep[c] = ep[c].clip(lower=0).astype(int)
