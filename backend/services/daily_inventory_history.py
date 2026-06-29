@@ -807,7 +807,13 @@ def refresh_inventory_history_rollforward(
             fill_cap = snap_ts - pd.Timedelta(days=1)
             wide_ts = pd.Timestamp(wide_end).normalize()
             if fill_cap > wide_ts:
-                merged = extend_history_with_sales(merged, sales_df=sales, cap_date=fill_cap)
+                clip = merged[merged["Date"] <= wide_ts].copy()
+                filled = extend_history_with_sales(clip, sales_df=sales, cap_date=fill_cap)
+                snap_rows = merged[
+                    (merged["Date"] > wide_ts)
+                    & (merged["Source"].astype(str).str.lower() == "snapshot")
+                ]
+                merged = merge_inventory_history(filled, snap_rows)
                 rolled = True
         variant = getattr(sess, "inventory_df_variant", None)
         if variant is not None and not getattr(variant, "empty", True) and "OMS_SKU" in variant.columns:

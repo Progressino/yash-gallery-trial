@@ -599,6 +599,41 @@ def test_refresh_fills_sales_gap_between_wide_end_and_snapshot():
     assert days[-1] == "2026-06-29"
 
 
+def test_refresh_fills_gap_when_snapshot_already_present():
+    from backend.session import AppSession
+    from backend.services.daily_inventory_history import (
+        merge_inventory_history,
+        refresh_inventory_history_rollforward,
+    )
+
+    sess = AppSession()
+    hist = _hist("SKU-A", "2026-06-25", 3)
+    hist["Source"] = "uploaded"
+    snap = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"],
+            "Date": pd.Timestamp("2026-06-29"),
+            "Qty": [99.0],
+            "Source": "snapshot",
+        }
+    )
+    sess.daily_inventory_history_df = merge_inventory_history(hist, snap)
+    sess.daily_inventory_history_wide_end_date = "2026-06-25"
+    sess.inventory_snapshot_date = "2026-06-29"
+    sess.inventory_df_variant = pd.DataFrame({"OMS_SKU": ["SKU-A"], "Total_Inventory": [99.0]})
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A"] * 3,
+            "TxnDate": pd.date_range("2026-06-26", "2026-06-28", freq="D"),
+            "Units_Effective": [1.0, 1.0, 1.0],
+        }
+    )
+    out = refresh_inventory_history_rollforward(sess, include_snapshot=True, sales_df=sales)
+    assert out.get("ok") is True
+    days = sorted(pd.to_datetime(sess.daily_inventory_history_df["Date"]).dt.strftime("%Y-%m-%d").unique())
+    assert all(d in days for d in ["2026-06-26", "2026-06-27", "2026-06-28", "2026-06-29"])
+
+
 def test_restore_inventory_history_merges_github_backup(tmp_path, monkeypatch):
     from backend.services import daily_inventory_history as dih
 
