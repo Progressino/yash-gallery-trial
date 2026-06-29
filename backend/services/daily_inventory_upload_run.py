@@ -262,6 +262,9 @@ def background_daily_inventory_upload(
         result = execute_daily_inventory_upload(sess, raw, filename, on_progress=_progress)
         sess.daily_inventory_upload_result = result
         if result.get("ok"):
+            from .daily_inventory_history import persist_upload_pipeline_snapshot
+
+            persist_upload_pipeline_snapshot(sess.daily_inventory_history_df)
             _progress("Saving to server…")
             _sync_disk_and_cache()
             threading.Thread(target=_persist_pg_background, daemon=True).start()

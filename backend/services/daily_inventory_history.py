@@ -800,6 +800,15 @@ def refresh_inventory_history_rollforward(
     merged = _ensure_source_column(extended)
     snapshot_appended = False
     if include_snapshot:
+        wide_end = wide_matrix_upload_end_date(sess)
+        snap_date = snap if len(snap) == 10 else str(cap_ts.date())
+        snap_ts = pd.Timestamp(snap_date).normalize()
+        if wide_end is not None and snap_ts > pd.Timestamp(wide_end).normalize():
+            fill_cap = snap_ts - pd.Timedelta(days=1)
+            sheet_max = inventory_history_max_date(merged)
+            if sheet_max is not None and fill_cap > pd.Timestamp(sheet_max).normalize():
+                merged = extend_history_with_sales(merged, sales_df=sales, cap_date=fill_cap)
+                rolled = True
         variant = getattr(sess, "inventory_df_variant", None)
         if variant is not None and not getattr(variant, "empty", True) and "OMS_SKU" in variant.columns:
             snap_date = snap if len(snap) == 10 else str(cap_ts.date())
@@ -1937,8 +1946,29 @@ def persist_daily_inventory_history_meta(sess) -> bool:
 INVENTORY_HISTORY_DISK_RECONCILE_DAYS = 0
 
 
+def _pipeline_inventory_history_path():
+    from pathlib import Path
+
+    return _warm_cache_dir() / "pipeline" / "inventory_history_snapshot.parquet"
+
+
+def persist_upload_pipeline_snapshot(df: pd.DataFrame | None) -> bool:
+    """Keep a durable copy of the last wide-matrix upload (survives stale-cache overwrites)."""
+    if df is None or getattr(df, "empty", True):
+        return False
+    try:
+        from ..services.helpers import _coerce_df_for_parquet
+
+        path = _pipeline_inventory_history_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _coerce_df_for_parquet(df).to_parquet(path, index=False)
+        return True
+    except Exception:
+        return False
+
+
 def iter_inventory_history_parquet_candidates() -> list:
-    """All on-disk daily inventory history parquets (warm cache + github bundles)."""
+    """All on-disk daily inventory history parquets (pipeline + warm cache + github bundles)."""
     from pathlib import Path
 
     cache = _warm_cache_dir()
@@ -1952,6 +1982,10 @@ def iter_inventory_history_parquet_candidates() -> list:
                 roots.append(sub)
     out: list[Path] = []
     seen: set[str] = set()
+    pipeline_p = _pipeline_inventory_history_path()
+    if pipeline_p.is_file():
+        out.append(pipeline_p)
+        seen.add(str(pipeline_p.resolve()))
     for root in roots:
         p = root / "daily_inventory_history_df.parquet"
         key = str(p.resolve())
@@ -2046,11 +2080,33 @@ def reconcile_inventory_history_disk_integrity(*, repair: bool = True) -> dict:
     rows = int(len(df))
     skus = int(df["OMS_SKU"].astype(str).nunique()) if "OMS_SKU" in df.columns else 0
     meta_rows = int(meta.get("daily_inventory_history_rows") or 0)
+    wide_end_s = str(meta.get("daily_inventory_history_wide_end_date") or "")[:10]
+    matrix_max_s = str(meta.get("daily_inventory_history_matrix_max_date") or "")[:10]
 
     if meta_max_s and df_max_s and meta_max_s != df_max_s:
         report["actions"].append(f"meta_max {meta_max_s} != parquet_max {df_max_s}")
+    if wide_end_s and df_max_s and wide_end_s > df_max_s:
+        report["actions"].append(f"parquet_max {df_max_s} behind wide_end {wide_end_s}")
+    if matrix_max_s and df_max_s and matrix_max_s > df_max_s:
+        report["actions"].append(f"parquet_max {df_max_s} behind matrix_max {matrix_max_s}")
     if meta_rows and rows and abs(meta_rows - rows) > max(500, int(rows * 0.05)):
         report["actions"].append(f"meta_rows {meta_rows} != parquet_rows {rows}")
+
+    if repair and report["actions"]:
+        restored = restore_inventory_history_from_best_disk_backups(df)
+        if restored is not None and (
+            inventory_history_is_newer_than(restored, df)
+            or _inventory_history_unique_days(restored) > _inventory_history_unique_days(df)
+        ):
+            from ..services.helpers import _coerce_df_for_parquet
+
+            df = restored
+            _coerce_df_for_parquet(df).to_parquet(hist_path, index=False)
+            report["actions"].append("parquet_restored_from_backups")
+            df_max = inventory_history_max_date(df)
+            df_max_s = str(pd.Timestamp(df_max).date()) if df_max is not None and pd.notna(df_max) else ""
+            rows = int(len(df))
+            skus = int(df["OMS_SKU"].astype(str).nunique()) if "OMS_SKU" in df.columns else 0
 
     if not repair or not report["actions"]:
         report["parquet_max_date"] = df_max_s
@@ -2208,6 +2264,7 @@ __all__ = [
     "persist_inventory_history_authoritative",
     "reconcile_inventory_history_disk_integrity",
     "restore_inventory_history_from_best_disk_backups",
+    "persist_upload_pipeline_snapshot",
     "iter_inventory_history_parquet_candidates",
     "INVENTORY_HISTORY_DISK_RECONCILE_DAYS",
     "upload_timestamp_epoch",

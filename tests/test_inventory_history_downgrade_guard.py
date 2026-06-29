@@ -420,7 +420,6 @@ def test_snapshot_upload_prunes_derived_gap_and_skips_rollforward():
 
     out = refresh_inventory_history_rollforward(sess, include_snapshot=True)
     assert out.get("ok") is True
-    assert out.get("rolled_forward") is False
 
     sub = sess.daily_inventory_history_df
     sub = sub[sub["OMS_SKU"].astype(str) == "SKU-A"]
@@ -428,9 +427,9 @@ def test_snapshot_upload_prunes_derived_gap_and_skips_rollforward():
         str(pd.Timestamp(d).date()): float(q)
         for d, q in zip(sub["Date"], sub["Qty"])
     }
-    assert "2026-06-26" not in day_qty
-    assert "2026-06-27" not in day_qty
-    assert "2026-06-28" not in day_qty
+    assert day_qty.get("2026-06-26") != 62.0
+    assert day_qty.get("2026-06-27") != 62.0
+    assert day_qty.get("2026-06-28") != 62.0
     assert day_qty.get("2026-06-29") == 99.0
     assert "2026-06-29" in (sess.daily_inventory_history_snapshot_dates or [])
 
@@ -534,6 +533,70 @@ def test_inventory_history_view_uses_data_days_not_calendar_gap():
     assert len(wide["dates"]) == 30
     assert wide["dates"][0] == "2026-05-02"
     assert wide["dates"][-1] == "2026-06-29"
+
+
+def test_reconcile_restores_parquet_from_pipeline_when_behind_wide_end(tmp_path, monkeypatch):
+    import json
+
+    from backend.services import daily_inventory_history as dih
+
+    cache = tmp_path / "warm_cache"
+    pipeline = cache / "pipeline"
+    pipeline.mkdir(parents=True)
+    june = _hist("SKU-A", "2026-06-25", 20)
+    june["Source"] = "uploaded"
+    june.to_parquet(pipeline / "inventory_history_snapshot.parquet", index=False)
+
+    may = _hist("SKU-A", "2026-05-30", 20)
+    may["Source"] = "uploaded"
+    may.to_parquet(cache / "daily_inventory_history_df.parquet", index=False)
+    (cache / "daily_inventory_history_meta.json").write_text(
+        json.dumps(
+            {
+                "daily_inventory_history_wide_end_date": "2026-06-25",
+                "daily_inventory_history_matrix_max_date": "2026-06-29",
+                "daily_inventory_history_max_date": "2026-06-29",
+                "daily_inventory_history_rows": 200000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dih, "_warm_cache_dir", lambda: cache)
+    out = dih.reconcile_inventory_history_disk_integrity(repair=True)
+    assert out.get("repaired") is True
+    assert any("restored" in a for a in out.get("actions", []))
+    df = pd.read_parquet(cache / "daily_inventory_history_df.parquet")
+    assert str(pd.to_datetime(df["Date"]).max().date()) == "2026-06-25"
+
+
+def test_refresh_fills_sales_gap_between_wide_end_and_snapshot():
+    from backend.session import AppSession
+    from backend.services.daily_inventory_history import refresh_inventory_history_rollforward
+
+    sess = AppSession()
+    hist = _hist("SKU-A", "2026-06-25", 5)
+    hist["Source"] = "uploaded"
+    sess.daily_inventory_history_df = hist
+    sess.daily_inventory_history_wide_end_date = "2026-06-25"
+    sess.inventory_snapshot_date = "2026-06-29"
+    sess.inventory_df_variant = pd.DataFrame(
+        {"OMS_SKU": ["SKU-A"], "Total_Inventory": [42.0]},
+    )
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A"] * 3,
+            "TxnDate": pd.date_range("2026-06-26", "2026-06-28", freq="D"),
+            "Units_Effective": [1.0, 1.0, 1.0],
+        }
+    )
+    sess.sales_df = sales
+    out = refresh_inventory_history_rollforward(sess, include_snapshot=True, sales_df=sales)
+    assert out.get("ok") is True
+    days = sorted(pd.to_datetime(sess.daily_inventory_history_df["Date"]).dt.strftime("%Y-%m-%d").unique())
+    assert "2026-06-26" in days
+    assert "2026-06-27" in days
+    assert "2026-06-28" in days
+    assert days[-1] == "2026-06-29"
 
 
 def test_restore_inventory_history_merges_github_backup(tmp_path, monkeypatch):
