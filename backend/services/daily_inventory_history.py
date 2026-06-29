@@ -1559,12 +1559,18 @@ def daily_inventory_history_meta_bundle(sess) -> dict:
     min_d = None
     if df is not None and not getattr(df, "empty", True) and "Date" in df.columns:
         min_d = pd.to_datetime(df["Date"], errors="coerce").min()
+    df_max_s = str(pd.Timestamp(mx).date()) if mx is not None and pd.notna(mx) else ""
+    sess_matrix_max = str(getattr(sess, "daily_inventory_history_matrix_max_date", "") or "").strip()[:10]
     cap_ts = inventory_history_matrix_cap_date(sess)
-    matrix_max_s = str(cap_ts.date()) if cap_ts is not None else ""
-    if not matrix_max_s and df_ts is not None:
-        matrix_max_s = str(df_ts.date())
-    elif not matrix_max_s and mx is not None:
-        matrix_max_s = str(pd.Timestamp(mx).date())
+    cap_s = str(cap_ts.date()) if cap_ts is not None else ""
+    # Ceiling tracks upload/snapshot authority; max_date must reflect rows actually in the df.
+    matrix_ceiling_s = cap_s or sess_matrix_max or df_max_s
+    if sess_matrix_max and matrix_ceiling_s < sess_matrix_max:
+        matrix_ceiling_s = sess_matrix_max
+    if cap_s and matrix_ceiling_s < cap_s:
+        matrix_ceiling_s = cap_s
+    if df_max_s and matrix_ceiling_s < df_max_s:
+        matrix_ceiling_s = df_max_s
     return {
         "daily_inventory_history_uploaded_at": str(
             getattr(sess, "daily_inventory_history_uploaded_at", "") or ""
@@ -1574,8 +1580,8 @@ def daily_inventory_history_meta_bundle(sess) -> dict:
         ),
         "daily_inventory_history_rows": rows,
         "daily_inventory_history_skus": skus,
-        "daily_inventory_history_max_date": matrix_max_s,
-        "daily_inventory_history_matrix_max_date": matrix_max_s,
+        "daily_inventory_history_max_date": df_max_s or matrix_ceiling_s,
+        "daily_inventory_history_matrix_max_date": matrix_ceiling_s or df_max_s,
         "daily_inventory_history_min_date": str(pd.Timestamp(min_d).date()) if pd.notna(min_d) else "",
     }
 

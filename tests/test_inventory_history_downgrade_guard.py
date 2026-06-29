@@ -166,6 +166,27 @@ def test_wide_matrix_includes_date_totals():
     assert wide["date_totals"] == [15.0, 35.0]
 
 
+def test_meta_bundle_max_date_follows_dataframe_not_upload_cap():
+    from backend.session import AppSession
+    import backend.services.daily_inventory_history as dih
+
+    sess = AppSession()
+    sess.daily_inventory_history_df = _hist("A", "2026-05-30", 10)
+    sess.daily_inventory_history_matrix_max_date = "2026-06-27"
+    orig = dih.read_daily_inventory_history_disk_meta
+    dih.read_daily_inventory_history_disk_meta = lambda: {
+        "daily_inventory_history_matrix_max_date": "2026-06-27",
+        "daily_inventory_history_rows": 5000,
+        "daily_inventory_history_skus": 2000,
+    }
+    try:
+        meta = dih.daily_inventory_history_meta_bundle(sess)
+        assert meta["daily_inventory_history_max_date"] == "2026-05-30"
+        assert meta["daily_inventory_history_matrix_max_date"] == "2026-06-27"
+    finally:
+        dih.read_daily_inventory_history_disk_meta = orig
+
+
 def test_inventory_sheet_end_date_from_filename():
     from backend.services.daily_inventory_history import inventory_sheet_end_date_from_filename
 

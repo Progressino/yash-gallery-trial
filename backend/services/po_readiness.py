@@ -287,19 +287,21 @@ def _attach_inventory_staleness(sess, data: dict) -> None:
     hist_loaded = bool(data.get("daily_inventory_history")) or bool(max_d)
     cap_ts = inventory_history_matrix_cap_date(sess)
     if cap_ts is not None:
-        cap_s = str(cap_ts.date())
-        promote_daily_inventory_matrix_max_date(sess, cap_s)
-        if not max_d or cap_s > str(max_d)[:10]:
-            max_d = cap_s
-            hist_loaded = True
-            data["daily_inventory_history"] = True
+        promote_daily_inventory_matrix_max_date(sess, str(cap_ts.date()))
     if not max_d:
+        from .daily_inventory_history import _load_daily_inventory_df_from_disk
+
         disk_meta = read_daily_inventory_history_disk_meta()
         if isinstance(disk_meta, dict) and not (
             int(disk_meta.get("daily_inventory_history_rows") or 0) < 100
             or int(disk_meta.get("daily_inventory_history_skus") or 0) < 50
         ):
-            max_d = str(disk_meta.get("daily_inventory_history_max_date") or "").strip()[:10]
+            disk_df = _load_daily_inventory_df_from_disk()
+            if disk_df is not None and not getattr(disk_df, "empty", True):
+                _, disk_max = daily_inventory_history_bounds(disk_df)
+                max_d = disk_max or str(disk_meta.get("daily_inventory_history_max_date") or "").strip()[:10]
+            else:
+                max_d = str(disk_meta.get("daily_inventory_history_max_date") or "").strip()[:10]
             if not min_d:
                 min_d = str(disk_meta.get("daily_inventory_history_min_date") or "").strip()[:10]
             if max_d or int(disk_meta.get("daily_inventory_history_rows") or 0) > 0:
