@@ -1554,25 +1554,27 @@ def project_inventory_calendar(
     for day in calendar:
         day_ts = pd.Timestamp(day).normalize()
         auth_day = auth[auth["Date"] == day_ts]
-        if not auth_day.empty:
-            out_frames.append(
-                auth_day[["OMS_SKU", "Date", "Qty", "Source"]].copy()
-            )
-            prev = prev.copy()
-            prev.loc[auth_day["OMS_SKU"].astype(str)] = (
-                auth_day.set_index("OMS_SKU")["Qty"].astype(float)
-            )
-            continue
+        auth_qty = (
+            auth_day.set_index("OMS_SKU")["Qty"].astype(float)
+            if not auth_day.empty
+            else pd.Series(dtype=float)
+        )
         net = sales_by_day.get(day_ts, pd.Series(0.0, index=skus)).reindex(skus).fillna(0.0)
-        new_prev = (prev - net).clip(lower=0.0)
-        active = (prev > 0.0) | (net.abs() > 1e-9) | (new_prev >= 0.0)
+        rolled = (prev.reindex(skus).fillna(0.0) - net).clip(lower=0.0)
+        new_prev = rolled.copy()
+        if not auth_qty.empty:
+            new_prev.loc[auth_qty.index.astype(str)] = auth_qty.values
+        sources = [
+            "uploaded" if str(sku) in set(auth_qty.index.astype(str)) else "derived"
+            for sku in skus
+        ]
         out_frames.append(
             pd.DataFrame(
                 {
                     "OMS_SKU": skus,
                     "Date": day_ts,
-                    "Qty": new_prev.values,
-                    "Source": "derived",
+                    "Qty": new_prev.reindex(skus).fillna(0.0).values,
+                    "Source": sources,
                 }
             )
         )
@@ -1657,7 +1659,44 @@ def densify_inventory_history_for_view(
     end = pd.Timestamp(inventory_history_view_end_date(inv_history, end_date)).normalize()
     start = end - pd.Timedelta(days=max(0, span - 1))
     trimmed = filter_inventory_history_window(inv_history, days=span, end_date=str(end.date()))
-    return project_inventory_calendar(trimmed, start, end, sales_df=sales_df)
+    repaired, _actions = repair_inventory_history_spikes(trimmed, sales_df)
+    work = repaired if _actions else trimmed
+    return project_inventory_calendar(work, start, end, sales_df=sales_df)
+
+
+def validate_inventory_history_catalog(
+    inv_history: pd.DataFrame,
+    *,
+    days: int | None = None,
+    end_date: str | None = None,
+    sales_df: pd.DataFrame | None = None,
+) -> dict:
+    """Sanity-check densified matrix totals for every SKU in the view window."""
+    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
+    end = pd.Timestamp(inventory_history_view_end_date(inv_history, end_date)).normalize()
+    start = end - pd.Timedelta(days=max(0, span - 1))
+    dense = densify_inventory_history_for_view(
+        inv_history, days=span, end_date=str(end.date()), sales_df=sales_df
+    )
+    if dense.empty:
+        return {"ok": False, "reason": "empty"}
+    per_sku = dense.groupby("OMS_SKU")["Date"].nunique()
+    expected_days = int((end - start).days) + 1
+    short = per_sku[per_sku < expected_days]
+    totals = dense.groupby("Date")["Qty"].sum().sort_index()
+    jump_up = 0
+    if len(totals) >= 2:
+        vals = totals.to_numpy(dtype=float)
+        jump_up = int(sum(1 for i in range(1, len(vals)) if vals[i] - vals[i - 1] > 5000))
+    return {
+        "ok": len(short) == 0 and jump_up == 0,
+        "sku_count": int(per_sku.shape[0]),
+        "expected_days": expected_days,
+        "skus_short_calendar": int(len(short)),
+        "short_examples": {str(k): int(v) for k, v in short.head(5).items()},
+        "date_totals_tail": [float(x) for x in totals.tail(3).tolist()],
+        "day_jump_over_5k": jump_up,
+    }
 
 
 def coverage_days_within(

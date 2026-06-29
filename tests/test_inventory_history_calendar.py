@@ -93,7 +93,62 @@ def test_repair_inventory_history_spikes_ignores_small_samples():
     assert not actions
 
 
-def test_wide_matrix_uses_full_calendar_columns():
+def test_all_skus_receive_full_calendar_window():
+    hist = pd.concat(
+        [
+            _hist("SKU-A", ["2026-06-01", "2026-06-15"], [10.0, 8.0]),
+            _hist("SKU-B", ["2026-06-10"], [5.0]),
+            _hist("SKU-C", ["2026-06-28", "2026-06-29"], [80000.0, 120000.0]),
+            _hist("SKU-D", ["2026-06-28"], [20000.0]),
+        ],
+        ignore_index=True,
+    )
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A", "SKU-B", "SKU-C", "SKU-D"],
+            "TxnDate": pd.to_datetime(["2026-06-29", "2026-06-29", "2026-06-29", "2026-06-29"]),
+            "Units_Effective": [1.0, 1.0, 2000.0, 1000.0],
+        }
+    )
+    out = densify_inventory_history_for_view(
+        hist, days=30, end_date="2026-06-29", sales_df=sales
+    )
+    per_sku = out.groupby("OMS_SKU")["Date"].nunique()
+    assert set(per_sku.index) == {"SKU-A", "SKU-B", "SKU-C", "SKU-D"}
+    assert (per_sku == 30).all()
+    wide = inventory_history_wide_matrix(hist, days=30, end_date="2026-06-29", sales_df=sales)
+    assert len(wide["dates"]) == 30
+    assert wide["total"] == 4
+    assert len(wide["rows"][0]["qtys"]) == 30
+
+
+def test_validate_inventory_history_catalog_flags_spike():
+    from backend.services.daily_inventory_history import validate_inventory_history_catalog
+
+    hist = pd.concat(
+        [
+            _hist("SKU-A", ["2026-06-28"], [80000.0]),
+            _hist("SKU-B", ["2026-06-28"], [20000.0]),
+            _hist("SKU-A", ["2026-06-29"], [120000.0]),
+            _hist("SKU-B", ["2026-06-29"], [80000.0]),
+        ],
+        ignore_index=True,
+    )
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A", "SKU-B"],
+            "TxnDate": pd.to_datetime(["2026-06-29", "2026-06-29"]),
+            "Units_Effective": [2000.0, 1000.0],
+        }
+    )
+    report = validate_inventory_history_catalog(
+        hist, days=2, end_date="2026-06-29", sales_df=sales
+    )
+    assert report["sku_count"] == 2
+    assert report["skus_short_calendar"] == 0
+    assert report["day_jump_over_5k"] == 0
+    assert report["ok"] is True
+
     hist = _hist(
         "SKU-A",
         ["2026-06-27", "2026-06-29"],
