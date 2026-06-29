@@ -144,6 +144,18 @@ jobs:
               esac
             done
           }
+          _force_remove_all_progressino_containers() {
+            docker ps -a --format '{{.ID}}\t{{.Names}}' | while IFS=$'\t' read -r id name; do
+              [ -n "$id" ] || continue
+              name="${name#/}"
+              case "$name" in
+                ${COMPOSE_PROJECT}-*)
+                  echo "Force removing progressino container: ${name} (${id})"
+                  docker rm -f "$id" 2>/dev/null || true
+                  ;;
+              esac
+            done
+          }
           _prune_stale_compose_containers backend
           _prune_stale_compose_containers stitching-backend
           _prune_stale_compose_containers frontend
@@ -152,14 +164,16 @@ jobs:
           docker container prune -f 2>/dev/null || true
           _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml kill 2>/dev/null || true
           _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml down --volumes=false --remove-orphans 2>/dev/null || true
+          _force_remove_all_progressino_containers
 
           _NO_CACHE=""
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.no_cache }}" = "true" ]; then
             _NO_CACHE="--no-cache"
           fi
-          _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml build ${_NO_CACHE} backend
+          _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml build ${_NO_CACHE} backend stitching-backend
           _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml build ${_NO_CACHE} frontend
-          _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml up -d --remove-orphans
+          _force_remove_all_progressino_containers
+          _dc -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml up -d --force-recreate --remove-orphans
           docker image prune -f || true
 
       - name: Enable PostgreSQL query analytics (pg_stat_statements)
@@ -222,12 +236,11 @@ jobs:
           fi
           for i in $(seq 1 24); do
             if curl -sf --connect-timeout 5 "http://127.0.0.1:8000/api/health" \
-              || curl -sf --connect-timeout 5 "http://127.0.0.1/api/health" \
-              || curl -sf --connect-timeout 5 "http://localhost/api/health"; then
+              && curl -sf --connect-timeout 5 "http://127.0.0.1/api/health"; then
               echo "OK: health check passed (attempt $i)"
               exit 0
             fi
-            echo "… waiting for /api/health (127.0.0.1:8000 or :80) attempt $i/24"
+            echo "… waiting for /api/health (backend :8000 + nginx :80) attempt $i/24"
             sleep 5
           done
           echo "ERROR: health check failed after retries"
