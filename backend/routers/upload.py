@@ -2360,6 +2360,13 @@ def _inventory_apply_parse_result(
                 hist.get("snapshot_date"),
                 hist.get("rows"),
             )
+        if hist.get("appended") or hist.get("rolled_forward"):
+            try:
+                import backend.main as _main
+
+                _main.sync_daily_inventory_history_sidecar(sess)
+            except Exception:
+                _log.exception("sync_daily_inventory_history_sidecar failed")
     except Exception:
         _log.exception("append_snapshot_inventory_to_history failed")
     refresh_inventory_api_cache(sess)

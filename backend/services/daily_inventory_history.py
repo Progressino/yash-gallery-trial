@@ -482,16 +482,28 @@ def inventory_history_matrix_cap_date(sess) -> pd.Timestamp | None:
 
 
 def inventory_history_authoritative_cap_date(sess) -> pd.Timestamp:
-    """Last day with real uploaded matrix data — daily snapshot must not add later columns."""
+    """Last day with authoritative inventory (wide matrix + daily snapshot columns)."""
+    caps: list[pd.Timestamp] = []
     matrix_cap = inventory_history_matrix_cap_date(sess)
     if matrix_cap is not None:
-        return matrix_cap
+        caps.append(matrix_cap)
+    sess_mx = str(getattr(sess, "daily_inventory_history_matrix_max_date", "") or "").strip()[:10]
+    if len(sess_mx) == 10:
+        try:
+            caps.append(pd.Timestamp(sess_mx).normalize())
+        except Exception:
+            pass
     snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
     if len(snap) == 10:
         try:
-            return pd.Timestamp(snap).normalize()
+            caps.append(pd.Timestamp(snap).normalize())
         except Exception:
             pass
+    df_max = inventory_history_max_date(getattr(sess, "daily_inventory_history_df", None))
+    if df_max is not None:
+        caps.append(df_max)
+    if caps:
+        return max(caps)
     return today_ist_timestamp()
 
 
@@ -593,6 +605,25 @@ def _sales_for_inventory_rollforward(sess) -> pd.DataFrame | None:
     return None
 
 
+def _variant_snapshot_qty_series(variant: pd.DataFrame) -> pd.Series | None:
+    """Total on-hand per SKU row for daily snapshot → history append."""
+    if variant is None or getattr(variant, "empty", True):
+        return None
+    if "Total_Inventory" in variant.columns:
+        return pd.to_numeric(variant["Total_Inventory"], errors="coerce").fillna(0.0)
+    try:
+        from .inventory import recompute_inventory_totals
+
+        work = recompute_inventory_totals(variant.copy())
+        if "Total_Inventory" in work.columns:
+            return pd.to_numeric(work["Total_Inventory"], errors="coerce").fillna(0.0)
+    except Exception:
+        pass
+    if "OMS_Inventory" in variant.columns:
+        return pd.to_numeric(variant["OMS_Inventory"], errors="coerce").fillna(0.0)
+    return None
+
+
 def refresh_inventory_history_rollforward(
     sess,
     *,
@@ -615,14 +646,15 @@ def refresh_inventory_history_rollforward(
     sheet_max = inventory_history_max_date(hist)
     if cap_date is not None:
         cap_ts = pd.Timestamp(cap_date).normalize()
-    elif len(snap) == 10:
+    elif include_snapshot and len(snap) == 10:
         cap_ts = pd.Timestamp(snap).normalize()
     elif sheet_max is not None:
         cap_ts = pd.Timestamp(sheet_max).normalize()
     else:
         cap_ts = inventory_history_authoritative_cap_date(sess)
     matrix_cap = inventory_history_matrix_cap_date(sess)
-    if matrix_cap is not None:
+    # Clamp roll-forward only for PO-calc paths — daily snapshot uploads extend the matrix.
+    if not include_snapshot and matrix_cap is not None:
         cap_ts = min(cap_ts, matrix_cap)
     extended = hist
     rolled = False
@@ -636,39 +668,38 @@ def refresh_inventory_history_rollforward(
         variant = getattr(sess, "inventory_df_variant", None)
         if variant is not None and not getattr(variant, "empty", True) and "OMS_SKU" in variant.columns:
             snap_date = snap if len(snap) == 10 else str(cap_ts.date())
-            matrix_cap = inventory_history_matrix_cap_date(sess)
             snap_ts = pd.Timestamp(snap_date).normalize()
-            if matrix_cap is not None and snap_ts > matrix_cap:
-                include_snapshot = False
-            else:
-                work = variant.copy()
-                work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
-                qty_col = "Total_Inventory" if "Total_Inventory" in work.columns else None
-                if qty_col:
-                    work["Qty"] = pd.to_numeric(work[qty_col], errors="coerce").fillna(0.0)
-                    work = work[work["OMS_SKU"].str.len() > 0]
-                    hist_skus = set(merged["OMS_SKU"].astype(str).str.strip().str.upper())
-                    work = work[work["OMS_SKU"].isin(hist_skus)]
-                    if not work.empty:
-                        incoming = pd.DataFrame(
-                            {
-                                "OMS_SKU": work["OMS_SKU"],
-                                "Date": snap_ts,
-                                "Qty": work["Qty"],
-                            }
-                        )
-                        if "Source" in merged.columns:
-                            merged = merged[
-                                ~((merged["Date"] == snap_ts) & (merged["Source"] == "derived"))
-                            ]
-                        merged = merge_inventory_history(merged, incoming)
-                        snapshot_appended = True
+            work = variant.copy()
+            work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+            qty = _variant_snapshot_qty_series(work)
+            if qty is not None:
+                work["Qty"] = qty.values
+                work = work[work["OMS_SKU"].str.len() > 0]
+                hist_skus = set(merged["OMS_SKU"].astype(str).str.strip().str.upper())
+                work = work[work["OMS_SKU"].isin(hist_skus)]
+                if not work.empty:
+                    incoming = pd.DataFrame(
+                        {
+                            "OMS_SKU": work["OMS_SKU"],
+                            "Date": snap_ts,
+                            "Qty": work["Qty"],
+                        }
+                    )
+                    if "Source" in merged.columns:
+                        merged = merged[
+                            ~((merged["Date"] == snap_ts) & (merged["Source"] == "derived"))
+                        ]
+                    merged = merge_inventory_history(merged, incoming)
+                    snapshot_appended = True
+                    promote_daily_inventory_matrix_max_date(sess, str(snap_ts.date()))
 
     end_anchor = inventory_history_max_date(merged)
     end_s = str(end_anchor.date()) if end_anchor is not None else None
     merged = filter_inventory_history_window(merged, days=span, end_date=end_s)
     sess.daily_inventory_history_df = merged
     sess._quarterly_cache.clear()
+    if end_anchor is not None:
+        promote_daily_inventory_matrix_max_date(sess, str(pd.Timestamp(end_anchor).date()))
 
     dates_norm = pd.to_datetime(merged["Date"], errors="coerce").dt.normalize()
     min_d = dates_norm.min()
@@ -696,8 +727,7 @@ def append_snapshot_inventory_to_history(sess) -> dict:
         return {"appended": False, "reason": "empty_snapshot"}
     if "OMS_SKU" not in variant.columns:
         return {"appended": False, "reason": "no_sku_column"}
-    qty_col = "Total_Inventory" if "Total_Inventory" in variant.columns else None
-    if not qty_col:
+    if _variant_snapshot_qty_series(variant) is None:
         return {"appended": False, "reason": "no_total_inventory"}
 
     result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
@@ -1441,6 +1471,7 @@ def inventory_history_wide_matrix(
     empty = {
         "loaded": False,
         "dates": [],
+        "date_totals": [],
         "rows": [],
         "total": 0,
         "limit": int(limit),
@@ -1472,6 +1503,9 @@ def inventory_history_wide_matrix(
     )
     dates_sorted = sorted(work["Date"].unique())
     date_strs = [str(pd.Timestamp(d).date()) for d in dates_sorted]
+    date_totals = [
+        float(work.loc[work["Date"] == d, "Qty"].sum()) for d in dates_sorted
+    ]
 
     sku_list = sorted(work["OMS_SKU"].astype(str).unique())
     total = int(len(sku_list))
@@ -1479,7 +1513,7 @@ def inventory_history_wide_matrix(
     end = start + max(1, int(limit))
     page_skus = sku_list[start:end]
     if not len(page_skus):
-        return {**empty, "loaded": True, "dates": date_strs, "total": total}
+        return {**empty, "loaded": True, "dates": date_strs, "date_totals": date_totals, "total": total}
 
     page_work = work[work["OMS_SKU"].isin(page_skus)]
     pivot = page_work.pivot(index="OMS_SKU", columns="Date", values="Qty")
@@ -1495,6 +1529,7 @@ def inventory_history_wide_matrix(
     return {
         "loaded": True,
         "dates": date_strs,
+        "date_totals": date_totals,
         "rows": rows,
         "total": total,
         "limit": int(limit),

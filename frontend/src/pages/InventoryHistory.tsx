@@ -79,6 +79,7 @@ export default function InventoryHistory() {
   })
 
   const dates = matrixQ.data?.dates ?? []
+  const dateTotals = matrixQ.data?.date_totals ?? []
   const matrixRows = matrixQ.data?.rows ?? []
   const totalSkus = matrixQ.data?.total ?? 0
   const inStockMin = matrixQ.data?.in_stock_min_qty ?? 1
@@ -288,6 +289,25 @@ export default function InventoryHistory() {
                           {formatDateCol(d)}
                         </th>
                       ))}
+                    </tr>
+                    <tr className="bg-indigo-50">
+                      <th className="sticky left-0 z-20 bg-indigo-50 border border-gray-200 px-2 py-1 text-left text-[10px] font-semibold text-indigo-900">
+                        Total inv.
+                      </th>
+                      {dates.map((d, i) => {
+                        const total = dateTotals[i] ?? 0
+                        return (
+                          <th
+                            key={`${d}-total`}
+                            className="border border-gray-200 px-1 py-1 text-center text-[10px] font-bold text-indigo-900 whitespace-nowrap tabular-nums"
+                            title={`${d}: ${total.toLocaleString()} units`}
+                          >
+                            {total > 0
+                              ? total.toLocaleString(undefined, { maximumFractionDigits: 0 })
+                              : '—'}
+                          </th>
+                        )
+                      })}
                     </tr>
                     <tr className="bg-slate-50">
                       <th className="sticky left-0 z-20 bg-slate-50 border border-gray-200 px-2 py-0.5 text-left text-[10px] text-gray-400 font-normal">

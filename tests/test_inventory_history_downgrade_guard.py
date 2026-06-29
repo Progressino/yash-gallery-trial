@@ -103,7 +103,7 @@ def test_authoritative_cap_date_never_exceeds_upload_end():
         dih.read_daily_inventory_history_disk_meta = orig
 
 
-def test_authoritative_cap_ignores_newer_snapshot_than_matrix():
+def test_authoritative_cap_includes_daily_snapshot_beyond_wide_matrix():
     from backend.session import AppSession
     import backend.services.daily_inventory_history as dih
 
@@ -119,9 +119,51 @@ def test_authoritative_cap_ignores_newer_snapshot_than_matrix():
     }
     try:
         cap = dih.inventory_history_authoritative_cap_date(sess)
-        assert str(cap.date()) == "2026-06-26"
+        assert str(cap.date()) == "2026-06-27"
     finally:
         dih.read_daily_inventory_history_disk_meta = orig
+
+
+def test_snapshot_extends_history_beyond_wide_matrix_end():
+    from backend.session import AppSession
+    from backend.services.daily_inventory_history import (
+        refresh_inventory_history_rollforward,
+    )
+
+    sess = AppSession()
+    hist = _hist("SKU-A", "2026-06-25", 5)
+    sess.daily_inventory_history_df = hist
+    sess.daily_inventory_history_matrix_max_date = "2026-06-25"
+    sess.inventory_snapshot_date = "2026-06-27"
+    sess.inventory_df_variant = __import__("pandas").DataFrame(
+        {"OMS_SKU": ["SKU-A"], "OMS_Inventory": [42.0], "Amazon_Inventory": [0.0]}
+    )
+    result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+    assert result.get("ok") is True
+    assert result.get("snapshot_appended") is True
+    out = sess.daily_inventory_history_df
+    max_d = str(__import__("pandas").to_datetime(out["Date"]).max().date())
+    assert max_d == "2026-06-27"
+    snap_row = out[
+        (__import__("pandas").to_datetime(out["Date"]).dt.normalize() == __import__("pandas").Timestamp("2026-06-27"))
+        & (out["OMS_SKU"].astype(str) == "SKU-A")
+    ]
+    assert not snap_row.empty
+    assert float(snap_row.iloc[0]["Qty"]) == 42.0
+
+
+def test_wide_matrix_includes_date_totals():
+    from backend.services.daily_inventory_history import inventory_history_wide_matrix
+
+    df = __import__("pandas").DataFrame(
+        {
+            "OMS_SKU": ["A", "A", "B", "B"],
+            "Date": ["2026-06-24", "2026-06-25", "2026-06-24", "2026-06-25"],
+            "Qty": [10.0, 20.0, 5.0, 15.0],
+        }
+    )
+    wide = inventory_history_wide_matrix(df, days=30)
+    assert wide["date_totals"] == [15.0, 35.0]
 
 
 def test_inventory_sheet_end_date_from_filename():

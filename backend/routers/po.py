@@ -83,6 +83,7 @@ def _inventory_matrix_payload(
             "loaded": False,
             "message": str(e),
             "dates": [],
+            "date_totals": [],
             "rows": [],
             "total": 0,
             "limit": int(limit),

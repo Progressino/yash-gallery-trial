@@ -1116,6 +1116,7 @@ export async function getPoDailyInventoryHistoryMatrix(
     ok: boolean
     loaded: boolean
     dates: string[]
+    date_totals?: number[]
     rows: InventoryHistoryMatrixRow[]
     total: number
     limit: number

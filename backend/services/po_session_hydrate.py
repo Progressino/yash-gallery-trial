@@ -344,7 +344,6 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
 
     from .daily_inventory_history import (
         apply_daily_inventory_history_meta,
-        inventory_history_authoritative_cap_date,
         inventory_history_max_date,
         read_daily_inventory_history_disk_meta,
         recanonicalize_inventory_history_skus,
@@ -364,37 +363,52 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
                 _main._warm_cache["daily_inventory_history_df"] = df.copy()
 
     mx = inventory_history_max_date(df)
-    cap = inventory_history_authoritative_cap_date(sess)
     snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
     snap_ts = pd.Timestamp(snap).normalize() if len(snap) == 10 else None
-    # Only fill a gap up to the matrix upload end — never add a column after the wide sheet.
-    if mx is not None and snap_ts is not None and snap_ts > mx and snap_ts <= cap:
+    # Fill gap with sales roll-forward and append daily snapshot when newer than matrix tail.
+    if mx is not None and snap_ts is not None and snap_ts > mx:
         try:
             result = refresh_inventory_history_rollforward(
                 sess, cap_date=snap_ts, include_snapshot=True
             )
             if result.get("ok"):
                 df = getattr(sess, "daily_inventory_history_df", None)
+                mx = inventory_history_max_date(df)
                 try:
                     _main.sync_daily_inventory_history_sidecar(sess)
                 except Exception:
                     pass
         except Exception:
             _log.exception("inventory history roll-forward on read failed")
-    elif mx is not None and mx.normalize() > cap.normalize():
-        # Trim any synthetic rows beyond authoritative upload end (e.g. prior today roll-forward).
-        from .daily_inventory_history import filter_inventory_history_window
-
-        trimmed = filter_inventory_history_window(
-            df,
-            days=3650,
-            end_date=str(cap.date()),
+    else:
+        from .daily_inventory_history import (
+            filter_inventory_history_window,
+            inventory_history_matrix_cap_date,
         )
-        if _df_row_count(trimmed) > 0 and inventory_history_max_date(trimmed) != mx:
-            sess.daily_inventory_history_df = trimmed
-            if not _main._warm_cache:
-                _main._warm_cache = {}
-            _main._warm_cache["daily_inventory_history_df"] = trimmed.copy()
+
+        matrix_cap = inventory_history_matrix_cap_date(sess)
+        if mx is not None and matrix_cap is not None and mx.normalize() > matrix_cap.normalize():
+            # Trim synthetic rows past wide-matrix end unless a daily snapshot extends the sheet.
+            allow_through = matrix_cap
+            if snap_ts is not None and snap_ts > matrix_cap:
+                allow_through = snap_ts
+            sess_mx = str(getattr(sess, "daily_inventory_history_matrix_max_date", "") or "").strip()[:10]
+            if len(sess_mx) == 10:
+                try:
+                    allow_through = max(allow_through, pd.Timestamp(sess_mx).normalize())
+                except Exception:
+                    pass
+            if mx.normalize() > allow_through.normalize():
+                trimmed = filter_inventory_history_window(
+                    df,
+                    days=3650,
+                    end_date=str(allow_through.date()),
+                )
+                if _df_row_count(trimmed) > 0 and inventory_history_max_date(trimmed) != mx:
+                    sess.daily_inventory_history_df = trimmed
+                    if not _main._warm_cache:
+                        _main._warm_cache = {}
+                    _main._warm_cache["daily_inventory_history_df"] = trimmed.copy()
 
     disk_meta = read_daily_inventory_history_disk_meta()
     if isinstance(disk_meta, dict) and disk_meta.get("daily_inventory_history_uploaded_at"):
