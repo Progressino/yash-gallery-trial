@@ -656,6 +656,42 @@ def filter_inventory_history_window(
     return work.loc[mask].reset_index(drop=True)
 
 
+def filter_inventory_history_view(
+    df: pd.DataFrame,
+    *,
+    days: int | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Keep rows for the last ``days`` snapshot dates (not empty calendar days).
+
+    Used by Inv History UI so a June snapshot after a May wide matrix still shows
+  full May columns instead of a single day in a calendar 30-day window.
+    """
+    if df is None or df.empty or "Date" not in df.columns:
+        return df if df is not None else pd.DataFrame(columns=_TALL_COLS)
+    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
+    if span <= 0:
+        return df.copy()
+    if end_date:
+        try:
+            end = pd.Timestamp(str(end_date)[:10]).normalize()
+        except Exception:
+            end = pd.Timestamp(inventory_history_view_end_date(df))
+    else:
+        end = pd.Timestamp(inventory_history_view_end_date(df))
+    if pd.isna(end):
+        end = today_ist_timestamp()
+    work = df.copy()
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work = work.dropna(subset=["Date"])
+    work = work[work["Date"] <= end]
+    if work.empty:
+        return work
+    unique_dates = sorted(work["Date"].unique())
+    keep_dates = set(unique_dates[-span:])
+    return work[work["Date"].isin(keep_dates)].reset_index(drop=True)
+
+
 def should_skip_inventory_history_extend(
     sheet_max: pd.Timestamp | None,
     inv_window_end: pd.Timestamp,
@@ -1452,7 +1488,7 @@ def inventory_history_summary(
     days: int | None = None,
     end_date: str | None = None,
 ) -> dict:
-    view = filter_inventory_history_window(df, days=days, end_date=end_date)
+    view = filter_inventory_history_view(df, days=days, end_date=end_date)
     if view is None or view.empty:
         return {
             "loaded": False,
@@ -1475,7 +1511,7 @@ def inventory_history_summary(
         "min_date": str(pd.Timestamp(min_d).date()) if pd.notna(min_d) else "",
         "max_date": str(pd.Timestamp(max_d).date()) if pd.notna(max_d) else "",
         "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
-        "window_end": str(end_date or today_ist_timestamp().date()),
+        "window_end": str(pd.Timestamp(max_d).date()) if pd.notna(max_d) else str(end_date or today_ist_timestamp().date()),
     }
 
 
@@ -1600,7 +1636,7 @@ def inventory_history_wide_matrix(
     if df is None or df.empty:
         return empty
 
-    work = filter_inventory_history_window(df, days=days, end_date=end_date)
+    work = filter_inventory_history_view(df, days=days, end_date=end_date)
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work = work.dropna(subset=["Date", "OMS_SKU"])
     if work.empty:
@@ -1653,7 +1689,7 @@ def inventory_history_wide_matrix(
         "offset": start,
         "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
         "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
-        "window_end": str(end_date or today_ist_timestamp().date()),
+        "window_end": str(date_strs[-1]) if date_strs else str(end_date or today_ist_timestamp().date()),
     }
 
 
@@ -2160,6 +2196,7 @@ __all__ = [
     "ensure_daily_inventory_coverage_light",
     "inventory_history_is_newer_than",
     "filter_inventory_history_window",
+    "filter_inventory_history_view",
     "inventory_history_summary",
     "list_inventory_history_dates",
     "inventory_rows_for_date",

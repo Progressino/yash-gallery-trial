@@ -505,6 +505,37 @@ def test_disk_reconcile_rollforward_preserves_pre_window_days(tmp_path, monkeypa
     assert len(days) == 31
 
 
+def test_inventory_history_view_uses_data_days_not_calendar_gap():
+    """May matrix + June snapshot must show ~30 May columns, not one June day."""
+    from backend.services.daily_inventory_history import (
+        filter_inventory_history_view,
+        inventory_history_wide_matrix,
+    )
+
+    may = _hist("SKU-A", "2026-05-30", 30)
+    may["Source"] = "uploaded"
+    june = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"],
+            "Date": pd.Timestamp("2026-06-29"),
+            "Qty": [99.0],
+            "Source": "snapshot",
+        }
+    )
+    df = pd.concat([may, june], ignore_index=True)
+
+    view = filter_inventory_history_view(df, days=30)
+    days = sorted(pd.to_datetime(view["Date"]).dt.strftime("%Y-%m-%d").unique())
+    assert len(days) == 30
+    assert days[0] == "2026-05-02"
+    assert days[-1] == "2026-06-29"
+
+    wide = inventory_history_wide_matrix(df, days=30, limit=10)
+    assert len(wide["dates"]) == 30
+    assert wide["dates"][0] == "2026-05-02"
+    assert wide["dates"][-1] == "2026-06-29"
+
+
 def test_restore_inventory_history_merges_github_backup(tmp_path, monkeypatch):
     from backend.services import daily_inventory_history as dih
 

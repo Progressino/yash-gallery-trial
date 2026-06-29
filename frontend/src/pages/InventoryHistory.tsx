@@ -121,7 +121,7 @@ export default function InventoryHistory() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">📅 Inventory History</h1>
           <p className="text-sm text-gray-600 mt-1 max-w-2xl">
-            Last {HISTORY_WINDOW_DAYS} days of daily inventory (wide matrix from Upload → History &amp; setup,
+            Last {HISTORY_WINDOW_DAYS} snapshot days of daily inventory (wide matrix from Upload → History &amp; setup,
             or snapshot columns from Upload → Daily uploads). Use this matrix to verify on-hand counts match PO{' '}
             <code className="font-mono text-xs">Eff_Days</code>.
           </p>
