@@ -1603,9 +1603,12 @@ def repair_inventory_history_spikes(
     sales = _sales_net_by_sku_day(sales_df)
     actions: list[str] = []
     out = work.copy()
-    for i in range(1, len(dates)):
-        d_prev = pd.Timestamp(dates[i - 1]).normalize()
-        d_next = pd.Timestamp(dates[i]).normalize()
+    # Only repair the latest snapshot column — earlier matrix uploads can ramp SKU
+    # coverage without being bad data.
+    pairs = [(dates[-2], dates[-1])]
+    for d_prev, d_next in pairs:
+        d_prev = pd.Timestamp(d_prev).normalize()
+        d_next = pd.Timestamp(d_next).normalize()
         prev_rows = out[out["Date"] == d_prev]
         next_rows = out[out["Date"] == d_next]
         if prev_rows.empty or next_rows.empty:
