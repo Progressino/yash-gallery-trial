@@ -805,8 +805,8 @@ def refresh_inventory_history_rollforward(
         snap_ts = pd.Timestamp(snap_date).normalize()
         if wide_end is not None and snap_ts > pd.Timestamp(wide_end).normalize():
             fill_cap = snap_ts - pd.Timedelta(days=1)
-            sheet_max = inventory_history_max_date(merged)
-            if sheet_max is not None and fill_cap > pd.Timestamp(sheet_max).normalize():
+            wide_ts = pd.Timestamp(wide_end).normalize()
+            if fill_cap > wide_ts:
                 merged = extend_history_with_sales(merged, sales_df=sales, cap_date=fill_cap)
                 rolled = True
         variant = getattr(sess, "inventory_df_variant", None)
