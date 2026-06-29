@@ -8,6 +8,7 @@ from backend.services.upload_file_sniff import (
     check_files_for_upload_target,
     check_upload_target,
     classify_upload_document,
+    partition_files_by_upload_target,
 )
 
 
@@ -74,6 +75,22 @@ def test_sku_status_rejects_existing_po_headers():
     msg = check_upload_target("sku_status_lead", csv.encode(), "existing_po_pipeline.xlsx")
     assert msg is not None
     assert "Existing PO" in msg
+
+
+def test_sales_rar_classified_as_daily_sales():
+    cls = classify_upload_document(b"Rar!\x1a\x07\x00", "Sales 27-28-6-26.rar")
+    assert cls["category"] == "daily_sales"
+    assert cls["confidence"] == "high"
+    assert check_upload_target("daily_sales", b"Rar!\x1a\x07\x00", "Sales 27-28-6-26.rar") is None
+
+
+def test_partition_routes_inventory_from_daily_sales_batch():
+    sales_rar = ("Sales 27-28-6-26.rar", b"Rar!\x1a\x07\x00")
+    oms_csv = ("OMS-inventory.csv", b"Item SkuCode,Buffer Stock\nSKU-A,1\n")
+    buckets, notes = partition_files_by_upload_target([sales_rar, oms_csv], "daily_sales")
+    assert sales_rar in buckets.get("daily_sales", [])
+    assert oms_csv in buckets.get("snapshot_inventory", [])
+    assert notes
 
 
 def test_daily_sales_batch_rejects_return_file():

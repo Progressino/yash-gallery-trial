@@ -647,6 +647,37 @@ def persist_po_sidecars_to_disk() -> None:
                         continue
                 except Exception:
                     pass
+            if key == "daily_inventory_history_df" and os.path.exists(path):
+                try:
+                    from .services.daily_inventory_history import (
+                        inventory_history_is_newer_than,
+                        inventory_history_max_date,
+                        read_daily_inventory_history_disk_meta,
+                    )
+
+                    old = pd.read_parquet(path)
+                    old_max = inventory_history_max_date(old)
+                    new_max = inventory_history_max_date(df)
+                    disk_meta = read_daily_inventory_history_disk_meta() or {}
+                    warm_meta = _warm_cache.get(_DAILY_INV_META_WARM_KEY)
+                    warm_meta = warm_meta if isinstance(warm_meta, dict) else {}
+                    allow = new_max is not None and old_max is not None and new_max > old_max
+                    if not allow and not inventory_history_is_newer_than(
+                        df,
+                        old,
+                        incoming_uploaded_at=str(
+                            warm_meta.get("daily_inventory_history_uploaded_at") or ""
+                        ),
+                        existing_uploaded_at=str(
+                            disk_meta.get("daily_inventory_history_uploaded_at") or ""
+                        ),
+                    ):
+                        log.warning(
+                            "Skipping daily inventory sidecar persist — warm cache matrix is older than disk"
+                        )
+                        continue
+                except Exception:
+                    pass
             _coerce_df_for_parquet(df).to_parquet(path, index=False)
             keys.add(key)
         manifest["keys"] = sorted(keys)
@@ -684,7 +715,7 @@ def sync_daily_inventory_history_sidecar(sess) -> None:
     disk_meta = read_daily_inventory_history_disk_meta() or {}
     sess_meta = daily_inventory_history_meta_bundle(sess)
 
-    from .daily_inventory_history import inventory_history_max_date
+    from .services.daily_inventory_history import inventory_history_max_date
 
     in_max = inventory_history_max_date(df)
     warm_max = inventory_history_max_date(warm_df)

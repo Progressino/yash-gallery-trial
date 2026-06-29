@@ -388,12 +388,15 @@ async def po_upload_daily_inventory_history(
         return {"ok": False, "message": "No session id."}
 
     if getattr(sess, "daily_inventory_upload_status", "idle") == "running":
-        return {
-            "ok": True,
-            "status": "running",
-            "message": getattr(sess, "daily_inventory_upload_message", "")
-            or "Daily inventory upload already in progress…",
-        }
+        from ..services.daily_inventory_upload_run import clear_stuck_daily_inventory_upload
+
+        if not clear_stuck_daily_inventory_upload(sess, force=False):
+            return {
+                "ok": True,
+                "status": "running",
+                "message": getattr(sess, "daily_inventory_upload_message", "")
+                or "Daily inventory upload already in progress…",
+            }
 
     raw = await file.read()
     if not raw:
@@ -413,11 +416,14 @@ async def po_upload_daily_inventory_history(
     except Exception:
         logging.getLogger(__name__).exception("daily inventory history upload sniff failed")
 
+    import time
+
     from ..concurrency import INVENTORY_EXECUTOR
     from ..services.daily_inventory_upload_run import background_daily_inventory_upload
 
     sess.daily_inventory_upload_status = "running"
     sess.daily_inventory_upload_message = "Upload received — queued for parse…"
+    sess.daily_inventory_upload_started = time.time()
     sess.daily_inventory_upload_result = {}
     INVENTORY_EXECUTOR.submit(
         background_daily_inventory_upload,
@@ -429,6 +435,27 @@ async def po_upload_daily_inventory_history(
         "ok": True,
         "status": "running",
         "message": "Parsing daily inventory in background — this may take 1–3 minutes for large files.",
+    }
+
+
+@router.post("/daily-inventory-history/reset-stuck")
+async def reset_stuck_daily_inventory_upload(request: Request):
+    """Clear a session stuck on daily_inventory_upload_status=running."""
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    from ..services.daily_inventory_upload_run import clear_stuck_daily_inventory_upload
+
+    cleared = clear_stuck_daily_inventory_upload(sess, force=True)
+    return {
+        "ok": True,
+        "cleared": cleared,
+        "daily_inventory_upload_status": getattr(sess, "daily_inventory_upload_status", "idle"),
+        "message": (
+            "Cleared stuck daily inventory upload — you can upload again."
+            if cleared
+            else "No stuck daily inventory upload to clear."
+        ),
     }
 
 

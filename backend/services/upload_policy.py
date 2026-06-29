@@ -15,6 +15,7 @@ _DAILY_UPLOAD_PREFIXES = (
     "/api/upload/daily",
     "/api/upload/build-sales",
     "/api/upload/inventory-auto",
+    "/api/upload/chunk",
     "/api/po/returns/import-file",
 )
 

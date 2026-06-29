@@ -21,6 +21,8 @@ def test_clerk_may_daily_auto_when_locked(monkeypatch):
     monkeypatch.setenv("UPLOAD_HISTORICAL_LOCKED", "1")
     assert check_upload_api_access("Clerk", "POST", "/api/upload/daily-auto") is None
     assert check_upload_api_access("Clerk", "POST", "/api/upload/inventory-auto") is None
+    assert check_upload_api_access("Clerk", "POST", "/api/upload/chunk/init") is None
+    assert check_upload_api_access("Clerk", "POST", "/api/upload/chunk/complete") is None
     assert check_upload_api_access("Clerk", "POST", "/api/po/returns/import-file") is None
     err = check_upload_api_access("Clerk", "POST", "/api/po/daily-inventory-history")
     assert err is not None

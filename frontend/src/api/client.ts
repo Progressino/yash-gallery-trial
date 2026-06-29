@@ -1052,6 +1052,15 @@ export async function waitForDailyInventoryUpload(
   throw new Error('Daily inventory upload timed out — try again in a minute.')
 }
 
+export async function resetStuckDailyInventoryUpload(): Promise<{
+  ok: boolean
+  cleared: boolean
+  message: string
+}> {
+  const { data } = await api.post('/po/daily-inventory-history/reset-stuck', {}, { timeout: 30_000 })
+  return data
+}
+
 export type DailyInventoryHistoryDate = { date: string; rows: number; skus: number }
 
 export async function getPoDailyInventoryHistoryDates(limit = 120) {

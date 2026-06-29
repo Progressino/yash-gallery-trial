@@ -31,7 +31,7 @@ _HISTORY_FILENAME_RE = re.compile(
     re.I,
 )
 _SNAPSHOT_FILENAME_RE = re.compile(
-    r"(^oms\b|\boms[\s_\-]|flipkart|myntra|amazon|ppmp|seller[\s_\-]*inventory|current[\s_\-]*inventory|\.rar$)",
+    r"(^oms\b|\boms[\s_\-]|flipkart|myntra|amazon|ppmp|seller[\s_\-]*inventory|current[\s_\-]*inventory)",
     re.I,
 )
 _RETURN_FILENAME_RE = re.compile(
@@ -39,7 +39,7 @@ _RETURN_FILENAME_RE = re.compile(
     re.I,
 )
 _SALES_FILENAME_RE = re.compile(
-    r"(shipment|seller.?orders|orders_\d{4}|mtr|tax[\s_\-]*report|b2c|b2b|daily[\s_\-]*order)",
+    r"(shipment|seller.?orders|orders_\d{4}|mtr|tax[\s_\-]*report|b2c|b2b|daily[\s_\-]*order|\bsales\b)",
     re.I,
 )
 _EXISTING_PO_FILENAME_RE = re.compile(
@@ -220,7 +220,7 @@ def _score_snapshot_inventory(text: str, filename: str, date_cols: int) -> int:
     )
     if date_cols < 2 and ("item skucode" in text or "buffer stock" in text):
         score += 3
-    if fn.endswith(".rar") and "return" not in fn and "mtr" not in fn:
+    if fn.endswith(".rar") and "return" not in fn and "mtr" not in fn and "sales" not in fn_l:
         score += 1
     return score
 
@@ -276,10 +276,11 @@ def classify_upload_document(raw: bytes, filename: str = "") -> dict:
     if raw[:6] == _RAR_MAGIC or fn_l.endswith(".rar"):
         if _RETURN_FILENAME_RE.search(fn) or "return data" in fn_l:
             return {"category": "returns", "confidence": "high", "date_columns": 0}
-        if _SALES_FILENAME_RE.search(fn) or "mtr" in fn_l:
-            return {"category": "daily_sales", "confidence": "medium", "date_columns": 0}
-        if "inventory" in fn_l or _score_snapshot_inventory(text, fn, date_cols) >= 3:
+        if _SALES_FILENAME_RE.search(fn) or "mtr" in fn_l or re.search(r"\bsales\b", fn_l):
+            return {"category": "daily_sales", "confidence": "high", "date_columns": 0}
+        if "inventory" in fn_l or re.search(r"\binv(?:entory)?\b", fn_l):
             return {"category": "snapshot_inventory", "confidence": "medium", "date_columns": 0}
+        # Generic RAR — let daily-auto / inventory-auto inspect archive contents.
         return {"category": "unknown", "confidence": "low", "date_columns": 0}
 
     history_fn = bool(_HISTORY_FILENAME_RE.search(fn))
@@ -448,6 +449,39 @@ def check_files_for_upload_target(
         if msg:
             return msg
     return None
+
+
+_DAILY_TAB_TARGETS = frozenset({"daily_sales", "snapshot_inventory", "returns"})
+
+
+def partition_files_by_upload_target(
+    file_parts: list[tuple[str, bytes]],
+    requested: UploadTarget,
+) -> tuple[dict[UploadTarget, list[tuple[str, bytes]]], list[str]]:
+    """Split a batch across upload cards on the Daily uploads tab (auto-route, never block)."""
+    buckets: dict[UploadTarget, list[tuple[str, bytes]]] = {}
+    notes: list[str] = []
+
+    for fname, raw in file_parts:
+        cls = classify_upload_document(raw, fname)
+        cat = cls["category"]
+        conf = cls["confidence"]
+        routed: UploadTarget | None = None
+        if cat != "unknown" and conf != "low":
+            routed = _CATEGORY_TO_TARGET.get(cat)  # type: ignore[arg-type]
+
+        if (
+            routed
+            and routed != requested
+            and requested in _DAILY_TAB_TARGETS
+            and routed in _DAILY_TAB_TARGETS
+        ):
+            buckets.setdefault(routed, []).append((fname, raw))
+            notes.append(f"“{fname}” → {_plain(_TARGET_LABELS[routed])}")
+        else:
+            buckets.setdefault(requested, []).append((fname, raw))
+
+    return buckets, notes
 
 
 # Legacy helpers (inventory history ↔ snapshot)

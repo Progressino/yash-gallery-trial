@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from datetime import datetime
 from io import BytesIO
 from typing import Any, Callable
@@ -13,6 +14,28 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 _IST = ZoneInfo("Asia/Kolkata")
+
+# Auto-clear stuck wide-matrix uploads after this many seconds (default 6 min).
+_DAILY_INV_UPLOAD_STUCK_SEC = int(os.environ.get("DAILY_INV_UPLOAD_STUCK_SEC", "360"))
+
+
+def clear_stuck_daily_inventory_upload(sess, *, force: bool = False) -> bool:
+    """Reset a session stuck in daily_inventory_upload_status=running."""
+    if getattr(sess, "daily_inventory_upload_status", "idle") != "running":
+        return False
+    started = float(getattr(sess, "daily_inventory_upload_started", 0) or 0)
+    age = time.time() - started if started > 0 else 999999
+    if not force and age < _DAILY_INV_UPLOAD_STUCK_SEC:
+        return False
+    msg = (
+        "Previous daily inventory upload did not finish (timed out or server was busy). "
+        "Try uploading again."
+    )
+    sess.daily_inventory_upload_status = "error"
+    sess.daily_inventory_upload_message = msg
+    sess.daily_inventory_upload_started = 0.0
+    sess.daily_inventory_upload_result = {"ok": False, "message": msg}
+    return True
 
 # PO engine only uses recent history for Eff_Days / roll-forward (default: last 30 calendar
 # days in the sheet, anchored on the latest snapshot date). Older columns are dropped at
@@ -230,6 +253,7 @@ def background_daily_inventory_upload(
 
     sess.daily_inventory_upload_status = "running"
     sess.daily_inventory_upload_message = "Starting parse…"
+    sess.daily_inventory_upload_started = time.time()
     lock_held = _acquire_daily_inventory_memory_lock(sess, session_id, _progress)
     try:
         result = execute_daily_inventory_upload(sess, raw, filename, on_progress=_progress)

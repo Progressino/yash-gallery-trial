@@ -8,7 +8,7 @@ import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage, restoreFullFromServer,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadFinishingReceipt, uploadDailyAuto, uploadPoReturnsImport,
-  uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile, uploadPoManualIntransitSheet,
+  uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile, uploadPoManualIntransitSheet, resetStuckDailyInventoryUpload,
   getCoverageResilient,
   type ManualIntransitParseReport,
   waitForDailyAutoIngest, waitForReturnsImport, waitForSalesRebuild, waitForTier1Bulk, verifyDailyUpload,
@@ -27,9 +27,8 @@ import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner
 import { downloadReconciliationReportCsv } from '../utils/reconciliationReportExport'
 import {
   checkFileForUploadTarget,
-  checkFilesForUploadTarget,
-  classifyUploadFilename,
   misplacedFilesForTarget,
+  partitionFilesByUploadTarget,
 } from '../lib/uploadFileSniff'
 
 type Toast = { type: 'success' | 'error'; msg: string }
@@ -524,17 +523,30 @@ export default function Upload() {
   }
 
   const handleDailyAuto = async (files: File[]) => {
-    const wrong = checkFilesForUploadTarget(files, 'daily_sales')
-    if (wrong) {
-      showToast('error', wrong, 14000)
-      return
+    const { buckets, routedNotes } = partitionFilesByUploadTarget(files, 'daily_sales')
+    const salesFiles = buckets.daily_sales ?? []
+    const invFiles = buckets.snapshot_inventory ?? []
+    if (routedNotes.length) {
+      showToast('success', `Auto-routing: ${routedNotes.join('; ')}`, 12_000)
     }
     setL('daily', true)
     setBuildingMsg('')
     setChunkProgress(null)
     try {
       await withUploadGuard(async () => {
-        const res = await uploadDailyAuto(files, p => {
+        if (invFiles.length) {
+          const invRes = await uploadInventoryAuto(invFiles)
+          if (invRes.ok && invRes.ingest_async) {
+            showToast('success', invRes.message || 'Inventory files queued on server…', 6000)
+          }
+        }
+        if (!salesFiles.length) {
+          if (invFiles.length) {
+            await refresh()
+          }
+          return
+        }
+        const res = await uploadDailyAuto(salesFiles, p => {
           setBuildingMsg(p.message)
           if (p.bytesTotal > 0) {
             if (p.phase === 'complete') {
@@ -743,6 +755,18 @@ export default function Upload() {
     } catch (e: unknown) {
       showToast('error', e instanceof Error ? e.message : 'Could not reset')
     } finally { setL('inv_reset', false) }
+  }
+
+  const handleClearStuckDailyInv = async () => {
+    setL('po_daily_inv_reset', true)
+    try {
+      const res = await resetStuckDailyInventoryUpload()
+      showToast('success', res.message)
+      setBuildingMsg('')
+      await refresh({ light: true })
+    } catch (e: unknown) {
+      showToast('error', e instanceof Error ? e.message : 'Could not reset')
+    } finally { setL('po_daily_inv_reset', false) }
   }
 
   const anyLoaded = coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart
@@ -1441,6 +1465,14 @@ export default function Upload() {
                 <span className="flex-1 truncate">
                   {buildingMsg || coverage.daily_inventory_upload_message || 'Parsing daily inventory matrix on server…'}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => void handleClearStuckDailyInv()}
+                  disabled={loading['po_daily_inv_reset']}
+                  className="shrink-0 px-2.5 py-0.5 rounded border border-blue-300 bg-white text-blue-900 hover:bg-blue-100 disabled:opacity-50 text-xs"
+                >
+                  {loading['po_daily_inv_reset'] ? 'Clearing…' : 'Clear stuck'}
+                </button>
               </div>
             </div>
           )}
@@ -1884,10 +1916,11 @@ export default function Upload() {
             disabled={!coverage.sku_mapping || coverage.inventory_upload_status === 'running'}
             uploading={loading['inv']}
             onUpload={async (files) => {
-              const wrong = checkFilesForUploadTarget(files, 'snapshot_inventory')
-              if (wrong) {
-                showToast('error', wrong, 14000)
-                return
+              const { buckets, routedNotes } = partitionFilesByUploadTarget(files, 'snapshot_inventory')
+              const invFiles = buckets.snapshot_inventory ?? []
+              const salesFiles = buckets.daily_sales ?? []
+              if (routedNotes.length) {
+                showToast('success', `Auto-routing: ${routedNotes.join('; ')}`, 12_000)
               }
               invWaitAbortRef.current = false
               setL('inv', true)
@@ -1895,7 +1928,17 @@ export default function Upload() {
               setInvProgress({ pct: 0, msg: 'Uploading inventory files…', phase: 'upload' })
               try {
                 await withUploadGuard(async () => {
-                  const res = await uploadInventoryAuto(files, p => {
+                  if (salesFiles.length) {
+                    const salesRes = await uploadDailyAuto(salesFiles)
+                    if (salesRes.ok) {
+                      showToast('success', salesRes.message || 'Daily sales files queued…', 6000)
+                    }
+                  }
+                  if (!invFiles.length) {
+                    if (salesFiles.length) await refresh()
+                    return
+                  }
+                  const res = await uploadInventoryAuto(invFiles, p => {
                     setBuildingMsg(p.message)
                     if (p.bytesTotal > 0 && p.phase !== 'complete') {
                       setInvProgress({
@@ -2856,7 +2899,8 @@ function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
 }) {
   const [queued, setQueued] = useState<File[]>([])
 
-  const misplaced = misplacedFilesForTarget(queued, 'daily_sales')
+  const partition = partitionFilesByUploadTarget(queued, 'daily_sales')
+  const routedNotes = partition.routedNotes
 
   const onDrop = useCallback((accepted: File[]) => {
     const sales = accepted.filter(f => !_isJunkUploadFile(f.name))
@@ -2909,20 +2953,14 @@ function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
 
   const submit = async () => {
     if (!queued.length) return
-    if (misplaced.length > 0) return
     await onUpload(queued)
     setQueued([])
   }
 
   return (
     <div className="space-y-2">
-      {misplaced.length > 0 && (
-        <WrongUploadTargetBanner
-          message={
-            checkFileForUploadTarget(misplaced[0].name, 'daily_sales')
-            || `“${misplaced[0].name}” does not belong in Daily order upload.`
-          }
-        />
+      {routedNotes.length > 0 && (
+        <AutoRouteBanner notes={routedNotes} />
       )}
       <div
         {...getRootProps()}
@@ -2972,16 +3010,16 @@ function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
       {queued.length > 0 && (
         <div className="space-y-1">
           {queued.map(f => {
-            const bad = misplaced.some(m => m.name === f.name)
+            const routed = routedNotes.some(n => n.startsWith(`“${f.name}”`))
             return (
             <div
               key={f.name}
               className={`flex items-center justify-between rounded px-3 py-1.5 text-xs ${
-                bad ? 'bg-rose-50 border border-rose-200' : 'bg-gray-50'
+                routed ? 'bg-blue-50 border border-blue-200' : 'bg-gray-50'
               }`}
             >
-              <span className={`truncate max-w-xs ${bad ? 'text-rose-800 font-medium' : 'text-gray-700'}`}>
-                {bad ? '⚠️ ' : ''}{f.name}
+              <span className={`truncate max-w-xs ${routed ? 'text-blue-800 font-medium' : 'text-gray-700'}`}>
+                {routed ? '↪ ' : ''}{f.name}
               </span>
               <button onClick={() => remove(f.name)} className="text-gray-400 hover:text-red-500 ml-2 shrink-0">✕</button>
             </div>
@@ -2989,7 +3027,7 @@ function DailyDropzone({ uploading, chunkProgress, onUpload, onReject }: {
           })}
           <button
             onClick={submit}
-            disabled={uploading || misplaced.length > 0}
+            disabled={uploading}
             className="w-full mt-1 py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
           >
             {uploading ? 'Uploading…' : `⬆ Upload ${queued.length} file${queued.length > 1 ? 's' : ''}`}
@@ -3111,6 +3149,20 @@ function DailyHistory({ allowDelete = false }: { allowDelete?: boolean }) {
   )
 }
 
+function AutoRouteBanner({ notes }: { notes: string[] }) {
+  return (
+    <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+      <p className="font-semibold">Auto-routing on upload</p>
+      <p className="mt-1">These files will be sent to the correct handler automatically:</p>
+      <ul className="mt-1 list-disc list-inside space-y-0.5">
+        {notes.map(n => (
+          <li key={n}>{n}</li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 function WrongUploadTargetBanner({ message }: { message: string }) {
   return (
     <div className="rounded-lg border-2 border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-900">
@@ -3127,7 +3179,8 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
 }) {
   const [queued, setQueued] = useState<File[]>([])
 
-  const misplaced = misplacedFilesForTarget(queued, 'snapshot_inventory')
+  const partition = partitionFilesByUploadTarget(queued, 'snapshot_inventory')
+  const routedNotes = partition.routedNotes
 
   const onDrop = useCallback((accepted: File[]) => {
     setQueued(prev => {
@@ -3153,21 +3206,13 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
 
   const submit = async () => {
     if (!queued.length) return
-    if (misplaced.length > 0) return
     await onUpload(queued)
     setQueued([])
   }
 
   return (
     <div className="space-y-2">
-      {misplaced.length > 0 && (
-        <WrongUploadTargetBanner
-          message={
-            checkFileForUploadTarget(misplaced[0].name, 'snapshot_inventory')
-            || `“${misplaced[0].name}” does not belong in Snapshot inventory.`
-          }
-        />
-      )}
+      {routedNotes.length > 0 && <AutoRouteBanner notes={routedNotes} />}
       <div
         {...getRootProps()}
         className={`border-2 border-dashed rounded-lg p-5 text-center cursor-pointer transition-colors
@@ -3188,17 +3233,16 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
       {queued.length > 0 && (
         <ul className="text-xs space-y-1">
           {queued.map(f => {
-            const detected = classifyUploadFilename(f.name)
-            const bad = detected !== 'neutral' && misplaced.some(m => m.name === f.name)
+            const routed = routedNotes.some(n => n.startsWith(`“${f.name}”`))
             return (
             <li
               key={f.name}
               className={`flex items-center justify-between rounded px-2 py-1 ${
-                bad ? 'bg-rose-50 border border-rose-200' : 'bg-gray-50'
+                routed ? 'bg-blue-50 border border-blue-200' : 'bg-gray-50'
               }`}
             >
-              <span className={`truncate ${bad ? 'text-rose-800 font-medium' : 'text-gray-700'}`}>
-                {bad ? '⚠️ ' : ''}{f.name}
+              <span className={`truncate ${routed ? 'text-blue-800 font-medium' : 'text-gray-700'}`}>
+                {routed ? '↪ ' : ''}{f.name}
               </span>
               <button onClick={() => remove(f.name)} className="ml-2 text-gray-400 hover:text-red-500">✕</button>
             </li>
@@ -3208,7 +3252,7 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
       )}
       <button
         onClick={submit}
-        disabled={!queued.length || uploading || disabled || misplaced.length > 0}
+        disabled={!queued.length || uploading || disabled}
         className="w-full py-2 rounded-lg text-xs font-semibold text-white bg-[#002B5B] hover:bg-blue-800 disabled:opacity-40"
       >
         {uploading ? 'Uploading…' : `Upload Inventory${queued.length ? ` (${queued.length} file${queued.length > 1 ? 's' : ''})` : ''}`}

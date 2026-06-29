@@ -20,11 +20,11 @@ export type UploadDocCategory =
 const HISTORY_NAME =
   /inventory[\s_-]*history|daily[\s_-]*inv(?:entory)?|inv[\s_-]*matrix|inventory-matrix/i
 const SNAPSHOT_NAME =
-  /(^oms\b|\boms[\s_-]|flipkart|myntra|amazon|ppmp|seller[\s_-]*inventory|current[\s_-]*inventory|\.rar$)/i
+  /(^oms\b|\boms[\s_-]|flipkart|myntra|amazon|ppmp|seller[\s_-]*inventory|current[\s_-]*inventory)/i
 const RETURN_NAME =
   /return|seller_returns|tcs_sales_return|last\s*\d+\s*days?\s*return|return\s*data/i
 const SALES_NAME =
-  /shipment|seller.?orders|orders_\d{4}|mtr|tax[\s_-]*report|b2c|b2b|daily[\s_-]*order/i
+  /shipment|seller.?orders|orders_\d{4}|mtr|tax[\s_-]*report|b2c|b2b|daily[\s_-]*order|\bsales\b/i
 const EXISTING_PO_NAME =
   /existing[\s_-]*po|open[\s_-]*po|pipeline[\s_-]*po|po[\s_-]*pipeline/i
 const SKU_STATUS_NAME =
@@ -183,4 +183,35 @@ export function misplacedFilesForTarget(files: File[], target: UploadTarget): Fi
     const detected = classifyUploadFilename(f.name)
     return detected !== 'neutral' && BLOCKED[target].has(detected)
   })
+}
+
+const DAILY_TAB_TARGETS = new Set<UploadTarget>(['daily_sales', 'snapshot_inventory', 'returns'])
+
+/** Split files across Daily uploads cards — auto-route instead of blocking. */
+export function partitionFilesByUploadTarget(
+  files: File[],
+  requestedTarget: UploadTarget,
+): { buckets: Partial<Record<UploadTarget, File[]>>; routedNotes: string[] } {
+  const buckets: Partial<Record<UploadTarget, File[]>> = {}
+  const routedNotes: string[] = []
+
+  for (const f of files) {
+    const detected = classifyUploadFilename(f.name)
+    const routedTarget = CATEGORY_TO_TARGET[detected]
+
+    if (
+      detected !== 'neutral' &&
+      routedTarget &&
+      routedTarget !== requestedTarget &&
+      DAILY_TAB_TARGETS.has(requestedTarget) &&
+      DAILY_TAB_TARGETS.has(routedTarget)
+    ) {
+      buckets[routedTarget] = [...(buckets[routedTarget] ?? []), f]
+      routedNotes.push(`“${f.name}” → ${TARGET_SECTION[routedTarget]}`)
+    } else {
+      buckets[requestedTarget] = [...(buckets[requestedTarget] ?? []), f]
+    }
+  }
+
+  return { buckets, routedNotes }
 }

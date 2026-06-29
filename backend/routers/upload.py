@@ -918,29 +918,46 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
     sess = _resolve_upload_session(session_id)
     if sess is None:
         return
+    route_notes: list[str] = []
     try:
-        from ..services.upload_file_sniff import check_files_for_upload_target
+        from ..services.upload_file_sniff import partition_files_by_upload_target
 
-        wrong = check_files_for_upload_target("daily_sales", file_parts)
-        if wrong:
-            err_payload = {
-                "ok": False,
-                "wrong_upload_target": True,
-                "message": wrong,
-                "detected_platforms": [],
-                "warnings": [wrong],
-                "processed_files": len(file_parts),
-                "detected_files": 0,
-                "unknown_files": len(file_parts),
-            }
-            _store_daily_auto_ingest_result(sess, err_payload)
-            sess.daily_auto_ingest_status = "error"
-            sess.daily_auto_ingest_message = wrong
+        buckets, route_notes = partition_files_by_upload_target(file_parts, "daily_sales")
+        file_parts = list(buckets.get("daily_sales") or [])
+        inv_parts = list(buckets.get("snapshot_inventory") or [])
+        ret_parts = list(buckets.get("returns") or [])
+        if inv_parts:
+            INVENTORY_EXECUTOR.submit(_run_inventory_auto_from_parts, session_id, inv_parts)
+        if ret_parts:
+            file_parts = list(file_parts) + ret_parts
+        if route_notes:
+            note = "Auto-routed: " + "; ".join(route_notes)
+            _log.info("daily-auto auto-route session=%s %s", session_id[:8], note)
+            sess.daily_auto_ingest_message = note
+    except Exception:
+        _log.exception("daily-auto worker upload partition failed")
+        file_parts = file_parts
+    if not file_parts:
+        if route_notes:
+            msg = "Auto-routed to the correct upload handler — " + "; ".join(route_notes)
+            _store_daily_auto_ingest_result(
+                sess,
+                {
+                    "ok": True,
+                    "message": msg,
+                    "auto_routed": route_notes,
+                    "detected_platforms": [],
+                    "warnings": [],
+                    "processed_files": 0,
+                    "detected_files": 0,
+                    "unknown_files": 0,
+                },
+            )
+            sess.daily_auto_ingest_status = "done"
+            sess.daily_auto_ingest_message = msg
             sess.sales_rebuild_status = "idle"
             sess.sales_rebuild_message = ""
-            return
-    except Exception:
-        _log.exception("daily-auto worker upload sniff failed")
+        return
     sess.daily_auto_ingest_status = "running"
     sess.daily_auto_ingest_started = time.time()
     n = len(file_parts)
@@ -2384,22 +2401,26 @@ def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, 
     sess = _resolve_upload_session(session_id)
     if sess is None:
         return
+    route_notes: list[str] = []
     try:
-        from ..services.upload_file_sniff import check_files_for_snapshot_upload
+        from ..services.upload_file_sniff import partition_files_by_upload_target
 
-        wrong = check_files_for_snapshot_upload(file_parts)
-        if wrong:
-            sess.inventory_upload_status = "error"
-            sess.inventory_upload_progress = 0
-            sess.inventory_upload_message = wrong.replace("**", "")
-            sess.inventory_upload_result = {
-                "ok": False,
-                "wrong_upload_target": True,
-                "message": wrong.replace("**", ""),
-            }
-            return
+        buckets, route_notes = partition_files_by_upload_target(file_parts, "snapshot_inventory")
+        file_parts = list(buckets.get("snapshot_inventory") or [])
+        sales_parts = list(buckets.get("daily_sales") or [])
+        if sales_parts:
+            DAILY_UPLOAD_EXECUTOR.submit(_run_daily_auto_ingest_pipeline, session_id, sales_parts)
+        if route_notes:
+            _log.info("inventory-auto auto-route session=%s %s", session_id[:8], route_notes)
     except Exception:
-        _log.exception("inventory-auto worker upload sniff failed")
+        _log.exception("inventory-auto worker upload partition failed")
+    if not file_parts:
+        if route_notes:
+            msg = "Auto-routed to daily sales upload — " + "; ".join(route_notes)
+            sess.inventory_upload_status = "done"
+            sess.inventory_upload_message = msg
+            sess.inventory_upload_result = {"ok": True, "message": msg, "auto_routed": route_notes}
+        return
     fnames = ", ".join(n[:36] + "…" if len(n) > 36 else n for n, _ in file_parts[:3])
     if len(file_parts) > 3:
         fnames += f" (+{len(file_parts) - 3} more)"
@@ -2554,35 +2575,44 @@ async def upload_inventory_auto(
         _log.exception("inventory-auto read files in request")
         return JSONResponse(content={"ok": False, "message": str(e)})
 
-    try:
-        from ..services.upload_file_sniff import check_files_for_snapshot_upload
-
-        wrong = check_files_for_snapshot_upload(file_parts)
-        if wrong:
-            return JSONResponse(
-                content={
-                    "ok": False,
-                    "wrong_upload_target": True,
-                    "suggested_section": "history_daily_inventory_matrix",
-                    "message": wrong.replace("**", ""),
-                }
-            )
-    except Exception:
-        _log.exception("inventory-auto upload sniff failed")
-
     sid = getattr(request.state, "session_id", None)
-    if sid:
+    route_notes: list[str] = []
+    try:
+        from ..services.upload_file_sniff import partition_files_by_upload_target
 
+        buckets, route_notes = partition_files_by_upload_target(file_parts, "snapshot_inventory")
+        file_parts = list(buckets.get("snapshot_inventory") or [])
+        sales_parts = list(buckets.get("daily_sales") or [])
+        if sales_parts and sid:
+            DAILY_UPLOAD_EXECUTOR.submit(_run_daily_auto_ingest_pipeline, sid, sales_parts)
+    except Exception:
+        _log.exception("inventory-auto upload partition failed")
+
+    if sid and file_parts:
+
+        inv_msg = (
+            "Upload accepted — parsing inventory on the server. "
+            "Status updates below; you can stay on this page."
+        )
+        if route_notes:
+            inv_msg = "Auto-routed: " + "; ".join(route_notes) + " " + inv_msg
         _mark_inventory_upload_running(sess, "Upload received — starting parse…")
         INVENTORY_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)
         return JSONResponse(
             content={
                 "ok": True,
                 "ingest_async": True,
-                "message": (
-                    "Upload accepted — parsing inventory on the server. "
-                    "Status updates below; you can stay on this page."
-                ),
+                "message": inv_msg,
+                "auto_routed": route_notes or None,
+            }
+        )
+    if sid and route_notes:
+        return JSONResponse(
+            content={
+                "ok": True,
+                "ingest_async": True,
+                "message": "Auto-routed to daily sales upload — " + "; ".join(route_notes),
+                "auto_routed": route_notes,
             }
         )
 
@@ -3937,45 +3967,55 @@ async def upload_daily_auto(
             status_code=400,
         )
 
+    route_notes: list[str] = []
+    inv_parts: list[tuple[str, bytes]] = []
     try:
-        from ..services.upload_file_sniff import check_files_for_upload_target
+        from ..services.upload_file_sniff import partition_files_by_upload_target
 
-        wrong = check_files_for_upload_target("daily_sales", file_parts)
-        if wrong:
-            return JSONResponse(
-                content={
-                    "ok": False,
-                    "wrong_upload_target": True,
-                    "suggested_section": "returns",
-                    "message": wrong,
-                    "detected_platforms": [],
-                    "warnings": [wrong],
-                    "processed_files": n_files,
-                    "detected_files": 0,
-                    "unknown_files": n_files,
-                }
-            )
+        buckets, route_notes = partition_files_by_upload_target(file_parts, "daily_sales")
+        file_parts = list(buckets.get("daily_sales") or [])
+        inv_parts = list(buckets.get("snapshot_inventory") or [])
+        if inv_parts:
+            INVENTORY_EXECUTOR.submit(_run_inventory_auto_worker, sid, inv_parts)
     except Exception:
-        _log.exception("daily-auto upload sniff failed")
+        _log.exception("daily-auto upload partition failed")
 
     msg = (
         "Upload accepted — parsing daily files on the server. "
         "Status updates below; you can stay on this page."
     )
+    if route_notes:
+        msg = "Auto-routed: " + "; ".join(route_notes) + " " + msg
 
-    _mark_daily_auto_ingest_running(sess, "Parsing daily files and merging into session…")
-    background_tasks.add_task(_queue_daily_auto_ingest, sid, file_parts)
+    if file_parts:
+        _mark_daily_auto_ingest_running(sess, "Parsing daily files and merging into session…")
+        background_tasks.add_task(_queue_daily_auto_ingest, sid, file_parts)
+    elif inv_parts:
+        _mark_inventory_upload_running(sess, "Auto-routed inventory files — starting parse…")
+    else:
+        return JSONResponse(
+            content={
+                "ok": False,
+                "message": "No recognizable daily files in upload.",
+                "detected_platforms": [],
+                "warnings": [],
+                "processed_files": n_files,
+                "detected_files": 0,
+                "unknown_files": n_files,
+            }
+        )
     return JSONResponse(
         content={
             "ok": True,
             "ingest_async": True,
             "message": msg,
+            "auto_routed": route_notes or None,
             "detected_platforms": [],
-            "warnings": [],
+            "warnings": route_notes,
             "processed_files": n_files,
             "detected_files": 0,
             "unknown_files": n_files,
-            "sales_rebuild": "pending",
+            "sales_rebuild": "pending" if file_parts else None,
         }
     )
 
@@ -4298,19 +4338,26 @@ async def _accept_inventory_auto_file_parts(
             "message": "An inventory upload is still processing. Wait for it to finish, then try again.",
         }
 
+    route_notes: list[str] = []
     try:
-        from ..services.upload_file_sniff import check_files_for_snapshot_upload
+        from ..services.upload_file_sniff import partition_files_by_upload_target
 
-        wrong = check_files_for_snapshot_upload(file_parts)
-        if wrong:
-            return {
-                "ok": False,
-                "wrong_upload_target": True,
-                "suggested_section": "history_daily_inventory_matrix",
-                "message": wrong.replace("**", ""),
-            }
+        buckets, route_notes = partition_files_by_upload_target(file_parts, "snapshot_inventory")
+        file_parts = list(buckets.get("snapshot_inventory") or [])
+        sales_parts = list(buckets.get("daily_sales") or [])
+        if sales_parts:
+            DAILY_UPLOAD_EXECUTOR.submit(_run_daily_auto_ingest_pipeline, sid, sales_parts)
     except Exception:
-        _log.exception("chunked inventory-auto upload sniff failed")
+        _log.exception("chunked inventory-auto upload partition failed")
+
+    if not file_parts and route_notes:
+        return {
+            "ok": True,
+            "ingest_async": True,
+            "chunked": True,
+            "message": "Auto-routed to daily sales — " + "; ".join(route_notes),
+            "auto_routed": route_notes,
+        }
 
     _mark_inventory_upload_running(sess, "Chunks assembled — starting parse…")
     INVENTORY_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)

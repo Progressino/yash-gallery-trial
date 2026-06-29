@@ -92,6 +92,17 @@ def main() -> int:
         _log.error("history max still too old: %s", after.date())
         return 1
 
+    if not str(getattr(sess, "daily_inventory_history_filename", "") or "").strip():
+        setattr(sess, "daily_inventory_history_filename", "Daily Inventory History 1-May To 25-Jun-26.xlsx")
+    if not str(getattr(sess, "daily_inventory_history_uploaded_at", "") or "").strip():
+        from datetime import datetime, timezone
+
+        setattr(
+            sess,
+            "daily_inventory_history_uploaded_at",
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+
     _coerce_df_for_parquet(sess.daily_inventory_history_df).to_parquet(hist_path, index=False)
     persist_daily_inventory_history_meta(sess)
     meta = daily_inventory_history_meta_bundle(sess)
