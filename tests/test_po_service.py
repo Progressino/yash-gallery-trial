@@ -4256,6 +4256,85 @@ def test_stale_manual_raise_json_never_blocks_pipeline_skus():
     assert "PIPE-B" not in block
 
 
+def test_manual_raise_block_without_session_manual_upload_flag():
+    """Restored sessions often lack existing_po_manual_upload — block from sheet New Order."""
+    from backend.session import AppSession
+    from backend.services.existing_po import manual_existing_po_raise_skus, resolve_manual_existing_po_raise_date
+    from backend.services.po_engine import calculate_po_base
+
+    sess = AppSession()
+    sess.existing_po_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["RAISED-XL", "PIPE-ONLY-M"],
+            "PO_Qty_Ordered": [50, 0],
+            "Pending_Cutting": [0, 5],
+            "Balance_to_Dispatch": [0, 0],
+            "PO_Pipeline_Total": [0, 5],
+        }
+    )
+    sess.existing_po_filename = "Po 27-Jun-26.xlsx"
+    assert not getattr(sess, "existing_po_manual_upload", False)
+
+    block = manual_existing_po_raise_skus(sess)
+    assert block == {"RAISED-XL"}
+    assert sess.existing_po_manual_upload is True
+    assert resolve_manual_existing_po_raise_date(sess) == "2026-06-27"
+
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["RAISED-XL", "PIPE-ONLY-M"],
+            "Total_Inventory": [2, 6],
+        }
+    )
+    end = pd.Timestamp("2026-06-29")
+    sales_rows = []
+    for sku, n in [("RAISED-XL", 15), ("PIPE-ONLY-M", 4)]:
+        for i in range(n):
+            sales_rows.append(
+                {
+                    "Sku": sku,
+                    "TxnDate": end - pd.Timedelta(days=i % 20),
+                    "Transaction Type": "Shipment",
+                    "Quantity": 1,
+                    "Units_Effective": 1,
+                    "Source": "Amazon",
+                }
+            )
+    sales = pd.DataFrame(sales_rows)
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=180,
+        demand_basis="Sold",
+        existing_po_df=sess.existing_po_df,
+        enforce_lead_time_release_gate=True,
+        planning_date="2026-06-29",
+        manual_existing_po_raise_skus=block,
+        manual_existing_po_raise_date="2026-06-27",
+        raise_ledger_lookback_days=14,
+    )
+    ordered_row = po[po["OMS_SKU"] == "RAISED-XL"].iloc[0]
+    assert int(ordered_row["PO_Qty"]) == 0
+    assert "manual Existing PO" in str(ordered_row.get("PO_Block_Reason") or "")
+
+
+def test_po_27_jun_existing_po_new_order_qty_matches_parse():
+    """Regression: Po 27-Jun-26 New Order column must parse to 24,820 units (not 30k+)."""
+    from pathlib import Path
+
+    from backend.services.existing_po import parse_existing_po
+
+    path = Path("/Users/samraisinghani/Downloads/Po 27-Jun-26.xlsx")
+    if not path.is_file():
+        pytest.skip("operator Po 27-Jun-26 fixture not on disk")
+    ep = parse_existing_po(path.read_bytes(), path.name)
+    ordered = int(pd.to_numeric(ep["PO_Qty_Ordered"], errors="coerce").fillna(0).sum())
+    assert ordered == 24820
+    assert int((ep["PO_Qty_Ordered"] > 0).sum()) == 140
+
+
 def test_po_auto_extends_inventory_history_so_user_uploads_baseline_once():
     """End-to-end: baseline inventory ends a week before sales max date.
 

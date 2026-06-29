@@ -633,6 +633,13 @@ def prepare_po_snapshot(
             except Exception:
                 logger.exception("parallel sidecar load failed")
 
+    try:
+        from .existing_po import ensure_manual_raise_ledger_for_calculate
+
+        ensure_manual_raise_ledger_for_calculate(sess, body.get("planning_date"))
+    except Exception:
+        logger.exception("ensure_manual_raise_ledger_for_calculate failed")
+
     if body.get("auto_import_yesterday_ledger", True) and session_id:
         from .po_raise_archive import try_auto_import_recent_ledgers
 

@@ -24,7 +24,7 @@ _log = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Bump when PO engine merge/ADS semantics change (invalidates shared cache).
-PO_MERGE_LOGIC_VERSION = 39
+PO_MERGE_LOGIC_VERSION = 40
 
 
 def po_merge_result_is_stale(meta: dict[str, Any] | None) -> bool:

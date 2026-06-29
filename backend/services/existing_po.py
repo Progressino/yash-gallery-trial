@@ -634,6 +634,7 @@ def persist_manual_raise_skus(sess) -> None:
         return
     try:
         path = _existing_po_disk_dir() / "existing_po_manual_raise_skus.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(list(skus), ensure_ascii=False), encoding="utf-8")
     except Exception:
         _log.exception("persist_manual_raise_skus failed")
@@ -651,11 +652,27 @@ def load_manual_raise_skus_into_session(sess) -> None:
         _log.exception("load_manual_raise_skus_into_session failed")
 
 
-def manual_existing_po_raise_skus(sess) -> set[str]:
-    """SKUs blocked from re-raise — positive ``PO_Qty_Ordered`` on manual upload only."""
-    if not getattr(sess, "existing_po_manual_upload", False):
-        return set()
+def resolve_manual_existing_po_raise_date(sess) -> str | None:
+    """Raise date for a manual Existing PO upload (session meta or filename)."""
+    d = str(getattr(sess, "existing_po_manual_raise_date", "") or "").strip()[:10]
+    if d:
+        return d
+    fn = str(getattr(sess, "existing_po_filename", "") or "")
+    if not fn:
+        return None
+    try:
+        from .po_raise_archive import parse_raise_date_from_filename
 
+        parsed = parse_raise_date_from_filename(fn)
+        if parsed is not None:
+            return str(pd.Timestamp(parsed).normalize().date())
+    except Exception:
+        pass
+    return None
+
+
+def manual_existing_po_raise_skus(sess) -> set[str]:
+    """SKUs blocked from re-raise — positive ``PO_Qty_Ordered`` on the Existing PO sheet."""
     def _from_existing_po_df(ep) -> set[str]:
         if ep is None or getattr(ep, "empty", True) or "OMS_SKU" not in ep.columns:
             return set()
@@ -666,6 +683,10 @@ def manual_existing_po_raise_skus(sess) -> set[str]:
     ep = getattr(sess, "existing_po_df", None)
     block = _from_existing_po_df(ep)
     if block:
+        sess.existing_po_manual_upload = True
+        _d = resolve_manual_existing_po_raise_date(sess)
+        if _d:
+            sess.existing_po_manual_raise_date = _d
         _sync_manual_raise_block_skus(sess, block)
         return block
 
@@ -676,11 +697,63 @@ def manual_existing_po_raise_skus(sess) -> set[str]:
     ep = getattr(sess, "existing_po_df", None)
     block = _from_existing_po_df(ep)
     if block:
+        sess.existing_po_manual_upload = True
+        _d = resolve_manual_existing_po_raise_date(sess)
+        if _d:
+            sess.existing_po_manual_raise_date = _d
         _sync_manual_raise_block_skus(sess, block)
         return block
 
     # Never fall back to stale sidecar JSON (may list every SKU on the sheet).
     return set()
+
+
+def ensure_manual_raise_ledger_for_calculate(sess, planning_date: str | None = None) -> bool:
+    """
+    Before PO calculate: ensure durable/session raise ledger reflects the latest
+    manual Existing PO upload (sheet date + pipeline / new-order qty).
+    """
+    block = manual_existing_po_raise_skus(sess)
+    if not block:
+        return False
+    raise_day = resolve_manual_existing_po_raise_date(sess)
+    if not raise_day:
+        return False
+    try:
+        from ..db.po_raised_db import ledger_rows_as_dataframe
+        from .po_raise_import import (
+            hydrate_session_ledger_from_db,
+            seed_ledger_from_manual_existing_po_upload,
+        )
+
+        day_s = str(raise_day)[:10]
+        db_df = ledger_rows_as_dataframe(start_date=day_s, end_date=day_s)
+        db_units = (
+            int(pd.to_numeric(db_df["Raised_Qty"], errors="coerce").fillna(0).sum())
+            if db_df is not None and not db_df.empty
+            else 0
+        )
+        led = getattr(sess, "po_raise_ledger_df", None)
+        sess_units = 0
+        if led is not None and not led.empty and "Raised_Date" in led.columns:
+            d = pd.Timestamp(day_s).normalize()
+            ld = pd.to_datetime(led["Raised_Date"], errors="coerce").dt.normalize()
+            sub = led[ld == d]
+            if not sub.empty:
+                sess_units = int(pd.to_numeric(sub["Raised_Qty"], errors="coerce").fillna(0).sum())
+        if db_units <= 0 and sess_units <= 0:
+            seed_ledger_from_manual_existing_po_upload(
+                sess,
+                raised_date=pd.Timestamp(day_s),
+                replace_day=True,
+            )
+            hydrate_session_ledger_from_db(
+                sess, planning_date, lookback_days=45, authoritative=False
+            )
+            return True
+    except Exception:
+        _log.exception("ensure_manual_raise_ledger_for_calculate failed")
+    return False
 
 
 def _sync_manual_raise_block_skus(sess, block: set[str]) -> None:
@@ -708,6 +781,8 @@ def apply_existing_po_session_meta(sess, meta: dict) -> None:
     if meta.get("existing_po_manual_raise_date"):
         sess.existing_po_manual_raise_date = str(meta["existing_po_manual_raise_date"])[:10]
     sess.existing_po_manual_upload = bool(meta.get("existing_po_manual_upload"))
+    if not sess.existing_po_manual_upload and int(meta.get("existing_po_new_order_skus") or 0) > 0:
+        sess.existing_po_manual_upload = True
     if meta.get("existing_po_sheet_pipeline_units") is not None:
         sess.existing_po_sheet_pipeline_units = int(meta.get("existing_po_sheet_pipeline_units") or 0)
     if "existing_po_totals_match" in meta:

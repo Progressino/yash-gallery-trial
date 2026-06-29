@@ -211,14 +211,10 @@ def execute_po_calculate(
     try:
         _lt_raw = body.get("lead_time")
         _lead_time = 0 if _lt_raw in (None, "") else int(_lt_raw or 0)
-        from .existing_po import manual_existing_po_raise_skus
+        from .existing_po import manual_existing_po_raise_skus, resolve_manual_existing_po_raise_date
 
-        _manual_raise_skus = (
-            manual_existing_po_raise_skus(sess)
-            if bool(getattr(sess, "existing_po_manual_upload", False))
-            else set()
-        )
-        _manual_raise_date = str(getattr(sess, "existing_po_manual_raise_date", "") or "")[:10] or None
+        _manual_raise_skus = manual_existing_po_raise_skus(sess)
+        _manual_raise_date = resolve_manual_existing_po_raise_date(sess)
         po_df = calculate_po_base(
             sales_df=_ads_source,
             inv_df=inv_df,
