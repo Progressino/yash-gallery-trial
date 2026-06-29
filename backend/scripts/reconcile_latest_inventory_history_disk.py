@@ -26,8 +26,10 @@ def main() -> int:
         inventory_sheet_end_date_from_filename,
         persist_daily_inventory_history_meta,
         promote_daily_inventory_matrix_max_date,
+        prune_non_snapshot_post_matrix_days,
         read_daily_inventory_history_disk_meta,
         refresh_inventory_history_rollforward,
+        snapshot_dates_from_history,
     )
     from backend.session import AppSession
 
@@ -44,9 +46,27 @@ def main() -> int:
         "daily_inventory_history_uploaded_at",
         "daily_inventory_history_filename",
         "daily_inventory_history_matrix_max_date",
+        "daily_inventory_history_wide_end_date",
     ):
         if meta_before.get(key):
             setattr(sess, key, meta_before[key])
+    snap_dates = meta_before.get("daily_inventory_history_snapshot_dates")
+    if isinstance(snap_dates, list) and snap_dates:
+        sess.daily_inventory_history_snapshot_dates = [str(d)[:10] for d in snap_dates if d]
+    elif not getattr(sess, "daily_inventory_history_snapshot_dates", None):
+        inferred = snapshot_dates_from_history(sess.daily_inventory_history_df)
+        if inferred:
+            sess.daily_inventory_history_snapshot_dates = inferred
+
+    fn = str(getattr(sess, "daily_inventory_history_filename", "") or "")
+    fn_end = inventory_sheet_end_date_from_filename(fn)
+    if fn_end and not getattr(sess, "daily_inventory_history_wide_end_date", None):
+        sess.daily_inventory_history_wide_end_date = fn_end
+
+    sess.daily_inventory_history_df = prune_non_snapshot_post_matrix_days(
+        sess.daily_inventory_history_df,
+        sess,
+    )
 
     inv_meta_path = cache / "inventory_session_meta.json"
     if inv_meta_path.is_file():

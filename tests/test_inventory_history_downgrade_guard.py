@@ -358,3 +358,78 @@ def test_ensure_inventory_history_trims_beyond_cap(monkeypatch):
     out = ensure_inventory_history_authoritative_for_read(sess)
     mx = out["Date"].max().normalize()
     assert str(mx.date()) == "2026-06-26"
+
+
+def test_merge_prefers_snapshot_over_derived():
+    from backend.services.daily_inventory_history import merge_inventory_history
+
+    existing = pd.DataFrame(
+        {
+            "OMS_SKU": ["A"],
+            "Date": [pd.Timestamp("2026-06-26")],
+            "Qty": [62.0],
+            "Source": "derived",
+        }
+    )
+    incoming = pd.DataFrame(
+        {
+            "OMS_SKU": ["A"],
+            "Date": [pd.Timestamp("2026-06-26")],
+            "Qty": [38.0],
+            "Source": "snapshot",
+        }
+    )
+    out = merge_inventory_history(existing, incoming)
+    assert len(out) == 1
+    assert float(out.iloc[0]["Qty"]) == 38.0
+    assert out.iloc[0]["Source"] == "snapshot"
+
+
+def test_snapshot_upload_prunes_derived_gap_and_skips_rollforward():
+    from backend.session import AppSession
+    from backend.services.daily_inventory_history import (
+        merge_inventory_history,
+        refresh_inventory_history_rollforward,
+    )
+
+    sess = AppSession()
+    dates = pd.date_range("2026-06-20", "2026-06-25", freq="D")
+    hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"] * len(dates),
+            "Date": dates,
+            "Qty": [10.0, 20, 30, 40, 50, 60],
+            "Source": "uploaded",
+        }
+    )
+    filler = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"] * 3,
+            "Date": pd.date_range("2026-06-26", "2026-06-28", freq="D"),
+            "Qty": [62.0, 62.0, 62.0],
+            "Source": "derived",
+        }
+    )
+    sess.daily_inventory_history_df = merge_inventory_history(hist, filler)
+    sess.daily_inventory_history_filename = "Inventory through 25 Jun 2026.xlsx"
+    sess.daily_inventory_history_wide_end_date = "2026-06-25"
+    sess.inventory_snapshot_date = "2026-06-29"
+    sess.inventory_df_variant = pd.DataFrame(
+        {"OMS_SKU": ["SKU-A"], "Total_Inventory": [99]},
+    )
+
+    out = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+    assert out.get("ok") is True
+    assert out.get("rolled_forward") is False
+
+    sub = sess.daily_inventory_history_df
+    sub = sub[sub["OMS_SKU"].astype(str) == "SKU-A"]
+    day_qty = {
+        str(pd.Timestamp(d).date()): float(q)
+        for d, q in zip(sub["Date"], sub["Qty"])
+    }
+    assert "2026-06-26" not in day_qty
+    assert "2026-06-27" not in day_qty
+    assert "2026-06-28" not in day_qty
+    assert day_qty.get("2026-06-29") == 99.0
+    assert "2026-06-29" in (sess.daily_inventory_history_snapshot_dates or [])

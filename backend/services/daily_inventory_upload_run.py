@@ -181,6 +181,9 @@ def execute_daily_inventory_upload(
     sess.daily_inventory_history_df = df
     sess.daily_inventory_history_uploaded_at = datetime.now(_IST).strftime("%Y-%m-%d %H:%M:%S")
     sess.daily_inventory_history_filename = filename or ""
+    fn_end = inventory_sheet_end_date_from_filename(filename or "")
+    if fn_end:
+        sess.daily_inventory_history_wide_end_date = fn_end
     if end_anchor:
         promote_daily_inventory_matrix_max_date(sess, end_anchor)
     sess._quarterly_cache.clear()

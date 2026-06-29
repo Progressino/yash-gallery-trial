@@ -32,6 +32,105 @@ _DEFAULT_VIEW_DAYS = int(os.environ.get("DAILY_INV_VIEW_DAYS", "30"))
 
 
 _TALL_COLS = ["OMS_SKU", "Date", "Qty"]
+_STORE_COLS = ["OMS_SKU", "Date", "Qty", "Source"]
+_SOURCE_RANK = {"snapshot": 3, "uploaded": 2, "derived": 1}
+
+
+def _ensure_source_column(df: pd.DataFrame | None, default: str = "uploaded") -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame(columns=_STORE_COLS)
+    out = df.copy()
+    if "Source" not in out.columns:
+        out["Source"] = default
+    else:
+        out["Source"] = out["Source"].astype(str).replace({"": default, "nan": default, "None": default})
+    return out
+
+
+def _coalesce_history_rows(combined: pd.DataFrame) -> pd.DataFrame:
+    """One row per SKU-day — snapshot beats uploaded beats derived; then highest qty."""
+    work = _ensure_source_column(combined, default="uploaded")
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce")
+    work = work.dropna(subset=["Date", "OMS_SKU", "Qty"])
+    work = work[work["OMS_SKU"].astype(str).str.len() > 0]
+    if work.empty:
+        return pd.DataFrame(columns=_STORE_COLS)
+    work["Qty"] = work["Qty"].astype(float).clip(lower=0.0)
+    work["_rank"] = work["Source"].astype(str).str.strip().str.lower().map(_SOURCE_RANK).fillna(1)
+    work = work.sort_values(
+        ["OMS_SKU", "Date", "_rank", "Qty"],
+        ascending=[True, True, False, False],
+    )
+    out = work.drop_duplicates(subset=["OMS_SKU", "Date"], keep="first").drop(columns=["_rank"])
+    return drop_zero_derived_rows(out.reset_index(drop=True))
+
+
+def record_inventory_snapshot_date(sess, snapshot_date: str) -> None:
+    """Track authoritative daily snapshot columns appended to the history matrix."""
+    d = str(snapshot_date or "").strip()[:10]
+    if len(d) != 10:
+        return
+    cur = list(getattr(sess, "daily_inventory_history_snapshot_dates", None) or [])
+    if d not in cur:
+        cur.append(d)
+        cur.sort()
+        sess.daily_inventory_history_snapshot_dates = cur
+
+
+def wide_matrix_upload_end_date(sess) -> pd.Timestamp | None:
+    """Last date from the one-time wide Excel upload (not daily snapshot extensions)."""
+    meta = read_daily_inventory_history_disk_meta() or {}
+    for raw in (
+        str(getattr(sess, "daily_inventory_history_wide_end_date", "") or "")[:10],
+        str(meta.get("daily_inventory_history_wide_end_date") or "")[:10],
+        inventory_sheet_end_date_from_filename(
+            str(getattr(sess, "daily_inventory_history_filename", "") or "")
+            or str(meta.get("daily_inventory_history_filename") or "")
+        ),
+    ):
+        if len(raw) == 10:
+            try:
+                return pd.Timestamp(raw).normalize()
+            except Exception:
+                continue
+    return None
+
+
+def snapshot_dates_from_history(hist: pd.DataFrame | None) -> list[str]:
+    if hist is None or getattr(hist, "empty", True) or "Source" not in hist.columns:
+        return []
+    work = _ensure_source_column(hist)
+    mask = work["Source"].astype(str).str.lower() == "snapshot"
+    if not bool(mask.any()):
+        return []
+    days = pd.to_datetime(work.loc[mask, "Date"], errors="coerce").dt.normalize().dropna()
+    return sorted({str(pd.Timestamp(d).date()) for d in days.unique()})
+
+
+def prune_non_snapshot_post_matrix_days(
+    hist: pd.DataFrame | None,
+    sess,
+    *,
+    extra_keep_dates: set[str] | None = None,
+) -> pd.DataFrame:
+    """Remove sales-derived filler after the wide matrix except known snapshot days."""
+    if hist is None or getattr(hist, "empty", True):
+        return hist if hist is not None else pd.DataFrame(columns=_STORE_COLS)
+    wide_end = wide_matrix_upload_end_date(sess)
+    if wide_end is None:
+        return _ensure_source_column(hist)
+    keep: set[str] = set(extra_keep_dates or set())
+    keep.update(str(getattr(sess, "daily_inventory_history_snapshot_dates", None) or []))
+    snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
+    if len(snap) == 10:
+        keep.add(snap)
+    work = _ensure_source_column(hist)
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    day_s = work["Date"].dt.strftime("%Y-%m-%d")
+    is_snapshot = work["Source"].astype(str).str.lower() == "snapshot"
+    keep_mask = (work["Date"] <= wide_end) | day_s.isin(keep) | is_snapshot
+    return work.loc[keep_mask].reset_index(drop=True)
 
 # Yash wide-matrix exports: ``28-5-26`` = 28 May 2026 (day-month-year).
 _DMY_HEADER_RE = re.compile(r"^(\d{1,2})-(\d{1,2})-(\d{2,4})$")
@@ -292,27 +391,16 @@ def merge_inventory_history(
     existing: Optional[pd.DataFrame],
     incoming: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Union SKU-day rows; keep max qty when both frames have the same key."""
+    """Union SKU-day rows; snapshot/uploaded rows beat sales-derived duplicates."""
     if incoming is None or incoming.empty:
-        return existing if existing is not None else pd.DataFrame(columns=_TALL_COLS)
+        return _ensure_source_column(existing) if existing is not None else pd.DataFrame(columns=_STORE_COLS)
     if existing is None or existing.empty:
-        return incoming[_TALL_COLS].copy()
-    ex = existing[[c for c in _TALL_COLS if c in existing.columns]].copy()
-    inc = incoming[_TALL_COLS].copy()
-    combined = pd.concat([ex, inc], ignore_index=True)
-    combined["Date"] = pd.to_datetime(combined["Date"], errors="coerce").dt.normalize()
-    combined["Qty"] = pd.to_numeric(combined["Qty"], errors="coerce")
-    combined = combined.dropna(subset=["Date", "OMS_SKU"])
-    combined = combined[combined["OMS_SKU"].astype(str).str.len() > 0]
-    combined = combined.dropna(subset=["Qty"])
-    if combined.empty:
-        return pd.DataFrame(columns=_TALL_COLS)
-    return drop_zero_derived_rows(
-        combined.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"]
-        .max()
-        .sort_values(["OMS_SKU", "Date"])
-        .reset_index(drop=True)
+        return _ensure_source_column(incoming, default="uploaded")
+    combined = pd.concat(
+        [_ensure_source_column(existing), _ensure_source_column(incoming, default="uploaded")],
+        ignore_index=True,
     )
+    return _coalesce_history_rows(combined)
 
 
 def inventory_history_max_date(df: Optional[pd.DataFrame]) -> Optional[pd.Timestamp]:
@@ -639,6 +727,12 @@ def refresh_inventory_history_rollforward(
     if hist is None or getattr(hist, "empty", True):
         return {"ok": False, "reason": "empty_history"}
 
+    if include_snapshot:
+        inferred = snapshot_dates_from_history(hist)
+        if inferred and not getattr(sess, "daily_inventory_history_snapshot_dates", None):
+            sess.daily_inventory_history_snapshot_dates = inferred
+        hist = prune_non_snapshot_post_matrix_days(hist, sess)
+
     span = int(max_history_days if max_history_days is not None else _MAX_HISTORY_DAYS)
     sales = sales_df if sales_df is not None else _sales_for_inventory_rollforward(sess)
 
@@ -658,11 +752,12 @@ def refresh_inventory_history_rollforward(
         cap_ts = min(cap_ts, matrix_cap)
     extended = hist
     rolled = False
-    if sheet_max is not None and sheet_max < cap_ts - pd.Timedelta(days=0):
+    # Daily snapshot upload: append one authoritative column — never sales-derived fill.
+    if not include_snapshot and sheet_max is not None and sheet_max < cap_ts:
         extended = extend_history_with_sales(hist, sales_df=sales, cap_date=cap_ts)
         rolled = True
 
-    merged = extended
+    merged = _ensure_source_column(extended)
     snapshot_appended = False
     if include_snapshot:
         variant = getattr(sess, "inventory_df_variant", None)
@@ -683,14 +778,15 @@ def refresh_inventory_history_rollforward(
                             "OMS_SKU": work["OMS_SKU"],
                             "Date": snap_ts,
                             "Qty": work["Qty"],
+                            "Source": "snapshot",
                         }
                     )
-                    if "Source" in merged.columns:
-                        merged = merged[
-                            ~((merged["Date"] == snap_ts) & (merged["Source"] == "derived"))
-                        ]
+                    merged = merged[
+                        ~((merged["Date"] == snap_ts) & (merged["Source"].astype(str) == "derived"))
+                    ]
                     merged = merge_inventory_history(merged, incoming)
                     snapshot_appended = True
+                    record_inventory_snapshot_date(sess, str(snap_ts.date()))
                     promote_daily_inventory_matrix_max_date(sess, str(snap_ts.date()))
 
     end_anchor = inventory_history_max_date(merged)
@@ -876,7 +972,8 @@ def _parse_one_sheet(
     if tall.empty:
         return pd.DataFrame(columns=_TALL_COLS)
     tall["Qty"] = tall["Qty"].astype(float).clip(lower=0.0)
-    return tall[_TALL_COLS].reset_index(drop=True)
+    tall["Source"] = "uploaded"
+    return tall[_STORE_COLS].reset_index(drop=True)
 
 
 def parse_daily_inventory_history_dataframes(
@@ -1258,6 +1355,14 @@ def extend_history_with_sales(
     if len(days) == 0:
         return base[out_cols].reset_index(drop=True)
 
+    authoritative = base[base["Source"].astype(str).str.lower().isin(["snapshot", "uploaded"])]
+    blocked = set(
+        zip(
+            authoritative["OMS_SKU"].astype(str).str.strip().str.upper(),
+            authoritative["Date"].dt.normalize(),
+        )
+    )
+
     if sales_net is not None and not sales_net.empty:
         pivot = (
             sales_net.set_index(["OMS_SKU", "Date"])["Net_Units"]
@@ -1279,16 +1384,24 @@ def extend_history_with_sales(
         # wide matrix (all dashes) and forced Eff_Days_Inventory to 0 after merges.
         active = (prev_qty > 0) | (np.abs(net_d) > 1e-9)
         if np.any(active):
-            derived_rows.append(
-                pd.DataFrame(
-                    {
-                        "OMS_SKU": sku_list[active],
-                        "Date": pd.Timestamp(d),
-                        "Qty": new_qty[active],
-                        "Source": "derived",
-                    }
+            day_ts = pd.Timestamp(d).normalize()
+            sku_active = sku_list[active]
+            keep = [
+                i
+                for i, sku in enumerate(sku_active)
+                if (str(sku).strip().upper(), day_ts) not in blocked
+            ]
+            if keep:
+                derived_rows.append(
+                    pd.DataFrame(
+                        {
+                            "OMS_SKU": sku_active[keep],
+                            "Date": day_ts,
+                            "Qty": new_qty[active][keep],
+                            "Source": "derived",
+                        }
+                    )
                 )
-            )
         prev_qty = new_qty
 
     if not derived_rows:
@@ -1578,6 +1691,15 @@ def daily_inventory_history_meta_bundle(sess) -> dict:
         "daily_inventory_history_filename": str(
             getattr(sess, "daily_inventory_history_filename", "") or ""
         ),
+        "daily_inventory_history_wide_end_date": str(
+            getattr(sess, "daily_inventory_history_wide_end_date", "") or ""
+        )[:10]
+        or inventory_sheet_end_date_from_filename(
+            str(getattr(sess, "daily_inventory_history_filename", "") or "")
+        ),
+        "daily_inventory_history_snapshot_dates": list(
+            getattr(sess, "daily_inventory_history_snapshot_dates", None) or []
+        ),
         "daily_inventory_history_rows": rows,
         "daily_inventory_history_skus": skus,
         "daily_inventory_history_max_date": df_max_s or matrix_ceiling_s,
@@ -1594,9 +1716,13 @@ def apply_daily_inventory_history_meta(sess, meta: dict) -> None:
         "daily_inventory_history_uploaded_at",
         "daily_inventory_history_filename",
         "daily_inventory_history_matrix_max_date",
+        "daily_inventory_history_wide_end_date",
     ):
         if meta.get(key):
             setattr(sess, key, str(meta[key]))
+    snap_dates = meta.get("daily_inventory_history_snapshot_dates")
+    if isinstance(snap_dates, list) and snap_dates:
+        sess.daily_inventory_history_snapshot_dates = [str(d)[:10] for d in snap_dates if d]
     cap = str(meta.get("daily_inventory_history_matrix_max_date") or meta.get("daily_inventory_history_max_date") or "")
     if len(cap) >= 10:
         promote_daily_inventory_matrix_max_date(sess, cap[:10])
@@ -1812,7 +1938,12 @@ __all__ = [
     "inventory_history_view_end_date",
     "inventory_history_matrix_cap_date",
     "inventory_sheet_end_date_from_filename",
-    "promote_daily_inventory_matrix_max_date",
+    "record_inventory_snapshot_date",
+    "prune_non_snapshot_post_matrix_days",
+    "snapshot_dates_from_history",
+    "wide_matrix_upload_end_date",
+    "_ensure_source_column",
+    "_coalesce_history_rows",
     "ensure_latest_daily_inventory_authoritative",
     "disk_inventory_meta_looks_placeholder",
     "session_inventory_matrix_stats",
