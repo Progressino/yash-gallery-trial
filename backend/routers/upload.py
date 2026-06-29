@@ -844,10 +844,15 @@ def verify_daily_upload(request: Request, date: str = ""):
         )
     elif ok and not sales_ready:
         hint = " Tier-3 saved — wait for sales rebuild or tap ↻ Rebuild on this page."
+    from ..services.daily_sales_history import _CORE_PLATFORMS
+
+    present = {str(p).strip().lower() for p in (tier3_platforms or nearby_platforms)}
+    missing_core = [p for p in _CORE_PLATFORMS if p not in present]
     return {
         "ok": ok,
         "date": day,
         "tier3_platforms": tier3_platforms or nearby_platforms,
+        "missing_core_platforms": missing_core,
         "tier3_upload_count": len(recent),
         "tier3_summary": tier3_summary,
         "recent_uploads": recent[:12],
@@ -863,6 +868,11 @@ def verify_daily_upload(request: Request, date: str = ""):
                 f"Tier-3 has {len(tier3_platforms)} platform(s) for {day}: {', '.join(tier3_platforms)}."
                 if tier3_platforms
                 else f"Uploads saved for {', '.join(nearby_platforms) or 'none'}."
+            )
+            + (
+                f" Missing core uploads: {', '.join(missing_core)}."
+                if missing_core and tier3_platforms
+                else ""
             )
             + (f" Session sales: {sales_rows:,} rows." if sales_ready else " Sales not rebuilt yet — wait or tap ↻ Rebuild.")
             + hint

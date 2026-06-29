@@ -11,6 +11,7 @@ from backend.services.daily_inventory_history import (
 from backend.services.daily_sales_history import (
     sales_history_for_sku,
     sales_history_summary,
+    sales_history_upload_coverage,
     sales_history_wide_matrix,
 )
 
@@ -83,6 +84,35 @@ def test_sales_history_wide_matrix_aggregates_net_units():
     assert by_sku["SKU-B"] == [0.0, 5.0]
     plat = sales_history_wide_matrix(sales, days=2, end_date="2026-06-02", platform="Amazon")
     assert plat["rows"][0]["units"] == [2.0, 0.0]
+
+
+def test_sales_history_upload_coverage_lists_missing_platforms(monkeypatch):
+    def _fake_coverage():
+        return {
+            "amazon": {"2026-06-01", "2026-06-02"},
+            "flipkart": {"2026-06-01", "2026-06-02"},
+            "meesho": {"2026-06-01"},
+            "myntra": {"2026-06-01", "2026-06-02"},
+        }
+
+    monkeypatch.setattr(
+        "backend.services.daily_store.get_upload_report_day_coverage",
+        _fake_coverage,
+    )
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A"],
+            "TxnDate": pd.to_datetime(["2026-06-02"]),
+            "Units_Effective": [1.0],
+            "Source": ["Amazon"],
+        }
+    )
+    out = sales_history_upload_coverage(sales_df=sales, days=2, end_date="2026-06-02")
+    gaps = {g["date"]: g["missing_platforms"] for g in out["coverage_gaps"]}
+    assert gaps["2026-06-02"] == ["meesho"]
+    assert "2026-06-01" not in gaps
+    wide = sales_history_wide_matrix(sales, days=2, end_date="2026-06-02")
+    assert "coverage_gaps" in wide
 
 
 def test_sales_history_for_sku_timeline():

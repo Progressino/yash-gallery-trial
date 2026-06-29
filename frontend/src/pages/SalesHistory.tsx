@@ -29,6 +29,12 @@ function formatDateCol(iso: string) {
   return iso
 }
 
+function formatPlatformLabel(p: string) {
+  const x = p.trim().toLowerCase()
+  if (!x) return p
+  return x.charAt(0).toUpperCase() + x.slice(1)
+}
+
 export default function SalesHistory() {
   const coverage = useSession()
   const [mode, setMode] = useState<'matrix' | 'sku'>('matrix')
@@ -105,6 +111,27 @@ export default function SalesHistory() {
     )
   }
 
+  const coverageGaps = matrixQ.data?.coverage_gaps ?? summaryQ.data?.coverage_gaps ?? []
+  const gapsByDate = useMemo(() => {
+    const m = new Map<string, string[]>()
+    for (const g of coverageGaps) {
+      m.set(g.date, g.missing_platforms)
+    }
+    return m
+  }, [coverageGaps])
+
+  const significantGaps = useMemo(
+    () =>
+      coverageGaps.filter(
+        g =>
+          g.missing_platforms.includes('amazon') ||
+          g.missing_platforms.includes('meesho') ||
+          g.missing_platforms.includes('flipkart') ||
+          g.missing_platforms.includes('myntra'),
+      ),
+    [coverageGaps],
+  )
+
   const rangeLabel = useMemo(() => {
     if (!dates.length) return ''
     return `${dates[0]} → ${dates[dates.length - 1]}`
@@ -142,6 +169,30 @@ export default function SalesHistory() {
         )}
         <span className="text-gray-500">Today (IST): {todayIsoIST()}</span>
       </div>
+
+      {significantGaps.length > 0 && platform === 'all' && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 space-y-2">
+          <p className="font-semibold">Missing daily uploads — totals will look low on these dates</p>
+          <ul className="list-disc pl-5 space-y-1">
+            {significantGaps.map(g => (
+              <li key={g.date}>
+                <strong>{g.date}</strong>: missing{' '}
+                {g.missing_platforms.map(formatPlatformLabel).join(', ')}
+                {g.present_platforms.length > 0
+                  ? ` (have ${g.present_platforms.map(formatPlatformLabel).join(', ')})`
+                  : ''}
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs text-amber-800">
+            Upload the missing platform files for each date on{' '}
+            <Link to="/upload" className="font-medium underline">
+              Upload → Daily order upload
+            </Link>
+            , then use Verify upload or rebuild sales.
+          </p>
+        </div>
+      )}
 
       {!salesLoaded && !matrixQ.isLoading && (
         <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600">
@@ -273,15 +324,30 @@ export default function SalesHistory() {
                       <th className="sticky left-0 z-20 bg-slate-100 border border-gray-200 px-2 py-1.5 text-left font-semibold text-gray-700 min-w-[10rem]">
                         SKU
                       </th>
-                      {dates.map(d => (
-                        <th
-                          key={d}
-                          className="sticky top-0 z-10 bg-slate-100 border border-gray-200 px-1.5 py-1 text-center font-semibold text-gray-600 whitespace-nowrap min-w-[3rem]"
-                          title={d}
-                        >
-                          {formatDateCol(d)}
-                        </th>
-                      ))}
+                      {dates.map(d => {
+                        const missing = gapsByDate.get(d) ?? []
+                        const hasGap =
+                          platform === 'all' &&
+                          missing.some(p => ['amazon', 'meesho', 'flipkart', 'myntra'].includes(p))
+                        return (
+                          <th
+                            key={d}
+                            className={`sticky top-0 z-10 border border-gray-200 px-1.5 py-1 text-center font-semibold whitespace-nowrap min-w-[3rem] ${
+                              hasGap
+                                ? 'bg-amber-100 text-amber-900'
+                                : 'bg-slate-100 text-gray-600'
+                            }`}
+                            title={
+                              hasGap
+                                ? `${d} — missing uploads: ${missing.map(formatPlatformLabel).join(', ')}`
+                                : d
+                            }
+                          >
+                            {formatDateCol(d)}
+                            {hasGap ? ' ⚠' : ''}
+                          </th>
+                        )
+                      })}
                     </tr>
                     <tr className="bg-violet-50">
                       <th className="sticky left-0 z-20 bg-violet-50 border border-gray-200 px-2 py-1 text-left text-[10px] font-semibold text-violet-900">
@@ -289,11 +355,21 @@ export default function SalesHistory() {
                       </th>
                       {dates.map((d, i) => {
                         const total = dateTotals[i] ?? 0
+                        const missing = gapsByDate.get(d) ?? []
+                        const hasGap =
+                          platform === 'all' &&
+                          missing.some(p => ['amazon', 'meesho', 'flipkart', 'myntra'].includes(p))
                         return (
                           <th
                             key={`${d}-total`}
-                            className="border border-gray-200 px-1 py-1 text-center text-[10px] font-bold text-violet-900 whitespace-nowrap tabular-nums"
-                            title={`${d}: ${total.toLocaleString()} net units`}
+                            className={`border border-gray-200 px-1 py-1 text-center text-[10px] font-bold whitespace-nowrap tabular-nums ${
+                              hasGap ? 'bg-amber-50 text-amber-900' : 'text-violet-900'
+                            }`}
+                            title={
+                              hasGap
+                                ? `${d}: ${total.toLocaleString()} net units — missing ${missing.map(formatPlatformLabel).join(', ')} uploads`
+                                : `${d}: ${total.toLocaleString()} net units`
+                            }
                           >
                             {total !== 0
                               ? total.toLocaleString(undefined, { maximumFractionDigits: 1 })

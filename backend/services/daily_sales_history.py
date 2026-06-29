@@ -8,6 +8,7 @@ import pandas as pd
 
 _IST = ZoneInfo("Asia/Kolkata")
 _DEFAULT_VIEW_DAYS = int(os.environ.get("DAILY_SALES_VIEW_DAYS", "30"))
+_CORE_PLATFORMS = ("amazon", "flipkart", "meesho", "myntra")
 
 
 def today_ist_timestamp() -> pd.Timestamp:
@@ -80,6 +81,44 @@ def sales_platforms_available(sales_df: pd.DataFrame | None) -> list[str]:
     return sorted({str(x) for x in tall["Source"].astype(str).str.strip().unique() if str(x).strip()})
 
 
+def sales_history_upload_coverage(
+    *,
+    days: int | None = None,
+    end_date: str | None = None,
+    sales_df: pd.DataFrame | None = None,
+) -> dict:
+    """Per-day Tier-3 upload gaps for core marketplaces in the view window."""
+    from .daily_store import get_upload_report_day_coverage
+
+    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
+    end = sales_history_view_end_date(sales_df, end_date)
+    start = end - pd.Timedelta(days=max(0, span - 1))
+    coverage = get_upload_report_day_coverage()
+    gaps: list[dict] = []
+    for d in pd.date_range(start, end, freq="D"):
+        iso = str(pd.Timestamp(d).date())
+        present: list[str] = []
+        missing: list[str] = []
+        for plat in _CORE_PLATFORMS:
+            days_set = coverage.get(plat) or set()
+            if iso in days_set:
+                present.append(plat)
+            else:
+                missing.append(plat)
+        if missing:
+            gaps.append(
+                {
+                    "date": iso,
+                    "missing_platforms": missing,
+                    "present_platforms": present,
+                }
+            )
+    return {
+        "core_platforms": list(_CORE_PLATFORMS),
+        "coverage_gaps": gaps,
+    }
+
+
 def sales_history_summary(
     sales_df: pd.DataFrame | None,
     *,
@@ -91,6 +130,9 @@ def sales_history_summary(
         sales_df, days=days, end_date=end_date, platform=platform
     )
     if view.empty:
+        coverage = sales_history_upload_coverage(
+            days=days, end_date=end_date, sales_df=sales_df
+        )
         return {
             "loaded": False,
             "rows": 0,
@@ -99,11 +141,15 @@ def sales_history_summary(
             "min_date": "",
             "max_date": "",
             "platforms": sales_platforms_available(sales_df),
+            **coverage,
         }
     daily = view.groupby("Date", as_index=False).agg(
         units=("Units", "sum"),
         skus=("OMS_SKU", "nunique"),
         txns=("Units", "count"),
+    )
+    coverage = sales_history_upload_coverage(
+        days=days, end_date=end_date, sales_df=sales_df
     )
     return {
         "loaded": True,
@@ -116,6 +162,7 @@ def sales_history_summary(
         "window_end": str(sales_history_view_end_date(sales_df, end_date).date()),
         "platforms": sales_platforms_available(sales_df),
         "total_units": float(view["Units"].sum()),
+        **coverage,
     }
 
 
@@ -196,6 +243,9 @@ def sales_history_wide_matrix(
         }
         for sku, row in pivot.iterrows()
     ]
+    coverage = sales_history_upload_coverage(
+        days=days, end_date=end_date, sales_df=sales_df
+    )
     return {
         "loaded": True,
         "dates": date_strs,
@@ -208,6 +258,7 @@ def sales_history_wide_matrix(
         "window_end": date_strs[-1] if date_strs else str(end.date()),
         "platform": platform,
         "platforms": sales_platforms_available(sales_df),
+        **coverage,
     }
 
 

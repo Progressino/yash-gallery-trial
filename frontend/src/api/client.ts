@@ -1142,6 +1142,12 @@ export async function getPoDailyInventoryHistoryMatrix(
   return data
 }
 
+export type SalesHistoryCoverageGap = {
+  date: string
+  missing_platforms: string[]
+  present_platforms: string[]
+}
+
 export type SalesHistoryMatrixRow = { sku: string; units: number[] }
 
 export async function getPoDailySalesHistorySummary(opts?: { days?: number; endDate?: string; platform?: string }) {
@@ -1157,6 +1163,8 @@ export async function getPoDailySalesHistorySummary(opts?: { days?: number; endD
     window_end?: string
     platforms?: string[]
     total_units?: number
+    core_platforms?: string[]
+    coverage_gaps?: SalesHistoryCoverageGap[]
   }>('/po/daily-sales-history', {
     params: {
       days: opts?.days ?? 30,
@@ -1187,6 +1195,8 @@ export async function getPoDailySalesHistoryMatrix(
     window_end?: string
     platform?: string
     platforms?: string[]
+    core_platforms?: string[]
+    coverage_gaps?: SalesHistoryCoverageGap[]
   }>('/po/daily-sales-history/matrix', {
     params: {
       q,
