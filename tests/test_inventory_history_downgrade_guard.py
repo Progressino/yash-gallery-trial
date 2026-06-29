@@ -467,3 +467,67 @@ def test_reconcile_disk_integrity_repairs_inflated_meta(tmp_path, monkeypatch):
     meta = json.loads((cache / "daily_inventory_history_meta.json").read_text())
     assert meta["daily_inventory_history_max_date"] == "2026-05-30"
     assert meta["daily_inventory_history_rows"] == 5
+
+
+def test_disk_reconcile_rollforward_preserves_pre_window_days(tmp_path, monkeypatch):
+    """Appending a June snapshot must not drop May rows during disk reconcile."""
+    from backend.session import AppSession
+    from backend.services import daily_inventory_history as dih
+
+    cache = tmp_path / "warm_cache"
+    cache.mkdir()
+    may = _hist("SKU-A", "2026-05-30", 30)
+    may["Source"] = "uploaded"
+    may.to_parquet(cache / "daily_inventory_history_df.parquet", index=False)
+
+    monkeypatch.setattr(dih, "_warm_cache_dir", lambda: cache)
+
+    sess = AppSession()
+    sess.daily_inventory_history_df = may.copy()
+    sess.inventory_snapshot_date = "2026-06-29"
+    sess.inventory_df_variant = pd.DataFrame(
+        {"OMS_SKU": ["SKU-A"], "Total_Inventory": [77.0]},
+    )
+
+    out = dih.refresh_inventory_history_rollforward(
+        sess,
+        include_snapshot=True,
+        max_history_days=dih.INVENTORY_HISTORY_DISK_RECONCILE_DAYS,
+    )
+    assert out.get("ok") is True
+    days = sorted(
+        pd.to_datetime(sess.daily_inventory_history_df["Date"], errors="coerce")
+        .dt.strftime("%Y-%m-%d")
+        .unique()
+    )
+    assert days[0] == "2026-05-01"
+    assert days[-1] == "2026-06-29"
+    assert len(days) == 31
+
+
+def test_restore_inventory_history_merges_github_backup(tmp_path, monkeypatch):
+    from backend.services import daily_inventory_history as dih
+
+    cache = tmp_path / "warm_cache"
+    gh = tmp_path / "github_cache" / "2026-05-29T07-15-45"
+    cache.mkdir(parents=True)
+    gh.mkdir(parents=True)
+
+    may = _hist("SKU-A", "2026-05-30", 20)
+    may["Source"] = "uploaded"
+    may.to_parquet(gh / "daily_inventory_history_df.parquet", index=False)
+
+    june = _hist("SKU-A", "2026-06-29", 1)
+    june["Source"] = "snapshot"
+    june.to_parquet(cache / "daily_inventory_history_df.parquet", index=False)
+
+    monkeypatch.setattr(dih, "_warm_cache_dir", lambda: cache)
+
+    restored = dih.restore_inventory_history_from_best_disk_backups(june)
+    assert restored is not None
+    days = sorted(
+        pd.to_datetime(restored["Date"], errors="coerce").dt.strftime("%Y-%m-%d").unique()
+    )
+    assert days[0] == "2026-05-11"
+    assert days[-1] == "2026-06-29"
+    assert len(days) == 21

@@ -21,6 +21,7 @@ def main() -> int:
     import pandas as pd
 
     from backend.services.daily_inventory_history import (
+        INVENTORY_HISTORY_DISK_RECONCILE_DAYS,
         daily_inventory_history_meta_bundle,
         inventory_history_matrix_cap_date,
         inventory_sheet_end_date_from_filename,
@@ -30,6 +31,7 @@ def main() -> int:
         read_daily_inventory_history_disk_meta,
         reconcile_inventory_history_disk_integrity,
         refresh_inventory_history_rollforward,
+        restore_inventory_history_from_best_disk_backups,
         snapshot_dates_from_history,
     )
     from backend.session import AppSession
@@ -46,7 +48,18 @@ def main() -> int:
     if integrity.get("actions"):
         meta_before = read_daily_inventory_history_disk_meta() or {}
     sess = AppSession()
-    sess.daily_inventory_history_df = pd.read_parquet(hist_path)
+    current_df = pd.read_parquet(hist_path)
+    restored = restore_inventory_history_from_best_disk_backups(current_df)
+    if restored is not None and len(restored) > len(current_df):
+        _log.info(
+            "Restored broader history from disk backups: rows %s -> %s days %s -> %s",
+            len(current_df),
+            len(restored),
+            current_df["Date"].nunique() if "Date" in current_df.columns else 0,
+            restored["Date"].nunique() if "Date" in restored.columns else 0,
+        )
+        current_df = restored
+    sess.daily_inventory_history_df = current_df
     for key in (
         "daily_inventory_history_uploaded_at",
         "daily_inventory_history_filename",
@@ -100,7 +113,11 @@ def main() -> int:
     if cap is not None:
         promote_daily_inventory_matrix_max_date(sess, str(cap.date()))
 
-    result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+    result = refresh_inventory_history_rollforward(
+        sess,
+        include_snapshot=True,
+        max_history_days=INVENTORY_HISTORY_DISK_RECONCILE_DAYS,
+    )
     _log.info("Rollforward: %s", result)
     if not result.get("ok"):
         return 1

@@ -1897,6 +1897,85 @@ def persist_daily_inventory_history_meta(sess) -> bool:
         return False
 
 
+# Disk reconcile / production scripts must never trim the on-disk matrix to 30d.
+INVENTORY_HISTORY_DISK_RECONCILE_DAYS = 0
+
+
+def iter_inventory_history_parquet_candidates() -> list:
+    """All on-disk daily inventory history parquets (warm cache + github bundles)."""
+    from pathlib import Path
+
+    cache = _warm_cache_dir()
+    roots: list[Path] = []
+    if cache.is_dir():
+        roots.append(cache)
+    gh_root = cache.parent / "github_cache"
+    if gh_root.is_dir():
+        for sub in sorted(gh_root.iterdir(), reverse=True):
+            if sub.is_dir():
+                roots.append(sub)
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        p = root / "daily_inventory_history_df.parquet"
+        key = str(p.resolve())
+        if p.is_file() and key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def merge_inventory_history_candidates(paths: list) -> pd.DataFrame | None:
+    """Union every readable on-disk candidate into one history frame."""
+    merged: pd.DataFrame | None = None
+    for p in paths:
+        try:
+            df = pd.read_parquet(p)
+        except Exception:
+            continue
+        if df is None or getattr(df, "empty", True):
+            continue
+        merged = merge_inventory_history(merged, df)
+    return merged
+
+
+def _inventory_history_unique_days(df: pd.DataFrame | None) -> int:
+    if df is None or getattr(df, "empty", True) or "Date" not in df.columns:
+        return 0
+    return int(pd.to_datetime(df["Date"], errors="coerce").dt.normalize().nunique())
+
+
+def restore_inventory_history_from_best_disk_backups(
+    current: pd.DataFrame | None = None,
+) -> pd.DataFrame | None:
+    """Merge all on-disk candidates when the union is broader than ``current`` alone."""
+    paths = iter_inventory_history_parquet_candidates()
+    if not paths:
+        return None
+    merged = merge_inventory_history_candidates(paths)
+    if merged is None or merged.empty:
+        return None
+    if current is None or getattr(current, "empty", True):
+        return merged
+    cur_days = _inventory_history_unique_days(current)
+    merged_days = _inventory_history_unique_days(merged)
+    if merged_days > cur_days:
+        return merged
+    if inventory_history_is_newer_than(merged, current):
+        return merged
+    cur_max = inventory_history_max_date(current)
+    merged_max = inventory_history_max_date(merged)
+    if (
+        merged_max is not None
+        and cur_max is not None
+        and merged_max >= cur_max
+        and merged_days >= cur_days
+        and len(merged) > len(current)
+    ):
+        return merged
+    return None
+
+
 def reconcile_inventory_history_disk_integrity(*, repair: bool = True) -> dict:
     """Detect and repair meta/parquet drift; never let metadata claim dates absent from rows."""
     import json
@@ -2091,6 +2170,9 @@ __all__ = [
     "persist_daily_inventory_history_meta",
     "persist_inventory_history_authoritative",
     "reconcile_inventory_history_disk_integrity",
+    "restore_inventory_history_from_best_disk_backups",
+    "iter_inventory_history_parquet_candidates",
+    "INVENTORY_HISTORY_DISK_RECONCILE_DAYS",
     "upload_timestamp_epoch",
     "daily_inventory_meta_is_newer",
 ]

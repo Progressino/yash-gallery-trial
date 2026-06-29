@@ -93,6 +93,7 @@ def _persist_history(sess) -> None:
 
 def main() -> int:
     from backend.services.daily_inventory_history import (
+        INVENTORY_HISTORY_DISK_RECONCILE_DAYS,
         read_daily_inventory_history_disk_meta,
         refresh_inventory_history_rollforward,
     )
@@ -112,7 +113,11 @@ def main() -> int:
         flush=True,
     )
 
-    result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+    result = refresh_inventory_history_rollforward(
+        sess,
+        include_snapshot=True,
+        max_history_days=INVENTORY_HISTORY_DISK_RECONCILE_DAYS,
+    )
     print("REFRESH:", json.dumps(result, indent=2, default=str), flush=True)
     if not result.get("ok"):
         print("FAIL: refresh returned not ok", flush=True)
