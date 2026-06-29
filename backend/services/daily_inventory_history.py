@@ -1614,11 +1614,20 @@ def repair_inventory_history_spikes(
         t_next = float(next_rows["Qty"].sum())
         if t_next <= t_prev:
             continue
+        prev_skus = int(prev_rows["OMS_SKU"].astype(str).nunique())
+        next_skus = int(next_rows["OMS_SKU"].astype(str).nunique())
+        sku_ratio = next_skus / max(prev_skus, 1)
         gap_mask = (sales["Date"] > d_prev) & (sales["Date"] <= d_next) if not sales.empty else pd.Series(dtype=bool)
         gap_sales = float(sales.loc[gap_mask, "Net_Units"].sum()) if not sales.empty and bool(gap_mask.any()) else 0.0
         expected = max(0.0, t_prev - gap_sales)
         tol = max(50.0, float(gap_sales) * 0.25, t_prev * 0.005)
-        spike = t_next > expected + tol and t_next > t_prev * float(ratio_threshold)
+        similar_universe = 0.92 <= sku_ratio <= 1.12
+        big_total_jump = t_next > t_prev * 1.12 and (t_next - t_prev) > max(5000.0, t_prev * 0.08)
+        new_sku_surge = (next_skus - prev_skus) > 400 and t_next > t_prev * 1.08
+        spike = (
+            t_next > expected + tol
+            and (big_total_jump and similar_universe or new_sku_surge)
+        )
         if not spike:
             continue
         prev_rows = out[out["Date"] == d_prev]

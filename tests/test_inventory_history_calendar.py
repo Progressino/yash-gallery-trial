@@ -51,6 +51,30 @@ def test_project_inventory_calendar_fills_every_day():
 def test_repair_inventory_history_spikes_replaces_bad_column():
     hist = pd.concat(
         [
+            _hist("SKU-A", ["2026-06-28"], [80000.0]),
+            _hist("SKU-B", ["2026-06-28"], [20000.0]),
+            _hist("SKU-A", ["2026-06-29"], [120000.0]),
+            _hist("SKU-B", ["2026-06-29"], [80000.0]),
+        ],
+        ignore_index=True,
+    )
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A", "SKU-B"],
+            "TxnDate": pd.to_datetime(["2026-06-29", "2026-06-29"]),
+            "Units_Effective": [2000.0, 1000.0],
+        }
+    )
+    repaired, actions = repair_inventory_history_spikes(hist, sales)
+    assert actions
+    totals = repaired.groupby("Date")["Qty"].sum()
+    assert float(totals.loc[pd.Timestamp("2026-06-28")]) == 100000.0
+    assert float(totals.loc[pd.Timestamp("2026-06-29")]) == 97000.0
+
+
+def test_repair_inventory_history_spikes_ignores_small_samples():
+    hist = pd.concat(
+        [
             _hist("SKU-A", ["2026-06-28"], [100.0]),
             _hist("SKU-B", ["2026-06-28"], [50.0]),
             _hist("SKU-A", ["2026-06-29"], [500.0]),
@@ -66,10 +90,7 @@ def test_repair_inventory_history_spikes_replaces_bad_column():
         }
     )
     repaired, actions = repair_inventory_history_spikes(hist, sales)
-    assert actions
-    totals = repaired.groupby("Date")["Qty"].sum()
-    assert float(totals.loc[pd.Timestamp("2026-06-28")]) == 150.0
-    assert float(totals.loc[pd.Timestamp("2026-06-29")]) == 147.0
+    assert not actions
 
 
 def test_wide_matrix_uses_full_calendar_columns():
