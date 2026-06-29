@@ -4140,7 +4140,8 @@ def test_should_skip_inventory_history_extend_stale_sheet():
     assert should_skip_inventory_history_extend(window_end, window_end, coverage_in_window=24) is True
 
 
-def test_manual_existing_po_upload_seeds_full_sheet_raise():
+def test_manual_existing_po_upload_seeds_new_order_only():
+    """Ledger records New Order qty only — pipeline stays on Existing PO sheet."""
     from backend.session import AppSession
     from backend.services.po_raise_import import seed_ledger_from_manual_existing_po_upload
 
@@ -4158,14 +4159,14 @@ def test_manual_existing_po_upload_seeds_full_sheet_raise():
     out = seed_ledger_from_manual_existing_po_upload(sess, replace_day=True)
     assert out.get("ok") is True
     assert out.get("raise_skus") == 1
+    assert out.get("total_units") == 12
     assert set(sess.existing_po_manual_raise_skus) == {"B-2"}
     led = sess.po_raise_ledger_df
     assert not led.empty
     b = led[led["OMS_SKU"] == "B-2"]
-    assert int(b["Raised_Qty"].iloc[0]) == 20
+    assert int(b["Raised_Qty"].iloc[0]) == 12
     c = led[led["OMS_SKU"] == "C-3"]
-    assert not c.empty
-    assert int(c["Raised_Qty"].iloc[0]) == 5
+    assert c.empty
 
 
 def test_pipeline_only_existing_po_does_not_block_new_po_qty():

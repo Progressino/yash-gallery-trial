@@ -711,7 +711,9 @@ def manual_existing_po_raise_skus(sess) -> set[str]:
 def ensure_manual_raise_ledger_for_calculate(sess, planning_date: str | None = None) -> bool:
     """
     Before PO calculate: ensure durable/session raise ledger reflects the latest
-    manual Existing PO upload (sheet date + pipeline / new-order qty).
+    manual Existing PO **New Order** qty for the sheet date (not open pipeline).
+
+    Skips re-seed when the operator deleted/suppressed that raise day on the dashboard.
     """
     block = manual_existing_po_raise_skus(sess)
     if not block:
@@ -720,13 +722,15 @@ def ensure_manual_raise_ledger_for_calculate(sess, planning_date: str | None = N
     if not raise_day:
         return False
     try:
-        from ..db.po_raised_db import ledger_rows_as_dataframe
+        from ..db.po_raised_db import is_raise_date_suppressed, ledger_rows_as_dataframe
         from .po_raise_import import (
             hydrate_session_ledger_from_db,
             seed_ledger_from_manual_existing_po_upload,
         )
 
         day_s = str(raise_day)[:10]
+        if is_raise_date_suppressed(day_s):
+            return False
         db_df = ledger_rows_as_dataframe(start_date=day_s, end_date=day_s)
         db_units = (
             int(pd.to_numeric(db_df["Raised_Qty"], errors="coerce").fillna(0).sum())

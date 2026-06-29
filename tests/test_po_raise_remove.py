@@ -168,3 +168,57 @@ def test_clear_raise_ledger_all(tmp_path, monkeypatch):
             lookback_days=14,
         )
         assert auto is None or day not in (auto.get("imported_days") or [])
+
+
+def test_ensure_manual_raise_ledger_skips_suppressed_day(tmp_path, monkeypatch):
+    from backend.services.existing_po import ensure_manual_raise_ledger_for_calculate
+    from backend.session import AppSession
+
+    db = tmp_path / "po_raised_sup2.db"
+    monkeypatch.setattr(po_raised_db, "DB_PATH", str(db))
+    po_raised_db.init_db()
+
+    sess = AppSession()
+    sess.existing_po_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["ORDERED-A"],
+            "PO_Qty_Ordered": [25],
+            "PO_Pipeline_Total": [400],
+            "Pending_Cutting": [375],
+            "Balance_to_Dispatch": [0],
+        }
+    )
+    sess.existing_po_filename = "Po 27-Jun-26.xlsx"
+    po_raised_db.suppress_raise_date("2026-06-27", note="operator deleted day")
+
+    assert ensure_manual_raise_ledger_for_calculate(sess, "2026-06-29") is False
+    assert sess.po_raise_ledger_df is None or getattr(sess.po_raise_ledger_df, "empty", True)
+    rows = po_raised_db.list_raises(start_date="2026-06-27", end_date="2026-06-27")
+    assert rows == []
+
+
+def test_ensure_manual_raise_ledger_seeds_new_order_not_pipeline(tmp_path, monkeypatch):
+    from backend.services.existing_po import ensure_manual_raise_ledger_for_calculate
+    from backend.session import AppSession
+
+    db = tmp_path / "po_raised_seed.db"
+    monkeypatch.setattr(po_raised_db, "DB_PATH", str(db))
+    po_raised_db.init_db()
+
+    sess = AppSession()
+    sess.existing_po_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["ORDERED-A", "PIPE-B"],
+            "PO_Qty_Ordered": [25, 0],
+            "PO_Pipeline_Total": [400, 80],
+            "Pending_Cutting": [375, 80],
+            "Balance_to_Dispatch": [0, 0],
+        }
+    )
+    sess.existing_po_filename = "Po 27-Jun-26.xlsx"
+
+    assert ensure_manual_raise_ledger_for_calculate(sess, "2026-06-29") is True
+    rows = po_raised_db.list_raises(start_date="2026-06-27", end_date="2026-06-27")
+    assert len(rows) == 1
+    assert rows[0]["oms_sku"] == "ORDERED-A"
+    assert int(rows[0]["qty"]) == 25

@@ -407,22 +407,16 @@ def bootstrap_all_archives_to_db() -> dict:
     }
 
 
+def _new_order_qty_from_existing_po_row(row: pd.Series) -> int:
+    """Qty actually raised on the manual Existing PO sheet date (New Order column only)."""
+    if "PO_Qty_Ordered" not in row.index:
+        return 0
+    return int(max(0, int(pd.to_numeric(row.get("PO_Qty_Ordered"), errors="coerce") or 0)))
+
+
 def _raised_qty_from_existing_po_row(row: pd.Series) -> int:
-    """Best single raise qty for a manual Existing PO upload row."""
-    parts: list[float] = []
-    for col in (
-        "PO_Qty_Ordered",
-        "PO_Pipeline_Total",
-        "Pending_Cutting",
-        "Balance_to_Dispatch",
-    ):
-        if col in row.index:
-            parts.append(float(pd.to_numeric(row.get(col), errors="coerce") or 0))
-    if len(parts) >= 2 and "Pending_Cutting" in row.index and "Balance_to_Dispatch" in row.index:
-        pc = float(pd.to_numeric(row.get("Pending_Cutting"), errors="coerce") or 0)
-        bd = float(pd.to_numeric(row.get("Balance_to_Dispatch"), errors="coerce") or 0)
-        parts.append(pc + bd)
-    return int(max(parts)) if parts else 0
+    """Backward-compatible alias — manual uploads record New Order qty only."""
+    return _new_order_qty_from_existing_po_row(row)
 
 
 def manual_raise_block_skus_from_existing_po(ep: pd.DataFrame) -> set[str]:
@@ -449,9 +443,11 @@ def seed_ledger_from_manual_existing_po_upload(
     """
     Manual Existing PO upload = confirmed PO raise for the sheet date.
 
-    Records pipeline / new-order qty in the raise ledger. Only SKUs with
-    ``PO_Qty_Ordered > 0`` are blocked from re-recommendation within the lookback
-    window (pipeline-only rows stay eligible for new PO qty).
+    Records **New Order** qty (``PO_Qty_Ordered``) in the raise ledger only.
+    Open pipeline (pending cutting / balance to dispatch) stays on the Existing PO
+    sheet and flows into ``PO_Pipeline_Total`` during calculate — it must not be
+    double-counted as a raise. Only SKUs with ``PO_Qty_Ordered > 0`` are blocked
+    from re-recommendation within the lookback window.
     """
     from ..db.po_raised_db import ledger_rows_as_dataframe
     from .po_raise_archive import parse_raise_date_from_filename
@@ -480,7 +476,7 @@ def seed_ledger_from_manual_existing_po_upload(
         sku = str(row.get("OMS_SKU") or "").strip().upper()
         if not sku:
             continue
-        qty = _raised_qty_from_existing_po_row(row)
+        qty = _new_order_qty_from_existing_po_row(row)
         if qty > 0:
             accum[sku] = max(int(accum.get(sku, 0)), qty)
 
