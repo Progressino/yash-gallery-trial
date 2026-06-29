@@ -433,3 +433,37 @@ def test_snapshot_upload_prunes_derived_gap_and_skips_rollforward():
     assert "2026-06-28" not in day_qty
     assert day_qty.get("2026-06-29") == 99.0
     assert "2026-06-29" in (sess.daily_inventory_history_snapshot_dates or [])
+
+
+def test_inventory_history_is_newer_prefers_later_max_not_row_count():
+    may = _hist("A", "2026-05-30", 40)
+    june = _hist("A", "2026-06-29", 10)
+    assert inventory_history_is_newer_than(june, may)
+    assert not inventory_history_is_newer_than(may, june)
+
+
+def test_reconcile_disk_integrity_repairs_inflated_meta(tmp_path, monkeypatch):
+    import json
+
+    from backend.services import daily_inventory_history as dih
+
+    hist = _hist("SKU", "2026-05-30", 5)
+    cache = tmp_path / "warm_cache"
+    cache.mkdir()
+    hist.to_parquet(cache / "daily_inventory_history_df.parquet", index=False)
+    (cache / "daily_inventory_history_meta.json").write_text(
+        json.dumps(
+            {
+                "daily_inventory_history_max_date": "2026-06-29",
+                "daily_inventory_history_rows": 999999,
+                "daily_inventory_history_skus": 9999,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dih, "_warm_cache_dir", lambda: cache)
+    out = dih.reconcile_inventory_history_disk_integrity(repair=True)
+    assert out.get("repaired") is True
+    meta = json.loads((cache / "daily_inventory_history_meta.json").read_text())
+    assert meta["daily_inventory_history_max_date"] == "2026-05-30"
+    assert meta["daily_inventory_history_rows"] == 5

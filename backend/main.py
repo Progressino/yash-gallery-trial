@@ -212,17 +212,30 @@ def bootstrap_warm_cache_if_empty() -> bool:
                 if key == "mtr_df":
                     continue
                 cur = disk_data.get(key)
-                if cur is None or (
-                    hasattr(val, "__len__")
-                    and hasattr(cur, "__len__")
-                    and len(val) > len(cur)
-                ):
+                replace = cur is None
+                if not replace and hasattr(val, "__len__") and hasattr(cur, "__len__"):
+                    if key == "daily_inventory_history_df":
+                        try:
+                            from .services.daily_inventory_history import inventory_history_is_newer_than
+
+                            replace = inventory_history_is_newer_than(val, cur)
+                        except Exception:
+                            replace = len(val) > len(cur)
+                    else:
+                        replace = len(val) > len(cur)
+                if replace:
                     disk_data[key] = val
             _warm_cache = disk_data
             _warm_cache_loaded_at = datetime.now(IST)
             if _warm_cache_generation < 1:
                 _warm_cache_generation = 1
             _warm_cache_ready.set()
+            try:
+                from .services.daily_inventory_history import reconcile_inventory_history_disk_integrity
+
+                reconcile_inventory_history_disk_integrity(repair=True)
+            except Exception:
+                log.exception("inventory history integrity repair on bootstrap failed")
             _top_up_po_sidecars_from_loose_disk()
             log.info("Warm cache bootstrapped from disk (%d keys)", len(_warm_cache))
             _deferred_load_mtr_df(Path(_DISK_CACHE_DIR))
@@ -746,41 +759,12 @@ def sync_daily_inventory_history_sidecar(sess) -> None:
     meta = sess_meta
     if meta.get("daily_inventory_history_uploaded_at") or meta.get("daily_inventory_history_rows"):
         _warm_cache[_DAILY_INV_META_WARM_KEY] = meta
-        persist_daily_inventory_history_meta(sess)
     try:
-        os.makedirs(_DISK_CACHE_DIR, exist_ok=True)
-        path = os.path.join(_DISK_CACHE_DIR, "daily_inventory_history_df.parquet")
-        if os.path.exists(path):
-            try:
-                old = pd.read_parquet(path)
-                old_max = inventory_history_max_date(old)
-                allow = in_max is not None and old_max is not None and in_max > old_max
-                if not allow and not inventory_history_is_newer_than(
-                    df,
-                    old,
-                    incoming_uploaded_at=str(meta.get("daily_inventory_history_uploaded_at") or ""),
-                    existing_uploaded_at=str(disk_meta.get("daily_inventory_history_uploaded_at") or ""),
-                ):
-                    log.warning(
-                        "Refusing to overwrite daily inventory parquet with older session matrix"
-                    )
-                    return
-            except Exception:
-                pass
-        manifest_path = os.path.join(_DISK_CACHE_DIR, "_manifest.json")
-        manifest: dict = {}
-        if os.path.exists(manifest_path):
-            with open(manifest_path, encoding="utf-8") as f:
-                manifest = json.load(f)
-        keys = set(manifest.get("keys") or [])
-        from .services.helpers import _coerce_df_for_parquet
+        from .services.daily_inventory_history import persist_inventory_history_authoritative
 
-        _coerce_df_for_parquet(df).to_parquet(path, index=False)
-        keys.add("daily_inventory_history_df")
-        manifest["keys"] = sorted(keys)
-        manifest["saved_at"] = datetime.now(IST).isoformat()
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f)
+        if not persist_inventory_history_authoritative(sess, df):
+            log.warning("Daily inventory sidecar sync skipped — would downgrade authoritative copy")
+            return
         log.info("Daily inventory history sidecar disk cache updated")
     except Exception:
         log.exception("daily_inventory_history sidecar disk persist failed")
@@ -1242,6 +1226,34 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
 
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 new_rows = len(val)
+                if key == "daily_inventory_history_df" and os.path.exists(path):
+                    try:
+                        from .services.daily_inventory_history import (
+                            inventory_history_is_newer_than,
+                            read_daily_inventory_history_disk_meta,
+                        )
+
+                        old = pd.read_parquet(path)
+                        disk_meta = read_daily_inventory_history_disk_meta() or {}
+                        warm_meta = cache_dict.get(_DAILY_INV_META_WARM_KEY)
+                        warm_meta = warm_meta if isinstance(warm_meta, dict) else {}
+                        if not inventory_history_is_newer_than(
+                            val,
+                            old,
+                            incoming_uploaded_at=str(
+                                warm_meta.get("daily_inventory_history_uploaded_at") or ""
+                            ),
+                            existing_uploaded_at=str(
+                                disk_meta.get("daily_inventory_history_uploaded_at") or ""
+                            ),
+                        ):
+                            log.warning(
+                                "Warm-cache disk save blocked for daily_inventory_history_df "
+                                "(would downgrade matrix max date)"
+                            )
+                            continue
+                    except Exception:
+                        log.exception("daily inventory history disk save guard failed")
                 if key in _WARM_PLATFORM_KEYS and os.path.exists(path):
                     try:
                         import pyarrow.parquet as pq
@@ -1322,7 +1334,16 @@ def _top_up_po_sidecars_from_loose_disk() -> None:
         cur = _warm_cache.get(key)
         cur_rows = int(len(cur)) if cur is not None and hasattr(cur, "__len__") else 0
         disk_rows = int(len(val))
-        replace = cur_rows <= 0 or disk_rows > cur_rows
+        replace = False
+        if key == "daily_inventory_history_df":
+            try:
+                from .services.daily_inventory_history import inventory_history_is_newer_than
+
+                replace = inventory_history_is_newer_than(val, cur if hasattr(cur, "empty") else None)
+            except Exception:
+                replace = cur_rows <= 0 or disk_rows > cur_rows
+        else:
+            replace = cur_rows <= 0 or disk_rows > cur_rows
         if not replace and key == "daily_inventory_history_df":
             try:
                 from .services.daily_inventory_history import inventory_history_max_date

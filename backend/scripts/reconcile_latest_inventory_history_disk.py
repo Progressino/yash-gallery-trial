@@ -24,10 +24,11 @@ def main() -> int:
         daily_inventory_history_meta_bundle,
         inventory_history_matrix_cap_date,
         inventory_sheet_end_date_from_filename,
-        persist_daily_inventory_history_meta,
+        persist_inventory_history_authoritative,
         promote_daily_inventory_matrix_max_date,
         prune_non_snapshot_post_matrix_days,
         read_daily_inventory_history_disk_meta,
+        reconcile_inventory_history_disk_integrity,
         refresh_inventory_history_rollforward,
         snapshot_dates_from_history,
     )
@@ -40,6 +41,10 @@ def main() -> int:
         return 0
 
     meta_before = read_daily_inventory_history_disk_meta() or {}
+    integrity = reconcile_inventory_history_disk_integrity(repair=True)
+    _log.info("Integrity check: %s", integrity)
+    if integrity.get("actions"):
+        meta_before = read_daily_inventory_history_disk_meta() or {}
     sess = AppSession()
     sess.daily_inventory_history_df = pd.read_parquet(hist_path)
     for key in (
@@ -107,10 +112,7 @@ def main() -> int:
     if cap is not None:
         promote_daily_inventory_matrix_max_date(sess, str(cap.date()))
 
-    persist_daily_inventory_history_meta(sess)
-    from backend.services.helpers import _coerce_df_for_parquet
-
-    _coerce_df_for_parquet(sess.daily_inventory_history_df).to_parquet(hist_path, index=False)
+    persist_inventory_history_authoritative(sess)
     meta = daily_inventory_history_meta_bundle(sess)
     (cache / "daily_inventory_history_meta.json").write_text(
         json.dumps(meta, default=str, indent=2),

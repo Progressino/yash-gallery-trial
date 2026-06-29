@@ -169,6 +169,14 @@ def load_po_sidecar_backups_from_disk() -> dict[str, pd.DataFrame]:
                 _log.exception("po sidecar backup read failed: %s", path)
                 continue
             prev = out.get(key)
+            if key == "daily_inventory_history_df" and prev is not None:
+                try:
+                    from .daily_inventory_history import inventory_history_is_newer_than
+
+                    if not inventory_history_is_newer_than(df, prev[1]):
+                        continue
+                except Exception:
+                    pass
             if prev is None or _sidecar_candidate_score(key, df) > _sidecar_candidate_score(key, prev[1]):
                 out[key] = (_df_row_count(df), df)
 
@@ -181,7 +189,12 @@ def _persist_sidecars_to_warm_disk(frames: dict[str, pd.DataFrame]) -> None:
     try:
         import backend.main as _main
 
-        _main._save_warm_cache_to_disk(frames)
+        if not _main._warm_cache:
+            _main._warm_cache = {}
+        for key, df in frames.items():
+            if key in _PO_SIDECAR_KEYS and df is not None and not getattr(df, "empty", True):
+                _main._warm_cache[key] = df.copy()
+        _main.persist_po_sidecars_to_disk()
     except Exception:
         _log.exception("persist restored PO sidecars to warm disk failed")
 

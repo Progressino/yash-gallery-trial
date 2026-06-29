@@ -620,7 +620,11 @@ def inventory_history_is_newer_than(
             return True
         if in_max < ex_max:
             return False
-    return len(incoming) >= len(existing)
+    if in_at > 0 or ex_at > 0:
+        return in_at >= ex_at
+    in_skus = int(incoming["OMS_SKU"].astype(str).nunique()) if "OMS_SKU" in incoming.columns else 0
+    ex_skus = int(existing["OMS_SKU"].astype(str).nunique()) if "OMS_SKU" in existing.columns else 0
+    return in_skus >= ex_skus
 
 
 def filter_inventory_history_window(
@@ -1702,7 +1706,7 @@ def daily_inventory_history_meta_bundle(sess) -> dict:
         ),
         "daily_inventory_history_rows": rows,
         "daily_inventory_history_skus": skus,
-        "daily_inventory_history_max_date": df_max_s or matrix_ceiling_s,
+        "daily_inventory_history_max_date": df_max_s,
         "daily_inventory_history_matrix_max_date": matrix_ceiling_s or df_max_s,
         "daily_inventory_history_min_date": str(pd.Timestamp(min_d).date()) if pd.notna(min_d) else "",
     }
@@ -1753,6 +1757,10 @@ def _load_daily_inventory_df_from_disk() -> pd.DataFrame | None:
 
 def ensure_latest_daily_inventory_authoritative(sess) -> bool:
     """Prefer the newest uploaded inventory matrix on disk/warm — never merge stale copies."""
+    try:
+        reconcile_inventory_history_disk_integrity(repair=True)
+    except Exception:
+        pass
     changed = False
     sess_at = upload_timestamp_epoch(str(getattr(sess, "daily_inventory_history_uploaded_at", "") or ""))
     disk_meta = read_daily_inventory_history_disk_meta() or {}
@@ -1869,6 +1877,12 @@ def persist_daily_inventory_history_meta(sess) -> bool:
     meta = daily_inventory_history_meta_bundle(sess)
     if not meta.get("daily_inventory_history_uploaded_at") and not meta.get("daily_inventory_history_rows"):
         return False
+    df = getattr(sess, "daily_inventory_history_df", None)
+    if df is not None and not getattr(df, "empty", True):
+        mx = inventory_history_max_date(df)
+        meta_max = str(meta.get("daily_inventory_history_max_date") or "")[:10]
+        if mx is not None and meta_max and meta_max != str(mx.date()):
+            meta["daily_inventory_history_max_date"] = str(mx.date())
     try:
         import json
 
@@ -1881,6 +1895,122 @@ def persist_daily_inventory_history_meta(sess) -> bool:
         return True
     except Exception:
         return False
+
+
+def reconcile_inventory_history_disk_integrity(*, repair: bool = True) -> dict:
+    """Detect and repair meta/parquet drift; never let metadata claim dates absent from rows."""
+    import json
+
+    path = _warm_cache_dir()
+    hist_path = path / "daily_inventory_history_df.parquet"
+    meta_path = path / _DAILY_INV_META_FILENAME
+    report: dict = {"ok": True, "repaired": False, "actions": []}
+
+    if not hist_path.is_file():
+        report["ok"] = False
+        report["reason"] = "missing_parquet"
+        return report
+
+    try:
+        df = pd.read_parquet(hist_path)
+    except Exception as exc:
+        report["ok"] = False
+        report["reason"] = f"parquet_read_failed:{exc}"
+        return report
+
+    meta = {}
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+
+    df_max = inventory_history_max_date(df)
+    df_max_s = str(pd.Timestamp(df_max).date()) if df_max is not None and pd.notna(df_max) else ""
+    meta_max_s = str(meta.get("daily_inventory_history_max_date") or "")[:10]
+    rows = int(len(df))
+    skus = int(df["OMS_SKU"].astype(str).nunique()) if "OMS_SKU" in df.columns else 0
+    meta_rows = int(meta.get("daily_inventory_history_rows") or 0)
+
+    if meta_max_s and df_max_s and meta_max_s != df_max_s:
+        report["actions"].append(f"meta_max {meta_max_s} != parquet_max {df_max_s}")
+    if meta_rows and rows and abs(meta_rows - rows) > max(500, int(rows * 0.05)):
+        report["actions"].append(f"meta_rows {meta_rows} != parquet_rows {rows}")
+
+    if not repair or not report["actions"]:
+        report["parquet_max_date"] = df_max_s
+        report["meta_max_date"] = meta_max_s
+        report["parquet_rows"] = rows
+        return report
+
+    repaired = dict(meta) if isinstance(meta, dict) else {}
+    repaired["daily_inventory_history_max_date"] = df_max_s
+    repaired["daily_inventory_history_rows"] = rows
+    repaired["daily_inventory_history_skus"] = skus
+    if df_max_s and (
+        not str(repaired.get("daily_inventory_history_matrix_max_date") or "")[:10]
+        or str(repaired.get("daily_inventory_history_matrix_max_date") or "")[:10] < df_max_s
+    ):
+        # Do not inflate matrix_max above parquet unless snapshot_dates explicitly newer in meta.
+        snap_dates = list(repaired.get("daily_inventory_history_snapshot_dates") or [])
+        snap_max = max(snap_dates) if snap_dates else df_max_s
+        if snap_max > df_max_s:
+            repaired["daily_inventory_history_matrix_max_date"] = snap_max
+        else:
+            repaired["daily_inventory_history_matrix_max_date"] = df_max_s
+    min_d = pd.to_datetime(df["Date"], errors="coerce").min() if "Date" in df.columns else None
+    if pd.notna(min_d):
+        repaired["daily_inventory_history_min_date"] = str(pd.Timestamp(min_d).date())
+
+    meta_path.write_text(json.dumps(repaired, default=str, indent=2), encoding="utf-8")
+    report["repaired"] = True
+    report["parquet_max_date"] = df_max_s
+    report["meta_max_date"] = df_max_s
+    report["parquet_rows"] = rows
+    return report
+
+
+def persist_inventory_history_authoritative(sess, df: pd.DataFrame | None = None) -> bool:
+    """Atomically persist inventory history parquet + meta from one dataframe."""
+    import json
+
+    from ..services.helpers import _coerce_df_for_parquet
+
+    work = df if df is not None else getattr(sess, "daily_inventory_history_df", None)
+    if work is None or getattr(work, "empty", True):
+        return False
+    sess.daily_inventory_history_df = work
+    cache = _warm_cache_dir()
+    cache.mkdir(parents=True, exist_ok=True)
+    hist_path = cache / "daily_inventory_history_df.parquet"
+    if hist_path.is_file():
+        try:
+            old = pd.read_parquet(hist_path)
+            disk_meta = read_daily_inventory_history_disk_meta() or {}
+            if not inventory_history_is_newer_than(
+                work,
+                old,
+                incoming_uploaded_at=str(
+                    daily_inventory_history_meta_bundle(sess).get("daily_inventory_history_uploaded_at") or ""
+                ),
+                existing_uploaded_at=str(disk_meta.get("daily_inventory_history_uploaded_at") or ""),
+            ):
+                return False
+        except Exception:
+            pass
+    _coerce_df_for_parquet(work).to_parquet(hist_path, index=False)
+    meta = daily_inventory_history_meta_bundle(sess)
+    (cache / _DAILY_INV_META_FILENAME).write_text(json.dumps(meta, default=str, indent=2), encoding="utf-8")
+    try:
+        import backend.main as _main
+
+        if not _main._warm_cache:
+            _main._warm_cache = {}
+        _main._warm_cache["daily_inventory_history_df"] = work.copy()
+        _main._warm_cache[_main._DAILY_INV_META_WARM_KEY] = meta
+    except Exception:
+        pass
+    return True
 
 
 def upload_timestamp_epoch(value: str) -> float:
@@ -1959,6 +2089,8 @@ __all__ = [
     "apply_daily_inventory_history_meta",
     "read_daily_inventory_history_disk_meta",
     "persist_daily_inventory_history_meta",
+    "persist_inventory_history_authoritative",
+    "reconcile_inventory_history_disk_integrity",
     "upload_timestamp_epoch",
     "daily_inventory_meta_is_newer",
 ]
