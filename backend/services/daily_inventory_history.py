@@ -1473,6 +1473,28 @@ def _sales_net_by_sku_day(
     return s.groupby(["OMS_SKU", "Date"], as_index=False)["Net_Units"].sum()
 
 
+def rollforward_inventory_day(
+    prev_day: pd.DataFrame,
+    target_date: pd.Timestamp,
+    sales_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Vectorised one-day roll-forward from a prior snapshot column."""
+    day = pd.Timestamp(target_date).normalize()
+    base = prev_day.copy()
+    base["OMS_SKU"] = base["OMS_SKU"].astype(str).str.strip().str.upper()
+    base["Qty"] = pd.to_numeric(base["Qty"], errors="coerce").fillna(0.0)
+    out = base.groupby("OMS_SKU", as_index=False)["Qty"].max()
+    sales = _sales_net_by_sku_day(sales_df, start=day, end=day)
+    if not sales.empty:
+        out = out.merge(sales, on="OMS_SKU", how="left")
+        out["Net_Units"] = out["Net_Units"].fillna(0.0)
+        out["Qty"] = (out["Qty"] - out["Net_Units"]).clip(lower=0.0)
+        out = out.drop(columns=["Net_Units"])
+    out["Date"] = day
+    out["Source"] = "derived"
+    return out[["OMS_SKU", "Date", "Qty", "Source"]]
+
+
 def project_inventory_calendar(
     inv_history: pd.DataFrame,
     start: pd.Timestamp,
@@ -1512,38 +1534,53 @@ def project_inventory_calendar(
         .drop_duplicates(subset=["OMS_SKU", "Date"], keep="first")
         .drop(columns=["_src_rank"])
     )
-    auth_map: dict[tuple[str, pd.Timestamp], tuple[float, str]] = {}
-    for _, r in auth.iterrows():
-        auth_map[(str(r["OMS_SKU"]), pd.Timestamp(r["Date"]).normalize())] = (
-            float(r["Qty"]),
-            str(r.get("Source") or "uploaded"),
-        )
+
+    pre = auth[auth["Date"] < cs].sort_values(["OMS_SKU", "Date"]).groupby("OMS_SKU", as_index=False).tail(1)
+    prev = (
+        pre.set_index("OMS_SKU")["Qty"].astype(float)
+        if not pre.empty
+        else pd.Series(dtype=float)
+    ).reindex(skus).fillna(0.0)
 
     sales = _sales_net_by_sku_day(sales_df, start=cs - pd.Timedelta(days=365), end=ce)
-    sales_lookup: dict[tuple[str, pd.Timestamp], float] = {}
+    sales_by_day: dict[pd.Timestamp, pd.Series] = {}
     if not sales.empty:
-        for _, r in sales.iterrows():
-            sales_lookup[(str(r["OMS_SKU"]), pd.Timestamp(r["Date"]).normalize())] = float(r["Net_Units"])
+        for day_ts, chunk in sales.groupby("Date"):
+            sales_by_day[pd.Timestamp(day_ts).normalize()] = (
+                chunk.set_index("OMS_SKU")["Net_Units"].astype(float)
+            )
 
-    rows: list[dict] = []
-    for sku in skus:
-        pre = auth[(auth["OMS_SKU"] == sku) & (auth["Date"] < cs)]
-        prev = float(pre.sort_values("Date").iloc[-1]["Qty"]) if not pre.empty else 0.0
-        for day in calendar:
-            day_ts = pd.Timestamp(day).normalize()
-            hit = auth_map.get((sku, day_ts))
-            if hit is not None:
-                qty, source = hit
-                prev = float(qty)
-                rows.append({"OMS_SKU": sku, "Date": day_ts, "Qty": prev, "Source": source})
-                continue
-            net = sales_lookup.get((sku, day_ts), 0.0)
-            prev = max(0.0, prev - net)
-            rows.append({"OMS_SKU": sku, "Date": day_ts, "Qty": prev, "Source": "derived"})
+    out_frames: list[pd.DataFrame] = []
+    for day in calendar:
+        day_ts = pd.Timestamp(day).normalize()
+        auth_day = auth[auth["Date"] == day_ts]
+        if not auth_day.empty:
+            out_frames.append(
+                auth_day[["OMS_SKU", "Date", "Qty", "Source"]].copy()
+            )
+            prev = prev.copy()
+            prev.loc[auth_day["OMS_SKU"].astype(str)] = (
+                auth_day.set_index("OMS_SKU")["Qty"].astype(float)
+            )
+            continue
+        net = sales_by_day.get(day_ts, pd.Series(0.0, index=skus)).reindex(skus).fillna(0.0)
+        new_prev = (prev - net).clip(lower=0.0)
+        active = (prev > 0.0) | (net.abs() > 1e-9) | (new_prev >= 0.0)
+        out_frames.append(
+            pd.DataFrame(
+                {
+                    "OMS_SKU": skus,
+                    "Date": day_ts,
+                    "Qty": new_prev.values,
+                    "Source": "derived",
+                }
+            )
+        )
+        prev = new_prev
 
-    if not rows:
+    if not out_frames:
         return pd.DataFrame(columns=_STORE_COLS)
-    return _coalesce_history_rows(pd.DataFrame(rows))
+    return _coalesce_history_rows(pd.concat(out_frames, ignore_index=True))
 
 
 def repair_inventory_history_spikes(
@@ -1584,8 +1621,8 @@ def repair_inventory_history_spikes(
         spike = t_next > expected + tol and t_next > t_prev * float(ratio_threshold)
         if not spike:
             continue
-        clip = out[out["Date"] <= d_prev].copy()
-        repaired = project_inventory_calendar(clip, d_next, d_next, sales_df=sales_df)
+        prev_rows = out[out["Date"] == d_prev]
+        repaired = rollforward_inventory_day(prev_rows, d_next, sales_df=sales_df)
         out = out[out["Date"] != d_next]
         out = pd.concat([out, repaired], ignore_index=True)
         actions.append(f"repaired_spike:{d_next.date()}: {int(t_next)}→{int(repaired['Qty'].sum())}")
