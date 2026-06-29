@@ -45,11 +45,28 @@ def sync_ledger_to_durable_db(sess, raised_date: pd.Timestamp) -> None:
         if sub.empty:
             return
         items = [
-            {"oms_sku": str(r["OMS_SKU"]), "qty": int(r["Raised_Qty"])}
+            {
+                "oms_sku": str(r["OMS_SKU"]),
+                "qty": int(r["Raised_Qty"]),
+                "lead_time": int(
+                    getattr(sess, "po_calculate_lead_time", None)
+                    or getattr(sess, "po_last_raise_lead_time", None)
+                    or 0
+                )
+                or None,
+            }
             for _, r in sub.iterrows()
             if int(r["Raised_Qty"]) > 0
         ]
         replace_raises_for_date(str(d.date()), items)
+        try:
+            from .po_raise_lead_time import lead_time_for_raise_record, persist_raise_day_lead_time
+
+            lt = lead_time_for_raise_record(sess)
+            if lt > 0:
+                persist_raise_day_lead_time(str(d.date()), lt, source="sync_ledger")
+        except Exception:
+            pass
     except Exception:
         _log.exception("sync_ledger_to_durable_db failed for %s", raised_date)
 
@@ -318,6 +335,7 @@ def apply_ledger_import(
     *,
     group_by_parent: bool = False,
     replace_day: bool = True,
+    lead_time: int | None = None,
 ) -> dict:
     base = getattr(sess, "po_raise_ledger_df", pd.DataFrame())
     if replace_day:
@@ -333,6 +351,18 @@ def apply_ledger_import(
     sess._quarterly_cache.clear()
     n = int(len(sess.po_raise_ledger_df))
     tot_units = int(sum(accum.values()))
+    if lead_time is not None and int(lead_time) > 0:
+        sess.po_last_raise_lead_time = int(lead_time)
+        try:
+            from .po_raise_lead_time import persist_raise_day_lead_time
+
+            persist_raise_day_lead_time(
+                str(raised_date.date()),
+                int(lead_time),
+                source="ledger_import",
+            )
+        except Exception:
+            pass
     sync_ledger_to_durable_db(sess, raised_date)
     try:
         from ..db.po_raised_db import clear_raise_date_suppression
@@ -439,6 +469,7 @@ def seed_ledger_from_manual_existing_po_upload(
     *,
     raised_date: pd.Timestamp | None = None,
     replace_day: bool = True,
+    lead_time: int | None = None,
 ) -> dict:
     """
     Manual Existing PO upload = confirmed PO raise for the sheet date.
@@ -465,6 +496,11 @@ def seed_ledger_from_manual_existing_po_upload(
     raised_date = pd.Timestamp(raised_date).normalize()
     day_s = str(raised_date.date())
 
+    from .po_raise_lead_time import lead_time_for_raise_record, persist_raise_day_lead_time
+
+    lt = int(lead_time) if lead_time is not None else lead_time_for_raise_record(sess)
+    sess.po_last_raise_lead_time = lt
+
     if not replace_day:
         existing = ledger_rows_as_dataframe(start_date=day_s, end_date=day_s)
         if existing is not None and not existing.empty:
@@ -485,6 +521,9 @@ def seed_ledger_from_manual_existing_po_upload(
     sess.existing_po_manual_raise_skus = block_skus
     sess.existing_po_manual_upload = True
 
+    if accum:
+        persist_raise_day_lead_time(day_s, lt, source="manual_existing_po_upload")
+
     if not accum:
         return {
             "ok": True,
@@ -497,7 +536,7 @@ def seed_ledger_from_manual_existing_po_upload(
             ),
         }
 
-    out = apply_ledger_import(sess, accum, raised_date, replace_day=replace_day)
+    out = apply_ledger_import(sess, accum, raised_date, replace_day=replace_day, lead_time=lt)
     out["raise_skus"] = len(block_skus)
     out["ledger_seeded"] = True
     out["manual_raise"] = True

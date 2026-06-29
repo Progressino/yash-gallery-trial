@@ -41,7 +41,7 @@ import {
   quarterColumnsFromApi,
   visiblePoColumns,
 } from '../lib/poDisplay'
-import { confirmPoRaiseOnServer, exportRaisePoCsv, type PoRaiseRow } from '../lib/poRaiseActions'
+import { confirmPoRaiseOnServer, exportRaisePoCsv, fetchSuggestedLeadTime, type PoRaiseRow } from '../lib/poRaiseActions'
 import { buildPoClientReportHtml, downloadPoClientReport } from '../utils/poClientReport'
 import { PoQtyInput } from '../components/PoQtyInput'
 import { PODashboardPanel } from '../components/PODashboardPanel'
@@ -293,6 +293,24 @@ function POFreshInner() {
       cancelled = true
     }
   }, [dataStatus?.ready, loading, params])
+
+  /** Default lead time from the most recent PO raise in the lookback window. */
+  useEffect(() => {
+    if (!dataStatus?.ready) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const hit = await fetchSuggestedLeadTime(calendarDateIST(), params.raise_ledger_lookback_days)
+        if (cancelled || hit.leadTime <= 0) return
+        setParams(p => (p.lead_time === hit.leadTime ? p : { ...p, lead_time: hit.leadTime }))
+      } catch {
+        /* optional */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [dataStatus?.ready, params.raise_ledger_lookback_days, setParams])
 
   /** Restore finished PO from server session only — never block the Calculate button. */
   useEffect(() => {
@@ -602,6 +620,9 @@ function POFreshInner() {
         rows: selectedRows,
         raisedDate,
         groupByParent: params.group_by_parent,
+        leadTime: params.lead_time,
+        periodDays: params.period_days,
+        targetDays: params.target_days,
       })
       if (!res.ok) {
         setRaiseConfirmErr(res.message || 'Could not save raise ledger.')
@@ -638,7 +659,7 @@ function POFreshInner() {
     } finally {
       setRaiseConfirmBusy(false)
     }
-  }, [params.group_by_parent, params.raise_view_date, runCalculate, selectedRows, totalRaiseUnits])
+  }, [params.group_by_parent, params.lead_time, params.period_days, params.raise_view_date, params.target_days, runCalculate, selectedRows, totalRaiseUnits])
 
   const exportClientReport = useCallback(() => {
     const day = calendarDateIST()

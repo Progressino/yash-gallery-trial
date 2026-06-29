@@ -24,10 +24,35 @@ export function exportRaisePoCsv(rows: PoRaiseRow[], poNumber: string) {
   void archivePoExportOnServer(csv, calendarDateIST())
 }
 
+export async function fetchSuggestedLeadTime(
+  planningDate?: string,
+  lookbackDays = 14,
+): Promise<{ leadTime: number; raiseDate: string; source: string }> {
+  const { data } = await api.get<{
+    ok?: boolean
+    lead_time?: number
+    raise_date?: string
+    source?: string
+  }>('/po/suggested-lead-time', {
+    params: {
+      planning_date: planningDate || calendarDateIST(),
+      lookback_days: lookbackDays,
+    },
+  })
+  return {
+    leadTime: Number(data?.lead_time) || 45,
+    raiseDate: String(data?.raise_date || ''),
+    source: String(data?.source || 'default'),
+  }
+}
+
 export async function confirmPoRaiseOnServer(opts: {
   rows: PoRaiseRow[]
   raisedDate: string
   groupByParent: boolean
+  leadTime?: number
+  periodDays?: number
+  targetDays?: number
 }): Promise<{
   ok: boolean
   message?: string
@@ -54,6 +79,9 @@ export async function confirmPoRaiseOnServer(opts: {
     rows: payloadRows,
     raised_date: opts.raisedDate,
     group_by_parent: opts.groupByParent,
+    lead_time: opts.leadTime,
+    period_days: opts.periodDays,
+    target_days: opts.targetDays,
   })
   if (!data?.ok) {
     return { ok: false, message: data?.message || 'Could not save raise ledger.' }

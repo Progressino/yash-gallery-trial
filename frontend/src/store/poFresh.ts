@@ -21,7 +21,7 @@ export type POFreshParams = {
 
 export const DEFAULT_PO_FRESH_PARAMS: POFreshParams = {
   period_days: 30,
-  lead_time: 60,
+  lead_time: 45,
   target_days: 180,
   grace_days: 0,
   demand_basis: 'Sold',

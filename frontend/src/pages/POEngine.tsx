@@ -29,6 +29,7 @@ import type { POFormulaContext } from '../lib/poFormulaHelp'
 import { calendarDateIST, yesterdayIST } from '../lib/dates'
 import { poOperationalReady, poOperationalLoaded, PO_OPERATIONAL_TOTAL } from '../lib/localSessionHint'
 import { archivePoExportOnServer } from '../lib/archivePoExport'
+import { confirmPoRaiseOnServer, fetchSuggestedLeadTime } from '../lib/poRaiseActions'
 import { looksLikePoExportCsv, pickPoExportCsvFromDownloads } from '../lib/pickPoExportCsv'
 import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner'
 
@@ -452,6 +453,24 @@ export default function POEngine() {
       syncTabFromUrl()
     })
   }, [syncTabFromUrl])
+
+  useEffect(() => {
+    if (!dataReady) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const hit = await fetchSuggestedLeadTime(calendarDateIST(), 14)
+        if (cancelled || hit.leadTime <= 0) return
+        setParams({ ...params, lead_time: hit.leadTime })
+      } catch {
+        /* optional */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- sync lead time once when data is ready
+  }, [dataReady])
 
   const refreshPoCoverage = useCallback(async () => {
     try {
@@ -891,30 +910,27 @@ export default function POEngine() {
       return
     }
     try {
-      const { data } = await api.post<{
-        ok?: boolean
-        message?: string
-        po_number?: string
-        raised_date?: string
-        total_qty?: number
-      }>('/po/raise-confirm', {
-        rows: payloadRows,
-        raised_date: planningDate,
-        group_by_parent: params.group_by_parent,
+      const res = await confirmPoRaiseOnServer({
+        rows,
+        raisedDate: planningDate,
+        groupByParent: params.group_by_parent,
+        leadTime: params.lead_time,
+        periodDays: params.period_days,
+        targetDays: params.target_days,
       })
-      if (!data?.ok) {
-        setRaiseConfirmErr(data?.message || 'Could not save raise ledger.')
+      if (!res.ok) {
+        setRaiseConfirmErr(res.message || 'Could not save raise ledger.')
         return
       }
-      const poNumber = data.po_number || `PO-${planningDate}`
+      const poNumber = res.poNumber || `PO-${planningDate}`
       exportRaisePO(rows, poNumber)
       const { buildPoRaiseReportHtml, downloadPoRaiseReport } = await import('../utils/poRaiseReport')
       downloadPoRaiseReport(
         buildPoRaiseReportHtml({
           poNumber,
-          raisedDate: data.raised_date || planningDate,
+          raisedDate: res.raisedDate || planningDate,
           rows,
-          totalQty: data.total_qty ?? rows.reduce((s, r) => s + r.Final_PO_Qty, 0),
+          totalQty: res.totalQty ?? rows.reduce((s, r) => s + r.Final_PO_Qty, 0),
         }),
         poNumber,
       )

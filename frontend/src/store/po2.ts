@@ -37,7 +37,7 @@ interface PO2State {
 
 export const PO2_DEFAULT_PARAMS: PO2Params = {
   period_days: 30,
-  lead_time: 60,
+  lead_time: 45,
   target_days: 180,
   grace_days: 0,
   demand_basis: 'Sold',

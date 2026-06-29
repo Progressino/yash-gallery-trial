@@ -204,6 +204,9 @@ class RaiseConfirmBody(BaseModel):
     rows: List[RaiseConfirmItem]
     raised_date: Optional[str] = None
     group_by_parent: bool = False
+    lead_time: Optional[int] = None
+    period_days: Optional[int] = None
+    target_days: Optional[int] = None
 
 
 @router.post("/sku-status-lead")
@@ -787,7 +790,24 @@ def po_raise_confirm(request: Request, body: RaiseConfirmBody):
     sess._quarterly_cache.clear()
 
     from ..services.po_raise_import import sync_ledger_to_durable_db
+    from ..services.po_raise_lead_time import lead_time_for_raise_record, persist_raise_day_lead_time
 
+    lt = lead_time_for_raise_record(
+        sess,
+        {
+            "lead_time": body.lead_time,
+            "planning_date": str(as_dt.date()),
+        },
+    )
+    sess.po_calculate_lead_time = lt
+    sess.po_last_raise_lead_time = lt
+    persist_raise_day_lead_time(
+        str(as_dt.date()),
+        lt,
+        period_days=body.period_days,
+        target_days=body.target_days,
+        source="raise_confirm",
+    )
     sync_ledger_to_durable_db(sess, as_dt)
     _sync_po_sidecars_to_durable_storage(request, sess)
 
@@ -945,6 +965,30 @@ async def po_raise_ledger_import_csv(
         f"{out['message']} Run Calculate PO to refresh columns."
     )
     return out
+
+
+@router.get("/suggested-lead-time")
+def po_suggested_lead_time(request: Request, planning_date: str = "", lookback_days: int = 14):
+    """Lead time for the next PO run — matches the most recent raise in the lookback window."""
+    from ..db.po_raised_db import latest_raise_lead_time_before
+    from ..services.po_raise_lead_time import DEFAULT_PO_LEAD_TIME_DAYS
+
+    plan = str(planning_date or "").strip()[:10] or None
+    lb = max(1, int(lookback_days or 14))
+    hit = latest_raise_lead_time_before(plan, lookback_days=lb, default_lead_time=DEFAULT_PO_LEAD_TIME_DAYS)
+    if hit:
+        return {
+            "ok": True,
+            "lead_time": int(hit["lead_time"]),
+            "raise_date": str(hit.get("raised_date") or ""),
+            "source": str(hit.get("source") or "last_raise"),
+        }
+    return {
+        "ok": True,
+        "lead_time": DEFAULT_PO_LEAD_TIME_DAYS,
+        "raise_date": "",
+        "source": "default",
+    }
 
 
 @router.get("/raise-ledger/summary")

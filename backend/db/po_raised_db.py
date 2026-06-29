@@ -49,6 +49,21 @@ def _ensure_suppressed_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_raise_day_meta_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS po_raise_day_meta (
+            raised_date   TEXT PRIMARY KEY,
+            lead_time     INTEGER NOT NULL,
+            period_days   INTEGER,
+            target_days   INTEGER,
+            source        TEXT DEFAULT '',
+            saved_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+
+
 def init_db() -> None:
     """Create the ledger table on app startup."""
     conn = _connect()
@@ -71,6 +86,7 @@ def init_db() -> None:
             "ON po_raised(oms_sku, raised_date)"
         )
         _ensure_suppressed_table(conn)
+        _ensure_raise_day_meta_table(conn)
         conn.commit()
     finally:
         conn.close()
@@ -392,3 +408,168 @@ def delete_by_ids(ids: Iterable[int]) -> int:
         return cur.rowcount or 0
     finally:
         conn.close()
+
+
+def save_raise_day_meta(
+    raised_date: str,
+    lead_time: int,
+    *,
+    period_days: Optional[int] = None,
+    target_days: Optional[int] = None,
+    source: str = "",
+) -> None:
+    day = str(raised_date).strip()[:10]
+    if not day or int(lead_time) <= 0:
+        return
+    conn = _connect()
+    try:
+        _ensure_raise_day_meta_table(conn)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO po_raise_day_meta
+                (raised_date, lead_time, period_days, target_days, source, saved_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            """,
+            (
+                day,
+                int(lead_time),
+                int(period_days) if period_days is not None else None,
+                int(target_days) if target_days is not None else None,
+                str(source or "")[:128],
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_raise_day_meta(raised_date: str) -> None:
+    day = str(raised_date).strip()[:10]
+    if not day:
+        return
+    conn = _connect()
+    try:
+        _ensure_raise_day_meta_table(conn)
+        conn.execute("DELETE FROM po_raise_day_meta WHERE raised_date = ?", (day,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_raise_day_meta(raised_date: str) -> Optional[dict[str, Any]]:
+    day = str(raised_date).strip()[:10]
+    if not day:
+        return None
+    conn = _connect()
+    try:
+        _ensure_raise_day_meta_table(conn)
+        cur = conn.execute(
+            "SELECT raised_date, lead_time, period_days, target_days, source, saved_at "
+            "FROM po_raise_day_meta WHERE raised_date = ? LIMIT 1",
+            (day,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def update_raises_lead_time_for_date(raised_date: str, lead_time: int) -> int:
+    day = str(raised_date).strip()[:10]
+    if not day or int(lead_time) <= 0:
+        return 0
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "UPDATE po_raised SET lead_time = ? WHERE raised_date = ?",
+            (int(lead_time), day),
+        )
+        conn.commit()
+        return cur.rowcount or 0
+    finally:
+        conn.close()
+
+
+def latest_raise_lead_time_before(
+    planning_date: Optional[str],
+    *,
+    lookback_days: int = 14,
+    default_lead_time: int = 45,
+) -> Optional[dict[str, Any]]:
+    """
+    Most recent raise day on or before ``planning_date`` within lookback.
+
+    Prefers ``po_raise_day_meta``; falls back to rows in ``po_raised`` with a
+    stored per-line lead time, else ``default_lead_time`` when raises exist.
+    """
+    try:
+        if planning_date and str(planning_date).strip():
+            plan = datetime.fromisoformat(str(planning_date).strip()[:10]).date()
+        else:
+            plan = datetime.utcnow().date()
+    except Exception:
+        plan = datetime.utcnow().date()
+    lb = max(1, int(lookback_days))
+    start = (plan - timedelta(days=lb - 1)).isoformat()
+    end = plan.isoformat()
+    suppressed = set(list_suppressed_raise_dates())
+
+    conn = _connect()
+    try:
+        _ensure_raise_day_meta_table(conn)
+        _ensure_suppressed_table(conn)
+        cur = conn.execute(
+            """
+            SELECT raised_date, lead_time, period_days, target_days, source
+            FROM po_raise_day_meta
+            WHERE raised_date >= ? AND raised_date <= ?
+            ORDER BY raised_date DESC
+            """,
+            (start, end),
+        )
+        for row in cur.fetchall():
+            day = str(row["raised_date"]).strip()[:10]
+            if day in suppressed:
+                continue
+            lt = int(row["lead_time"] or 0)
+            if lt > 0:
+                return {
+                    "raised_date": day,
+                    "lead_time": lt,
+                    "period_days": row["period_days"],
+                    "target_days": row["target_days"],
+                    "source": row["source"] or "meta",
+                }
+
+        cur = conn.execute(
+            """
+            SELECT raised_date, lead_time, SUM(qty) AS units
+            FROM po_raised
+            WHERE raised_date >= ? AND raised_date <= ?
+            GROUP BY raised_date
+            HAVING SUM(qty) > 0
+            ORDER BY raised_date DESC
+            """,
+            (start, end),
+        )
+        for row in cur.fetchall():
+            day = str(row["raised_date"]).strip()[:10]
+            if day in suppressed:
+                continue
+            units = float(row["units"] or 0)
+            if units <= 0:
+                continue
+            if row["lead_time"] is not None and int(row["lead_time"]) > 0:
+                lt = int(row["lead_time"])
+            else:
+                lt = int(default_lead_time)
+            return {
+                "raised_date": day,
+                "lead_time": lt,
+                "period_days": None,
+                "target_days": None,
+                "source": "ledger_rows",
+            }
+    finally:
+        conn.close()
+    return None

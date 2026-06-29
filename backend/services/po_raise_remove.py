@@ -53,10 +53,11 @@ def remove_raise_ledger_day(
     if not day:
         return {"ok": False, "message": "raised_date is required (YYYY-MM-DD).", "removed": 0}
 
-    from ..db.po_raised_db import delete_raises_for_date, suppress_raise_date
+    from ..db.po_raised_db import delete_raise_day_meta, delete_raises_for_date, suppress_raise_date
     from ..services.po_raise_archive import delete_archives_for_date
 
     removed_db = delete_raises_for_date(day)
+    delete_raise_day_meta(day)
     removed_sess = _remove_day_from_session_df(sess, day)
     suppress_raise_date(day, note="removed via PO dashboard")
     archive_removed = delete_archives_for_date(day, session_id)

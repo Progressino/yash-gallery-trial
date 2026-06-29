@@ -154,6 +154,10 @@ def execute_po_calculate(
     lookback = max(int(body.get("raise_ledger_lookback_days") or 14), 14)
     group_by_parent = bool(body.get("group_by_parent", False))
 
+    from .po_raise_lead_time import apply_lead_time_from_last_raise
+
+    body, _lead_meta = apply_lead_time_from_last_raise(sess, body)
+
     try:
         import backend.main as _main
 
@@ -211,6 +215,7 @@ def execute_po_calculate(
     try:
         _lt_raw = body.get("lead_time")
         _lead_time = 0 if _lt_raw in (None, "") else int(_lt_raw or 0)
+        sess.po_calculate_lead_time = _lead_time
         from .existing_po import manual_existing_po_raise_skus, resolve_manual_existing_po_raise_date
 
         _manual_raise_skus = manual_existing_po_raise_skus(sess)
@@ -366,6 +371,7 @@ def execute_po_calculate(
         "ads_source": _ads_label,
         "snapshot_id": snap.snapshot_id,
         "pipeline_warnings": snap.warnings,
+        "lead_time_meta": _lead_meta,
         "summary": {
             "new_po_qty_sum": int(_po_qty.sum()),
             "new_po_sku_count": int((_po_qty > 0).sum()),
@@ -375,6 +381,11 @@ def execute_po_calculate(
             "existing_po_applied": _ep_gen > 0 and int((_pipe > 0).sum()) > 0,
             "existing_po_generation": _ep_gen,
             "existing_po_filename": str(getattr(sess, "existing_po_filename", "") or ""),
+            "lead_time_applied": int(
+                _lead_meta.get("lead_time_applied") or body.get("lead_time") or 0
+            ),
+            "lead_time_source": str(_lead_meta.get("lead_time_source") or ""),
+            "lead_time_raise_date": str(_lead_meta.get("lead_time_raise_date") or ""),
         },
     }
 
