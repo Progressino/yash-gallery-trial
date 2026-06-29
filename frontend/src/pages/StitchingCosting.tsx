@@ -30,6 +30,7 @@ type TabId =
   | 'comparison'
   | 'challan'
   | 'style'
+  | 'completed_style_costing'
   | 'efficiency'
   | 'payroll'
   | 'attendance'
@@ -51,6 +52,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'comparison', label: '📈 P&L Compare' },
   { id: 'challan', label: '🧾 Challans' },
   { id: 'style', label: '💎 Style Costing' },
+  { id: 'completed_style_costing', label: '✅ Completed Style Costing' },
   { id: 'efficiency', label: '📊 Efficiency' },
   { id: 'payroll', label: '💰 Payroll' },
   { id: 'attendance', label: '🕐 Karigar Attendance' },
@@ -187,6 +189,7 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
       {!karigarOnly && tab === 'comparison' && <ComparisonDashboardTab />}
       {!karigarOnly && tab === 'challan' && <ChallanTab onFlash={flash} />}
       {!karigarOnly && tab === 'style' && <StyleCostingTab />}
+      {!karigarOnly && tab === 'completed_style_costing' && <CompletedStyleCostingTab />}
       {!karigarOnly && tab === 'efficiency' && <EfficiencyTab />}
       {!karigarOnly && tab === 'payroll' && <PayrollTab />}
       {!karigarOnly && tab === 'attendance' && <AttendanceTab type="karigar" />}
@@ -2413,6 +2416,201 @@ function ClickableChallanDataTable({
         </tbody>
       </table>
     </div>
+  )
+}
+
+function CompletedStyleCostingTab() {
+  const qc = useQueryClient()
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: ['stitching-completed-style-costing'],
+    queryFn: () => api.get('/stitching/completed-style-costing').then(r => r.data),
+  })
+  const patchMut = useMutation({
+    mutationFn: (payload: { style: string; outsider_cost_rs: number; outsider_vendor: string }) =>
+      api.patch(`/stitching/completed-style-costing/${encodeURIComponent(payload.style)}`, {
+        outsider_cost_rs: payload.outsider_cost_rs,
+        outsider_vendor: payload.outsider_vendor,
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['stitching-completed-style-costing'] })
+    },
+  })
+  const finalizeMut = useMutation({
+    mutationFn: (style: string) =>
+      api.post(`/stitching/completed-style-costing/${encodeURIComponent(style)}/finalize`, {
+        finalized_by: 'erp',
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['stitching-completed-style-costing'] })
+    },
+  })
+
+  const rows = (data?.rows ?? []) as Record<string, unknown>[]
+  const summary = data?.summary as Record<string, number> | undefined
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-gray-600">
+        Completed challan styles (all pieces received) sit here until outsider job-work is entered.
+        Actual overall cost = internal stitching + outsider cost.
+      </p>
+      {(isLoading) && (
+        <div className="text-sm text-[#2c5aa0]">Loading completed style costing…</div>
+      )}
+      {isError && (
+        <p className="text-sm text-red-700">
+          Failed to load.{' '}
+          <button type="button" className="underline font-semibold" onClick={() => void refetch()}>
+            Retry
+          </button>
+        </p>
+      )}
+      {summary && (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+          {[
+            ['Completed styles', summary.completed_styles],
+            ['Pending finalize', summary.pending_finalize],
+            ['Fully costed', summary.fully_costed],
+            ['Total internal', `₹${Number(summary.total_internal_rs || 0).toLocaleString()}`],
+            ['Total actual', `₹${Number(summary.total_actual_rs || 0).toLocaleString()}`],
+          ].map(([label, val]) => (
+            <div key={String(label)} className="bg-white border rounded-lg p-3 text-sm">
+              <p className="text-gray-500 text-xs">{label}</p>
+              <p className="font-bold text-[#2c5aa0]">{val}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      <Section title="Completed style ledger">
+        {!rows.length ? (
+          <p className="text-sm text-gray-400 text-center py-6">No completed styles yet — finish challan receipts first.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 border-b">
+                <tr>
+                  {[
+                    'Style',
+                    'Internal stitching',
+                    'Outsider vendor',
+                    'Outsider cost',
+                    'Actual overall',
+                    'Status',
+                    'Action',
+                  ].map(h => (
+                    <th key={h} className="text-left px-2 py-2 font-semibold text-gray-600 whitespace-nowrap">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(row => (
+                  <CompletedStyleCostingRow
+                    key={String(row.Style)}
+                    row={row}
+                    saving={patchMut.isPending}
+                    finalizing={finalizeMut.isPending}
+                    onSave={(outsiderCost, outsiderVendor) =>
+                      patchMut.mutate({
+                        style: String(row.Style),
+                        outsider_cost_rs: outsiderCost,
+                        outsider_vendor: outsiderVendor,
+                      })
+                    }
+                    onFinalize={() => finalizeMut.mutate(String(row.Style))}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Section>
+    </div>
+  )
+}
+
+function CompletedStyleCostingRow({
+  row,
+  saving,
+  finalizing,
+  onSave,
+  onFinalize,
+}: {
+  row: Record<string, unknown>
+  saving: boolean
+  finalizing: boolean
+  onSave: (outsiderCost: number, outsiderVendor: string) => void
+  onFinalize: () => void
+}) {
+  const locked = String(row.Status) === 'Fully Costed'
+  const [outsiderCost, setOutsiderCost] = useState(String(row.Outsider_Cost_Rs ?? ''))
+  const [outsiderVendor, setOutsiderVendor] = useState(String(row.Outsider_Vendor ?? ''))
+  const internal = Number(row.Internal_Stitching_Cost_Rs ?? 0)
+  const actual = internal + (Number(outsiderCost) || 0)
+
+  useEffect(() => {
+    setOutsiderCost(String(row.Outsider_Cost_Rs ?? ''))
+    setOutsiderVendor(String(row.Outsider_Vendor ?? ''))
+  }, [row.Outsider_Cost_Rs, row.Outsider_Vendor])
+
+  return (
+    <tr className="border-b border-gray-50 hover:bg-gray-50/80">
+      <td className="px-2 py-2 font-semibold text-[#002B5B]">{String(row.Style)}</td>
+      <td className="px-2 py-2">₹{internal.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+      <td className="px-2 py-2">
+        <input
+          className="border rounded px-2 py-1 w-28"
+          value={outsiderVendor}
+          disabled={locked}
+          placeholder="Vendor"
+          onChange={e => setOutsiderVendor(e.target.value)}
+          onBlur={() => {
+            if (!locked) onSave(Number(outsiderCost) || 0, outsiderVendor)
+          }}
+        />
+      </td>
+      <td className="px-2 py-2">
+        <input
+          type="number"
+          min={0}
+          step="0.01"
+          className="border rounded px-2 py-1 w-24"
+          value={outsiderCost}
+          disabled={locked}
+          onChange={e => setOutsiderCost(e.target.value)}
+          onBlur={() => {
+            if (!locked) onSave(Number(outsiderCost) || 0, outsiderVendor)
+          }}
+        />
+      </td>
+      <td className="px-2 py-2 font-semibold">
+        ₹{actual.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+      </td>
+      <td className="px-2 py-2">
+        <span
+          className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+            locked ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-900'
+          }`}
+        >
+          {locked ? 'Fully Costed' : 'Pending'}
+        </span>
+      </td>
+      <td className="px-2 py-2">
+        {!locked ? (
+          <button
+            type="button"
+            className="px-2 py-1 rounded bg-[#002B5B] text-white text-[11px] font-semibold disabled:opacity-50"
+            disabled={saving || finalizing}
+            onClick={onFinalize}
+          >
+            Finalize
+          </button>
+        ) : (
+          <span className="text-gray-400 text-[10px]">{String(row.Finalized_At || '')}</span>
+        )}
+      </td>
+    </tr>
   )
 }
 

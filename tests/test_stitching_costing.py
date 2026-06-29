@@ -746,3 +746,65 @@ def test_sunday_production_report_uses_six_hour_salary_basis():
     rep = svc.production_entry_reports("2026-06-07", "K001")
     assert float(rep["report2_hourly"][0]["Hourly_Salary_Rs"]) == round(480 / 6, 2)
     assert int(rep["report1"][0]["Working_Hours"]) == 2
+
+
+def test_completed_style_costing_finalize_flow():
+    """Style 1008 example: internal stitching 60 + outsider 20 = actual 80."""
+    save_sheet_df(
+        "style_master",
+        pd.DataFrame([{"Style": "1008", "Operation": "Stitching", "Target": 80, "Rate_Rs": 3.0}]),
+    )
+    save_sheet_df(
+        "challan_master",
+        pd.DataFrame(
+            [
+                {
+                    "Challan_No": "CH-1008",
+                    "Style": "1008",
+                    "Party": "Test",
+                    "Total_Qty": 10,
+                    "Received_Qty": 10,
+                    "Rate_Per_Pc": 100,
+                    "Deposit_Rs": 0,
+                    "Date": "2026-06-01",
+                }
+            ]
+        ),
+    )
+    save_sheet_df(
+        "production_log",
+        pd.DataFrame(
+            [
+                {
+                    "Date": "2026-06-02",
+                    "Style": "1008",
+                    "Operation": "Stitching",
+                    "Karigar_ID": "K001",
+                    "Challan_No": "CH-1008",
+                    "Piece_Value_Rs": 60.0,
+                }
+            ]
+        ),
+    )
+
+    rep = svc.completed_style_costing_report()
+    assert rep["ok"] is True
+    row = next(r for r in rep["rows"] if r["Style"] == "1008")
+    assert row["Internal_Stitching_Cost_Rs"] == 60.0
+    assert row["Status"] == "Pending"
+
+    upd = svc.update_completed_style_outsider("1008", outsider_cost_rs=20.0, outsider_vendor="Manoh patwa")
+    assert upd["ok"] is True
+
+    rep2 = svc.completed_style_costing_report()
+    row2 = next(r for r in rep2["rows"] if r["Style"] == "1008")
+    assert row2["Outsider_Cost_Rs"] == 20.0
+    assert row2["Outsider_Vendor"] == "Manoh patwa"
+    assert row2["Actual_Overall_Cost_Rs"] == 80.0
+
+    fin = svc.finalize_completed_style_cost("1008", finalized_by="qa")
+    assert fin["ok"] is True
+    rep3 = svc.completed_style_costing_report()
+    row3 = next(r for r in rep3["rows"] if r["Style"] == "1008")
+    assert row3["Status"] == "Fully Costed"
+    assert row3["Finalized_By"] == "qa"

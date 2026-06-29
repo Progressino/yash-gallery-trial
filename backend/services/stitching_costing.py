@@ -1714,6 +1714,162 @@ def style_costing_report(
     }
 
 
+def _internal_stitching_cost_by_style() -> dict[str, float]:
+    """Sum in-house stitching labour (Piece_Value_Rs) per style from production log."""
+    pl = get_sheet_df("production_log")
+    if pl.empty or "Piece_Value_Rs" not in pl.columns or "Style" not in pl.columns:
+        return {}
+    work = pl.copy()
+    work["Piece_Value_Rs"] = safe_num(work["Piece_Value_Rs"])
+    work["Style"] = work["Style"].astype(str).str.strip()
+    if "Operation" in work.columns:
+        op = work["Operation"].astype(str).str.lower()
+        stitch = work[op.str.contains("stitch", na=False)]
+        if not stitch.empty:
+            work = stitch
+    out = work.groupby("Style")["Piece_Value_Rs"].sum().round(2)
+    return {str(k): float(v) for k, v in out.items()}
+
+
+def _finalize_rows_by_style() -> dict[str, dict]:
+    df = get_sheet_df("style_cost_finalize")
+    if df.empty or "Style" not in df.columns:
+        return {}
+    out: dict[str, dict] = {}
+    for _, row in df.iterrows():
+        style = str(row.get("Style") or "").strip()
+        if style:
+            out[style] = row.to_dict()
+    return out
+
+
+def _upsert_style_cost_finalize(style: str, updates: dict[str, Any]) -> dict[str, Any]:
+    style = str(style or "").strip()
+    if not style:
+        return {"ok": False, "message": "Style required"}
+    df = get_sheet_df("style_cost_finalize")
+    if df.empty:
+        df = pd.DataFrame(columns=["Style", "Outsider_Cost_Rs", "Outsider_Vendor", "Status", "Finalized_At", "Finalized_By", "Notes"])
+    if "Style" not in df.columns:
+        df["Style"] = ""
+    mask = df["Style"].astype(str).str.strip() == style
+    if mask.any():
+        idx = df.index[mask][0]
+        for k, v in updates.items():
+            df.at[idx, k] = v
+    else:
+        row = {"Style": style, "Outsider_Cost_Rs": 0.0, "Outsider_Vendor": "", "Status": "Pending", "Finalized_At": "", "Finalized_By": "", "Notes": ""}
+        row.update(updates)
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    save_sheet_df("style_cost_finalize", df)
+    return {"ok": True, "style": style}
+
+
+def completed_style_costing_report() -> dict[str, Any]:
+    """Ledger of fully received styles with internal + outsider cost reconciliation."""
+    costing = style_costing_report(month="All", style="All", party="All")
+    rollup = costing.get("style_rollup") or []
+    stitch_costs = _internal_stitching_cost_by_style()
+    finalize_map = _finalize_rows_by_style()
+
+    rows: list[dict] = []
+    for sr in rollup:
+        pending_ch = int(sr.get("Pending_Challans") or 0)
+        challans = int(sr.get("Challans") or 0)
+        if pending_ch > 0 or challans < 1:
+            continue
+        style = str(sr.get("Style") or "").strip()
+        if not style:
+            continue
+        internal = float(stitch_costs.get(style, sr.get("Actual_Labour") or 0))
+        fin = finalize_map.get(style, {})
+        outsider = float(safe_num(pd.Series([fin.get("Outsider_Cost_Rs", 0)])).iloc[0])
+        status = str(fin.get("Status") or "Pending").strip() or "Pending"
+        actual = round(internal + outsider, 2)
+        rows.append(
+            {
+                "Style": style,
+                "Challans": challans,
+                "Qty": float(sr.get("Qty") or 0),
+                "Internal_Stitching_Cost_Rs": round(internal, 2),
+                "Outsider_Cost_Rs": round(outsider, 2),
+                "Outsider_Vendor": str(fin.get("Outsider_Vendor") or "").strip(),
+                "Actual_Overall_Cost_Rs": actual,
+                "Status": status,
+                "Finalized_At": str(fin.get("Finalized_At") or "").strip(),
+                "Finalized_By": str(fin.get("Finalized_By") or "").strip(),
+                "Notes": str(fin.get("Notes") or "").strip(),
+            }
+        )
+
+    rows.sort(key=lambda r: (r.get("Status") != "Pending", str(r.get("Style") or "")))
+    pending = sum(1 for r in rows if r.get("Status") != "Fully Costed")
+    fully = sum(1 for r in rows if r.get("Status") == "Fully Costed")
+    return {
+        "ok": True,
+        "rows": rows,
+        "summary": {
+            "completed_styles": len(rows),
+            "pending_finalize": pending,
+            "fully_costed": fully,
+            "total_internal_rs": round(sum(float(r.get("Internal_Stitching_Cost_Rs") or 0) for r in rows), 2),
+            "total_outsider_rs": round(sum(float(r.get("Outsider_Cost_Rs") or 0) for r in rows), 2),
+            "total_actual_rs": round(sum(float(r.get("Actual_Overall_Cost_Rs") or 0) for r in rows), 2),
+        },
+    }
+
+
+def update_completed_style_outsider(
+    style: str,
+    *,
+    outsider_cost_rs: float,
+    outsider_vendor: str = "",
+    notes: str = "",
+) -> dict[str, Any]:
+    style = str(style or "").strip()
+    if not style:
+        return {"ok": False, "message": "Style required"}
+    fin = _finalize_rows_by_style().get(style, {})
+    if str(fin.get("Status") or "") == "Fully Costed":
+        return {"ok": False, "message": f"Style {style} is already fully costed"}
+    rep = completed_style_costing_report()
+    if not any(str(r.get("Style")) == style for r in rep.get("rows") or []):
+        return {"ok": False, "message": f"Style {style} is not in completed challan ledger"}
+    cost = max(0.0, float(outsider_cost_rs or 0))
+    return _upsert_style_cost_finalize(
+        style,
+        {
+            "Outsider_Cost_Rs": round(cost, 2),
+            "Outsider_Vendor": str(outsider_vendor or "").strip(),
+            "Notes": str(notes or "").strip(),
+            "Status": "Pending",
+        },
+    )
+
+
+def finalize_completed_style_cost(style: str, *, finalized_by: str = "") -> dict[str, Any]:
+    style = str(style or "").strip()
+    if not style:
+        return {"ok": False, "message": "Style required"}
+    fin = _finalize_rows_by_style().get(style, {})
+    if str(fin.get("Status") or "") == "Fully Costed":
+        return {"ok": False, "message": f"Style {style} is already fully costed"}
+    rep = completed_style_costing_report()
+    match = next((r for r in rep.get("rows") or [] if str(r.get("Style")) == style), None)
+    if not match:
+        return {"ok": False, "message": f"Style {style} is not in completed challan ledger"}
+    return _upsert_style_cost_finalize(
+        style,
+        {
+            "Outsider_Cost_Rs": float(match.get("Outsider_Cost_Rs") or 0),
+            "Outsider_Vendor": str(match.get("Outsider_Vendor") or fin.get("Outsider_Vendor") or ""),
+            "Status": "Fully Costed",
+            "Finalized_At": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+            "Finalized_By": str(finalized_by or "").strip(),
+        },
+    )
+
+
 def challan_detail_report(challan_no: str) -> dict[str, Any]:
     """Full challan snapshot: master, costing P&L, production log, and karigar expenses."""
     cn_raw = str(challan_no or "").strip()

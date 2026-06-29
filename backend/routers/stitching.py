@@ -436,6 +436,42 @@ def style_costing(month: str = "All", style: str = "All", party: str = "All"):
     return svc.style_costing_report(month=month, style=style, party=party)
 
 
+class CompletedStyleOutsiderBody(BaseModel):
+    outsider_cost_rs: float = 0.0
+    outsider_vendor: str = ""
+    notes: str = ""
+
+
+class CompletedStyleFinalizeBody(BaseModel):
+    finalized_by: str = ""
+
+
+@router.get("/completed-style-costing")
+def completed_style_costing():
+    return svc.completed_style_costing_report()
+
+
+@router.patch("/completed-style-costing/{style}")
+def patch_completed_style_outsider(style: str, body: CompletedStyleOutsiderBody):
+    out = svc.update_completed_style_outsider(
+        style,
+        outsider_cost_rs=body.outsider_cost_rs,
+        outsider_vendor=body.outsider_vendor,
+        notes=body.notes,
+    )
+    if not out.get("ok"):
+        raise HTTPException(400, out.get("message", "Update failed"))
+    return {**out, "report": svc.completed_style_costing_report()}
+
+
+@router.post("/completed-style-costing/{style}/finalize")
+def post_finalize_completed_style(style: str, body: CompletedStyleFinalizeBody):
+    out = svc.finalize_completed_style_cost(style, finalized_by=body.finalized_by)
+    if not out.get("ok"):
+        raise HTTPException(400, out.get("message", "Finalize failed"))
+    return {**out, "report": svc.completed_style_costing_report()}
+
+
 @router.get("/efficiency")
 def efficiency(date_from: str = "", date_to: str = "", styles: str = ""):
     if not date_from:
