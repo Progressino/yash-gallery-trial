@@ -1959,6 +1959,13 @@ def _cached_bundle_stale_vs_tier3_uploads(
         return False
     if not platforms_with_uploads_in_range(s, e):
         return False
+    try:
+        from ..services.platform_session_window import session_platform_shorter_than_tier3
+
+        if sess and session_platform_shorter_than_tier3(sess):
+            return True
+    except Exception:
+        pass
     if payload.get("tier3_auto_pull"):
         return bool(sess and _tier3_token_mismatch(sess))
     applied = getattr(sess, "_tier3_sync_token_applied", None) if sess else None

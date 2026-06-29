@@ -116,6 +116,33 @@ def _attach_version_meta(payload: dict[str, Any], meta: dict[str, Any]) -> dict[
     return out
 
 
+def _artifact_covers_tier3_window(payload: dict[str, Any], start_date: str, end_date: str) -> bool:
+    """Reject hot artifacts that only show a subset of platforms Tier-3 has for this window."""
+    try:
+        from ..services.daily_store import platforms_with_uploads_in_range
+
+        expected = {
+            str(p).strip().lower()
+            for p in (platforms_with_uploads_in_range(start_date, end_date) or [])
+            if str(p).strip()
+        }
+    except Exception:
+        return True
+    if not expected:
+        return True
+    loaded: set[str] = set()
+    for row in payload.get("platform_summary") or []:
+        if int(row.get("total_units") or 0) > 0:
+            loaded.add(str(row.get("platform") or "").strip().lower())
+    for key, row in (payload.get("platforms") or {}).items():
+        if int((row or {}).get("sales") or 0) > 0:
+            loaded.add(str(key).strip().lower())
+    core_expected = expected & {"amazon", "flipkart", "meesho", "myntra"}
+    if not core_expected:
+        return True
+    return core_expected.issubset(loaded)
+
+
 def build_dashboard_summary(
     sess,
     *,
@@ -132,27 +159,39 @@ def build_dashboard_summary(
 
     if has_window:
         cache_key = _summary_cache_key(s, e, limit)
-        hit = _SUMMARY_CACHE.get(cache_key)
-        if hit and (time.time() - float(hit.get("_ts", 0))) < _SUMMARY_CACHE_TTL_SEC:
-            return {k: v for k, v in hit.items() if k != "_ts"}
-
         try:
-            from .intelligence_artifacts import (
-                load_hot_summary_for_request,
-                save_artifact,
-                schedule_artifact_build,
-                KIND_HOT,
-            )
+            from ..services.platform_session_window import session_platform_shorter_than_tier3
+            from ..routers.data import _tier3_token_mismatch
 
-            artifact, meta = load_hot_summary_for_request(sess, s, e, limit)
-            if artifact:
-                payload = _attach_version_meta(artifact, meta)
-                _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
-                return payload
+            prefer_tier3 = session_platform_shorter_than_tier3(sess) or _tier3_token_mismatch(sess)
         except Exception:
-            pass
+            prefer_tier3 = False
 
-        # Tier-3 fallback only when no artifact exists.
+        if not prefer_tier3:
+            hit = _SUMMARY_CACHE.get(cache_key)
+            if hit and (time.time() - float(hit.get("_ts", 0))) < _SUMMARY_CACHE_TTL_SEC:
+                cached = {k: v for k, v in hit.items() if k != "_ts"}
+                if _artifact_covers_tier3_window(cached, s, e):
+                    return cached
+
+        if not prefer_tier3:
+            try:
+                from .intelligence_artifacts import (
+                    load_hot_summary_for_request,
+                    save_artifact,
+                    schedule_artifact_build,
+                    KIND_HOT,
+                )
+
+                artifact, meta = load_hot_summary_for_request(sess, s, e, limit)
+                if artifact and _artifact_covers_tier3_window(artifact, s, e):
+                    payload = _attach_version_meta(artifact, meta)
+                    _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
+                    return payload
+            except Exception:
+                pass
+
+        # Tier-3 fallback when no artifact exists or session lags SQLite dailies.
         try:
             from ..routers.data import _build_intelligence_bundle_payload_from_tier3
             from .intelligence_artifacts import save_artifact, schedule_artifact_build, KIND_HOT
