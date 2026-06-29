@@ -20,6 +20,38 @@ router = APIRouter()
 _IST = ZoneInfo("Asia/Kolkata")
 
 
+def _warm_cache_parquet(name: str) -> pd.DataFrame:
+    """Read a warm-cache parquet directly from disk (shared across sessions)."""
+    import os
+    from pathlib import Path
+
+    root = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
+    path = root / f"{name}.parquet"
+    if path.is_file():
+        try:
+            return pd.read_parquet(path)
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+
+def _inventory_history_df_for_matrix_read(sess) -> pd.DataFrame:
+    """Fast matrix read — disk/warm cache only; skip roll-forward on every page."""
+    try:
+        import backend.main as _main
+
+        _main.bootstrap_warm_cache_if_empty()
+        wc = (_main._warm_cache or {}).get("daily_inventory_history_df")
+        if wc is not None and not wc.empty:
+            return wc.copy()
+    except Exception:
+        pass
+    disk = _warm_cache_parquet("daily_inventory_history_df")
+    if not disk.empty:
+        return disk
+    return _inventory_history_df_for_read(sess)
+
+
 def _inventory_history_df_for_read(sess) -> pd.DataFrame:
     """Load daily inventory matrix from warm cache / disk — no full session PG restore."""
     try:
@@ -66,7 +98,7 @@ def _inventory_matrix_payload(
     from ..services.daily_inventory_history import inventory_history_wide_matrix
 
     try:
-        df = _inventory_history_df_for_read(sess)
+        df = _inventory_history_df_for_matrix_read(sess)
         sales_df = _sales_df_for_read(sess)
         out = inventory_history_wide_matrix(
             df,
@@ -97,7 +129,7 @@ def _inventory_matrix_payload(
 
 
 def _sales_df_for_read(sess) -> pd.DataFrame:
-    """Session sales_df with warm-cache fallback for read-only matrix APIs."""
+    """Session sales_df with warm-cache / disk fallback for read-only matrix APIs."""
     sales = getattr(sess, "sales_df", None)
     if sales is not None and not sales.empty:
         return sales
@@ -110,6 +142,9 @@ def _sales_df_for_read(sess) -> pd.DataFrame:
             return wc
     except Exception:
         pass
+    disk = _warm_cache_parquet("sales_df")
+    if not disk.empty:
+        return disk
     return pd.DataFrame()
 
 

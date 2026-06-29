@@ -66,7 +66,6 @@ export default function InventoryHistory() {
 
   const matrixQ = useQuery({
     queryKey: ['inv-history-matrix', skuFilter, page, HISTORY_WINDOW_DAYS, channel],
-    enabled: mode === 'matrix' && (summaryQ.isSuccess || summaryQ.isError),
     retry: 1,
     queryFn: async () =>
       getPoDailyInventoryHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE, {

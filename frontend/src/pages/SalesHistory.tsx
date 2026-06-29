@@ -6,6 +6,7 @@ import {
   getPoDailySalesHistorySku,
   getPoDailySalesHistorySummary,
 } from '../api/client'
+import { useSession } from '../store/session'
 import { todayIsoIST } from '../lib/reportingDates'
 
 const PAGE_SIZE = 100
@@ -29,6 +30,7 @@ function formatDateCol(iso: string) {
 }
 
 export default function SalesHistory() {
+  const coverage = useSession()
   const [mode, setMode] = useState<'matrix' | 'sku'>('matrix')
   const [platform, setPlatform] = useState('all')
   const [skuFilter, setSkuFilter] = useState('')
@@ -48,7 +50,6 @@ export default function SalesHistory() {
 
   const matrixQ = useQuery({
     queryKey: ['sales-history-matrix', skuFilter, page, HISTORY_WINDOW_DAYS, platform],
-    enabled: mode === 'matrix' && (summaryQ.isSuccess || summaryQ.isError),
     retry: 1,
     queryFn: async () =>
       getPoDailySalesHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE, {
@@ -66,6 +67,11 @@ export default function SalesHistory() {
       }),
   })
 
+  const salesLoaded =
+    summaryQ.data?.loaded ||
+    matrixQ.data?.loaded ||
+    (coverage.sales_rows ?? 0) > 0 ||
+    (coverage.daily_orders ?? false)
   const platforms = summaryQ.data?.platforms ?? matrixQ.data?.platforms ?? []
   const dates = matrixQ.data?.dates ?? []
   const dateTotals = matrixQ.data?.date_totals ?? []
@@ -121,7 +127,7 @@ export default function SalesHistory() {
 
       <div className="bg-white border border-gray-200 rounded-xl p-4 text-sm text-gray-700 flex flex-wrap gap-x-6 gap-y-1">
         <span>
-          <strong>Loaded:</strong> {summaryQ.data?.loaded ? 'Yes' : 'No'}
+          <strong>Loaded:</strong> {salesLoaded ? 'Yes' : 'No'}
         </span>
         {summaryQ.data?.min_date && summaryQ.data?.max_date && (
           <span>
@@ -137,7 +143,7 @@ export default function SalesHistory() {
         <span className="text-gray-500">Today (IST): {todayIsoIST()}</span>
       </div>
 
-      {!summaryQ.data?.loaded && (
+      {!salesLoaded && !matrixQ.isLoading && (
         <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600">
           Upload daily sales on{' '}
           <Link to="/upload" className="text-indigo-700 font-medium underline">
