@@ -1589,13 +1589,14 @@ def calculate_po_base(
             po_df.loc[_low_vol_floor, "Eff_Days"] = np.clip(
                 np.maximum(_eff_lv, _floor_lv), 0, float(ADS_WINDOW)
             )
+    _has_inv_hist_col = po_df.get("_has_inv_hist", pd.Series(False, index=po_df.index)).fillna(False)
     po_df.drop(columns=["_cal_span_days", "_has_inv_hist"], inplace=True, errors="ignore")
 
     # SKUs with no ADS-window sales may still show Eff_Days from the 150d ship context
     # when inventory history is missing (common for SKUs not in the daily snapshot file).
     _eff_now = pd.to_numeric(po_df.get("Eff_Days"), errors="coerce").fillna(0)
     _ship150_u = pd.to_numeric(po_df.get("Ship_Units_150d"), errors="coerce").fillna(0)
-    _need_ship_span = (_eff_now <= 0) & (_ship150_u > 0)
+    _need_ship_span = (_eff_now <= 0) & (_ship150_u > 0) & (~_has_inv_hist_col)
     if bool(_need_ship_span.any()) and not df.empty:
         ship150_act = df[(df["TxnDate"] >= ship_150_cutoff) & (df["_is_ship"])].copy()
         if not ship150_act.empty:

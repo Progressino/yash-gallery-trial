@@ -662,34 +662,8 @@ def filter_inventory_history_view(
     days: int | None = None,
     end_date: str | None = None,
 ) -> pd.DataFrame:
-    """Keep rows for the last ``days`` snapshot dates (not empty calendar days).
-
-    Used by Inv History UI so a June snapshot after a May wide matrix still shows
-  full May columns instead of a single day in a calendar 30-day window.
-    """
-    if df is None or df.empty or "Date" not in df.columns:
-        return df if df is not None else pd.DataFrame(columns=_TALL_COLS)
-    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
-    if span <= 0:
-        return df.copy()
-    if end_date:
-        try:
-            end = pd.Timestamp(str(end_date)[:10]).normalize()
-        except Exception:
-            end = pd.Timestamp(inventory_history_view_end_date(df))
-    else:
-        end = pd.Timestamp(inventory_history_view_end_date(df))
-    if pd.isna(end):
-        end = today_ist_timestamp()
-    work = df.copy()
-    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
-    work = work.dropna(subset=["Date"])
-    work = work[work["Date"] <= end]
-    if work.empty:
-        return work
-    unique_dates = sorted(work["Date"].unique())
-    keep_dates = set(unique_dates[-span:])
-    return work[work["Date"].isin(keep_dates)].reset_index(drop=True)
+    """Keep rows in the last ``days`` calendar days ending on the view anchor date."""
+    return filter_inventory_history_window(df, days=days, end_date=end_date)
 
 
 def should_skip_inventory_history_extend(
@@ -1467,6 +1441,176 @@ def extend_history_with_sales(
     return full.reset_index(drop=True)
 
 
+def _sales_net_by_sku_day(
+    sales_df: pd.DataFrame | None,
+    *,
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Aggregate signed daily net units per SKU (shipments positive, returns negative)."""
+    empty = pd.DataFrame(columns=["OMS_SKU", "Date", "Net_Units"])
+    if sales_df is None or sales_df.empty:
+        return empty
+    s = sales_df.copy()
+    sku_col = "Sku" if "Sku" in s.columns else "OMS_SKU"
+    date_col = "TxnDate" if "TxnDate" in s.columns else "Date"
+    eff_col = "Units_Effective" if "Units_Effective" in s.columns else "Quantity"
+    if sku_col not in s.columns or date_col not in s.columns or eff_col not in s.columns:
+        return empty
+    s = s[[sku_col, date_col, eff_col]].copy()
+    s.columns = ["OMS_SKU", "Date", "Net_Units"]
+    s["Date"] = pd.to_datetime(s["Date"], errors="coerce").dt.normalize()
+    s["Net_Units"] = pd.to_numeric(s["Net_Units"], errors="coerce").fillna(0.0)
+    s["OMS_SKU"] = s["OMS_SKU"].astype(str).str.strip().str.upper()
+    s = s.dropna(subset=["Date"])
+    s = s[s["OMS_SKU"].str.len() > 0]
+    if start is not None:
+        s = s[s["Date"] >= pd.Timestamp(start).normalize()]
+    if end is not None:
+        s = s[s["Date"] <= pd.Timestamp(end).normalize()]
+    if s.empty:
+        return empty
+    return s.groupby(["OMS_SKU", "Date"], as_index=False)["Net_Units"].sum()
+
+
+def project_inventory_calendar(
+    inv_history: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    sales_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Fill every calendar day in ``[start, end]`` with on-hand qty per SKU.
+
+    Authoritative uploaded/snapshot cells win. Gap days roll forward from the
+    previous day minus net sales (floored at zero).
+    """
+    if inv_history is None or inv_history.empty:
+        return pd.DataFrame(columns=_STORE_COLS)
+    cs = pd.Timestamp(start).normalize()
+    ce = pd.Timestamp(end).normalize()
+    if cs > ce:
+        return pd.DataFrame(columns=_STORE_COLS)
+
+    base = _ensure_source_column(inv_history)
+    base["Date"] = pd.to_datetime(base["Date"], errors="coerce").dt.normalize()
+    base["Qty"] = pd.to_numeric(base["Qty"], errors="coerce")
+    base = base.dropna(subset=["Date", "OMS_SKU"])
+    base["OMS_SKU"] = base["OMS_SKU"].astype(str).str.strip().str.upper()
+    base = base[base["OMS_SKU"].str.len() > 0]
+    if base.empty:
+        return pd.DataFrame(columns=_STORE_COLS)
+
+    calendar = pd.date_range(cs, ce, freq="D")
+    skus = sorted(base.loc[base["Date"] <= ce, "OMS_SKU"].astype(str).unique())
+    if not skus:
+        return pd.DataFrame(columns=_STORE_COLS)
+
+    auth = base.copy()
+    auth["_src_rank"] = auth["Source"].astype(str).str.strip().str.lower().map(_SOURCE_RANK).fillna(1)
+    auth = (
+        auth.sort_values(["OMS_SKU", "Date", "_src_rank", "Qty"], ascending=[True, True, False, False])
+        .drop_duplicates(subset=["OMS_SKU", "Date"], keep="first")
+        .drop(columns=["_src_rank"])
+    )
+    auth_map: dict[tuple[str, pd.Timestamp], tuple[float, str]] = {}
+    for _, r in auth.iterrows():
+        auth_map[(str(r["OMS_SKU"]), pd.Timestamp(r["Date"]).normalize())] = (
+            float(r["Qty"]),
+            str(r.get("Source") or "uploaded"),
+        )
+
+    sales = _sales_net_by_sku_day(sales_df, start=cs - pd.Timedelta(days=365), end=ce)
+    sales_lookup: dict[tuple[str, pd.Timestamp], float] = {}
+    if not sales.empty:
+        for _, r in sales.iterrows():
+            sales_lookup[(str(r["OMS_SKU"]), pd.Timestamp(r["Date"]).normalize())] = float(r["Net_Units"])
+
+    rows: list[dict] = []
+    for sku in skus:
+        pre = auth[(auth["OMS_SKU"] == sku) & (auth["Date"] < cs)]
+        prev = float(pre.sort_values("Date").iloc[-1]["Qty"]) if not pre.empty else 0.0
+        for day in calendar:
+            day_ts = pd.Timestamp(day).normalize()
+            hit = auth_map.get((sku, day_ts))
+            if hit is not None:
+                qty, source = hit
+                prev = float(qty)
+                rows.append({"OMS_SKU": sku, "Date": day_ts, "Qty": prev, "Source": source})
+                continue
+            net = sales_lookup.get((sku, day_ts), 0.0)
+            prev = max(0.0, prev - net)
+            rows.append({"OMS_SKU": sku, "Date": day_ts, "Qty": prev, "Source": "derived"})
+
+    if not rows:
+        return pd.DataFrame(columns=_STORE_COLS)
+    return _coalesce_history_rows(pd.DataFrame(rows))
+
+
+def repair_inventory_history_spikes(
+    inv_history: pd.DataFrame,
+    sales_df: pd.DataFrame | None = None,
+    *,
+    tolerance_units: float = 800.0,
+    ratio_threshold: float = 1.04,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Replace snapshot columns that jump up when sales imply a decrease."""
+    if inv_history is None or inv_history.empty:
+        return inv_history, []
+    work = _ensure_source_column(inv_history)
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    dates = sorted(work["Date"].dropna().unique())
+    if len(dates) < 2:
+        return work.reset_index(drop=True), []
+
+    sales = _sales_net_by_sku_day(sales_df)
+    actions: list[str] = []
+    out = work.copy()
+    for i in range(1, len(dates)):
+        d_prev = pd.Timestamp(dates[i - 1]).normalize()
+        d_next = pd.Timestamp(dates[i]).normalize()
+        prev_rows = out[out["Date"] == d_prev]
+        next_rows = out[out["Date"] == d_next]
+        if prev_rows.empty or next_rows.empty:
+            continue
+        t_prev = float(prev_rows["Qty"].sum())
+        t_next = float(next_rows["Qty"].sum())
+        if t_next <= t_prev:
+            continue
+        gap_mask = (sales["Date"] > d_prev) & (sales["Date"] <= d_next) if not sales.empty else pd.Series(dtype=bool)
+        gap_sales = float(sales.loc[gap_mask, "Net_Units"].sum()) if not sales.empty and bool(gap_mask.any()) else 0.0
+        expected = max(0.0, t_prev - gap_sales)
+        tol = max(50.0, float(gap_sales) * 0.25, t_prev * 0.005)
+        spike = t_next > expected + tol and t_next > t_prev * float(ratio_threshold)
+        if not spike:
+            continue
+        clip = out[out["Date"] <= d_prev].copy()
+        repaired = project_inventory_calendar(clip, d_next, d_next, sales_df=sales_df)
+        out = out[out["Date"] != d_next]
+        out = pd.concat([out, repaired], ignore_index=True)
+        actions.append(f"repaired_spike:{d_next.date()}: {int(t_next)}→{int(repaired['Qty'].sum())}")
+    if not actions:
+        return work.reset_index(drop=True), []
+    return _coalesce_history_rows(out), actions
+
+
+def densify_inventory_history_for_view(
+    inv_history: pd.DataFrame,
+    *,
+    days: int | None = None,
+    end_date: str | None = None,
+    sales_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Calendar window + per-SKU roll-forward for the inventory history UI."""
+    if inv_history is None or inv_history.empty:
+        return pd.DataFrame(columns=_STORE_COLS)
+    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
+    end = pd.Timestamp(inventory_history_view_end_date(inv_history, end_date)).normalize()
+    start = end - pd.Timedelta(days=max(0, span - 1))
+    trimmed = filter_inventory_history_window(inv_history, days=span, end_date=str(end.date()))
+    return project_inventory_calendar(trimmed, start, end, sales_df=sales_df)
+
+
 def coverage_days_within(
     inv_history: pd.DataFrame,
     cutoff_start: pd.Timestamp,
@@ -1634,6 +1778,7 @@ def inventory_history_wide_matrix(
     offset: int = 0,
     days: int | None = None,
     end_date: str | None = None,
+    sales_df: pd.DataFrame | None = None,
 ) -> dict:
     """Pivot tall history to Excel-style wide matrix: SKU rows × date columns."""
     empty = {
@@ -1651,7 +1796,9 @@ def inventory_history_wide_matrix(
     if df is None or df.empty:
         return empty
 
-    work = filter_inventory_history_view(df, days=days, end_date=end_date)
+    work = densify_inventory_history_for_view(
+        df, days=days, end_date=end_date, sales_df=sales_df
+    )
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work = work.dropna(subset=["Date", "OMS_SKU"])
     if work.empty:
@@ -1669,7 +1816,10 @@ def inventory_history_wide_matrix(
         work.sort_values("Qty", ascending=False)
         .drop_duplicates(subset=["OMS_SKU", "Date"], keep="first")
     )
-    dates_sorted = sorted(work["Date"].unique())
+    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
+    view_end = pd.Timestamp(inventory_history_view_end_date(df, end_date)).normalize()
+    view_start = view_end - pd.Timedelta(days=max(0, span - 1))
+    dates_sorted = list(pd.date_range(view_start, view_end, freq="D"))
     date_strs = [str(pd.Timestamp(d).date()) for d in dates_sorted]
     date_totals = [
         float(work.loc[work["Date"] == d, "Qty"].sum()) for d in dates_sorted

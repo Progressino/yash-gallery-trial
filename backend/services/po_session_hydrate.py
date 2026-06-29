@@ -437,6 +437,23 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
     except Exception:
         _log.exception("reconcile_daily_inventory_meta_if_session_newer failed")
 
+    df = getattr(sess, "daily_inventory_history_df", None)
+    if df is not None and not getattr(df, "empty", True):
+        from .daily_inventory_history import repair_inventory_history_spikes
+
+        sales_df = getattr(sess, "sales_df", None)
+        repaired, actions = repair_inventory_history_spikes(df, sales_df)
+        if actions:
+            sess.daily_inventory_history_df = repaired
+            if not _main._warm_cache:
+                _main._warm_cache = {}
+            _main._warm_cache["daily_inventory_history_df"] = repaired.copy()
+            try:
+                _main.sync_daily_inventory_history_sidecar(sess)
+            except Exception:
+                _log.exception("persist repaired inventory history failed")
+            df = repaired
+
     return drop_zero_derived_rows(df)
 
 

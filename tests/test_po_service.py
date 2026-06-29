@@ -3379,6 +3379,62 @@ def test_eff_days_zero_when_no_sales_despite_inventory_history():
     assert float(row["Recent_ADS"]) == 0.0
 
 
+def test_inventory_history_blocks_ship150_eff_days_inflation():
+    """OOS SKUs in the history matrix must not inherit a 30d ship-span Eff_Days."""
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["OOS-8XL"] * 4,
+            "Date": pd.to_datetime(["2026-06-07", "2026-06-19", "2026-06-20", "2026-06-21"]),
+            "Qty": [0.0, 0.0, 0.0, 0.0],
+            "Source": ["uploaded"] * 4,
+        }
+    )
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "OOS-8XL",
+                "TxnDate": pd.Timestamp("2026-06-10"),
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            },
+            {
+                "Sku": "OOS-8XL",
+                "TxnDate": pd.Timestamp("2026-06-15"),
+                "Transaction Type": "Shipment",
+                "Quantity": 4,
+                "Units_Effective": 4,
+                "Source": "Amazon",
+            },
+            {
+                "Sku": "RECENT-OTHER",
+                "TxnDate": pd.Timestamp("2026-06-18"),
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            },
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["OOS-8XL", "RECENT-OTHER"], "Total_Inventory": [0, 1]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=inv_hist,
+    )
+    row = po.loc[po["OMS_SKU"] == "OOS-8XL"].iloc[0]
+    assert int(row["Sold_Units"]) == 5
+    assert int(row["Eff_Days_Inventory"]) == 0
+    assert int(row["Eff_Days"]) == 0
+
+
 def test_in_stock_sku_shows_inventory_eff_days_without_ads_window_sales():
     """SKUs with on-hand stock + inventory history must show Eff_Days even when ADS-window sold=0."""
     inv_hist = pd.DataFrame(

@@ -66,6 +66,7 @@ def _inventory_matrix_payload(
 
     try:
         df = _inventory_history_df_for_read(sess)
+        sales_df = getattr(sess, "sales_df", None)
         out = inventory_history_wide_matrix(
             df,
             q=q,
@@ -73,6 +74,7 @@ def _inventory_matrix_payload(
             offset=max(0, int(offset)),
             days=min(max(1, int(days)), 120),
             end_date=end_date,
+            sales_df=sales_df,
         )
         out["ok"] = True
         return out
@@ -603,7 +605,7 @@ def po_get_daily_inventory_history_for_sku(
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
-    df = sess.daily_inventory_history_df
+    df = _inventory_history_df_for_read(sess)
     if df is None or df.empty:
         return {"ok": True, "loaded": False, "sku": sku, "rows": []}
     from ..services.po_engine import canonical_oms_key
@@ -611,6 +613,7 @@ def po_get_daily_inventory_history_for_sku(
     from ..services.daily_inventory_history import (
         IN_STOCK_MIN_QTY,
         extend_history_with_sales,
+        project_inventory_calendar,
     )
 
     sku_map = sess.sku_mapping or None
@@ -683,7 +686,22 @@ def po_get_daily_inventory_history_for_sku(
     if uploaded_max is not None:
         end_ts = max(end_ts, uploaded_max)
     start_ts = end_ts - pd.Timedelta(days=max(0, int(window_days) - 1))
-    win = sub[(sub["Date"] >= start_ts) & (sub["Date"] <= end_ts)].copy()
+    dense = project_inventory_calendar(
+        work,
+        start_ts,
+        end_ts,
+        sales_df=sales_for_ext,
+    )
+    win = dense[dense["OMS_SKU"] == target].copy()
+    if win.empty and parent_used:
+        parent_key = get_parent_sku(target)
+        win = dense[dense["OMS_SKU"].map(get_parent_sku) == parent_key].copy()
+    win["Date"] = pd.to_datetime(win["Date"], errors="coerce")
+    win = win.dropna(subset=["Date"])
+    win["Qty"] = pd.to_numeric(win["Qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    if "Source" not in win.columns:
+        win["Source"] = "uploaded"
+    win = win.sort_values("Date")
     in_stock_days = int((win["Qty"] >= IN_STOCK_MIN_QTY).sum())
 
     rows = [

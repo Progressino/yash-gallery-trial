@@ -162,7 +162,8 @@ def test_wide_matrix_includes_date_totals():
             "Qty": [10.0, 20.0, 5.0, 15.0],
         }
     )
-    wide = inventory_history_wide_matrix(df, days=30)
+    wide = inventory_history_wide_matrix(df, days=2, end_date="2026-06-25")
+    assert wide["dates"] == ["2026-06-24", "2026-06-25"]
     assert wide["date_totals"] == [15.0, 35.0]
 
 
@@ -511,7 +512,7 @@ def test_inventory_history_view_uses_data_days_not_calendar_gap():
         inventory_history_wide_matrix,
     )
 
-    may = _hist("SKU-A", "2026-05-30", 30)
+    may = _hist("SKU-A", "2026-06-28", 28)
     may["Source"] = "uploaded"
     june = pd.DataFrame(
         {
@@ -523,15 +524,15 @@ def test_inventory_history_view_uses_data_days_not_calendar_gap():
     )
     df = pd.concat([may, june], ignore_index=True)
 
-    view = filter_inventory_history_view(df, days=30)
+    view = filter_inventory_history_view(df, days=30, end_date="2026-06-29")
     days = sorted(pd.to_datetime(view["Date"]).dt.strftime("%Y-%m-%d").unique())
-    assert len(days) == 30
-    assert days[0] == "2026-05-02"
+    assert len(days) == 29
+    assert days[0] == "2026-06-01"
     assert days[-1] == "2026-06-29"
 
-    wide = inventory_history_wide_matrix(df, days=30, limit=10)
+    wide = inventory_history_wide_matrix(df, days=30, end_date="2026-06-29", limit=10)
     assert len(wide["dates"]) == 30
-    assert wide["dates"][0] == "2026-05-02"
+    assert wide["dates"][0] == "2026-05-31"
     assert wide["dates"][-1] == "2026-06-29"
 
 
