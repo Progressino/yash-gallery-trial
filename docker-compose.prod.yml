@@ -204,4 +204,5 @@ services:
       - "443:443"
     depends_on:
       - backend
+      - stitching-backend
     restart: unless-stopped

@@ -26,7 +26,7 @@ ssh "${HOST}" "cd ${APP_DIR} && \
   export APP_GIT_SHA='${DEPLOY_TAG}' APP_BUILT_AT='${BUILT_AT}' COMPOSE_PROJECT_NAME='${COMPOSE_PROJECT}' && \
   docker compose -p app -f ${COMPOSE_FILE} down 2>/dev/null || true && \
   docker compose -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILE} build frontend backend stitching-backend && \
-  docker compose -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILE} up -d frontend backend stitching-backend"
+  docker compose -p ${COMPOSE_PROJECT} -f ${COMPOSE_FILE} up -d --remove-orphans"
 
 echo "Done. Build tag: ${DEPLOY_TAG} (${BUILT_AT})"
 echo "Verify: curl -s https://app.progressino.com/api/health | jq .git_sha"
