@@ -1106,11 +1106,13 @@ export async function getPoDailyInventoryHistorySku(sku: string, windowDays = 30
 
 export type InventoryHistoryMatrixRow = { sku: string; qtys: number[] }
 
+export type InventoryHistoryChannel = 'combined' | 'oms' | 'amazon'
+
 export async function getPoDailyInventoryHistoryMatrix(
   q = '',
   limit = 150,
   offset = 0,
-  opts?: { days?: number; endDate?: string },
+  opts?: { days?: number; endDate?: string; channel?: InventoryHistoryChannel },
 ) {
   const { data } = await api.get<{
     ok: boolean
@@ -1124,15 +1126,101 @@ export async function getPoDailyInventoryHistoryMatrix(
     in_stock_min_qty?: number
     window_days?: number
     window_end?: string
+    channel?: string
+    channel_split_available?: boolean
   }>('/po/daily-inventory-history/matrix', {
     params: {
       q,
       limit,
       offset,
       days: opts?.days ?? 30,
+      channel: opts?.channel ?? 'combined',
       ...(opts?.endDate ? { end_date: opts.endDate } : {}),
     },
     timeout: 120_000,
+  })
+  return data
+}
+
+export type SalesHistoryMatrixRow = { sku: string; units: number[] }
+
+export async function getPoDailySalesHistorySummary(opts?: { days?: number; endDate?: string; platform?: string }) {
+  const { data } = await api.get<{
+    ok: boolean
+    loaded?: boolean
+    rows?: number
+    skus?: number
+    days?: number
+    min_date?: string
+    max_date?: string
+    window_days?: number
+    window_end?: string
+    platforms?: string[]
+    total_units?: number
+  }>('/po/daily-sales-history', {
+    params: {
+      days: opts?.days ?? 30,
+      ...(opts?.endDate ? { end_date: opts.endDate } : {}),
+      ...(opts?.platform ? { platform: opts.platform } : {}),
+    },
+    timeout: 60_000,
+  })
+  return data
+}
+
+export async function getPoDailySalesHistoryMatrix(
+  q = '',
+  limit = 150,
+  offset = 0,
+  opts?: { days?: number; endDate?: string; platform?: string },
+) {
+  const { data } = await api.get<{
+    ok: boolean
+    loaded: boolean
+    dates: string[]
+    date_totals?: number[]
+    rows: SalesHistoryMatrixRow[]
+    total: number
+    limit: number
+    offset: number
+    window_days?: number
+    window_end?: string
+    platform?: string
+    platforms?: string[]
+  }>('/po/daily-sales-history/matrix', {
+    params: {
+      q,
+      limit,
+      offset,
+      days: opts?.days ?? 30,
+      ...(opts?.endDate ? { end_date: opts.endDate } : {}),
+      ...(opts?.platform ? { platform: opts.platform } : {}),
+    },
+    timeout: 120_000,
+  })
+  return data
+}
+
+export async function getPoDailySalesHistorySku(
+  sku: string,
+  windowDays = 30,
+  opts?: { platform?: string },
+) {
+  const { data } = await api.get<{
+    ok: boolean
+    loaded: boolean
+    sku: string
+    rows: Array<{ date: string; units: number; txns: number }>
+    net_units?: number
+    window_days?: number
+    window_start?: string
+    window_end?: string
+  }>('/po/daily-sales-history/sku', {
+    params: {
+      sku,
+      window_days: windowDays,
+      ...(opts?.platform ? { platform: opts.platform } : {}),
+    },
   })
   return data
 }

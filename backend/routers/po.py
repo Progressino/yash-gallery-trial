@@ -61,12 +61,13 @@ def _inventory_matrix_payload(
     offset: int = 0,
     days: int = 30,
     end_date: Optional[str] = None,
+    channel: str = "combined",
 ) -> dict:
     from ..services.daily_inventory_history import inventory_history_wide_matrix
 
     try:
         df = _inventory_history_df_for_read(sess)
-        sales_df = getattr(sess, "sales_df", None)
+        sales_df = _sales_df_for_read(sess)
         out = inventory_history_wide_matrix(
             df,
             q=q,
@@ -75,6 +76,7 @@ def _inventory_matrix_payload(
             days=min(max(1, int(days)), 120),
             end_date=end_date,
             sales_df=sales_df,
+            channel=channel,
         )
         out["ok"] = True
         return out
@@ -90,7 +92,25 @@ def _inventory_matrix_payload(
             "total": 0,
             "limit": int(limit),
             "offset": int(offset),
+            "channel": channel,
         }
+
+
+def _sales_df_for_read(sess) -> pd.DataFrame:
+    """Session sales_df with warm-cache fallback for read-only matrix APIs."""
+    sales = getattr(sess, "sales_df", None)
+    if sales is not None and not sales.empty:
+        return sales
+    try:
+        import backend.main as _main
+
+        _main.bootstrap_warm_cache_if_empty()
+        wc = (_main._warm_cache or {}).get("sales_df")
+        if wc is not None and not wc.empty:
+            return wc
+    except Exception:
+        pass
+    return pd.DataFrame()
 
 
 @router.get("/readiness")
@@ -571,6 +591,7 @@ async def po_daily_inventory_history_matrix(
     offset: int = 0,
     days: int = 30,
     end_date: Optional[str] = None,
+    channel: str = "combined",
 ):
     """Excel-style wide matrix: SKU rows × date columns (paginated)."""
     from ..concurrency import run_read_api
@@ -586,6 +607,7 @@ async def po_daily_inventory_history_matrix(
         offset=offset,
         days=days,
         end_date=end_date,
+        channel=channel,
     )
 
 
@@ -747,6 +769,95 @@ def po_sku_audit(request: Request, sku: str):
 
     qp = {k: request.query_params.get(k) for k in request.query_params.keys()}
     return build_po_sku_audit(sess, sku, qp)
+
+
+@router.get("/daily-sales-history")
+async def po_get_daily_sales_history(
+    request: Request,
+    days: int = 30,
+    end_date: Optional[str] = None,
+    platform: Optional[str] = None,
+):
+    """Summary of persisted daily sales in the ADS-style window."""
+    from ..concurrency import run_read_api
+    from ..services.daily_sales_history import sales_history_summary
+
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "loaded": False}
+
+    def _work() -> dict:
+        sales = _sales_df_for_read(sess)
+        summary = sales_history_summary(
+            sales,
+            days=min(max(1, int(days)), 120),
+            end_date=end_date,
+            platform=platform,
+        )
+        return {"ok": True, **summary}
+
+    return await run_read_api(_work)
+
+
+@router.get("/daily-sales-history/matrix")
+async def po_daily_sales_history_matrix(
+    request: Request,
+    q: str = "",
+    limit: int = 150,
+    offset: int = 0,
+    days: int = 30,
+    end_date: Optional[str] = None,
+    platform: Optional[str] = None,
+):
+    """Excel-style wide matrix: SKU rows × date columns of net daily units."""
+    from ..concurrency import run_read_api
+    from ..services.daily_sales_history import sales_history_wide_matrix
+
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+
+    def _work() -> dict:
+        sales = _sales_df_for_read(sess)
+        out = sales_history_wide_matrix(
+            sales,
+            q=q,
+            limit=min(max(1, int(limit)), 15000),
+            offset=max(0, int(offset)),
+            days=min(max(1, int(days)), 120),
+            end_date=end_date,
+            platform=platform,
+        )
+        out["ok"] = True
+        return out
+
+    return await run_read_api(_work)
+
+
+@router.get("/daily-sales-history/sku")
+def po_get_daily_sales_history_for_sku(
+    request: Request,
+    sku: str,
+    window_days: int = 30,
+    end_date: Optional[str] = None,
+    platform: Optional[str] = None,
+):
+    """Day-by-day net units for one SKU (verify daily sales uploads)."""
+    from ..services.daily_sales_history import sales_history_for_sku
+
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+    sales = _sales_df_for_read(sess)
+    out = sales_history_for_sku(
+        sales,
+        sku,
+        window_days=min(max(1, int(window_days)), 120),
+        end_date=end_date,
+        platform=platform,
+        sku_mapping=getattr(sess, "sku_mapping", None) or None,
+    )
+    return {"ok": True, **out}
 
 
 @router.delete("/daily-inventory-history")

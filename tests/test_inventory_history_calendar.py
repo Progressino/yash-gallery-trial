@@ -6,6 +6,7 @@ from backend.services.daily_inventory_history import (
     inventory_history_wide_matrix,
     project_inventory_calendar,
     repair_inventory_history_spikes,
+    validate_inventory_history_catalog,
 )
 
 
@@ -123,8 +124,6 @@ def test_all_skus_receive_full_calendar_window():
 
 
 def test_validate_inventory_history_catalog_flags_spike():
-    from backend.services.daily_inventory_history import validate_inventory_history_catalog
-
     hist = pd.concat(
         [
             _hist("SKU-A", ["2026-06-28"], [80000.0]),
@@ -160,23 +159,81 @@ def test_validate_inventory_history_catalog_flags_spike():
     assert len(out["rows"][0]["qtys"]) == 3
 
 
+def _sparse_sku_cases() -> list[tuple[str, list[str], list[float]]]:
+    """Diverse sparse snapshot patterns — not tied to one product family."""
+    return [
+        ("1024YKMUSTARD-8XL", ["2026-06-07", "2026-06-19"], [1.0, 0.0]),
+        ("1488YKWHITE-XS-S", ["2026-06-01", "2026-06-15", "2026-06-29"], [12.0, 10.0, 8.0]),
+        ("1001YKBEIGE-3XL", ["2026-06-10"], [5.0]),
+        ("1006YKBLUE-L", ["2026-06-28", "2026-06-29"], [0.0, 0.0]),
+        ("OOS-ONLY-SKU", ["2026-06-05"], [0.0]),
+        ("SINGLE-DAY-STOCK", ["2026-06-20"], [42.0]),
+    ]
+
+
 def test_densify_carries_forward_between_sparse_snapshots():
-    hist = _hist(
-        "1024YKMUSTARD-8XL",
-        ["2026-06-07", "2026-06-19"],
-        [1.0, 0.0],
+    cases = _sparse_sku_cases()
+    hist = pd.concat(
+        [_hist(sku, dates, qtys) for sku, dates, qtys in cases],
+        ignore_index=True,
+    )
+    sales_rows = [
+        {"Sku": "1024YKMUSTARD-8XL", "TxnDate": "2026-06-10", "Units_Effective": 1.0},
+        {"Sku": "1488YKWHITE-XS-S", "TxnDate": "2026-06-20", "Units_Effective": 2.0},
+        {"Sku": "1001YKBEIGE-3XL", "TxnDate": "2026-06-12", "Units_Effective": 1.0},
+    ]
+    sales = pd.DataFrame(sales_rows)
+    sales["TxnDate"] = pd.to_datetime(sales["TxnDate"])
+    out = densify_inventory_history_for_view(
+        hist, days=30, end_date="2026-06-29", sales_df=sales
+    )
+    per_sku = out.groupby("OMS_SKU")["Date"].nunique()
+    assert set(per_sku.index) == {sku for sku, _, _ in cases}
+    assert (per_sku == 30).all()
+
+    mustard = out[out["OMS_SKU"] == "1024YKMUSTARD-8XL"].sort_values("Date")
+    by_day = {str(pd.Timestamp(r["Date"]).date()): float(r["Qty"]) for _, r in mustard.iterrows()}
+    assert by_day["2026-06-07"] == 1.0
+    assert by_day["2026-06-10"] == 0.0
+    assert by_day["2026-06-19"] == 0.0
+
+    oos = out[out["OMS_SKU"] == "OOS-ONLY-SKU"].sort_values("Date")
+    assert len(oos) == 30
+    assert (oos["Qty"] == 0.0).all()
+
+
+def test_validate_catalog_all_skus_diverse_sparse_patterns():
+    """Every SKU in a mixed catalog gets a full calendar — not only one fixture SKU."""
+    cases = _sparse_sku_cases()
+    # Bulk-generate additional SKUs with random sparse anchors across the window.
+    extra_frames = []
+    for i in range(40):
+        sku = f"BULK-SKU-{i:03d}"
+        day = 1 + (i * 7) % 29
+        qty = float(i % 17)
+        extra_frames.append(_hist(sku, [f"2026-06-{day:02d}"], [qty]))
+    hist = pd.concat(
+        [_hist(sku, dates, qtys) for sku, dates, qtys in cases] + extra_frames,
+        ignore_index=True,
     )
     sales = pd.DataFrame(
         {
-            "Sku": ["1024YKMUSTARD-8XL"],
-            "TxnDate": pd.to_datetime(["2026-06-10"]),
-            "Units_Effective": [1.0],
+            "Sku": [sku for sku, _, _ in cases[:3]],
+            "TxnDate": pd.to_datetime(["2026-06-10", "2026-06-20", "2026-06-12"]),
+            "Units_Effective": [1.0, 2.0, 1.0],
         }
     )
-    out = densify_inventory_history_for_view(
-        hist, days=13, end_date="2026-06-19", sales_df=sales
+    report = validate_inventory_history_catalog(
+        hist, days=30, end_date="2026-06-29", sales_df=sales
     )
-    sub = out[out["OMS_SKU"] == "1024YKMUSTARD-8XL"].sort_values("Date")
-    assert len(sub) == 13
-    assert float(sub.iloc[0]["Qty"]) == 1.0
-    assert float(sub[sub["Date"] == pd.Timestamp("2026-06-10")].iloc[0]["Qty"]) == 0.0
+    assert report["ok"] is True
+    assert report["skus_short_calendar"] == 0
+    assert report["sku_count"] == len(cases) + 40
+    assert report["day_jump_over_5k"] == 0
+
+    dense = densify_inventory_history_for_view(
+        hist, days=30, end_date="2026-06-29", sales_df=sales
+    )
+    per_sku = dense.groupby("OMS_SKU")["Date"].nunique()
+    assert (per_sku == 30).all()
+    assert per_sku.shape[0] == report["sku_count"]

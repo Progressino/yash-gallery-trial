@@ -2,19 +2,14 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
-  api,
-  getPoDailyInventoryHistoryMatrix,
-  getPoDailyInventoryHistorySku,
-  type InventoryHistoryChannel,
+  getPoDailySalesHistoryMatrix,
+  getPoDailySalesHistorySku,
+  getPoDailySalesHistorySummary,
 } from '../api/client'
-import { useSession } from '../store/session'
-import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner'
 import { todayIsoIST } from '../lib/reportingDates'
 
 const PAGE_SIZE = 100
 const HISTORY_WINDOW_DAYS = 30
-
-type SkuDayRow = { date: string; qty: number; in_stock: boolean; source: string }
 
 function downloadCsv(filename: string, headers: string[], rows: string[][]) {
   const lines = [headers.join(','), ...rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(','))]
@@ -33,10 +28,9 @@ function formatDateCol(iso: string) {
   return iso
 }
 
-export default function InventoryHistory() {
-  const coverage = useSession()
+export default function SalesHistory() {
   const [mode, setMode] = useState<'matrix' | 'sku'>('matrix')
-  const [channel, setChannel] = useState<InventoryHistoryChannel>('combined')
+  const [platform, setPlatform] = useState('all')
   const [skuFilter, setSkuFilter] = useState('')
   const [skuQuery, setSkuQuery] = useState('')
   const [skuWindow, setSkuWindow] = useState(30)
@@ -44,68 +38,54 @@ export default function InventoryHistory() {
   const [exporting, setExporting] = useState(false)
 
   const summaryQ = useQuery({
-    queryKey: ['inv-history-summary', HISTORY_WINDOW_DAYS],
-    queryFn: async () => {
-      const { data } = await api.get('/po/daily-inventory-history', {
-        params: { days: HISTORY_WINDOW_DAYS },
-      })
-      return data as {
-        loaded?: boolean
-        min_date?: string
-        max_date?: string
-        rows?: number
-        skus?: number
-        days?: number
-        window_days?: number
-        window_end?: string
-        uploaded_at?: string
-        filename?: string
-      }
-    },
+    queryKey: ['sales-history-summary', HISTORY_WINDOW_DAYS, platform],
+    queryFn: async () =>
+      getPoDailySalesHistorySummary({
+        days: HISTORY_WINDOW_DAYS,
+        platform: platform === 'all' ? undefined : platform,
+      }),
   })
 
   const matrixQ = useQuery({
-    queryKey: ['inv-history-matrix', skuFilter, page, HISTORY_WINDOW_DAYS, channel],
+    queryKey: ['sales-history-matrix', skuFilter, page, HISTORY_WINDOW_DAYS, platform],
     enabled: mode === 'matrix' && (summaryQ.isSuccess || summaryQ.isError),
     retry: 1,
     queryFn: async () =>
-      getPoDailyInventoryHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE, {
+      getPoDailySalesHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE, {
         days: HISTORY_WINDOW_DAYS,
-        channel,
+        platform: platform === 'all' ? undefined : platform,
       }),
   })
 
   const skuTimelineQ = useQuery({
-    queryKey: ['inv-history-sku', skuQuery, skuWindow],
+    queryKey: ['sales-history-sku', skuQuery, skuWindow, platform],
     enabled: mode === 'sku' && skuQuery.trim().length >= 3,
-    queryFn: async () => getPoDailyInventoryHistorySku(skuQuery.trim(), skuWindow),
+    queryFn: async () =>
+      getPoDailySalesHistorySku(skuQuery.trim(), skuWindow, {
+        platform: platform === 'all' ? undefined : platform,
+      }),
   })
 
+  const platforms = summaryQ.data?.platforms ?? matrixQ.data?.platforms ?? []
   const dates = matrixQ.data?.dates ?? []
   const dateTotals = matrixQ.data?.date_totals ?? []
   const matrixRows = matrixQ.data?.rows ?? []
   const totalSkus = matrixQ.data?.total ?? 0
-  const inStockMin = matrixQ.data?.in_stock_min_qty ?? 1
-  const skuRows = (skuTimelineQ.data?.rows ?? []) as SkuDayRow[]
+  const skuRows = skuTimelineQ.data?.rows ?? []
 
   const pageCount = Math.max(1, Math.ceil(totalSkus / PAGE_SIZE))
 
   const handleExportMatrix = async () => {
     setExporting(true)
     try {
-      const data = await getPoDailyInventoryHistoryMatrix(skuFilter, 15000, 0, {
+      const data = await getPoDailySalesHistoryMatrix(skuFilter, 15000, 0, {
         days: HISTORY_WINDOW_DAYS,
-        channel,
+        platform: platform === 'all' ? undefined : platform,
       })
       const hdr = ['SKU', ...data.dates]
-      const body = data.rows.map(r => [r.sku, ...r.qtys.map(q => String(q))])
-      const label = [
-        channel !== 'combined' ? channel : null,
-        skuFilter.trim() || null,
-      ]
-        .filter(Boolean)
-        .join('-')
-      downloadCsv(`${label ? `inventory-matrix-${label}` : 'inventory-matrix'}.csv`, hdr, body)
+      const body = data.rows.map(r => [r.sku, ...r.units.map(u => String(u))])
+      const label = [platform !== 'all' ? platform : null, skuFilter.trim() || null].filter(Boolean).join('-')
+      downloadCsv(`${label ? `sales-matrix-${label}` : 'sales-matrix'}.csv`, hdr, body)
     } finally {
       setExporting(false)
     }
@@ -113,13 +93,11 @@ export default function InventoryHistory() {
 
   const handleExportSku = () => {
     downloadCsv(
-      `inventory-history-${skuQuery.trim()}.csv`,
-      ['date', 'sku', 'qty', 'in_stock', 'source'],
-      skuRows.map(r => [r.date, skuQuery.trim(), String(r.qty), r.in_stock ? 'yes' : 'no', r.source]),
+      `sales-history-${skuQuery.trim()}.csv`,
+      ['date', 'sku', 'net_units', 'txns'],
+      skuRows.map(r => [r.date, skuQuery.trim(), String(r.units), String(r.txns)]),
     )
   }
-
-  const channelSplitAvailable = matrixQ.data?.channel_split_available ?? false
 
   const rangeLabel = useMemo(() => {
     if (!dates.length) return ''
@@ -130,96 +108,74 @@ export default function InventoryHistory() {
     <div className="max-w-[100vw] mx-auto p-4 md:p-6 space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">📅 Inventory History</h1>
+          <h1 className="text-2xl font-bold text-gray-900">📈 Daily Sales History</h1>
           <p className="text-sm text-gray-600 mt-1 max-w-2xl">
-            Last {HISTORY_WINDOW_DAYS} snapshot days of daily inventory (wide matrix from Upload → History &amp; setup,
-            or snapshot columns from Upload → Daily uploads). Use this matrix to verify on-hand counts match PO{' '}
-            <code className="font-mono text-xs">Eff_Days</code>.
+            Last {HISTORY_WINDOW_DAYS} days of net units sold per SKU (shipments minus returns from daily
+            uploads). Use this matrix to verify daily sales files were ingested correctly before PO calculate.
           </p>
         </div>
         <Link to="/upload" className="text-sm font-medium text-indigo-700 hover:underline shrink-0">
-          Upload snapshot →
+          Upload daily sales →
         </Link>
       </div>
 
-      <InventoryStalenessBanner />
-
       <div className="bg-white border border-gray-200 rounded-xl p-4 text-sm text-gray-700 flex flex-wrap gap-x-6 gap-y-1">
         <span>
-          <strong>Loaded:</strong>{' '}
-          {summaryQ.data?.loaded || coverage.daily_inventory_history ? 'Yes' : 'No'}
+          <strong>Loaded:</strong> {summaryQ.data?.loaded ? 'Yes' : 'No'}
         </span>
         {summaryQ.data?.min_date && summaryQ.data?.max_date && (
           <span>
-            <strong>Window:</strong> last {summaryQ.data.window_days ?? HISTORY_WINDOW_DAYS} days ·{' '}
-            {summaryQ.data.min_date} → {summaryQ.data.max_date}
+            <strong>Window:</strong> {summaryQ.data.min_date} → {summaryQ.data.max_date}
           </span>
         )}
         {summaryQ.data?.skus != null && (
           <span>
             <strong>SKUs:</strong> {summaryQ.data.skus.toLocaleString()} ·{' '}
-            <strong>days:</strong> {summaryQ.data.days?.toLocaleString()}
+            <strong>net units:</strong> {summaryQ.data.total_units?.toLocaleString() ?? '—'}
           </span>
         )}
         <span className="text-gray-500">Today (IST): {todayIsoIST()}</span>
       </div>
 
-      {!summaryQ.data?.loaded && !coverage.daily_inventory_history && (
+      {!summaryQ.data?.loaded && (
         <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600">
-          Upload daily snapshot inventory on{' '}
+          Upload daily sales on{' '}
           <Link to="/upload" className="text-indigo-700 font-medium underline">
-            Upload → Daily uploads → Snapshot inventory
+            Upload → Daily uploads → Daily order upload
           </Link>
-          . Each day you upload builds one column in this matrix (last {HISTORY_WINDOW_DAYS} days).
-        </div>
-      )}
-
-      {summaryQ.data?.loaded && !dates.length && !matrixQ.isLoading && !matrixQ.isFetching && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          {summaryQ.data.max_date &&
-          summaryQ.data.max_date < todayIsoIST().slice(0, 10) ? (
-            <>
-              Inventory history matrix ends <strong>{summaryQ.data.max_date}</strong> (today{' '}
-              {todayIsoIST()}). Re-upload the wide Excel under Upload → History &amp; setup → Daily
-              inventory history matrix (PO).
-            </>
-          ) : (
-            <>
-              Matrix summary loaded but the table is empty — try refreshing. If this persists after
-              upload, use Upload → Server &amp; cache → Reload from server.
-            </>
-          )}
+          . Each file adds shipment/return rows that appear here as daily net units per SKU.
         </div>
       )}
 
       <div className="flex flex-wrap gap-2 items-center">
-        <span className="text-xs font-medium text-gray-500 mr-1">Channel:</span>
-        {(
-          [
-            ['combined', 'Combined (max)'],
-            ['oms', 'OMS warehouse'],
-            ['amazon', 'Amazon FBA'],
-          ] as const
-        ).map(([key, label]) => (
+        <span className="text-xs font-medium text-gray-500 mr-1">Platform:</span>
+        <button
+          type="button"
+          onClick={() => {
+            setPlatform('all')
+            setPage(0)
+          }}
+          className={`px-3 py-1.5 rounded-lg text-sm font-medium border ${
+            platform === 'all' ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-gray-700'
+          }`}
+        >
+          All platforms
+        </button>
+        {platforms.map(p => (
           <button
-            key={key}
+            key={p}
             type="button"
             onClick={() => {
-              setChannel(key)
+              setPlatform(p)
               setPage(0)
             }}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium border ${
-              channel === key ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700'
+              platform === p ? 'bg-violet-600 text-white border-violet-600' : 'bg-white text-gray-700'
             }`}
           >
-            {label}
+            {p}
           </button>
         ))}
-        {!channelSplitAvailable && channel !== 'combined' && (
-          <span className="text-xs text-amber-700 ml-2">
-            OMS/Amazon split needs a re-upload of the wide matrix (OMS + Amazon sheets).
-          </span>
-        )}
       </div>
 
       <div className="flex gap-2">
@@ -230,7 +186,7 @@ export default function InventoryHistory() {
             mode === 'matrix' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700'
           }`}
         >
-          Wide matrix (Excel)
+          Wide matrix
         </button>
         <button
           type="button"
@@ -269,29 +225,18 @@ export default function InventoryHistory() {
           </div>
 
           {matrixQ.isLoading ? (
-            <p className="p-4 text-sm text-gray-500">
-              Loading matrix…
-              {summaryQ.data?.max_date ? (
-                <span className="block text-xs text-gray-400 mt-1">
-                  Summary loaded ({summaryQ.data.skus?.toLocaleString() ?? '—'} SKUs through{' '}
-                  {summaryQ.data.max_date}) — building table…
-                </span>
-              ) : null}
-            </p>
+            <p className="p-4 text-sm text-gray-500">Loading sales matrix…</p>
           ) : matrixQ.isError ? (
-            <p className="p-4 text-sm text-red-700">
-              Matrix load failed — try refreshing. If this persists, ask admin to reload server cache.
-            </p>
+            <p className="p-4 text-sm text-red-700">Matrix load failed — try refreshing.</p>
           ) : !dates.length ? (
-            <p className="p-4 text-sm text-gray-500">No inventory history dates loaded.</p>
+            <p className="p-4 text-sm text-gray-500">No sales history in this window.</p>
           ) : (
             <>
               <div className="px-4 py-2 text-xs text-gray-500 border-b border-gray-50 flex flex-wrap items-center justify-between gap-2">
                 <span>
                   {totalSkus.toLocaleString()} SKUs · {dates.length} days
                   {rangeLabel ? ` · ${rangeLabel}` : ''}
-                  {channel !== 'combined' ? ` · ${channel.toUpperCase()}` : ''}
-                  {skuFilter.trim() ? ` · filter “${skuFilter.trim()}”` : ''}
+                  {platform !== 'all' ? ` · ${platform}` : ''}
                 </span>
                 <span className="flex items-center gap-2">
                   <button
@@ -320,7 +265,7 @@ export default function InventoryHistory() {
                   <thead>
                     <tr className="bg-slate-100">
                       <th className="sticky left-0 z-20 bg-slate-100 border border-gray-200 px-2 py-1.5 text-left font-semibold text-gray-700 min-w-[10rem]">
-                        Item SkuCode
+                        SKU
                       </th>
                       {dates.map(d => (
                         <th
@@ -332,38 +277,24 @@ export default function InventoryHistory() {
                         </th>
                       ))}
                     </tr>
-                    <tr className="bg-indigo-50">
-                      <th className="sticky left-0 z-20 bg-indigo-50 border border-gray-200 px-2 py-1 text-left text-[10px] font-semibold text-indigo-900">
-                        Total inv.
+                    <tr className="bg-violet-50">
+                      <th className="sticky left-0 z-20 bg-violet-50 border border-gray-200 px-2 py-1 text-left text-[10px] font-semibold text-violet-900">
+                        Total units
                       </th>
                       {dates.map((d, i) => {
                         const total = dateTotals[i] ?? 0
                         return (
                           <th
                             key={`${d}-total`}
-                            className="border border-gray-200 px-1 py-1 text-center text-[10px] font-bold text-indigo-900 whitespace-nowrap tabular-nums"
-                            title={`${d}: ${total.toLocaleString()} units`}
+                            className="border border-gray-200 px-1 py-1 text-center text-[10px] font-bold text-violet-900 whitespace-nowrap tabular-nums"
+                            title={`${d}: ${total.toLocaleString()} net units`}
                           >
-                            {total > 0
-                              ? total.toLocaleString(undefined, { maximumFractionDigits: 0 })
+                            {total !== 0
+                              ? total.toLocaleString(undefined, { maximumFractionDigits: 1 })
                               : '—'}
                           </th>
                         )
                       })}
-                    </tr>
-                    <tr className="bg-slate-50">
-                      <th className="sticky left-0 z-20 bg-slate-50 border border-gray-200 px-2 py-0.5 text-left text-[10px] text-gray-400 font-normal">
-                        Date
-                      </th>
-                      {dates.map(d => (
-                        <th
-                          key={`${d}-sub`}
-                          className="border border-gray-200 px-1 py-0.5 text-center text-[10px] text-gray-400 font-normal whitespace-nowrap"
-                          title={d}
-                        >
-                          {d.slice(5)}
-                        </th>
-                      ))}
                     </tr>
                   </thead>
                   <tbody>
@@ -372,20 +303,19 @@ export default function InventoryHistory() {
                         <td className="sticky left-0 z-10 bg-white border border-gray-200 px-2 py-1 font-mono text-gray-800 whitespace-nowrap">
                           {row.sku}
                         </td>
-                        {row.qtys.map((qty, i) => {
-                          const inStock = qty >= inStockMin
-                          return (
-                            <td
-                              key={`${row.sku}-${dates[i]}`}
-                              className={`border border-gray-200 px-1.5 py-1 text-right font-mono tabular-nums ${
-                                inStock ? 'text-gray-800' : 'text-rose-400 bg-rose-50/60'
-                              }`}
-                              title={`${dates[i]}: ${qty}`}
-                            >
-                              {qty > 0 ? qty.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}
-                            </td>
-                          )
-                        })}
+                        {row.units.map((units, i) => (
+                          <td
+                            key={`${row.sku}-${dates[i]}`}
+                            className={`border border-gray-200 px-1.5 py-1 text-right font-mono tabular-nums ${
+                              units < 0 ? 'text-rose-600 bg-rose-50/60' : 'text-gray-800'
+                            }`}
+                            title={`${dates[i]}: ${units} net units`}
+                          >
+                            {units !== 0
+                              ? units.toLocaleString(undefined, { maximumFractionDigits: 1 })
+                              : '—'}
+                          </td>
+                        ))}
                       </tr>
                     ))}
                   </tbody>
@@ -431,29 +361,32 @@ export default function InventoryHistory() {
           ) : skuQuery.trim().length < 3 ? (
             <p className="p-4 text-sm text-gray-500">Enter at least 3 characters of a SKU.</p>
           ) : skuRows.length === 0 ? (
-            <p className="p-4 text-sm text-amber-700">No history rows for this SKU.</p>
+            <p className="p-4 text-sm text-amber-700">No sales rows for this SKU in the window.</p>
           ) : (
             <div className="max-h-[32rem] overflow-auto">
               <table className="w-full text-xs">
                 <thead className="bg-gray-50 sticky top-0">
                   <tr>
                     <th className="text-left px-4 py-2 font-semibold text-gray-600">Date</th>
-                    <th className="text-right px-4 py-2 font-semibold text-gray-600">On-hand</th>
-                    <th className="text-left px-4 py-2 font-semibold text-gray-600">Source</th>
-                    <th className="text-left px-4 py-2 font-semibold text-gray-600">Counted?</th>
+                    <th className="text-right px-4 py-2 font-semibold text-gray-600">Net units</th>
+                    <th className="text-right px-4 py-2 font-semibold text-gray-600">Txns</th>
                   </tr>
                 </thead>
                 <tbody>
                   {skuRows.map(r => (
-                    <tr key={r.date} className={r.in_stock ? '' : 'bg-rose-50/50'}>
+                    <tr key={r.date} className={r.units < 0 ? 'bg-rose-50/50' : ''}>
                       <td className="px-4 py-1.5 font-mono">{r.date}</td>
-                      <td className="px-4 py-1.5 text-right font-mono">{r.qty.toLocaleString()}</td>
-                      <td className="px-4 py-1.5">{r.source === 'derived' ? 'auto · sales' : 'uploaded'}</td>
-                      <td className="px-4 py-1.5">{r.in_stock ? '✓' : '—'}</td>
+                      <td className="px-4 py-1.5 text-right font-mono">{r.units.toLocaleString()}</td>
+                      <td className="px-4 py-1.5 text-right font-mono">{r.txns}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              {skuTimelineQ.data?.net_units != null && (
+                <p className="px-4 py-2 text-xs text-gray-500 border-t">
+                  Window net: <strong>{skuTimelineQ.data.net_units.toLocaleString()}</strong> units
+                </p>
+              )}
             </div>
           )}
         </div>

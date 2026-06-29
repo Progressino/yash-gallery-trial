@@ -33,7 +33,80 @@ _DEFAULT_VIEW_DAYS = int(os.environ.get("DAILY_INV_VIEW_DAYS", "30"))
 
 _TALL_COLS = ["OMS_SKU", "Date", "Qty"]
 _STORE_COLS = ["OMS_SKU", "Date", "Qty", "Source"]
+_CHANNEL_COLS = ["OMS_SKU", "Date", "Qty", "Source", "Channel"]
 _SOURCE_RANK = {"snapshot": 3, "uploaded": 2, "derived": 1}
+
+
+def _channel_from_sheet(sheet_name: str) -> str:
+    """Map wide-matrix sheet name to inventory channel (OMS warehouse vs Amazon FBA)."""
+    n = (sheet_name or "").strip().lower()
+    if any(h in n for h in ("amazon", "fba")):
+        return "amazon"
+    return "oms"
+
+
+def _ensure_channel_column(df: pd.DataFrame | None, default: str = "") -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame(columns=_CHANNEL_COLS)
+    out = _ensure_source_column(df)
+    if "Channel" not in out.columns:
+        out["Channel"] = default
+    else:
+        out["Channel"] = (
+            out["Channel"].astype(str).str.strip().str.lower().replace({"nan": "", "none": ""})
+        )
+    return out
+
+
+def inventory_channel_split_available(df: pd.DataFrame | None) -> bool:
+    """True when the matrix has separate OMS and/or Amazon sheet rows (not legacy merged)."""
+    work = _ensure_channel_column(df)
+    if work.empty:
+        return False
+    ch = work["Channel"].astype(str).str.strip().str.lower()
+    return bool(ch.isin(["oms", "amazon"]).any())
+
+
+def _history_dedupe_keys(work: pd.DataFrame) -> list[str]:
+    work = _ensure_channel_column(work)
+    ch = work["Channel"].astype(str).str.strip().str.lower()
+    if ch.isin(["oms", "amazon"]).any():
+        return ["OMS_SKU", "Date", "Channel"]
+    return ["OMS_SKU", "Date"]
+
+
+def combine_inventory_channels(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Max on-hand per SKU-day across OMS + Amazon (PO combined view)."""
+    work = _coalesce_history_rows(_ensure_channel_column(df))
+    if work.empty:
+        return pd.DataFrame(columns=_STORE_COLS)
+    ch = work["Channel"].astype(str).str.strip().str.lower()
+    if not ch.isin(["oms", "amazon"]).any():
+        return work.drop(columns=["Channel"], errors="ignore")
+    work["_rank"] = work["Source"].astype(str).str.strip().str.lower().map(_SOURCE_RANK).fillna(1)
+    work = work.sort_values(
+        ["OMS_SKU", "Date", "_rank", "Qty"],
+        ascending=[True, True, False, False],
+    )
+    out = work.groupby(["OMS_SKU", "Date"], as_index=False).agg(
+        Qty=("Qty", "max"),
+        Source=("Source", "first"),
+    )
+    return out.reset_index(drop=True)
+
+
+def filter_inventory_history_channel(df: pd.DataFrame | None, channel: str = "combined") -> pd.DataFrame:
+    """``combined`` = max(OMS, Amazon); ``oms`` / ``amazon`` = one channel only."""
+    channel = (channel or "combined").strip().lower()
+    if channel == "combined":
+        return combine_inventory_channels(df)
+    work = _coalesce_history_rows(_ensure_channel_column(df))
+    if work.empty:
+        return pd.DataFrame(columns=_STORE_COLS)
+    ch = work["Channel"].astype(str).str.strip().str.lower()
+    if not ch.isin(["oms", "amazon"]).any():
+        return pd.DataFrame(columns=_STORE_COLS)
+    return work.loc[ch == channel, _STORE_COLS].reset_index(drop=True)
 
 
 def _ensure_source_column(df: pd.DataFrame | None, default: str = "uploaded") -> pd.DataFrame:
@@ -61,12 +134,15 @@ def _coalesce_history_rows(
     if work.empty:
         return pd.DataFrame(columns=_STORE_COLS)
     work["Qty"] = work["Qty"].astype(float).clip(lower=0.0)
+    work = _ensure_channel_column(work)
     work["_rank"] = work["Source"].astype(str).str.strip().str.lower().map(_SOURCE_RANK).fillna(1)
+    dedupe_keys = _history_dedupe_keys(work)
+    sort_cols = list(dedupe_keys) + ["_rank", "Qty"]
     work = work.sort_values(
-        ["OMS_SKU", "Date", "_rank", "Qty"],
-        ascending=[True, True, False, False],
+        sort_cols,
+        ascending=[True] * len(dedupe_keys) + [False, False],
     )
-    out = work.drop_duplicates(subset=["OMS_SKU", "Date"], keep="first").drop(columns=["_rank"])
+    out = work.drop_duplicates(subset=dedupe_keys, keep="first").drop(columns=["_rank"])
     out = out.reset_index(drop=True)
     if drop_zero_derived:
         return drop_zero_derived_rows(out)
@@ -1023,17 +1099,22 @@ def parse_daily_inventory_history_dataframes(
     for name, df in sheet_dfs.items():
         if df is None or df.empty:
             continue
-        parts.append(_parse_one_sheet(df, mapping, sheet_name=name, max_days=max_days))
+        part = _parse_one_sheet(df, mapping, sheet_name=name, max_days=max_days)
+        if part.empty:
+            continue
+        part = part.copy()
+        part["Channel"] = _channel_from_sheet(name)
+        parts.append(part)
     if not parts:
         return pd.DataFrame(columns=_TALL_COLS)
     out = pd.concat(parts, ignore_index=True)
     if out.empty:
         return out
-    # Multiple sheets can list the same SKU — keep the maximum stock seen across
-    # sources for the same date (warehouse + FBA snapshots can both be > 0).
+    # Keep OMS and Amazon separate per SKU-day; PO combines with max() when needed.
+    group_cols = ["OMS_SKU", "Date", "Channel"] if "Channel" in out.columns else ["OMS_SKU", "Date"]
     out = (
-        out.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"].max()
-        .sort_values(["OMS_SKU", "Date"])
+        out.groupby(group_cols, as_index=False)["Qty"].max()
+        .sort_values(group_cols)
         .reset_index(drop=True)
     )
     return out
@@ -1118,6 +1199,7 @@ def trim_inventory_history_for_po(
     po_skus: Optional[set] = None,
 ) -> pd.DataFrame:
     """Keep only SKU-day rows needed for one PO run (avoids processing multi-year baselines)."""
+    inv_history = combine_inventory_channels(inv_history)
     if inv_history is None or inv_history.empty:
         return pd.DataFrame(columns=_TALL_COLS)
     ws = pd.Timestamp(window_start).normalize()
@@ -1156,6 +1238,7 @@ def effective_days_from_history(
 
     Returns: ``OMS_SKU``, ``Eff_Days_Inventory`` (int).
     """
+    inv_history = combine_inventory_channels(inv_history)
     if inv_history is None or inv_history.empty:
         return pd.DataFrame(columns=["OMS_SKU", "Eff_Days_Inventory"])
     df = inv_history.copy()
@@ -1317,7 +1400,7 @@ def extend_history_with_sales(
     if inv_history is None or inv_history.empty:
         return pd.DataFrame(columns=["OMS_SKU", "Date", "Qty", "Source"])
 
-    base = inv_history.copy()
+    base = combine_inventory_channels(inv_history)
     base["Date"] = pd.to_datetime(base["Date"], errors="coerce").dt.normalize()
     base["Qty"] = pd.to_numeric(base["Qty"], errors="coerce")
     base = base.dropna(subset=["Date", "Qty", "OMS_SKU"])
@@ -1658,8 +1741,10 @@ def densify_inventory_history_for_view(
     days: int | None = None,
     end_date: str | None = None,
     sales_df: pd.DataFrame | None = None,
+    channel: str = "combined",
 ) -> pd.DataFrame:
     """Calendar window + per-SKU roll-forward for the inventory history UI."""
+    inv_history = filter_inventory_history_channel(inv_history, channel)
     if inv_history is None or inv_history.empty:
         return pd.DataFrame(columns=_STORE_COLS)
     span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
@@ -1874,8 +1959,10 @@ def inventory_history_wide_matrix(
     days: int | None = None,
     end_date: str | None = None,
     sales_df: pd.DataFrame | None = None,
+    channel: str = "combined",
 ) -> dict:
     """Pivot tall history to Excel-style wide matrix: SKU rows × date columns."""
+    channel = (channel or "combined").strip().lower()
     empty = {
         "loaded": False,
         "dates": [],
@@ -1887,12 +1974,14 @@ def inventory_history_wide_matrix(
         "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
         "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
         "window_end": str(end_date or today_ist_timestamp().date()),
+        "channel": channel,
+        "channel_split_available": inventory_channel_split_available(df),
     }
     if df is None or df.empty:
         return empty
 
     work = densify_inventory_history_for_view(
-        df, days=days, end_date=end_date, sales_df=sales_df
+        df, days=days, end_date=end_date, sales_df=sales_df, channel=channel
     )
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work = work.dropna(subset=["Date", "OMS_SKU"])
@@ -1950,6 +2039,8 @@ def inventory_history_wide_matrix(
         "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
         "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
         "window_end": str(date_strs[-1]) if date_strs else str(end_date or today_ist_timestamp().date()),
+        "channel": channel,
+        "channel_split_available": inventory_channel_split_available(df),
     }
 
 
