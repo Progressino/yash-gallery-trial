@@ -47,7 +47,11 @@ def _ensure_source_column(df: pd.DataFrame | None, default: str = "uploaded") ->
     return out
 
 
-def _coalesce_history_rows(combined: pd.DataFrame) -> pd.DataFrame:
+def _coalesce_history_rows(
+    combined: pd.DataFrame,
+    *,
+    drop_zero_derived: bool = True,
+) -> pd.DataFrame:
     """One row per SKU-day — snapshot beats uploaded beats derived; then highest qty."""
     work = _ensure_source_column(combined, default="uploaded")
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
@@ -63,7 +67,10 @@ def _coalesce_history_rows(combined: pd.DataFrame) -> pd.DataFrame:
         ascending=[True, True, False, False],
     )
     out = work.drop_duplicates(subset=["OMS_SKU", "Date"], keep="first").drop(columns=["_rank"])
-    return drop_zero_derived_rows(out.reset_index(drop=True))
+    out = out.reset_index(drop=True)
+    if drop_zero_derived:
+        return drop_zero_derived_rows(out)
+    return out
 
 
 def record_inventory_snapshot_date(sess, snapshot_date: str) -> None:
@@ -1582,7 +1589,7 @@ def project_inventory_calendar(
 
     if not out_frames:
         return pd.DataFrame(columns=_STORE_COLS)
-    return _coalesce_history_rows(pd.concat(out_frames, ignore_index=True))
+    return _coalesce_history_rows(pd.concat(out_frames, ignore_index=True), drop_zero_derived=False)
 
 
 def repair_inventory_history_spikes(
