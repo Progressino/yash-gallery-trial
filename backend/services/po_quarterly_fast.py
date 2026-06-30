@@ -244,22 +244,118 @@ def _load_unified_sales_df() -> pd.DataFrame:
             return pd.DataFrame()
 
 
+def _load_platform_frame_from_disk(attr: str) -> pd.DataFrame:
+    """Full Tier-1 platform parquet from ``WARM_CACHE_DIR`` (no rolling window clip)."""
+    path = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")) / f"{attr}.parquet"
+    if not path.is_file():
+        return pd.DataFrame()
+    try:
+        return pd.read_parquet(path)
+    except Exception:
+        return pd.DataFrame()
+
+
 def _warm_cache_platform_frames() -> dict[str, pd.DataFrame]:
-    """Attach shared warm-cache platform frames without hydrating the user session."""
+    """Tier-1 / Tier-2 bulk platform history — warm RAM, then disk parquets."""
+    from .shared_frames import warm_frame
+
+    out: dict[str, pd.DataFrame] = {}
+    for _plat, attr, _sp, _ca in _WARM_FRAME_ATTRS:
+        df = warm_frame(attr)
+        if df is None or getattr(df, "empty", True):
+            df = _load_platform_frame_from_disk(attr)
+        if df is not None and not getattr(df, "empty", True):
+            out[attr] = df
+    if out:
+        return out
     try:
         import backend.main as _main
 
         stub = type("_QuarterlyWarmStub", (), {})()
         _main.try_attach_shared_frames_fast(stub)
-        out: dict[str, pd.DataFrame] = {}
         for _plat, attr, _sp, _ca in _WARM_FRAME_ATTRS:
             df = getattr(stub, attr, None)
             if df is not None and not getattr(df, "empty", True):
                 out[attr] = df
-        return out
     except Exception:
-        logger.debug("Warm-cache platform frames unavailable for quarterly supplement", exc_info=True)
-        return {}
+        logger.debug("Warm-cache platform frames unavailable for quarterly", exc_info=True)
+    return out
+
+
+def _tier1_platform_frame(
+    plat: str,
+    attr: str,
+    *,
+    warm_frames: Optional[dict[str, pd.DataFrame]] = None,
+) -> pd.DataFrame:
+    """
+    Best available Tier-1 / Tier-2 bulk frame for one platform.
+
+    Prefer warm-cache / disk bulk; when that is missing or thin, fall back to the full
+    SQLite upload store (Tier-1 ZIP history lives there as well).
+    """
+    from .daily_store import load_platform_data, merge_platform_data
+
+    frames = warm_frames if warm_frames is not None else _warm_cache_platform_frames()
+    df = frames.get(attr, pd.DataFrame())
+    min_rows = 50_000 if plat == "amazon" else 5_000
+    if df is None or getattr(df, "empty", True) or len(df) < min_rows:
+        try:
+            bulk = load_platform_data(plat, months=None)
+        except Exception:
+            bulk = pd.DataFrame()
+        if bulk is not None and not bulk.empty:
+            if df is None or getattr(df, "empty", True):
+                df = bulk
+            elif len(bulk) > len(df):
+                df = merge_platform_data(df, bulk, plat)
+            else:
+                df = merge_platform_data(df, bulk, plat)
+    return df if df is not None else pd.DataFrame()
+
+
+def _accumulate_tier1_platform_history(
+    sku_mapping: Optional[Dict[str, str]],
+    *,
+    group_by_parent: bool,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    cutoff_90: pd.Timestamp,
+    cutoff_30: pd.Timestamp,
+    q_label_map: dict[tuple[int, int], str],
+    quarter_sums: dict[tuple[str, str], int],
+    units_90: dict[str, int],
+    units_30: dict[str, int],
+    days_30: dict[str, Set[pd.Timestamp]],
+    platform_day_keys: Set[DayKey],
+    progress_cb: ProgressCb = None,
+) -> None:
+    """Primary quarterly source — Tier-1 bulk + Tier-2 uploads (warm cache / disk / SQLite)."""
+    if progress_cb:
+        progress_cb(10, "Loading Tier-1 bulk platform history…")
+    warm_frames = _warm_cache_platform_frames()
+    for plat, attr, strip_pl, canon in _WARM_FRAME_ATTRS:
+        df = _tier1_platform_frame(plat, attr, warm_frames=warm_frames)
+        if df is None or df.empty:
+            continue
+        _accumulate_shipment_frame(
+            df,
+            plat,
+            sku_mapping,
+            strip_pl=strip_pl,
+            canonical_oms=canon,
+            group_by_parent=group_by_parent,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            cutoff_90=cutoff_90,
+            cutoff_30=cutoff_30,
+            q_label_map=q_label_map,
+            quarter_sums=quarter_sums,
+            units_90=units_90,
+            units_30=units_30,
+            days_30=days_30,
+            platform_day_keys=platform_day_keys,
+        )
 
 
 def _accumulate_sales_df_shipments(
@@ -349,53 +445,6 @@ def _accumulate_sales_df_shipments(
     return len(work)
 
 
-def _supplement_quarterly_from_warm_cache(
-    sku_mapping: Optional[Dict[str, str]],
-    *,
-    group_by_parent: bool,
-    start_ts: pd.Timestamp,
-    end_ts: pd.Timestamp,
-    cutoff_90: pd.Timestamp,
-    cutoff_30: pd.Timestamp,
-    q_label_map: dict[tuple[int, int], str],
-    quarter_sums: dict[tuple[str, str], int],
-    units_90: dict[str, int],
-    units_30: dict[str, int],
-    days_30: dict[str, Set[pd.Timestamp]],
-    platform_day_keys: Set[DayKey],
-    progress_cb: ProgressCb = None,
-) -> None:
-    """Fill SKU-days missing from Tier-3 using warm-cache bulk platform history."""
-    frames = _warm_cache_platform_frames()
-    if not frames:
-        return
-    if progress_cb:
-        progress_cb(92, "Merging warm-cache platform history…")
-    for plat, attr, strip_pl, canon in _WARM_FRAME_ATTRS:
-        df = frames.get(attr)
-        if df is None or df.empty:
-            continue
-        _accumulate_shipment_frame(
-            df,
-            plat,
-            sku_mapping,
-            strip_pl=strip_pl,
-            canonical_oms=canon,
-            group_by_parent=group_by_parent,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            cutoff_90=cutoff_90,
-            cutoff_30=cutoff_30,
-            q_label_map=q_label_map,
-            quarter_sums=quarter_sums,
-            units_90=units_90,
-            units_30=units_30,
-            days_30=days_30,
-            platform_day_keys=platform_day_keys,
-            skip_days=platform_day_keys,
-        )
-
-
 def calculate_quarterly_from_tier3_streaming(
     sku_mapping: Optional[Dict[str, str]],
     start_date: str,
@@ -405,7 +454,9 @@ def calculate_quarterly_from_tier3_streaming(
     n_quarters: int = 8,
     progress_cb: ProgressCb = None,
 ) -> pd.DataFrame:
-    """Aggregate quarterly pivot by reading one Tier-3 blob at a time."""
+    """
+    Aggregate quarterly pivot: Tier-1/2 bulk first, Tier-3 dailies gap-fill, then sales_df.
+    """
     from .daily_store import (
         _PLATFORM_METRICS_COLUMNS,
         _get_conn,
@@ -432,6 +483,22 @@ def calculate_quarterly_from_tier3_streaming(
     days_30: dict[str, Set[pd.Timestamp]] = defaultdict(set)
     platform_day_keys: Set[DayKey] = set()
 
+    _accumulate_tier1_platform_history(
+        sku_mapping,
+        group_by_parent=group_by_parent,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=cutoff_90,
+        cutoff_30=cutoff_30,
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+        platform_day_keys=platform_day_keys,
+        progress_cb=progress_cb,
+    )
+
     conn = _get_conn()
     clause = _tier3_window_sql_clause()
     count_sql = f"""
@@ -453,7 +520,7 @@ def calculate_quarterly_from_tier3_streaming(
         total += int(row[0] if row else 0)
 
     if progress_cb:
-        progress_cb(8, f"Scanning {total} upload file(s)…")
+        progress_cb(8, f"Gap-filling from {total} Tier-3 daily file(s)…")
 
     done = 0
     for plat, _sp, _ca in _PLATFORM_SPECS:
@@ -461,8 +528,8 @@ def calculate_quarterly_from_tier3_streaming(
         for _fn, blob in rows:
             done += 1
             if progress_cb and total:
-                pct = 10 + int(80 * done / max(total, 1))
-                progress_cb(pct, f"Aggregating {plat} ({done}/{total})…")
+                pct = 20 + int(70 * done / max(total, 1))
+                progress_cb(pct, f"Tier-3 gap-fill {plat} ({done}/{total})…")
             try:
                 want = _PLATFORM_METRICS_COLUMNS.get(plat)
                 d = pd.read_parquet(
@@ -495,25 +562,10 @@ def calculate_quarterly_from_tier3_streaming(
                 units_30=units_30,
                 days_30=days_30,
                 platform_day_keys=platform_day_keys,
+                skip_days=platform_day_keys,
             )
             del d, blob
     conn.close()
-
-    _supplement_quarterly_from_warm_cache(
-        sku_mapping,
-        group_by_parent=group_by_parent,
-        start_ts=start_ts,
-        end_ts=end_ts,
-        cutoff_90=cutoff_90,
-        cutoff_30=cutoff_30,
-        q_label_map=q_label_map,
-        quarter_sums=quarter_sums,
-        units_90=units_90,
-        units_30=units_30,
-        days_30=days_30,
-        platform_day_keys=platform_day_keys,
-        progress_cb=progress_cb,
-    )
 
     sales_df = _load_unified_sales_df()
     if not sales_df.empty:
