@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 13
+QUARTERLY_CACHE_SCHEMA = 14
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
@@ -214,6 +214,83 @@ def _pivot_to_payload(pivot: pd.DataFrame, *, n_quarters: int = 8) -> dict[str, 
     return normalize_quarterly_payload(payload, n_quarters=n_quarters)
 
 
+def _wait_for_bulk_mtr_loaded(timeout_sec: float = 90.0) -> None:
+    """Tier-1 Amazon MTR often loads deferred after warm-cache bootstrap."""
+    import time
+
+    from .shared_frames import warm_frame
+
+    deadline = time.time() + max(5.0, float(timeout_sec))
+    while time.time() < deadline:
+        if len(warm_frame("mtr_df")) >= 50_000:
+            return
+        time.sleep(2.0)
+    try:
+        import backend.main as _main
+        from pathlib import Path
+
+        if len(warm_frame("mtr_df")) < 1000:
+            p = Path(getattr(_main, "_DISK_CACHE_DIR", "/data/warm_cache")) / "mtr_df.parquet"
+            if p.is_file() and _main._warm_cache is not None:
+                import pandas as pd
+
+                _main._warm_cache["mtr_df"] = pd.read_parquet(p)
+    except Exception:
+        pass
+
+
+def _warm_bulk_platform_row_count() -> int:
+    from .shared_frames import warm_frame
+
+    try:
+        import backend.main as _main
+
+        if not _main._warm_cache:
+            _main.bootstrap_warm_cache_if_empty()
+            _main._warm_cache_ready.wait(timeout=30.0)
+        _wait_for_bulk_mtr_loaded(timeout_sec=30.0)
+    except Exception:
+        pass
+    return sum(
+        len(warm_frame(k))
+        for k in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
+    )
+
+
+def _build_via_warm_tier1(
+    sess,
+    *,
+    group_by_parent: bool,
+    n_quarters: int,
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+) -> dict[str, Any]:
+    """Tier-1 / Tier-2 bulk history from warm-cache frames (same path as PO calculate)."""
+    import backend.main as _main
+    from .po_engine import calculate_quarterly_history
+    from .shared_frames import warm_frame
+
+    if progress_cb:
+        progress_cb(12, "Loading Tier-1 bulk platform history…")
+    _main.bootstrap_warm_cache_if_empty()
+    _main._warm_cache_ready.wait(timeout=90.0)
+    _wait_for_bulk_mtr_loaded(timeout_sec=60.0)
+    mapping = sess.sku_mapping or (_main._warm_cache or {}).get("sku_mapping") or {}
+    pivot = calculate_quarterly_history(
+        sales_df=warm_frame("sales_df"),
+        mtr_df=warm_frame("mtr_df"),
+        myntra_df=warm_frame("myntra_df"),
+        meesho_df=warm_frame("meesho_df"),
+        flipkart_df=warm_frame("flipkart_df"),
+        snapdeal_df=warm_frame("snapdeal_df"),
+        sku_mapping=mapping,
+        group_by_parent=group_by_parent,
+        n_quarters=n_quarters,
+    )
+    if progress_cb:
+        progress_cb(88, "Quarterly pivot ready from Tier-1 bulk…")
+    return _pivot_to_payload(pivot, n_quarters=n_quarters)
+
+
 def _build_via_streaming(
     sku_mapping: dict,
     start: str,
@@ -298,6 +375,15 @@ def build_quarterly_payload(
     # quarters are not zero for top sellers (warm-cache session span can look wide
     # while per-SKU history is shallow).
     if tier3_deeper or tier3_deep:
+        if _warm_bulk_platform_row_count() >= 100_000:
+            out = _build_via_warm_tier1(
+                sess,
+                group_by_parent=group_by_parent,
+                n_quarters=n_quarters,
+                progress_cb=progress_cb,
+            )
+            if out.get("loaded") and out.get("rows"):
+                return out
         if progress_cb:
             progress_cb(
                 12,

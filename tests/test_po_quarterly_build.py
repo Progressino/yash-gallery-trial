@@ -13,7 +13,7 @@ from backend.session import AppSession
 
 
 def test_quarterly_cache_schema_bumped():
-    assert quarterly_cache_key(False, 8)[0] == 13
+    assert quarterly_cache_key(False, 8)[0] == 14
 
 
 def test_normalize_quarterly_payload_pads_missing_columns():
@@ -105,6 +105,10 @@ def test_tier3_deep_history_prefers_streaming(monkeypatch):
     monkeypatch.setattr(
         "backend.services.po_quarterly_warmup._tier3_covers_quarterly_window",
         lambda _n: True,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._warm_bulk_platform_row_count",
+        lambda: 0,
     )
 
     out = build_quarterly_payload(sess, n_quarters=8)
@@ -213,6 +217,10 @@ def test_tier3_deeper_than_session_uses_streaming(monkeypatch):
     monkeypatch.setattr(
         "backend.services.platform_session_window.session_platform_shorter_than_tier3",
         lambda _s: True,
+    )
+    monkeypatch.setattr(
+        "backend.services.po_quarterly_warmup._warm_bulk_platform_row_count",
+        lambda: 0,
     )
 
     out = build_quarterly_payload(sess, n_quarters=8)

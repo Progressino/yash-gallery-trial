@@ -354,6 +354,11 @@ def _accumulate_tier1_platform_history(
         )
         if df is None or df.empty:
             continue
+        if "Date" in df.columns:
+            d = pd.to_datetime(df["Date"], errors="coerce")
+            df = df[(d >= start_ts) & (d <= end_ts)]
+        if df.empty:
+            continue
         _accumulate_shipment_frame(
             df,
             plat,

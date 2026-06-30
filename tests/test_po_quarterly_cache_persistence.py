@@ -21,7 +21,7 @@ def tmp_cache_dir(tmp_path, monkeypatch):
 def test_disk_path_uses_schema_group_and_n_quarters(tmp_cache_dir):
     key = quarterly_cache_key(False, 8)
     path = qc._disk_path(key)
-    assert path.endswith("quarterly_v13_0_8.json")
+    assert path.endswith("quarterly_v14_0_8.json")
 
 
 def test_store_persists_to_disk_and_survives_memory_clear(tmp_cache_dir):
