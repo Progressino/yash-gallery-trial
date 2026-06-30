@@ -258,6 +258,28 @@ def _load_platform_frame_from_disk(attr: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _sync_load_bulk_mtr_if_needed() -> None:
+    """Ensure deferred Amazon MTR bulk is in warm cache before Tier-1 quarterly."""
+    import time
+
+    from .shared_frames import warm_frame
+
+    for _ in range(60):
+        if len(warm_frame("mtr_df")) >= 50_000:
+            return
+        time.sleep(2.0)
+    try:
+        import backend.main as _main
+        from pathlib import Path
+
+        if len(warm_frame("mtr_df")) < 1000 and _main._warm_cache is not None:
+            p = Path(getattr(_main, "_DISK_CACHE_DIR", "/data/warm_cache")) / "mtr_df.parquet"
+            if p.is_file():
+                _main._warm_cache["mtr_df"] = pd.read_parquet(p)
+    except Exception:
+        pass
+
+
 def _warm_cache_platform_frames() -> dict[str, pd.DataFrame]:
     """Tier-1 / Tier-2 bulk platform history — warm RAM, then disk parquets."""
     from .shared_frames import warm_frame
@@ -267,7 +289,8 @@ def _warm_cache_platform_frames() -> dict[str, pd.DataFrame]:
 
         if not _main._warm_cache:
             _main.bootstrap_warm_cache_if_empty()
-            _main._warm_cache_ready.wait(timeout=30.0)
+            _main._warm_cache_ready.wait(timeout=90.0)
+        _sync_load_bulk_mtr_if_needed()
     except Exception:
         pass
 

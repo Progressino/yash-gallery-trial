@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 14
+QUARTERLY_CACHE_SCHEMA = 15
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
@@ -375,15 +375,6 @@ def build_quarterly_payload(
     # quarters are not zero for top sellers (warm-cache session span can look wide
     # while per-SKU history is shallow).
     if tier3_deeper or tier3_deep:
-        if _warm_bulk_platform_row_count() >= 100_000:
-            out = _build_via_warm_tier1(
-                sess,
-                group_by_parent=group_by_parent,
-                n_quarters=n_quarters,
-                progress_cb=progress_cb,
-            )
-            if out.get("loaded") and out.get("rows"):
-                return out
         if progress_cb:
             progress_cb(
                 12,
