@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 10
+QUARTERLY_CACHE_SCHEMA = 11
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
@@ -314,7 +314,9 @@ def build_quarterly_payload(
             progress_cb=progress_cb,
         )
 
-    if has_plat and plat_span >= min_span - 60:
+    # Never use session platform frames when Tier-3 exists — span can look wide while
+    # per-SKU history is shallow (e.g. Amazon Tier-3 only from Apr 2026).
+    if has_plat and plat_span >= min_span - 60 and not _tier3_covers_quarterly_window(n_quarters):
         if progress_cb:
             progress_cb(40, "Using saved platform history…")
         pivot = _pivot_from_session_frames(

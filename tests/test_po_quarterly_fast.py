@@ -87,3 +87,47 @@ def test_accumulate_frame_skips_quarters_outside_label_map():
     assert n == 1
     assert ("OLD-SKU-M", "Oct-Dec 2024") not in quarter_sums
     assert quarter_sums[("1001YKBEIGE-M", "Oct-Dec 2024")] == 40
+
+
+def test_accumulate_sales_skips_platform_days():
+    """Unified sales must not double-count SKU-days already on platform side."""
+    from backend.services.po_quarterly_fast import _accumulate_sales_df_shipments
+
+    start_ts = pd.Timestamp("2024-06-01")
+    end_ts = pd.Timestamp("2026-06-04")
+    today = pd.Timestamp.today()
+    from backend.services.po_engine import get_indian_fy_quarter, quarter_col_name
+
+    fy, qn = get_indian_fy_quarter(pd.Timestamp("2026-06-02"))
+    q_label_map = {(fy, qn): quarter_col_name(fy, qn)}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+    platform_day_keys = {("SKU-A", pd.Timestamp("2026-06-01").normalize())}
+
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A", "SKU-A"],
+            "TxnDate": pd.to_datetime(["2026-06-01", "2026-06-02"]),
+            "Transaction Type": ["Shipment", "Shipment"],
+            "Quantity": [50, 7],
+        }
+    )
+    n = _accumulate_sales_df_shipments(
+        sales,
+        None,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+        platform_day_keys=platform_day_keys,
+    )
+    assert n == 1
+    assert quarter_sums[("SKU-A", quarter_col_name(fy, qn))] == 7

@@ -383,44 +383,57 @@ def calculate_quarterly_history(
     pivot["Units_30d"] = pivot["Units_30d"].astype(int)
 
     if not group_by_parent:
-        from .existing_po import fan_out_bundled_listing_metrics
+        pivot = apply_quarterly_bundled_fan_out(pivot, ordered_q_cols)
 
-        q_metric_cols = ordered_q_cols + ["Avg_Monthly", "Units_90d", "Units_30d", "Freq_30d", "ADS"]
-        # Always fan out for quarterly history — individual sizes need proportional
-        # sales history regardless of whether inventory lists a bundled SKU.
-        fan = fan_out_bundled_listing_metrics(
-            pivot,
-            q_metric_cols,
-        )
-        if fan is not None and not fan.empty:
-            pivot = pivot.merge(fan, on="OMS_SKU", how="left", suffixes=("", "__bund"))
-            for c in q_metric_cols:
-                base = pd.to_numeric(pivot.get(c), errors="coerce").fillna(0)
-                fb = pd.to_numeric(pivot.get(f"{c}__bund"), errors="coerce").fillna(0)
-                pivot[c] = np.where(base > 0, base, fb)
-            pivot.drop(
-                columns=[f"{c}__bund" for c in q_metric_cols],
-                inplace=True,
-                errors="ignore",
-            )
-            existing = set(pivot["OMS_SKU"].astype(str))
-            missing = fan[~fan["OMS_SKU"].astype(str).isin(existing)]
-            if not missing.empty:
-                extra = missing.copy()
-                for col in pivot.columns:
-                    if col not in extra.columns:
-                        extra[col] = 0 if col in q_metric_cols else ""
-                pivot = pd.concat([pivot, extra[pivot.columns]], ignore_index=True)
-            _ads = pivot["ADS"]
-            pivot["Status"] = np.select(
-                [_ads >= 1.0, _ads >= 0.33, _ads >= 0.10],
-                ["Fast Moving", "Moderate", "Slow Selling"],
-                default="Not Moving",
-            )
-            pivot["Units_90d"] = pivot["Units_90d"].astype(int)
-            pivot["Units_30d"] = pivot["Units_30d"].astype(int)
-            pivot["Freq_30d"] = pivot["Freq_30d"].astype(int)
+    return pivot
 
+
+def apply_quarterly_bundled_fan_out(
+    pivot: pd.DataFrame,
+    ordered_q_cols: list[str],
+) -> pd.DataFrame:
+    """Split bundled-listing quarterly metrics across per-size children (L–XL, etc.)."""
+    if pivot is None or pivot.empty:
+        return pivot
+    from .existing_po import fan_out_bundled_listing_metrics
+
+    q_metric_cols = ordered_q_cols + [
+        "Avg_Monthly",
+        "Units_90d",
+        "Units_30d",
+        "Freq_30d",
+        "ADS",
+    ]
+    fan = fan_out_bundled_listing_metrics(pivot, q_metric_cols)
+    if fan is None or fan.empty:
+        return pivot
+    pivot = pivot.merge(fan, on="OMS_SKU", how="left", suffixes=("", "__bund"))
+    for c in q_metric_cols:
+        base = pd.to_numeric(pivot.get(c), errors="coerce").fillna(0)
+        fb = pd.to_numeric(pivot.get(f"{c}__bund"), errors="coerce").fillna(0)
+        pivot[c] = np.where(base > 0, base, fb)
+    pivot.drop(
+        columns=[f"{c}__bund" for c in q_metric_cols],
+        inplace=True,
+        errors="ignore",
+    )
+    existing = set(pivot["OMS_SKU"].astype(str))
+    missing = fan[~fan["OMS_SKU"].astype(str).isin(existing)]
+    if not missing.empty:
+        extra = missing.copy()
+        for col in pivot.columns:
+            if col not in extra.columns:
+                extra[col] = 0 if col in q_metric_cols else ""
+        pivot = pd.concat([pivot, extra[pivot.columns]], ignore_index=True)
+    _ads = pivot["ADS"]
+    pivot["Status"] = np.select(
+        [_ads >= 1.0, _ads >= 0.33, _ads >= 0.10],
+        ["Fast Moving", "Moderate", "Slow Selling"],
+        default="Not Moving",
+    )
+    pivot["Units_90d"] = pivot["Units_90d"].astype(int)
+    pivot["Units_30d"] = pivot["Units_30d"].astype(int)
+    pivot["Freq_30d"] = pivot["Freq_30d"].astype(int)
     return pivot
 
 

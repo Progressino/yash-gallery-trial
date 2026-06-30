@@ -13,7 +13,7 @@ from backend.session import AppSession
 
 
 def test_quarterly_cache_schema_bumped():
-    assert quarterly_cache_key(False, 8)[0] == 10
+    assert quarterly_cache_key(False, 8)[0] == 11
 
 
 def test_normalize_quarterly_payload_pads_missing_columns():

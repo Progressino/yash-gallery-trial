@@ -1,19 +1,25 @@
 """
 Fast PO quarterly history — stream Tier-3 parquet blobs and aggregate in memory
 without merging multi-million-row frames into the user session (OOM-safe).
+
+Tier-3 daily uploads are the primary source; warm-cache platform frames and unified
+sales_df fill SKU-days missing from Tier-3 (e.g. Amazon bulk MTR before daily sync).
 """
 from __future__ import annotations
 
 import io
 import logging
+import os
 from collections import defaultdict
 from datetime import timedelta
+from pathlib import Path
 from typing import Callable, Dict, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
 
 from .po_engine import (
+    apply_quarterly_bundled_fan_out,
     canonical_oms_key,
     get_indian_fy_quarter,
     get_parent_sku,
@@ -24,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 ProgressCb = Optional[Callable[[int, str], None]]
 
+DayKey = Tuple[str, pd.Timestamp]
+
 _PLATFORM_SPECS = (
     ("amazon", True, False),
     ("myntra", False, True),
@@ -31,6 +39,16 @@ _PLATFORM_SPECS = (
     ("flipkart", False, True),
     ("snapdeal", False, True),
 )
+
+_WARM_FRAME_ATTRS = (
+    ("amazon", "mtr_df", True, False),
+    ("myntra", "myntra_df", False, True),
+    ("meesho", "meesho_df", False, True),
+    ("flipkart", "flipkart_df", False, True),
+    ("snapdeal", "snapdeal_df", False, True),
+)
+
+_SALES_READ_COLS = ["Sku", "TxnDate", "Quantity", "Transaction Type"]
 
 
 def _quarter_seq(n_quarters: int) -> list[tuple[int, int]]:
@@ -51,6 +69,31 @@ def _ordered_q_cols(n_quarters: int) -> list[str]:
     return [quarter_col_name(fy, qn) for fy, qn in _quarter_seq(n_quarters)]
 
 
+def _filter_new_platform_days(
+    work: pd.DataFrame,
+    *,
+    skip_days: Optional[Set[DayKey]],
+    record_days: bool,
+    platform_day_keys: Set[DayKey],
+) -> pd.DataFrame:
+    """Keep only rows whose (SKU, day) is not already on the platform side."""
+    if work.empty:
+        return work
+    work = work.copy()
+    work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["_sku"] = work["SKU"].astype(str)
+    if skip_days:
+        keys = list(zip(work["_sku"], work["_day"]))
+        keep = np.array([k not in skip_days for k in keys], dtype=bool)
+        work = work.loc[keep]
+        if work.empty:
+            return work
+    if record_days:
+        for sku, day in zip(work["_sku"], work["_day"]):
+            platform_day_keys.add((str(sku), pd.Timestamp(day)))
+    return work.drop(columns=["_day", "_sku"], errors="ignore")
+
+
 def _accumulate_shipment_frame(
     df: pd.DataFrame,
     platform: str,
@@ -68,6 +111,8 @@ def _accumulate_shipment_frame(
     units_90: dict[str, int],
     units_30: dict[str, int],
     days_30: dict[str, Set[pd.Timestamp]],
+    platform_day_keys: Optional[Set[DayKey]] = None,
+    skip_days: Optional[Set[DayKey]] = None,
 ) -> int:
     """Add one blob's shipment rows into aggregate dicts. Returns rows processed."""
     from .daily_store import _PLATFORM_METRICS_COLUMNS
@@ -126,6 +171,16 @@ def _accumulate_shipment_frame(
     if work.empty:
         return 0
 
+    record_days = platform_day_keys is not None
+    work = _filter_new_platform_days(
+        work,
+        skip_days=skip_days,
+        record_days=record_days,
+        platform_day_keys=platform_day_keys or set(),
+    )
+    if work.empty:
+        return 0
+
     month = work["Date"].dt.month
     year = work["Date"].dt.year
     fy = np.where(month >= 4, year + 1, year)
@@ -134,8 +189,6 @@ def _accumulate_shipment_frame(
         [1, 2, 3],
         default=4,
     )
-    # Only aggregate quarters in the requested window (n_quarters). Older Tier-3
-    # rows outside that window must not KeyError the label map.
     valid = np.array(
         [q_label_map.get((int(f), int(q))) is not None for f, q in zip(fy, qn)],
         dtype=bool,
@@ -167,6 +220,180 @@ def _accumulate_shipment_frame(
                 days.add(d)
 
     return len(work)
+
+
+def _load_unified_sales_df() -> pd.DataFrame:
+    """Warm-cache unified sales (session-free) for quarterly supplement."""
+    try:
+        import backend.main as _main
+
+        wc = (_main._warm_cache or {}).get("sales_df")
+        if wc is not None and not wc.empty:
+            return wc
+    except Exception:
+        pass
+    path = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")) / "sales_df.parquet"
+    if not path.is_file():
+        return pd.DataFrame()
+    try:
+        return pd.read_parquet(path, columns=_SALES_READ_COLS)
+    except Exception:
+        try:
+            return pd.read_parquet(path)
+        except Exception:
+            return pd.DataFrame()
+
+
+def _warm_cache_platform_frames() -> dict[str, pd.DataFrame]:
+    """Attach shared warm-cache platform frames without hydrating the user session."""
+    try:
+        import backend.main as _main
+
+        stub = type("_QuarterlyWarmStub", (), {})()
+        _main.try_attach_shared_frames_fast(stub)
+        out: dict[str, pd.DataFrame] = {}
+        for _plat, attr, _sp, _ca in _WARM_FRAME_ATTRS:
+            df = getattr(stub, attr, None)
+            if df is not None and not getattr(df, "empty", True):
+                out[attr] = df
+        return out
+    except Exception:
+        logger.debug("Warm-cache platform frames unavailable for quarterly supplement", exc_info=True)
+        return {}
+
+
+def _accumulate_sales_df_shipments(
+    sales_df: pd.DataFrame,
+    sku_mapping: Optional[Dict[str, str]],
+    *,
+    group_by_parent: bool,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    cutoff_90: pd.Timestamp,
+    cutoff_30: pd.Timestamp,
+    q_label_map: dict[tuple[int, int], str],
+    quarter_sums: dict[tuple[str, str], int],
+    units_90: dict[str, int],
+    units_30: dict[str, int],
+    days_30: dict[str, Set[pd.Timestamp]],
+    platform_day_keys: Set[DayKey],
+) -> int:
+    """Append unified sales shipment rows for SKU-days not already on platform side."""
+    from .po_engine import _sales_shipment_history_part
+
+    part = _sales_shipment_history_part(sales_df)
+    if part.empty:
+        return 0
+    work = part.copy()
+    work = work[work["TxnType"].astype(str).str.strip().str.lower().eq("shipment")]
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
+    work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
+    work = work.dropna(subset=["Date"])
+    work = work[(work["Date"] >= start_ts) & (work["Date"] <= end_ts)]
+    work = work[work["Qty"] > 0]
+    if work.empty:
+        return 0
+
+    raw_skus = work["SKU"].astype(str).unique()
+    canon = {s: canonical_oms_key(s, sku_mapping) for s in raw_skus}
+    work["SKU"] = work["SKU"].map(canon).fillna("")
+    work = work[work["SKU"].str.len() > 0]
+    if group_by_parent:
+        work["SKU"] = work["SKU"].map(lambda s: get_parent_sku(s))
+
+    work = _filter_new_platform_days(
+        work,
+        skip_days=platform_day_keys,
+        record_days=False,
+        platform_day_keys=platform_day_keys,
+    )
+    if work.empty:
+        return 0
+
+    month = work["Date"].dt.month
+    year = work["Date"].dt.year
+    fy = np.where(month >= 4, year + 1, year)
+    qn = np.select(
+        [(month >= 4) & (month <= 6), (month >= 7) & (month <= 9), month >= 10],
+        [1, 2, 3],
+        default=4,
+    )
+    valid = np.array(
+        [q_label_map.get((int(f), int(q))) is not None for f, q in zip(fy, qn)],
+        dtype=bool,
+    )
+    if not valid.any():
+        return 0
+    if not valid.all():
+        work = work.loc[valid].reset_index(drop=True)
+        fy = fy[valid]
+        qn = qn[valid]
+    cols_lbl = [q_label_map[(int(f), int(q))] for f, q in zip(fy, qn)]
+    skus = work["SKU"].astype(str).values
+    qtys = work["Qty"].astype(int).values
+    for sku, col, q in zip(skus, cols_lbl, qtys):
+        quarter_sums[(sku, col)] += int(q)
+
+    recent = work[work["Date"] >= cutoff_90]
+    if not recent.empty:
+        for sku, q in recent.groupby("SKU")["Qty"].sum().items():
+            units_90[str(sku)] += int(q)
+    recent30 = work[work["Date"] >= cutoff_30]
+    if not recent30.empty:
+        for sku, q in recent30.groupby("SKU")["Qty"].sum().items():
+            units_30[str(sku)] += int(q)
+        for sku, grp in recent30.groupby("SKU"):
+            days = days_30[str(sku)]
+            for d in grp["Date"].dt.normalize().unique():
+                days.add(d)
+    return len(work)
+
+
+def _supplement_quarterly_from_warm_cache(
+    sku_mapping: Optional[Dict[str, str]],
+    *,
+    group_by_parent: bool,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    cutoff_90: pd.Timestamp,
+    cutoff_30: pd.Timestamp,
+    q_label_map: dict[tuple[int, int], str],
+    quarter_sums: dict[tuple[str, str], int],
+    units_90: dict[str, int],
+    units_30: dict[str, int],
+    days_30: dict[str, Set[pd.Timestamp]],
+    platform_day_keys: Set[DayKey],
+    progress_cb: ProgressCb = None,
+) -> None:
+    """Fill SKU-days missing from Tier-3 using warm-cache bulk platform history."""
+    frames = _warm_cache_platform_frames()
+    if not frames:
+        return
+    if progress_cb:
+        progress_cb(92, "Merging warm-cache platform history…")
+    for plat, attr, strip_pl, canon in _WARM_FRAME_ATTRS:
+        df = frames.get(attr)
+        if df is None or df.empty:
+            continue
+        _accumulate_shipment_frame(
+            df,
+            plat,
+            sku_mapping,
+            strip_pl=strip_pl,
+            canonical_oms=canon,
+            group_by_parent=group_by_parent,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            cutoff_90=cutoff_90,
+            cutoff_30=cutoff_30,
+            q_label_map=q_label_map,
+            quarter_sums=quarter_sums,
+            units_90=units_90,
+            units_30=units_30,
+            days_30=days_30,
+            platform_day_keys=platform_day_keys,
+            skip_days=platform_day_keys,
+        )
 
 
 def calculate_quarterly_from_tier3_streaming(
@@ -203,6 +430,7 @@ def calculate_quarterly_from_tier3_streaming(
     units_90: dict[str, int] = defaultdict(int)
     units_30: dict[str, int] = defaultdict(int)
     days_30: dict[str, Set[pd.Timestamp]] = defaultdict(set)
+    platform_day_keys: Set[DayKey] = set()
 
     conn = _get_conn()
     clause = _tier3_window_sql_clause()
@@ -233,7 +461,7 @@ def calculate_quarterly_from_tier3_streaming(
         for _fn, blob in rows:
             done += 1
             if progress_cb and total:
-                pct = 10 + int(85 * done / total)
+                pct = 10 + int(80 * done / max(total, 1))
                 progress_cb(pct, f"Aggregating {plat} ({done}/{total})…")
             try:
                 want = _PLATFORM_METRICS_COLUMNS.get(plat)
@@ -266,9 +494,46 @@ def calculate_quarterly_from_tier3_streaming(
                 units_90=units_90,
                 units_30=units_30,
                 days_30=days_30,
+                platform_day_keys=platform_day_keys,
             )
             del d, blob
     conn.close()
+
+    _supplement_quarterly_from_warm_cache(
+        sku_mapping,
+        group_by_parent=group_by_parent,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=cutoff_90,
+        cutoff_30=cutoff_30,
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+        platform_day_keys=platform_day_keys,
+        progress_cb=progress_cb,
+    )
+
+    sales_df = _load_unified_sales_df()
+    if not sales_df.empty:
+        if progress_cb:
+            progress_cb(94, "Merging unified sales history…")
+        _accumulate_sales_df_shipments(
+            sales_df,
+            sku_mapping,
+            group_by_parent=group_by_parent,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            cutoff_90=cutoff_90,
+            cutoff_30=cutoff_30,
+            q_label_map=q_label_map,
+            quarter_sums=quarter_sums,
+            units_90=units_90,
+            units_30=units_30,
+            days_30=days_30,
+            platform_day_keys=platform_day_keys,
+        )
 
     if not quarter_sums:
         return pd.DataFrame()
@@ -298,4 +563,8 @@ def calculate_quarterly_from_tier3_streaming(
         ["Fast Moving", "Moderate", "Slow Selling"],
         default="Not Moving",
     )
+
+    if not group_by_parent:
+        pivot = apply_quarterly_bundled_fan_out(pivot, ordered_q_cols)
+
     return pivot
