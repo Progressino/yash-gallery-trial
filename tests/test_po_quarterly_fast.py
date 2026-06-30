@@ -104,7 +104,7 @@ def test_accumulate_sales_skips_platform_days():
     units_90: dict = defaultdict(int)
     units_30: dict = defaultdict(int)
     days_30: dict = defaultdict(set)
-    platform_day_keys = {("SKU-A", pd.Timestamp("2026-06-01").normalize())}
+    platform_day_keys = {("amazon", "SKU-A", pd.Timestamp("2026-06-01").normalize())}
 
     sales = pd.DataFrame(
         {
@@ -131,3 +131,50 @@ def test_accumulate_sales_skips_platform_days():
     )
     assert n == 1
     assert quarter_sums[("SKU-A", quarter_col_name(fy, qn))] == 7
+
+
+def test_tier3_fills_same_day_different_platform():
+    """Tier-3 must not be blocked on a day when only another platform is in Tier-1."""
+    from backend.services.po_quarterly_fast import _accumulate_shipment_frame
+
+    start_ts = pd.Timestamp("2025-07-01")
+    end_ts = pd.Timestamp("2025-09-30")
+    today = pd.Timestamp.today()
+    q_label_map = {(2026, 2): "Jul-Sep 2025"}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+    platform_day_keys: set = set()
+
+    myntra = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-08-01"]),
+            "OMS_SKU": ["SKU-A"],
+            "TxnType": ["Shipment"],
+            "Quantity": [5],
+        }
+    )
+    amazon = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-08-01"]),
+            "SKU": ["SKU-A"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [7],
+        }
+    )
+    _accumulate_shipment_frame(
+        myntra, "myntra", None, strip_pl=False, canonical_oms=True, group_by_parent=False,
+        start_ts=start_ts, end_ts=end_ts, cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30), q_label_map=q_label_map,
+        quarter_sums=quarter_sums, units_90=units_90, units_30=units_30, days_30=days_30,
+        platform_day_keys=platform_day_keys,
+    )
+    _accumulate_shipment_frame(
+        amazon, "amazon", None, strip_pl=True, canonical_oms=False, group_by_parent=False,
+        start_ts=start_ts, end_ts=end_ts, cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30), q_label_map=q_label_map,
+        quarter_sums=quarter_sums, units_90=units_90, units_30=units_30, days_30=days_30,
+        platform_day_keys=platform_day_keys, skip_days=platform_day_keys,
+    )
+    assert quarter_sums[("SKU-A", "Jul-Sep 2025")] == 12

@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 ProgressCb = Optional[Callable[[int, str], None]]
 
 DayKey = Tuple[str, pd.Timestamp]
+PlatformDayKey = Tuple[str, str, pd.Timestamp]
 
 _PLATFORM_SPECS = (
     ("amazon", True, False),
@@ -72,25 +73,26 @@ def _ordered_q_cols(n_quarters: int) -> list[str]:
 def _filter_new_platform_days(
     work: pd.DataFrame,
     *,
-    skip_days: Optional[Set[DayKey]],
+    platform: str,
+    skip_days: Optional[Set[PlatformDayKey]],
     record_days: bool,
-    platform_day_keys: Set[DayKey],
+    platform_day_keys: Set[PlatformDayKey],
 ) -> pd.DataFrame:
-    """Keep only rows whose (SKU, day) is not already on the platform side."""
+    """Keep only rows whose (platform, SKU, day) is not already recorded for that platform."""
     if work.empty:
         return work
     work = work.copy()
     work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work["_sku"] = work["SKU"].astype(str)
     if skip_days:
-        keys = list(zip(work["_sku"], work["_day"]))
+        keys = [(platform, sku, day) for sku, day in zip(work["_sku"], work["_day"])]
         keep = np.array([k not in skip_days for k in keys], dtype=bool)
         work = work.loc[keep]
         if work.empty:
             return work
     if record_days:
         for sku, day in zip(work["_sku"], work["_day"]):
-            platform_day_keys.add((str(sku), pd.Timestamp(day)))
+            platform_day_keys.add((platform, str(sku), pd.Timestamp(day)))
     return work.drop(columns=["_day", "_sku"], errors="ignore")
 
 
@@ -111,8 +113,8 @@ def _accumulate_shipment_frame(
     units_90: dict[str, int],
     units_30: dict[str, int],
     days_30: dict[str, Set[pd.Timestamp]],
-    platform_day_keys: Optional[Set[DayKey]] = None,
-    skip_days: Optional[Set[DayKey]] = None,
+    platform_day_keys: Optional[Set[PlatformDayKey]] = None,
+    skip_days: Optional[Set[PlatformDayKey]] = None,
 ) -> int:
     """Add one blob's shipment rows into aggregate dicts. Returns rows processed."""
     from .daily_store import _PLATFORM_METRICS_COLUMNS
@@ -174,6 +176,7 @@ def _accumulate_shipment_frame(
     record_days = platform_day_keys is not None
     work = _filter_new_platform_days(
         work,
+        platform=platform,
         skip_days=skip_days,
         record_days=record_days,
         platform_day_keys=platform_day_keys or set(),
@@ -334,7 +337,7 @@ def _accumulate_tier1_platform_history(
     units_90: dict[str, int],
     units_30: dict[str, int],
     days_30: dict[str, Set[pd.Timestamp]],
-    platform_day_keys: Set[DayKey],
+    platform_day_keys: Set[PlatformDayKey],
     progress_cb: ProgressCb = None,
 ) -> None:
     """Primary quarterly source — Tier-1 bulk + Tier-2 uploads (warm cache / disk / SQLite)."""
@@ -385,7 +388,7 @@ def _accumulate_sales_df_shipments(
     units_90: dict[str, int],
     units_30: dict[str, int],
     days_30: dict[str, Set[pd.Timestamp]],
-    platform_day_keys: Set[DayKey],
+    platform_day_keys: Set[PlatformDayKey],
 ) -> int:
     """Append unified sales shipment rows for SKU-days not already on platform side."""
     from .po_engine import _sales_shipment_history_part
@@ -410,12 +413,15 @@ def _accumulate_sales_df_shipments(
     if group_by_parent:
         work["SKU"] = work["SKU"].map(lambda s: get_parent_sku(s))
 
-    work = _filter_new_platform_days(
-        work,
-        skip_days=platform_day_keys,
-        record_days=False,
-        platform_day_keys=platform_day_keys,
-    )
+    sku_days_on_platform = {(sku, day) for _p, sku, day in platform_day_keys}
+    work = work.copy()
+    work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["_sku"] = work["SKU"].astype(str)
+    if sku_days_on_platform:
+        keys = list(zip(work["_sku"], work["_day"]))
+        keep = np.array([k not in sku_days_on_platform for k in keys], dtype=bool)
+        work = work.loc[keep]
+    work = work.drop(columns=["_day", "_sku"], errors="ignore")
     if work.empty:
         return 0
 
@@ -494,7 +500,7 @@ def calculate_quarterly_from_tier3_streaming(
     units_90: dict[str, int] = defaultdict(int)
     units_30: dict[str, int] = defaultdict(int)
     days_30: dict[str, Set[pd.Timestamp]] = defaultdict(set)
-    platform_day_keys: Set[DayKey] = set()
+    platform_day_keys: Set[PlatformDayKey] = set()
 
     _accumulate_tier1_platform_history(
         sku_mapping,
