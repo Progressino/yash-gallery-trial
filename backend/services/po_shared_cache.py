@@ -243,6 +243,12 @@ def invalidate_po_after_sales_or_returns_change(sess) -> None:
         _invalidate_intelligence_bundle_cache()
     except Exception:
         _log.exception("intelligence bundle cache invalidation after data change failed")
+    try:
+        from .tier3_session_merge import invalidate_platform_build_cache
+
+        invalidate_platform_build_cache()
+    except Exception:
+        _log.exception("invalidate_platform_build_cache after data change failed")
 
 
 def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:

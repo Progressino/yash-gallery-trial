@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from datetime import date, timedelta
 from typing import Any
 
@@ -16,6 +17,29 @@ from .platform_session_window import (
 )
 
 _log = logging.getLogger(__name__)
+
+# ── Process-level cache for the expensive platform-sales build ──────────────
+# Key = (frame-fingerprint, tier3-token-repr). Invalidated naturally when tier3
+# sync token changes (any daily upload). Avoids rebuilding raw platform DFs for
+# every PO calculate when data hasn't changed (e.g. user changes lead time).
+_PLAT_BUILD_CACHE: dict[str, pd.DataFrame] = {}
+_PLAT_BUILD_LOCK = threading.Lock()
+
+
+def _plat_build_cache_key(bulk_frames: dict[str, pd.DataFrame], tier3_token: dict) -> str:
+    parts: list[str] = []
+    for attr in sorted(bulk_frames.keys()):
+        df = bulk_frames[attr]
+        n = len(df) if df is not None else 0
+        parts.append(f"{attr}:{n}")
+    parts.append(repr(sorted(tier3_token.items()) if isinstance(tier3_token, dict) else tier3_token))
+    return "|".join(parts)
+
+
+def invalidate_platform_build_cache() -> None:
+    """Call when any platform upload changes data (tier3 token will also change, but belt+suspenders)."""
+    with _PLAT_BUILD_LOCK:
+        _PLAT_BUILD_CACHE.clear()
 
 
 def tier3_months() -> int:
@@ -467,7 +491,7 @@ def _build_po_ads_from_platform_history(
     ``sales_df`` is often shallow (OMS-only) while quarterly / PO columns use
   platform parquets.
     """
-    from .daily_store import get_summary, platforms_with_uploads_in_range
+    from .daily_store import get_summary, get_tier3_sync_token, platforms_with_uploads_in_range
     from .po_calculate_run import _build_platform_sales_df
 
     plan = _normalize_planning_date(planning_date)
@@ -493,7 +517,22 @@ def _build_po_ads_from_platform_history(
                 window_plats=window_plats,
             )
 
-    base = _build_platform_sales_df(sess, frame_overrides=frame_overrides)
+    # Check process-level cache before the expensive _build_platform_sales_df call.
+    # Key captures frame sizes + tier3 state — any upload shifts the token → miss → rebuild.
+    tier3_token = get_tier3_sync_token() or {}
+    _cache_key = _plat_build_cache_key(frame_overrides, tier3_token)
+    with _PLAT_BUILD_LOCK:
+        base = _PLAT_BUILD_CACHE.get(_cache_key)
+    if base is not None:
+        _log.info("PO ADS platform build CACHE HIT (%d rows)", len(base))
+    else:
+        base = _build_platform_sales_df(sess, frame_overrides=frame_overrides)
+        if not base.empty:
+            with _PLAT_BUILD_LOCK:
+                _PLAT_BUILD_CACHE.clear()  # keep only one entry — avoid memory bloat
+                _PLAT_BUILD_CACHE[_cache_key] = base
+            _log.info("PO ADS platform build cached (%d rows)", len(base))
+
     if base.empty:
         return pd.DataFrame()
 

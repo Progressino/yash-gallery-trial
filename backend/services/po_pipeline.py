@@ -391,24 +391,25 @@ def _resolve_ads_sales_source(
     from .tier3_session_merge import build_po_ads_platform_sales
 
     period = int(body.get("period_days", 30))
-    if progress_cb:
-        progress_cb(28, "Loading Tier-3 daily sales for ADS window…")
-
-    platform_sales = build_po_ads_platform_sales(
-        sess,
-        planning_date=body.get("planning_date"),
-        period_days=period,
-        use_seasonality=bool(body.get("use_seasonality", False)),
-        use_ly_fallback=bool(body.get("use_ly_fallback", True)),
-    )
     use_ly = bool(body.get("use_ly_fallback", True))
     use_season = bool(body.get("use_seasonality", False))
     needs_platform_history = use_ly or use_season
-    mat_sales = None
+    planning_date = body.get("planning_date")
+
+    # ── Fast path 1: materialized daily (PG pre-aggregated, full LY history) ─────
+    # Try this FIRST — it's ~100x faster than rebuilding from raw platform frames.
+    # The quarterly_ly_floor applied inside calculate_po_base handles LY correction
+    # from quarterly history, so full platform rebuild is rarely worth the cost.
+    if progress_cb:
+        progress_cb(28, "Loading sales for ADS window…")
+
+    mat_sales: pd.DataFrame | None = None
+    mat_label: str = "materialized-daily"
     if po_inputs_from_pg_enabled() and not sales_df.empty and inputs.sales_source.startswith(
         "postgres"
     ):
         mat_sales = sales_df
+        mat_label = inputs.ads_source_label if inputs.ads_source_label else "materialized-daily"
     else:
         try:
             from ..db.forecast_sales_materializations import load_po_sales_df
@@ -416,23 +417,56 @@ def _resolve_ads_sales_source(
             mat_sales = load_po_sales_df(
                 sess,
                 period_days=period,
-                planning_date=body.get("planning_date"),
-                use_seasonality=bool(body.get("use_seasonality", False)),
-                use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+                planning_date=planning_date,
+                use_seasonality=use_season,
+                use_ly_fallback=use_ly,
             )
         except Exception:
             logger.exception("load_po_sales_df failed — falling back to raw sales")
 
+    if mat_sales is not None and not mat_sales.empty:
+        logger.info("PO ADS fast path: %s (%d rows, skipping platform rebuild)", mat_label, len(mat_sales))
+        return mat_sales, mat_label
+
+    # ── Fast path 2: session sales_df when deep enough ───────────────────────────
+    if not sales_df.empty:
+        try:
+            from .tier3_session_merge import (
+                _sales_has_ads_history,
+                _trim_sales_to_ads_window,
+                sales_data_lag_days,
+                session_sales_through,
+            )
+
+            thru = session_sales_through(sess)
+            lag = sales_data_lag_days(planning_date, thru)
+            if (
+                lag is not None
+                and lag <= 3
+                and _sales_has_ads_history(sales_df, planning_date, period, use_season, use_ly)
+            ):
+                out = _trim_sales_to_ads_window(sales_df, planning_date, period, use_season, use_ly)
+                if not out.empty:
+                    logger.info("PO ADS session fast path: sales_df (%d rows, lag=%sd)", len(out), lag)
+                    return out, "session"
+        except Exception:
+            logger.debug("PO ADS session fast-path check failed, continuing to platform build", exc_info=True)
+
+    # ── Slow path: build from raw platform frames (fallback only) ────────────────
+    if progress_cb:
+        progress_cb(28, "Loading Tier-3 daily sales for ADS window…")
+
+    platform_sales = build_po_ads_platform_sales(
+        sess,
+        planning_date=planning_date,
+        period_days=period,
+        use_seasonality=use_season,
+        use_ly_fallback=use_ly,
+    )
+
     if needs_platform_history and not platform_sales.empty:
         ads_source = platform_sales
         ads_label = "platform"
-    elif mat_sales is not None and not mat_sales.empty:
-        ads_source = mat_sales
-        ads_label = (
-            inputs.ads_source_label
-            if inputs.sales_source.startswith("postgres")
-            else "materialized-daily"
-        )
     elif not platform_sales.empty:
         ads_source = platform_sales
         ads_label = "platform"
@@ -447,8 +481,8 @@ def _resolve_ads_sales_source(
         ads_source = _trim_sales_for_po_memory(
             ads_source,
             period_days=period,
-            use_seasonality=bool(body.get("use_seasonality", False)),
-            use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+            use_seasonality=use_season,
+            use_ly_fallback=use_ly,
         )
     return ads_source, ads_label
 
