@@ -562,6 +562,54 @@ def ensure_sales_history_for_quarterly(sess) -> bool:
     return False
 
 
+def quarterly_ly_floor_dict(
+    sess,
+    *,
+    group_by_parent: bool = False,
+    n_quarters: int = 8,
+    planning_date: str | None = None,
+) -> dict[str, float]:
+    """Per-SKU LY/seasonal floor (rate/day) from the prior-year quarter column.
+
+    Cache-only lookup (never blocks) — must be called BEFORE ``calculate_po_base``
+    so the floor is baked into ADS before Days_Left / Projected_Running_Days /
+    Gross_PO_Qty are derived from it. A post-hoc floor (applied after those fields
+    are already computed) leaves them inconsistent with the displayed ADS.
+    """
+    payload = get_quarterly_payload_for_po(
+        sess, group_by_parent=group_by_parent, n_quarters=n_quarters
+    )
+    rows = payload.get("rows") if payload else None
+    if not rows:
+        return {}
+
+    from .po_engine import _calendar_quarter_span, get_indian_fy_quarter, quarter_col_name
+
+    try:
+        plan = pd.Timestamp(pd.to_datetime(str(planning_date or pd.Timestamp.today()).strip()[:10]))
+    except Exception:
+        plan = pd.Timestamp.today().normalize()
+
+    q_start, q_end = _calendar_quarter_span(plan, 1)
+    fy, qn = get_indian_fy_quarter(q_start)
+    col = quarter_col_name(fy, qn)
+    q_days = max(int((q_end.normalize() - q_start.normalize()).days) + 1, 7)
+
+    out: dict[str, float] = {}
+    for row in rows:
+        sku = str(row.get("OMS_SKU") or "").strip()
+        if not sku or col not in row:
+            continue
+        try:
+            units = max(float(row.get(col) or 0), 0.0)
+        except (TypeError, ValueError):
+            continue
+        if units <= 0:
+            continue
+        out[sku] = round(units / float(q_days), 3)
+    return out
+
+
 def attach_quarterly_columns_to_po_df(
     po_df: pd.DataFrame,
     sess,
@@ -600,17 +648,13 @@ def attach_quarterly_columns_to_po_df(
     for c in merge_cols:
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
 
-    from .po_engine import apply_quarterly_ads_floors
-
-    return apply_quarterly_ads_floors(
-        out,
-        planning_date=planning_date,
-        period_days=period_days,
-        demand_basis=demand_basis,
-        use_ly_fallback=use_ly_fallback,
-        use_seasonality=use_seasonality,
-        seasonal_weight=seasonal_weight,
-    )
+    # NOTE: the LY/seasonal ADS floor from this same quarterly data is applied
+    # earlier, inside calculate_po_base() via quarterly_ly_floor_dict() — BEFORE
+    # Days_Left / Projected_Running_Days / Gross_PO_Qty are derived from ADS.
+    # Applying it here (post-hoc, after those fields are already computed) would
+    # leave them inconsistent with the displayed ADS. This function only merges
+    # the display columns (the 8 quarter columns shown in the UI table).
+    return out
 
 
 def schedule_shared_quarterly_prewarm() -> None:

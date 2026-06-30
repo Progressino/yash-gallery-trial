@@ -3215,6 +3215,62 @@ def test_ly_and_seasonal_lift_ads_when_recent_window_is_weak():
     assert ads >= seasonal
 
 
+def test_quarterly_ly_floor_keeps_days_left_consistent_with_final_ads():
+    """Regression: when the quarterly LY/seasonal floor lifts ADS, Days_Left and
+    Projected_Running_Days must use that SAME final ADS — not a stale pre-floor
+    value. Previously the floor was applied post-hoc (after calculate_po_base
+    returned), so the displayed ADS column and Days_Left/Projected_Running_Days
+    used two different ADS values, making "covered without PO" misleading."""
+    sku = "QFLOOR-3XL"
+    days = pd.date_range("2026-05-25", periods=30, freq="D")
+    sales = pd.DataFrame(
+        {
+            "Sku": [sku] * len(days),
+            "TxnDate": days,
+            "Transaction Type": ["Shipment"] * len(days),
+            "Quantity": [0] * len(days),
+            "Units_Effective": [0] * len(days),
+        }
+    )
+    # 17 sold over the 30-day window (matches the reported real-world case).
+    sales.loc[sales.index[:17], "Quantity"] = 1
+    sales.loc[sales.index[:17], "Units_Effective"] = 1
+    inv = pd.DataFrame({"OMS_SKU": [sku], "Total_Inventory": [135]})
+    existing_po = pd.DataFrame(
+        {"OMS_SKU": [sku], "PO_Pipeline_Total": [43], "Lead_Time_Days": [45]}
+    )
+
+    # Quarterly floor strong enough to dominate the final ADS via the seasonal max.
+    floor = {sku: 1.65}
+
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=60,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        use_seasonality=True,
+        use_ly_fallback=True,
+        existing_po_df=existing_po,
+        enforce_lead_time_release_gate=True,
+        quarterly_ly_floor=floor,
+    )
+    row = po.iloc[0]
+    ads = float(row["ADS"])
+    inv_total = float(row.get("Total_Inventory", 135))
+    pipeline = float(row.get("PO_Pipeline_Effective", row.get("PO_Pipeline_Total", 0)))
+    days_left = float(row["Days_Left"])
+    projected = float(row["Projected_Running_Days"])
+
+    assert ads >= 1.6, f"floor should lift ADS, got {ads}"
+    # Days_Left / Projected_Running_Days must be derived from the SAME final ADS
+    # the row reports — not a pre-floor value.
+    assert days_left == pytest.approx(round(inv_total / ads, 1), abs=0.15)
+    assert projected == pytest.approx(round((inv_total + pipeline) / ads, 1), abs=0.15)
+
+
 def test_high_cover_style_no_po_when_projected_exceeds_lead_gate():
     """Excel rule: no PO when projected cover already exceeds factory lead (e.g. 1023YKPBLUE)."""
     parent = "1023YKPBLUE"

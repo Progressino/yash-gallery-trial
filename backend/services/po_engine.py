@@ -1158,6 +1158,12 @@ def calculate_po_base(
     stage_timer: Any = None,
     manual_existing_po_raise_skus: Optional[set[str]] = None,
     manual_existing_po_raise_date: Optional[str] = None,
+    # Per-SKU LY/seasonal floor (rate/day) from the prior-year quarterly column shown
+    # in the UI — unified sales under-counts vs Tier-1 bulk quarterly history. Must be
+    # applied here (before Days_Left / Projected_Running_Days / Gross_PO_Qty are
+    # derived from ADS), not as a post-hoc patch — otherwise those fields go stale
+    # relative to the displayed ADS. See quarterly_ly_floor_dict().
+    quarterly_ly_floor: Optional[Dict[str, float]] = None,
 ) -> pd.DataFrame:
     import time as _time
 
@@ -1948,6 +1954,18 @@ def calculate_po_base(
         po_df, seasonal_df, ["Seasonal_Month_ADS"]
     )
     po_df["Seasonal_Month_ADS"] = pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0)
+
+    if quarterly_ly_floor:
+        _q_floor = (
+            po_df["OMS_SKU"].astype(str).map(quarterly_ly_floor).fillna(0.0).astype(float)
+        )
+        if (_q_floor > 0).any():
+            po_df["LY_ADS"] = np.maximum(
+                pd.to_numeric(po_df["LY_ADS"], errors="coerce").fillna(0.0), _q_floor
+            ).round(3)
+            po_df["Seasonal_Month_ADS"] = np.maximum(
+                pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0), _q_floor
+            ).round(3)
 
     if use_seasonality:
         # Weighted blend of recent vs rolling LY window, then floor by seasonal month-pair ADS.

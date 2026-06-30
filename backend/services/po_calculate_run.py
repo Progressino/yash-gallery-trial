@@ -223,6 +223,23 @@ def execute_po_calculate(
 
         _manual_raise_skus = manual_existing_po_raise_skus(sess)
         _manual_raise_date = resolve_manual_existing_po_raise_date(sess)
+
+        # Quarterly LY/seasonal floor — fetched BEFORE calculate_po_base so it's
+        # baked into ADS before Days_Left / Projected_Running_Days / Gross_PO_Qty
+        # are derived from it (cache-only lookup, never blocks; empty if not warm).
+        _quarterly_floor: dict = {}
+        try:
+            from .po_quarterly_warmup import quarterly_ly_floor_dict
+
+            _quarterly_floor = quarterly_ly_floor_dict(
+                sess,
+                group_by_parent=group_by_parent,
+                n_quarters=8,
+                planning_date=body.get("planning_date"),
+            )
+        except Exception:
+            logger.exception("quarterly_ly_floor_dict failed (non-fatal)")
+
         po_df = calculate_po_base(
             sales_df=_ads_source,
             inv_df=inv_df,
@@ -256,6 +273,7 @@ def execute_po_calculate(
             stage_timer=stage_timer,
             manual_existing_po_raise_skus=_manual_raise_skus or None,
             manual_existing_po_raise_date=_manual_raise_date,
+            quarterly_ly_floor=_quarterly_floor or None,
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}

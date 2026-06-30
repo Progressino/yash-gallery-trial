@@ -63,23 +63,14 @@ def test_ly_and_seasonal_use_prior_calendar_quarter():
     assert float(row["ADS"]) >= 0.77, f"ADS={row['ADS']}"
 
 
-def test_quarterly_ads_floor_lifts_ly_from_prior_year_quarter():
-    """Quarterly Apr–Jun units must floor LY/Season when sales_df under-counts."""
-    from backend.services.po_quarterly_warmup import attach_quarterly_columns_to_po_df
+def test_quarterly_ly_floor_dict_computes_rate_from_prior_year_quarter():
+    """quarterly_ly_floor_dict() must convert the prior-year quarter column units
+    into a per-day rate, fetched BEFORE calculate_po_base (not post-hoc) so
+    Days_Left / Projected_Running_Days stay consistent with the final ADS."""
+    from backend.services.po_quarterly_warmup import quarterly_ly_floor_dict
     from backend.session import AppSession
 
     sku = "1003YKMUSTARD-5XL"
-    po = pd.DataFrame(
-        {
-            "OMS_SKU": [sku],
-            "Recent_ADS": [0.8],
-            "LY_ADS": [0.1],
-            "Seasonal_Month_ADS": [0.1],
-            "Flat30_ADS": [0.8],
-            "ADS": [0.8],
-            "Sold_Units": [60],
-        }
-    )
     sess = AppSession()
     payload = {
         "loaded": True,
@@ -92,22 +83,47 @@ def test_quarterly_ads_floor_lifts_ly_from_prior_year_quarter():
     orig = qw.get_quarterly_payload_for_po
     qw.get_quarterly_payload_for_po = lambda *_a, **_kw: payload
     try:
-        out = attach_quarterly_columns_to_po_df(
-            po,
-            sess,
-            planning_date="2026-06-30",
-            period_days=30,
-            use_ly_fallback=True,
-            use_seasonality=False,
-            seasonal_weight=0.5,
-        )
+        floor = quarterly_ly_floor_dict(sess, planning_date="2026-06-30")
     finally:
         qw.get_quarterly_payload_for_po = orig
 
-    # 154 units / 91 days ≈ 1.692/day LY signal; ADS blends recent + LY (50/50) when seasonality off
-    assert float(out["LY_ADS"].iloc[0]) >= 1.5
-    ads = float(out["ADS"].iloc[0])
-    assert 1.2 <= ads <= 1.45, f"ADS should blend 0.8 and ~1.69, got {ads}"
+    # 154 units / 91 days ≈ 1.692/day LY signal.
+    assert floor.get(sku, 0) >= 1.5
+
+    sales = pd.DataFrame(
+        {
+            "Sku": [sku] * 4,
+            "TxnDate": pd.date_range("2026-06-01", periods=4, freq="D"),
+            "Transaction Type": ["Shipment"] * 4,
+            "Quantity": [1, 1, 1, 1],
+            "Units_Effective": [1, 1, 1, 1],
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": [sku], "Total_Inventory": [100]})
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=60,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        use_seasonality=False,
+        use_ly_fallback=True,
+        quarterly_ly_floor=floor,
+    )
+    row = po.iloc[0]
+    recent = float(row["Recent_ADS"])
+    ads = float(row["ADS"])
+    days_left = float(row["Days_Left"])
+    # ADS blends recent + the quarterly-floored LY (50/50) when seasonality off.
+    expected_blend = round(recent * 0.5 + floor[sku] * 0.5, 3)
+    assert ads == pytest.approx(expected_blend, abs=0.01), (
+        f"ADS should blend recent={recent} and floored LY={floor[sku]}, got {ads}"
+    )
+    assert ads > recent, "quarterly floor should lift ADS above the raw recent signal"
+    # Days_Left must be derived from this SAME final ADS, not a stale pre-floor one.
+    assert days_left == pytest.approx(round(100.0 / ads, 1), abs=0.1)
 
 
 def test_ly_blend_midpoint_without_seasonality():
