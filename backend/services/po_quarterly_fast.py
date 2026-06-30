@@ -259,6 +259,15 @@ def _warm_cache_platform_frames() -> dict[str, pd.DataFrame]:
     """Tier-1 / Tier-2 bulk platform history — warm RAM, then disk parquets."""
     from .shared_frames import warm_frame
 
+    try:
+        import backend.main as _main
+
+        if not _main._warm_cache:
+            _main.bootstrap_warm_cache_if_empty()
+            _main._warm_cache_ready.wait(timeout=30.0)
+    except Exception:
+        pass
+
     out: dict[str, pd.DataFrame] = {}
     for _plat, attr, _sp, _ca in _WARM_FRAME_ATTRS:
         df = warm_frame(attr)
@@ -287,30 +296,28 @@ def _tier1_platform_frame(
     attr: str,
     *,
     warm_frames: Optional[dict[str, pd.DataFrame]] = None,
+    start_date: str = "",
+    end_date: str = "",
 ) -> pd.DataFrame:
     """
-    Best available Tier-1 / Tier-2 bulk frame for one platform.
+    Best available Tier-1 / Tier-2 bulk frame for one platform (memory-safe).
 
-    Prefer warm-cache / disk bulk; when that is missing or thin, fall back to the full
-    SQLite upload store (Tier-1 ZIP history lives there as well).
+    Order: warm RAM → disk parquet → windowed SQLite uploads for the quarterly range.
+    Never loads unbounded ``months=None`` history (OOM on large MTR archives).
     """
-    from .daily_store import load_platform_data, merge_platform_data
+    from .daily_store import load_platform_data_for_report_range
 
     frames = warm_frames if warm_frames is not None else _warm_cache_platform_frames()
     df = frames.get(attr, pd.DataFrame())
-    min_rows = 50_000 if plat == "amazon" else 5_000
-    if df is None or getattr(df, "empty", True) or len(df) < min_rows:
+    if df is None or getattr(df, "empty", True):
+        df = _load_platform_frame_from_disk(attr)
+    s0 = str(start_date)[:10]
+    s1 = str(end_date)[:10]
+    if (df is None or getattr(df, "empty", True)) and len(s0) == 10 and len(s1) == 10:
         try:
-            bulk = load_platform_data(plat, months=None)
+            df = load_platform_data_for_report_range(plat, s0, s1, dedup=True)
         except Exception:
-            bulk = pd.DataFrame()
-        if bulk is not None and not bulk.empty:
-            if df is None or getattr(df, "empty", True):
-                df = bulk
-            elif len(bulk) > len(df):
-                df = merge_platform_data(df, bulk, plat)
-            else:
-                df = merge_platform_data(df, bulk, plat)
+            df = pd.DataFrame()
     return df if df is not None else pd.DataFrame()
 
 
@@ -335,7 +342,13 @@ def _accumulate_tier1_platform_history(
         progress_cb(10, "Loading Tier-1 bulk platform history…")
     warm_frames = _warm_cache_platform_frames()
     for plat, attr, strip_pl, canon in _WARM_FRAME_ATTRS:
-        df = _tier1_platform_frame(plat, attr, warm_frames=warm_frames)
+        df = _tier1_platform_frame(
+            plat,
+            attr,
+            warm_frames=warm_frames,
+            start_date=str(start_ts.date()),
+            end_date=str(end_ts.date()),
+        )
         if df is None or df.empty:
             continue
         _accumulate_shipment_frame(
