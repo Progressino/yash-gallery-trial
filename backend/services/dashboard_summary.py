@@ -159,37 +159,27 @@ def build_dashboard_summary(
 
     if has_window:
         cache_key = _summary_cache_key(s, e, limit)
+        hit = _SUMMARY_CACHE.get(cache_key)
+        if hit and (time.time() - float(hit.get("_ts", 0))) < _SUMMARY_CACHE_TTL_SEC:
+            cached = {k: v for k, v in hit.items() if k != "_ts"}
+            if _artifact_covers_tier3_window(cached, s, e):
+                return cached
+
         try:
-            from ..services.platform_session_window import session_platform_shorter_than_tier3
-            from ..routers.data import _tier3_token_mismatch
+            from .intelligence_artifacts import (
+                load_hot_summary_for_request,
+                save_artifact,
+                schedule_artifact_build,
+                KIND_HOT,
+            )
 
-            prefer_tier3 = session_platform_shorter_than_tier3(sess) or _tier3_token_mismatch(sess)
+            artifact, meta = load_hot_summary_for_request(sess, s, e, limit)
+            if artifact and _artifact_covers_tier3_window(artifact, s, e):
+                payload = _attach_version_meta(artifact, meta)
+                _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
+                return payload
         except Exception:
-            prefer_tier3 = False
-
-        if not prefer_tier3:
-            hit = _SUMMARY_CACHE.get(cache_key)
-            if hit and (time.time() - float(hit.get("_ts", 0))) < _SUMMARY_CACHE_TTL_SEC:
-                cached = {k: v for k, v in hit.items() if k != "_ts"}
-                if _artifact_covers_tier3_window(cached, s, e):
-                    return cached
-
-        if not prefer_tier3:
-            try:
-                from .intelligence_artifacts import (
-                    load_hot_summary_for_request,
-                    save_artifact,
-                    schedule_artifact_build,
-                    KIND_HOT,
-                )
-
-                artifact, meta = load_hot_summary_for_request(sess, s, e, limit)
-                if artifact and _artifact_covers_tier3_window(artifact, s, e):
-                    payload = _attach_version_meta(artifact, meta)
-                    _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
-                    return payload
-            except Exception:
-                pass
+            pass
 
         # Tier-3 fallback when no artifact exists or session lags SQLite dailies.
         try:

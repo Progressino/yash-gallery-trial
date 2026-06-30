@@ -214,15 +214,24 @@ def sales_history_wide_matrix(
         .sum()
         .sort_values(["OMS_SKU", "Date"])
     )
-    date_totals = [
-        float(daily.loc[daily["Date"] == d, "Units"].sum()) for d in dates_sorted
-    ]
+    totals_by_day = daily.groupby("Date", as_index=False)["Units"].sum()
+    totals_map = {
+        pd.Timestamp(r["Date"]).normalize(): float(r["Units"])
+        for _, r in totals_by_day.iterrows()
+    }
+    date_totals = [float(totals_map.get(pd.Timestamp(d).normalize(), 0.0)) for d in dates_sorted]
 
-    sku_list = sorted(daily["OMS_SKU"].astype(str).unique())
-    total = int(len(sku_list))
+    sku_rank = (
+        daily.groupby("OMS_SKU", as_index=False)["Units"]
+        .max()
+        .sort_values(["Units", "OMS_SKU"], ascending=[False, True])["OMS_SKU"]
+        .astype(str)
+        .tolist()
+    )
+    total = int(len(sku_rank))
     start_i = max(0, int(offset))
     end_i = start_i + max(1, int(limit))
-    page_skus = sku_list[start_i:end_i]
+    page_skus = sku_rank[start_i:end_i]
     if not page_skus:
         return {
             **empty,
@@ -243,8 +252,10 @@ def sales_history_wide_matrix(
         }
         for sku, row in pivot.iterrows()
     ]
-    coverage = sales_history_upload_coverage(
-        days=days, end_date=end_date, sales_df=sales_df
+    coverage = (
+        sales_history_upload_coverage(days=days, end_date=end_date, sales_df=sales_df)
+        if offset == 0
+        else {"core_platforms": list(_CORE_PLATFORMS), "coverage_gaps": []}
     )
     return {
         "loaded": True,

@@ -1187,7 +1187,7 @@ def list_uploads() -> List[dict]:
 
 
 _COVERAGE_CACHE: tuple[float, Dict[str, Set[str]]] | None = None
-_COVERAGE_CACHE_TTL_SEC = 30.0
+_COVERAGE_CACHE_TTL_SEC = 300.0
 
 
 def invalidate_upload_coverage_cache() -> None:

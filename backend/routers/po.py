@@ -18,21 +18,33 @@ from pydantic import BaseModel
 router = APIRouter()
 
 _IST = ZoneInfo("Asia/Kolkata")
+_SALES_READ_COLS = ["Sku", "TxnDate", "Units_Effective", "Source", "Transaction Type"]
+_PARQUET_DISK_CACHE: dict[tuple, tuple[float, pd.DataFrame]] = {}
 
 
-def _warm_cache_parquet(name: str) -> pd.DataFrame:
+def _warm_cache_parquet(name: str, *, columns: list[str] | None = None) -> pd.DataFrame:
     """Read a warm-cache parquet directly from disk (shared across sessions)."""
     import os
     from pathlib import Path
 
     root = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
     path = root / f"{name}.parquet"
-    if path.is_file():
-        try:
-            return pd.read_parquet(path)
-        except Exception:
-            pass
-    return pd.DataFrame()
+    if not path.is_file():
+        return pd.DataFrame()
+    cache_key = (name, tuple(columns or ()))
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    hit = _PARQUET_DISK_CACHE.get(cache_key)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    try:
+        df = pd.read_parquet(path, columns=columns) if columns else pd.read_parquet(path)
+    except Exception:
+        return pd.DataFrame()
+    _PARQUET_DISK_CACHE[cache_key] = (mtime, df)
+    return df
 
 
 def _inventory_history_df_for_matrix_read(sess) -> pd.DataFrame:
@@ -40,10 +52,9 @@ def _inventory_history_df_for_matrix_read(sess) -> pd.DataFrame:
     try:
         import backend.main as _main
 
-        _main.bootstrap_warm_cache_if_empty()
         wc = (_main._warm_cache or {}).get("daily_inventory_history_df")
         if wc is not None and not wc.empty:
-            return wc.copy()
+            return wc
     except Exception:
         pass
     disk = _warm_cache_parquet("daily_inventory_history_df")
@@ -136,13 +147,12 @@ def _sales_df_for_read(sess) -> pd.DataFrame:
     try:
         import backend.main as _main
 
-        _main.bootstrap_warm_cache_if_empty()
         wc = (_main._warm_cache or {}).get("sales_df")
         if wc is not None and not wc.empty:
             return wc
     except Exception:
         pass
-    disk = _warm_cache_parquet("sales_df")
+    disk = _warm_cache_parquet("sales_df", columns=_SALES_READ_COLS)
     if not disk.empty:
         return disk
     return pd.DataFrame()

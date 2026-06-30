@@ -1329,24 +1329,19 @@ export default function Dashboard() {
   }, [dashboardReady])
 
   useEffect(() => {
-    if (!parityReport || parityReport.ok) return
+    if (!parityReport?.tier3_sync_mismatch) return
     clearIntelligenceCache()
     void qc.invalidateQueries({ queryKey: ['dashboard-summary'] })
     void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
-  }, [parityReport?.ok, parityReport?.warnings, qc])
-
-  const sessionBehindTier3 = Boolean(
-    parityReport?.warnings?.some(w => w.includes('shorter than Tier-3')),
-  )
+  }, [parityReport?.tier3_sync_mismatch, qc])
 
   const cachedBundleHint = useMemo(() => {
-    if (sessionBehindTier3) return null
     const fresh = readIntelligenceCache(dateStart, dateEnd, salesBasis, serverCacheVersion)
     if (fresh && bundleHasDisplayData(fresh)) return { bundle: fresh, expired: false, versionMismatch: false }
     const stale = readIntelligenceCacheStale(dateStart, dateEnd, salesBasis, serverCacheVersion)
     if (stale && bundleHasDisplayData(stale.bundle)) return stale
     return null
-  }, [dateStart, dateEnd, salesBasis, serverCacheVersion, sessionBehindTier3])
+  }, [dateStart, dateEnd, salesBasis, serverCacheVersion])
 
   const cacheExpired = cachedBundleHint?.expired === true
 
@@ -1369,8 +1364,7 @@ export default function Dashboard() {
     return p.toString()
   }, [dateStart, dateEnd, topSkuLimit, salesBasis])
 
-  const summaryUsable =
-    Boolean(summaryBundle && bundleHasDisplayData(summaryBundle)) && !sessionBehindTier3
+  const summaryUsable = Boolean(summaryBundle && bundleHasDisplayData(summaryBundle))
   const hasDsrDataEarly = Boolean(isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle))
   const summarySettled = summaryFetched || summaryError
   const needBundleFallback =
@@ -1517,7 +1511,7 @@ export default function Dashboard() {
     if (merged && bundleHasDisplayData(merged) && merged.data_completeness !== 'partial') {
       return merged
     }
-    if (summaryBundle && bundleHasDisplayData(summaryBundle) && !sessionBehindTier3) return summaryBundle
+    if (summaryBundle && bundleHasDisplayData(summaryBundle)) return summaryBundle
     if (isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle)) return dsrBundle
     if (merged && bundleHasDisplayData(merged)) return merged
     if (cachedBundleHint && bundleHasDisplayData(cachedBundleHint.bundle)) {
@@ -1532,7 +1526,6 @@ export default function Dashboard() {
     dsrBundle,
     isSingleDay,
     cachedBundleHint,
-    sessionBehindTier3,
   ])
 
   const bundleWarming = intelligenceBundle?.status === 'warming'
