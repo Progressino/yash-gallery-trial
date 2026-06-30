@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 15
+QUARTERLY_CACHE_SCHEMA = 16
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
@@ -458,21 +458,87 @@ def try_build_quarterly_payload_sync(
             return None
 
 
+def build_incremental_quarterly_payload(
+    sess,
+    *,
+    group_by_parent: bool = False,
+    n_recent_quarters: int = 2,
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+) -> dict[str, Any]:
+    """Refresh only recent quarters + rolling ADS metrics (after Tier-3 daily uploads)."""
+    import datetime
+
+    _ensure_session_operational_frames(sess)
+    try:
+        days = max(90, int(os.environ.get("PO_QUARTERLY_INCREMENTAL_DAYS", "90")))
+    except ValueError:
+        days = 90
+    recent_n = max(1, min(4, int(n_recent_quarters)))
+    need_days = max(days, recent_n * 92 + 14)
+    end = datetime.date.today().isoformat()
+    start = (datetime.date.today() - datetime.timedelta(days=need_days)).isoformat()
+    mapping = sess.sku_mapping or {}
+    if progress_cb:
+        progress_cb(15, f"Refreshing last {recent_n} quarter(s) of sales…")
+    return _build_via_streaming(
+        mapping,
+        start,
+        end,
+        group_by_parent=group_by_parent,
+        n_quarters=recent_n,
+        progress_cb=progress_cb,
+    )
+
+
+def get_quarterly_payload_for_po(
+    sess,
+    *,
+    group_by_parent: bool = False,
+    n_quarters: int = 8,
+) -> dict[str, Any]:
+    """Fast path for Calculate PO — shared cache only, never blocks on a full rebuild."""
+    from .po_quarterly_cache import (
+        get_shared_quarterly,
+        quarterly_is_stale,
+        schedule_quarterly_refresh_if_stale,
+    )
+
+    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
+    sess_cache = (getattr(sess, "_quarterly_cache", None) or {}).get(cache_key)
+    if sess_cache and sess_cache.get("loaded") and not quarterly_is_stale(sess_cache):
+        return normalize_quarterly_payload(sess_cache, n_quarters=n_quarters)
+
+    payload = get_shared_quarterly(cache_key)
+    if payload and payload.get("loaded") and payload.get("rows"):
+        payload = normalize_quarterly_payload(payload, n_quarters=n_quarters)
+        if not hasattr(sess, "_quarterly_cache"):
+            sess._quarterly_cache = {}
+        sess._quarterly_cache[cache_key] = payload
+        if quarterly_is_stale(payload):
+            schedule_quarterly_refresh_if_stale(cache_key, sess, force_full=False)
+        return payload
+
+    schedule_quarterly_refresh_if_stale(cache_key, sess, force_full=True)
+    return {"loaded": False, "rows": []}
+
+
 def warmup_quarterly_cache(
     sess,
     *,
     group_by_parent: bool = False,
     n_quarters: int = 8,
 ) -> Tuple[dict[str, Any], bool]:
-    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
-    if cache_key in sess._quarterly_cache and sess._quarterly_cache[cache_key].get("loaded"):
-        return sess._quarterly_cache[cache_key], False
+    """Return cached quarterly data; schedule background refresh when stale."""
+    from .po_quarterly_cache import schedule_quarterly_refresh_if_stale
 
-    result = build_quarterly_payload(
+    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
+    payload = get_quarterly_payload_for_po(
         sess, group_by_parent=group_by_parent, n_quarters=n_quarters
     )
-    sess._quarterly_cache[cache_key] = result
-    return result, False
+    started = schedule_quarterly_refresh_if_stale(
+        cache_key, sess, force_full=not payload.get("loaded")
+    )
+    return payload, started
 
 
 def restore_platform_history_for_quarterly(sess, n_quarters: int = 8) -> bool:
@@ -507,17 +573,9 @@ def attach_quarterly_columns_to_po_df(
     if po_df is None or po_df.empty or "OMS_SKU" not in po_df.columns:
         return po_df
 
-    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
-    payload = (getattr(sess, "_quarterly_cache", None) or {}).get(cache_key)
-    if not payload or not payload.get("loaded"):
-        payload = try_build_quarterly_payload_sync(
-            sess, group_by_parent=group_by_parent, n_quarters=n_quarters
-        )
-    if payload:
-        payload = normalize_quarterly_payload(payload, n_quarters=n_quarters)
-        if not hasattr(sess, "_quarterly_cache"):
-            sess._quarterly_cache = {}
-        sess._quarterly_cache[cache_key] = payload
+    payload = get_quarterly_payload_for_po(
+        sess, group_by_parent=group_by_parent, n_quarters=n_quarters
+    )
 
     if not payload or not payload.get("loaded") or not payload.get("rows"):
         return po_df
@@ -554,12 +612,15 @@ def schedule_shared_quarterly_prewarm() -> None:
             from .po_quarterly_cache import (
                 get_shared_quarterly,
                 load_shared_quarterly_from_disk,
+                quarterly_is_stale,
+                schedule_quarterly_refresh_if_stale,
                 start_shared_quarterly_build,
                 store_shared_quarterly,
             )
 
             key = quarterly_cache_key(False, 8)
-            if get_shared_quarterly(key):
+            existing = get_shared_quarterly(key)
+            if existing and existing.get("loaded") and not quarterly_is_stale(existing):
                 return
 
             # Fast path: a persisted payload from before the last restart is
@@ -569,8 +630,12 @@ def schedule_shared_quarterly_prewarm() -> None:
             disk_payload = load_shared_quarterly_from_disk(key)
             if disk_payload:
                 store_shared_quarterly(key, disk_payload)
-                logger.info("Shared quarterly cache restored from disk (%d rows)",
-                            len(disk_payload.get("rows") or []))
+                logger.info(
+                    "Shared quarterly cache restored from disk (%d rows)",
+                    len(disk_payload.get("rows") or []),
+                )
+                if quarterly_is_stale(disk_payload):
+                    schedule_quarterly_refresh_if_stale(key, None, force_full=False)
                 return
 
             # Let warm-cache Phase 1+2 and session restores finish first.

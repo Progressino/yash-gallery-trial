@@ -1279,6 +1279,15 @@ def _finish_tier1_bulk(sess: AppSession, resp: UploadResponse) -> None:
             sess.tier1_bulk_result = resp.model_dump()
         except Exception:
             sess.tier1_bulk_result = {"ok": True, "message": resp.message, "rows": resp.rows}
+        try:
+            from ..services.po_quarterly_cache import invalidate_shared_quarterly
+            from ..services.po_quarterly_warmup import schedule_shared_quarterly_prewarm
+
+            invalidate_shared_quarterly()
+            sess._quarterly_cache.clear()
+            schedule_shared_quarterly_prewarm()
+        except Exception:
+            pass
     else:
         sess.tier1_bulk_status = "error"
         sess.tier1_bulk_message = resp.message

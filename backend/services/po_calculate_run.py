@@ -551,17 +551,17 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
                 ledger_auto_import=result.get("ledger_auto_import"),
             )
 
-            def _warm_quarterly_bg() -> None:
+            def _refresh_quarterly_if_stale() -> None:
                 try:
-                    from .po_quarterly_warmup import warmup_quarterly_cache
+                    from .po_quarterly_cache import schedule_quarterly_refresh_if_stale
+                    from .po_quarterly_warmup import quarterly_cache_key
 
-                    warmup_quarterly_cache(
-                        sess,
-                        group_by_parent=bool(body.get("group_by_parent", False)),
-                        n_quarters=8,
+                    key = quarterly_cache_key(
+                        bool(body.get("group_by_parent", False)), 8
                     )
+                    schedule_quarterly_refresh_if_stale(key, sess, force_full=False)
                 except Exception:
-                    logger.exception("quarterly warmup after PO calculate failed")
+                    logger.exception("quarterly refresh after PO calculate failed")
 
             try:
                 from .po_shared_cache import save_shared_cache
@@ -579,7 +579,7 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
                 )
 
             threading.Thread(
-                target=_warm_quarterly_bg,
+                target=_refresh_quarterly_if_stale,
                 daemon=True,
                 name=f"po-qtr-{job_id[:8]}",
             ).start()

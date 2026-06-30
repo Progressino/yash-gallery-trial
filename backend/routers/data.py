@@ -712,7 +712,7 @@ def _restore_daily_if_needed(
                     **_sales_overlay_build_kwargs(sess),
                 )
                 sess._quarterly_cache.clear()
-                _invalidate_shared_quarterly_cache()
+                _schedule_quarterly_refresh(sess)
                 _invalidate_intelligence_bundle_cache()
             except Exception:
                 pass
@@ -2488,14 +2488,23 @@ def _sales_overlay_build_kwargs(sess: AppSession) -> dict:
 
 
 def _invalidate_shared_quarterly_cache() -> None:
-    """Drop the server-wide PO quarterly cache (memory + disk) after sales/
-    platform data actually changes. The next ``/po/quarterly`` request already
-    rebuilds on a cache miss (``start_quarterly_background``), so no separate
-    rewarm thread is needed here."""
+    """Drop the server-wide PO quarterly cache (memory + disk) — Tier-1 bulk only."""
     try:
         from ..services.po_quarterly_cache import invalidate_shared_quarterly
 
         invalidate_shared_quarterly()
+    except Exception:
+        pass
+
+
+def _schedule_quarterly_refresh(sess: AppSession | None = None, *, force_full: bool = False) -> None:
+    """Background refresh after Tier-3 daily uploads — keeps deep history, patches recent quarters."""
+    try:
+        from ..services.po_quarterly_cache import schedule_quarterly_refresh_if_stale
+        from ..services.po_quarterly_warmup import quarterly_cache_key
+
+        key = quarterly_cache_key(False, 8)
+        schedule_quarterly_refresh_if_stale(key, sess, force_full=force_full)
     except Exception:
         pass
 
@@ -2523,7 +2532,7 @@ def _rebuild_session_sales(sess: AppSession) -> None:
         )
         sess._quarterly_cache.clear()
         sess._intelligence_bundle_cache.clear()
-        _invalidate_shared_quarterly_cache()
+        _schedule_quarterly_refresh(sess)
         _invalidate_intelligence_bundle_cache()
         _refresh_sales_days_by_source(sess)
         _mark_tier3_sync_applied(sess)
@@ -2995,7 +3004,7 @@ def _ensure_sales_rebuilt(sess: AppSession) -> None:
             **_sales_overlay_build_kwargs(sess),
         )
         sess._quarterly_cache.clear()
-        _invalidate_shared_quarterly_cache()
+        _schedule_quarterly_refresh(sess)
         _invalidate_intelligence_bundle_cache()
     except Exception:
         pass

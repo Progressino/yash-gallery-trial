@@ -14,7 +14,7 @@ from backend.services.po_quarterly_warmup import (
 
 
 def test_quarterly_cache_schema_v9():
-    assert quarterly_cache_key(False, 8)[0] == QUARTERLY_CACHE_SCHEMA == 15
+    assert quarterly_cache_key(False, 8)[0] == QUARTERLY_CACHE_SCHEMA == 16
 
 
 def test_quarterly_report_window_covers_eight_quarters():
@@ -53,12 +53,12 @@ def test_po_quarterly_returns_cached_without_rebuild(client, monkeypatch):
     assert body["rows"][0]["OMS_SKU"] == "SKU1"
 
 
-def test_po_quarterly_warming_when_sync_times_out(client, monkeypatch):
+def test_po_quarterly_warming_when_cache_missing(client, monkeypatch):
     from backend.session import store
 
     monkeypatch.setattr(
-        "backend.services.po_quarterly_warmup.try_build_quarterly_payload_sync",
-        lambda *a, **k: None,
+        "backend.services.po_quarterly_cache.schedule_quarterly_refresh_if_stale",
+        lambda *a, **k: True,
     )
     monkeypatch.setattr(
         "backend.services.po_quarterly_jobs.start_quarterly_background",

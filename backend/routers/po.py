@@ -1935,6 +1935,8 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     from ..services.po_quarterly_cache import (
         get_shared_quarterly,
         quarterly_build_status,
+        quarterly_is_stale,
+        schedule_quarterly_refresh_if_stale,
     )
     from ..services.po_quarterly_jobs import (
         get_quarterly_job,
@@ -1942,7 +1944,6 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     )
     from ..services.po_quarterly_warmup import (
         quarterly_cache_key,
-        try_build_quarterly_payload_sync,
         normalize_quarterly_payload,
     )
 
@@ -1953,6 +1954,8 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     if shared and shared.get("loaded") and shared.get("rows"):
         shared = normalize_quarterly_payload(shared, n_quarters=n_quarters)
         sess._quarterly_cache[cache_key] = shared
+        if quarterly_is_stale(shared):
+            schedule_quarterly_refresh_if_stale(cache_key, sess, force_full=False)
         return shared
 
     cached = sess._quarterly_cache.get(cache_key)
@@ -1988,16 +1991,7 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
             "message": job.get("message") or "Quarterly build failed",
         }
 
-    result = try_build_quarterly_payload_sync(
-        sess,
-        group_by_parent=group_by_parent,
-        n_quarters=n_quarters,
-    )
-    if result and result.get("loaded") and result.get("rows"):
-        result = normalize_quarterly_payload(result, n_quarters=n_quarters)
-        sess._quarterly_cache[cache_key] = result
-        return result
-
+    schedule_quarterly_refresh_if_stale(cache_key, sess, force_full=True)
     if sid:
         start_quarterly_background(
             sid,
