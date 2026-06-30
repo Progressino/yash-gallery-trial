@@ -10,7 +10,28 @@ interface Supplier { id: number; supplier_code: string; supplier_name: string; s
 interface Processor { id: number; processor_code: string; processor_name: string; processor_type: string; contact_person: string; phone: string }
 interface PRLine { id: number; material_code: string; material_name: string; material_type: string; required_qty: number; po_qty: number; unit: string; required_by_date: string }
 interface PR { id: number; pr_number: string; pr_date: string; requested_by: string; department: string; priority: string; status: string; so_reference: string; pr_type: string; source: string; required_by_date: string; lines: PRLine[] }
-interface PO { id: number; po_number: string; po_date: string; supplier_name: string; status: string; total: number; delivery_date: string; pr_reference: string; so_reference: string; payment_terms?: string; lines: POLine[] }
+interface PO {
+  id: number
+  po_number: string
+  po_date: string
+  supplier_name: string
+  status: string
+  total: number
+  delivery_date: string
+  pr_reference: string
+  so_reference: string
+  payment_terms?: string
+  delivery_location?: string
+  bill_to_name?: string
+  bill_to_address?: string
+  bill_to_gst?: string
+  ship_to_name?: string
+  ship_to_address?: string
+  ship_to_contact?: string
+  ship_to_phone?: string
+  ship_to_gst?: string
+  lines: POLine[]
+}
 interface POLine { id: number; material_code: string; material_name: string; material_type: string; po_qty: number; unit: string; rate: number; gst_pct: number; amount: number }
 interface JWO { id: number; jwo_number: string; jwo_date: string; processor_name: string; processor_id?: number; status: string; total: number; expected_return_date: string; pr_reference?: string; so_reference?: string; issued_by?: string; remarks?: string; lines: JWOLine[] }
 interface JWOLine { id: number; input_material: string; input_qty?: number; output_material: string; output_qty: number; output_unit?: string; process_type: string; rate: number; amount: number; unit?: string }
@@ -42,7 +63,7 @@ interface IssueNote {
   lines: MINLine[]
 }
 interface GRN { id: number; grn_number: string; grn_date: string; grn_type: string; party_name: string; status: string; total_value: number; reference_number?: string; challan_no?: string; invoice_no?: string; lines: GRNLine[] }
-interface GRNLine { id: number; material_code: string; material_name?: string; received_qty: number; accepted_qty: number; rejected_qty: number; qc_status: string; rate: number; amount: number; unit?: string }
+interface GRNLine { id: number; material_code: string; material_name?: string; po_qty?: number; received_qty: number; accepted_qty: number; rejected_qty: number; qc_status: string; rate: number; amount: number; unit?: string }
 interface MRPLineItem {
   material_code: string; material_name: string; material_type: string
   required_qty: number; net_req: number; unit: string
@@ -71,6 +92,26 @@ const GRN_TYPES = ['PO Receipt', 'JWO Receipt']
 const PAYMENT_TERMS = ['Immediate', 'Net 15', 'Net 30', 'Net 45', 'Net 60']
 const GST_RATES = [0, 5, 12, 18, 28]
 
+const YASH_GALLERY = {
+  name: 'Yash Gallery Pvt. Ltd.',
+  address: 'Bhiwandi, Thane District, Maharashtra — 421302, India',
+  gst: '',
+  phone: '',
+  email: 'purchase@yashgallery.com',
+}
+
+const defaultBillTo = () => ({
+  bill_to_name: YASH_GALLERY.name,
+  bill_to_address: YASH_GALLERY.address,
+  bill_to_gst: YASH_GALLERY.gst,
+})
+
+const fmtRate = (n: number) =>
+  '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const fmtMoney = fmtRate
+/** @deprecated use fmtMoney — kept for gradual migration */
+const fmt = fmtMoney
+
 const statusColor = (s: string) => {
   if (['Approved', 'Received', 'Verified', 'Posted', 'Closed'].includes(s)) return 'bg-green-100 text-green-700'
   if (['Draft', 'Pending Approval'].includes(s)) return 'bg-yellow-100 text-yellow-700'
@@ -80,7 +121,6 @@ const statusColor = (s: string) => {
   return 'bg-gray-100 text-gray-600'
 }
 
-const fmt = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN')
 const today = () => new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
 
 // ── Print helpers ─────────────────────────────────────────────────────────────
@@ -92,7 +132,14 @@ const printDocument = (html: string, title: string) => {
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:'Segoe UI',sans-serif;font-size:12px;color:#1a1a1a;padding:24px}
     .header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #002B5B;padding-bottom:12px;margin-bottom:16px}
-    .company{font-size:20px;font-weight:700;color:#002B5B}
+    .company-block{display:flex;gap:14px;align-items:flex-start}
+    .company-logo{height:56px;width:auto;object-fit:contain}
+    .company-name{font-size:18px;font-weight:700;color:#002B5B;line-height:1.2}
+    .company-meta{font-size:10px;color:#475569;line-height:1.5;margin-top:4px}
+    .party-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
+    .party-box{border:1px solid #cbd5e1;border-radius:6px;padding:10px;background:#fff}
+    .party-title{font-size:10px;font-weight:700;text-transform:uppercase;color:#002B5B;margin-bottom:6px;letter-spacing:.04em}
+    .party-line{font-size:12px;color:#1e293b;line-height:1.45}
     .doc-title{font-size:16px;font-weight:600;color:#002B5B;text-align:right}
     .doc-num{font-size:22px;font-weight:800;color:#002B5B;text-align:right}
     .info-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
@@ -124,24 +171,59 @@ const printDocument = (html: string, title: string) => {
 }
 
 const buildPOPrintHTML = (po: PO) => {
+  const logoUrl = typeof window !== 'undefined' ? `${window.location.origin}/logo.png` : '/logo.png'
   const subtotal = po.lines.reduce((s, l) => s + l.amount, 0)
   const gstTotal = po.lines.reduce((s, l) => s + (l.amount * (l.gst_pct || 0) / 100), 0)
   const grand = subtotal + gstTotal
+  const billName = po.bill_to_name || YASH_GALLERY.name
+  const billAddr = po.bill_to_address || YASH_GALLERY.address
+  const billGst = po.bill_to_gst || YASH_GALLERY.gst
+  const shipName = po.ship_to_name || po.delivery_location || '—'
+  const shipAddr = po.ship_to_address || '—'
+  const shipContact = [po.ship_to_contact, po.ship_to_phone].filter(Boolean).join(' · ')
+  const shipGst = po.ship_to_gst || ''
   return `
     <div class="header">
-      <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b;margin-top:4px">Purchase Department</div></div>
-      <div><div class="doc-title">PURCHASE ORDER</div><div class="doc-num">${po.po_number}</div></div>
+      <div class="company-block">
+        <img src="${logoUrl}" alt="Yash Gallery" class="company-logo" onerror="this.style.display='none'" />
+        <div>
+          <div class="company-name">${YASH_GALLERY.name}</div>
+          <div class="company-meta">${YASH_GALLERY.address.replace(/\n/g, '<br/>')}</div>
+          ${YASH_GALLERY.phone ? `<div class="company-meta">Tel: ${YASH_GALLERY.phone}</div>` : ''}
+          ${YASH_GALLERY.email ? `<div class="company-meta">${YASH_GALLERY.email}</div>` : ''}
+        </div>
+      </div>
+      <div>
+        <div class="doc-title">PURCHASE ORDER</div>
+        <div class="doc-num">${po.po_number}</div>
+        <div style="font-size:11px;color:#64748b;text-align:right;margin-top:6px">Date: ${po.po_date || today()}</div>
+      </div>
+    </div>
+    <div class="party-grid">
+      <div class="party-box">
+        <div class="party-title">Bill To</div>
+        <div class="party-line"><strong>${billName}</strong></div>
+        <div class="party-line">${billAddr.replace(/\n/g, '<br/>')}</div>
+        ${billGst ? `<div class="party-line" style="margin-top:6px"><strong>GSTIN:</strong> ${billGst}</div>` : ''}
+      </div>
+      <div class="party-box">
+        <div class="party-title">Ship To</div>
+        <div class="party-line"><strong>${shipName}</strong></div>
+        <div class="party-line">${shipAddr.replace(/\n/g, '<br/>')}</div>
+        ${shipContact ? `<div class="party-line" style="margin-top:6px">${shipContact}</div>` : ''}
+        ${shipGst ? `<div class="party-line"><strong>GSTIN:</strong> ${shipGst}</div>` : ''}
+      </div>
     </div>
     <div class="info-grid">
       <div class="info-box">
-        <div class="info-label">Supplier</div>
+        <div class="info-label">Supplier / Vendor</div>
         <div class="info-value">${po.supplier_name}</div>
       </div>
       <div class="info-box">
-        <div class="info-label">PO Date</div>
-        <div class="info-value">${po.po_date || today()}</div>
-        <div class="info-label" style="margin-top:8px">Delivery Date</div>
+        <div class="info-label">Delivery Date</div>
         <div class="info-value">${po.delivery_date || '—'}</div>
+        <div class="info-label" style="margin-top:8px">Payment Terms</div>
+        <div class="info-value">${po.payment_terms || '—'}</div>
       </div>
       <div class="info-box">
         <div class="info-label">SO Reference</div>
@@ -150,10 +232,9 @@ const buildPOPrintHTML = (po: PO) => {
         <div class="info-value">${po.pr_reference || '—'}</div>
       </div>
       <div class="info-box">
-        <div class="info-label">Payment Terms</div>
-        <div class="info-value">${po.payment_terms || '—'}</div>
-        <div class="info-label" style="margin-top:8px">Status</div>
+        <div class="info-label">Status</div>
         <div class="info-value"><span class="badge">${po.status}</span></div>
+        ${po.delivery_location ? `<div class="info-label" style="margin-top:8px">Delivery Location</div><div class="info-value">${po.delivery_location}</div>` : ''}
       </div>
     </div>
     <table>
@@ -170,17 +251,17 @@ const buildPOPrintHTML = (po: PO) => {
           <td>${l.material_type || '—'}</td>
           <td class="right">${l.po_qty}</td>
           <td>${l.unit || 'PCS'}</td>
-          <td class="right">${fmt(l.rate)}</td>
+          <td class="right">${fmtRate(l.rate)}</td>
           <td class="right">${l.gst_pct || 0}%</td>
-          <td class="right"><strong>${fmt(l.amount)}</strong></td>
+          <td class="right"><strong>${fmtMoney(l.amount)}</strong></td>
         </tr>`).join('')}
       </tbody>
     </table>
     <div style="display:flex;justify-content:flex-end">
       <div class="totals">
-        <div class="total-row"><span>Subtotal</span><span>${fmt(subtotal)}</span></div>
-        <div class="total-row"><span>GST</span><span>${fmt(gstTotal)}</span></div>
-        <div class="total-row grand"><span>Grand Total</span><span>${fmt(grand)}</span></div>
+        <div class="total-row"><span>Subtotal</span><span>${fmtMoney(subtotal)}</span></div>
+        <div class="total-row"><span>GST</span><span>${fmtMoney(gstTotal)}</span></div>
+        <div class="total-row grand"><span>Grand Total</span><span>${fmtMoney(grand)}</span></div>
       </div>
     </div>
     <div class="footer">
@@ -383,6 +464,17 @@ function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string })
       alert(msg || 'Could not regenerate issue note')
     },
   })
+  const statusMut = useMutation({
+    mutationFn: (status: string) => api.patch(`/purchase/min/${note?.id}/status`, { status }),
+    onSuccess: () => {
+      void refetch()
+      qc.invalidateQueries({ queryKey: ['mins'] })
+    },
+    onError: (e: unknown) => {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      alert(msg || 'Could not update issue note')
+    },
+  })
 
   if (isLoading) return <p className="text-xs text-gray-400 py-2">Loading material issue note…</p>
   if (!note) {
@@ -406,9 +498,33 @@ function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string })
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs font-semibold text-sky-900">
           📋 Material Issue Note — <span className="font-mono">{note.min_number}</span>
+          <span className={`ml-2 text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(note.status)}`}>{note.status}</span>
           <span className="font-normal text-sky-700 ml-2">JWO {note.jwo_reference || jwoNumber} · {note.jwo_date || note.min_date}</span>
         </p>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          {note.status === 'Draft' && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!window.confirm('Confirm material issue? Stock will be deducted from Item Master.')) return
+                  statusMut.mutate('Confirmed')
+                }}
+                disabled={statusMut.isPending || !note.lines.length}
+                className="text-xs px-2 py-1 rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
+              >
+                {statusMut.isPending ? '…' : '✓ Confirm Issue'}
+              </button>
+              <button
+                type="button"
+                onClick={() => statusMut.mutate('Cancelled')}
+                disabled={statusMut.isPending}
+                className="text-xs px-2 py-1 rounded border border-red-200 text-red-700 bg-white hover:bg-red-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </>
+          )}
           <button
             type="button"
             onClick={() => printDocument(buildMINPrintHTML(note), `MIN - ${note.min_number}`)}
@@ -419,13 +535,18 @@ function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string })
           <button
             type="button"
             onClick={() => regen.mutate()}
-            disabled={regen.isPending}
+            disabled={regen.isPending || note.status === 'Confirmed'}
             className="text-xs px-2 py-1 border border-sky-300 rounded bg-white text-sky-800 hover:bg-sky-100 disabled:opacity-50"
           >
             {regen.isPending ? '…' : '↻ Refresh from BOM'}
           </button>
         </div>
       </div>
+      {note.status === 'Draft' && (
+        <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+          Draft — stock is <strong>not</strong> deducted until you click <strong>Confirm Issue</strong>.
+        </p>
+      )}
       {note.lines.length === 0 ? (
         <p className="text-xs text-amber-800">No BOM materials — check Item Master BOM for the output item.</p>
       ) : (
@@ -546,7 +667,20 @@ export default function Purchase() {
 
   // Edit Draft PO
   const [editingPO, setEditingPO] = useState<number | null>(null)
-  const [editPOForm, setEditPOForm] = useState({ supplier_id: undefined as number | undefined, supplier_name: '', delivery_date: '', payment_terms: '', so_reference: '', remarks: '' })
+  const [editPOForm, setEditPOForm] = useState({
+    supplier_id: undefined as number | undefined,
+    supplier_name: '',
+    delivery_date: '',
+    payment_terms: '',
+    so_reference: '',
+    remarks: '',
+    ...defaultBillTo(),
+    ship_to_name: '',
+    ship_to_address: '',
+    ship_to_contact: '',
+    ship_to_phone: '',
+    ship_to_gst: '',
+  })
   const [editPOLines, setEditPOLines] = useState<{ material_code: string; material_name: string; material_type: string; po_qty: number; unit: string; rate: number; gst_pct: number }[]>([])
 
   // ── NEW: Edit Draft JWO ────────────────────────────────────────────────────
@@ -564,14 +698,29 @@ export default function Purchase() {
 
   // PO / JWO / GRN forms
   const [showPOForm, setShowPOForm] = useState(false)
-  const [poForm, setPOForm] = useState({ supplier_id: undefined as number | undefined, supplier_name: '', delivery_date: '', payment_terms: '', delivery_location: '', pr_reference: '', so_reference: '', remarks: '' })
+  const [poForm, setPOForm] = useState({
+    supplier_id: undefined as number | undefined,
+    supplier_name: '',
+    delivery_date: '',
+    payment_terms: '',
+    delivery_location: '',
+    pr_reference: '',
+    so_reference: '',
+    remarks: '',
+    ...defaultBillTo(),
+    ship_to_name: '',
+    ship_to_address: '',
+    ship_to_contact: '',
+    ship_to_phone: '',
+    ship_to_gst: '',
+  })
   const [poLines, setPOLines] = useState<{ material_code: string; material_name: string; material_type: string; po_qty: number; unit: string; rate: number; gst_pct: number }[]>([])
   const [showJWOForm, setShowJWOForm] = useState(false)
   const [jwoForm, setJWOForm] = useState({ processor_id: undefined as number | undefined, processor_name: '', expected_return_date: '', pr_reference: '', so_reference: '', issued_by: '', remarks: '' })
   const [jwoLines, setJWOLines] = useState<{ input_material: string; input_qty: number; output_material: string; output_qty: number; process_type: string; rate: number }[]>([])
   const [showGRNForm, setShowGRNForm] = useState(false)
   const [grnForm, setGRNForm] = useState({ grn_type: 'PO Receipt', reference_number: '', party_name: '', challan_no: '', invoice_no: '', vehicle_no: '', transporter: '', warehouse: '', remarks: '' })
-  const [grnLines, setGRNLines] = useState<{ material_code: string; material_name: string; received_qty: number; accepted_qty: number; rejected_qty: number; unit: string; rate: number; qc_status: string }[]>([])
+  const [grnLines, setGRNLines] = useState<{ material_code: string; material_name: string; po_qty?: number; received_qty: number; accepted_qty: number; rejected_qty: number; unit: string; rate: number; qc_status: string }[]>([])
   // MIN form
   const [showMINForm, setShowMINForm] = useState(false)
   const [minForm, setMINForm] = useState({ jwo_reference: '', so_reference: '', from_location: 'Grey Warehouse', to_location: '', to_vendor: '', issued_by: '', remarks: '' })
@@ -629,6 +778,18 @@ export default function Purchase() {
   const verifyGRNMut = useMutation({ mutationFn: ({ id, status }: { id: number; status: string }) => api.patch(`/purchase/grn/${id}/verify`, { status }), onSuccess: () => qc.invalidateQueries({ queryKey: ['grns'] }) })
   const updatePOMut = useMutation({ mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/purchase/po/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ['pos'] }); setEditingPO(null) } })
   const createMINMut = useMutation({ mutationFn: (b: object) => api.post('/purchase/min', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['mins'] }); setShowMINForm(false); setMINLines([]) } })
+  const confirmMINMut = useMutation({
+    mutationFn: ({ id, status }: { id: number; status: string }) => api.patch(`/purchase/min/${id}/status`, { status }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['mins'] })
+      qc.invalidateQueries({ queryKey: ['jwo-issue-note'] })
+      invalidate()
+    },
+    onError: (e: unknown) => {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      alert(msg || 'Could not update issue note')
+    },
+  })
   const createGPMut = useMutation({ mutationFn: (b: object) => api.post('/purchase/gate-pass', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['gate-passes'] }); setShowGPForm(false); setGPLines([]) } })
   // Gate-pass UI is wired through dedicated buttons added later — keep state hooks live.
   void showGPForm; void gpForm; void setGPForm; void gpLines; void gatePasses; void createGPMut
@@ -824,6 +985,7 @@ export default function Purchase() {
         setGRNForm(f => ({ ...f, grn_type: 'PO Receipt', reference_number: po.po_number, party_name: po.supplier_name }))
         let lines = po.lines.map(l => ({
           material_code: l.material_code, material_name: l.material_name,
+          po_qty: l.po_qty,
           received_qty: l.po_qty, accepted_qty: l.po_qty, rejected_qty: 0,
           unit: l.unit || 'PCS', rate: l.rate, qc_status: 'Pending'
         }))
@@ -839,6 +1001,7 @@ export default function Purchase() {
             const accept = byCode[l.material_code] != null ? Math.max(0, byCode[l.material_code]) : l.po_qty
             return {
               material_code: l.material_code, material_name: l.material_name,
+              po_qty: l.po_qty,
               received_qty: accept, accepted_qty: accept, rejected_qty: 0,
               unit: l.unit || 'PCS', rate: l.rate, qc_status: 'Pending'
             }
@@ -850,6 +1013,7 @@ export default function Purchase() {
         setGRNForm(f => ({ ...f, grn_type: 'JWO Receipt', reference_number: jwo.jwo_number, party_name: jwo.processor_name }))
         let jLines = jwo.lines.map(l => ({
           material_code: l.output_material, material_name: l.output_material,
+          po_qty: l.output_qty,
           received_qty: l.output_qty, accepted_qty: l.output_qty, rejected_qty: 0,
           unit: l.output_unit || 'MTR', rate: l.rate, qc_status: 'Pending'
         }))
@@ -865,6 +1029,7 @@ export default function Purchase() {
             const accept = byCode[l.output_material] != null ? Math.max(0, byCode[l.output_material]) : l.output_qty
             return {
               material_code: l.output_material, material_name: l.output_material,
+              po_qty: l.output_qty,
               received_qty: accept, accepted_qty: accept, rejected_qty: 0,
               unit: l.output_unit || 'MTR', rate: l.rate, qc_status: 'Pending'
             }
@@ -1442,6 +1607,24 @@ export default function Purchase() {
                       onChange={e => setPOForm(f => ({ ...f, [k]: e.target.value }))} className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" /></div>
                 ))}
               </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t pt-3">
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-gray-600 uppercase">Bill To</p>
+                  <input placeholder="Company name" value={poForm.bill_to_name} onChange={e => setPOForm(f => ({ ...f, bill_to_name: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm" />
+                  <textarea placeholder="Billing address" value={poForm.bill_to_address} onChange={e => setPOForm(f => ({ ...f, bill_to_address: e.target.value }))} rows={3} className="w-full border rounded px-2 py-1.5 text-sm" />
+                  <input placeholder="GSTIN" value={poForm.bill_to_gst} onChange={e => setPOForm(f => ({ ...f, bill_to_gst: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm" />
+                </div>
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-gray-600 uppercase">Ship To</p>
+                  <input placeholder="Warehouse / Printer / Job worker" value={poForm.ship_to_name} onChange={e => setPOForm(f => ({ ...f, ship_to_name: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm" />
+                  <textarea placeholder="Delivery address" value={poForm.ship_to_address} onChange={e => setPOForm(f => ({ ...f, ship_to_address: e.target.value }))} rows={3} className="w-full border rounded px-2 py-1.5 text-sm" />
+                  <div className="grid grid-cols-2 gap-2">
+                    <input placeholder="Contact person" value={poForm.ship_to_contact} onChange={e => setPOForm(f => ({ ...f, ship_to_contact: e.target.value }))} className="border rounded px-2 py-1.5 text-sm" />
+                    <input placeholder="Mobile" value={poForm.ship_to_phone} onChange={e => setPOForm(f => ({ ...f, ship_to_phone: e.target.value }))} className="border rounded px-2 py-1.5 text-sm" />
+                  </div>
+                  <input placeholder="Ship-to GSTIN (if applicable)" value={poForm.ship_to_gst} onChange={e => setPOForm(f => ({ ...f, ship_to_gst: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm" />
+                </div>
+              </div>
               <div>
                 <div className="flex justify-between mb-2"><p className="text-sm font-medium text-gray-600">PO Lines</p>
                   <button onClick={() => setPOLines(l => [...l, { material_code: '', material_name: '', material_type: 'RM', po_qty: 0, unit: 'PCS', rate: 0, gst_pct: 0 }])}
@@ -1450,13 +1633,13 @@ export default function Purchase() {
                   <div key={i} className="grid grid-cols-7 gap-2 mb-2 text-sm">
                     <input placeholder="Code" value={ln.material_code} onChange={e => setPOLines(l => l.map((x, j) => j === i ? { ...x, material_code: e.target.value } : x))} className="border rounded px-2 py-1.5" />
                     <input placeholder="Name" value={ln.material_name} onChange={e => setPOLines(l => l.map((x, j) => j === i ? { ...x, material_name: e.target.value } : x))} className="border rounded px-2 py-1.5 col-span-2" />
-                    <input type="number" placeholder="Qty" value={ln.po_qty} onChange={e => setPOLines(l => l.map((x, j) => j === i ? { ...x, po_qty: +e.target.value } : x))} className="border rounded px-2 py-1.5" />
-                    <input type="number" placeholder="Rate ₹" value={ln.rate} onChange={e => setPOLines(l => l.map((x, j) => j === i ? { ...x, rate: +e.target.value } : x))} className="border rounded px-2 py-1.5" />
-                    <span className="py-1.5 text-right text-gray-600 font-medium">{fmt(ln.po_qty * ln.rate)}</span>
+                    <input type="number" step="0.01" placeholder="Qty" value={ln.po_qty} onChange={e => setPOLines(l => l.map((x, j) => j === i ? { ...x, po_qty: +e.target.value } : x))} className="border rounded px-2 py-1.5" />
+                    <input type="number" step="0.01" placeholder="Rate ₹" value={ln.rate} onChange={e => setPOLines(l => l.map((x, j) => j === i ? { ...x, rate: +e.target.value } : x))} className="border rounded px-2 py-1.5" />
+                    <span className="py-1.5 text-right text-gray-600 font-medium">{fmtMoney(ln.po_qty * ln.rate)}</span>
                     <button onClick={() => setPOLines(l => l.filter((_, j) => j !== i))} className="text-red-400 text-sm">✕</button>
                   </div>
                 ))}
-                {poLines.length > 0 && <p className="text-sm font-semibold text-right text-gray-700 mt-2">Total: {fmt(poLines.reduce((s, l) => s + l.po_qty * l.rate, 0))}</p>}
+                {poLines.length > 0 && <p className="text-sm font-semibold text-right text-gray-700 mt-2">Total: {fmtMoney(poLines.reduce((s, l) => s + l.po_qty * l.rate, 0))}</p>}
               </div>
               <div className="flex gap-2">
                 <button onClick={() => createPOMut.mutate({ ...poForm, lines: poLines.map(l => ({ ...l, amount: l.po_qty * l.rate })) })} disabled={createPOMut.isPending}
@@ -1531,8 +1714,8 @@ export default function Purchase() {
                                   <td className="py-1"><input value={ln.material_code} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, material_code: e.target.value } : x))} className="w-full border rounded px-1.5 py-1" /></td>
                                   <td className="py-1"><input value={ln.material_name} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, material_name: e.target.value } : x))} className="w-full border rounded px-1.5 py-1" /></td>
                                   <td className="py-1"><select value={ln.material_type} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, material_type: e.target.value } : x))} className="w-full border rounded px-1.5 py-1">{MAT_TYPES.map(t => <option key={t} value={t}>{MAT_TYPE_LABELS[t] || t}</option>)}</select></td>
-                                  <td className="py-1"><input type="number" value={ln.po_qty} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, po_qty: +e.target.value } : x))} className="w-16 border rounded px-1.5 py-1 text-right" /></td>
-                                  <td className="py-1"><input type="number" value={ln.rate} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, rate: +e.target.value } : x))} className="w-20 border rounded px-1.5 py-1 text-right" /></td>
+                                  <td className="py-1"><input type="number" step="0.01" value={ln.po_qty} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, po_qty: +e.target.value } : x))} className="w-16 border rounded px-1.5 py-1 text-right" /></td>
+                                  <td className="py-1"><input type="number" step="0.01" value={ln.rate} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, rate: +e.target.value } : x))} className="w-20 border rounded px-1.5 py-1 text-right" /></td>
                                   <td className="py-1"><select value={ln.gst_pct} onChange={e => setEditPOLines(l => l.map((x, j) => j === i ? { ...x, gst_pct: +e.target.value } : x))} className="w-full border rounded px-1.5 py-1">{GST_RATES.map(g => <option key={g} value={g}>{g}%</option>)}</select></td>
                                   <td className="py-1 text-right font-medium pr-1">{fmt(ln.po_qty * ln.rate)}</td>
                                   <td className="py-1"><button onClick={() => setEditPOLines(l => l.filter((_, j) => j !== i))} className="text-red-400 px-1">✕</button></td>
@@ -1554,7 +1737,7 @@ export default function Purchase() {
                       <div className="space-y-2 pt-3">
                         {po.status === 'Draft' && (
                           <div className="flex justify-end">
-                            <button onClick={() => { const sup = suppliers.find(s => s.supplier_name === po.supplier_name); setEditingPO(po.id); setEditPOForm({ supplier_id: sup?.id, supplier_name: po.supplier_name, delivery_date: po.delivery_date || '', payment_terms: '', so_reference: po.so_reference || '', remarks: '' }); setEditPOLines(po.lines.map(l => ({ material_code: l.material_code, material_name: l.material_name, material_type: l.material_type || 'RM', po_qty: l.po_qty, unit: l.unit, rate: l.rate, gst_pct: l.gst_pct }))) }}
+                            <button onClick={() => { const sup = suppliers.find(s => s.supplier_name === po.supplier_name); setEditingPO(po.id); setEditPOForm({ supplier_id: sup?.id, supplier_name: po.supplier_name, delivery_date: po.delivery_date || '', payment_terms: po.payment_terms || '', so_reference: po.so_reference || '', remarks: '', bill_to_name: po.bill_to_name || YASH_GALLERY.name, bill_to_address: po.bill_to_address || YASH_GALLERY.address, bill_to_gst: po.bill_to_gst || '', ship_to_name: po.ship_to_name || '', ship_to_address: po.ship_to_address || '', ship_to_contact: po.ship_to_contact || '', ship_to_phone: po.ship_to_phone || '', ship_to_gst: po.ship_to_gst || '' }); setEditPOLines(po.lines.map(l => ({ material_code: l.material_code, material_name: l.material_name, material_type: l.material_type || 'RM', po_qty: l.po_qty, unit: l.unit, rate: l.rate, gst_pct: l.gst_pct }))) }}
                               className="text-xs px-3 py-1 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50">✏️ Edit</button>
                           </div>
                         )}
@@ -1825,23 +2008,43 @@ export default function Purchase() {
               </div>
               <div>
                 <div className="flex justify-between mb-2"><p className="text-sm font-medium text-gray-600">Material Lines</p>
-                  <button onClick={() => setGRNLines(l => [...l, { material_code: '', material_name: '', received_qty: 0, accepted_qty: 0, rejected_qty: 0, unit: 'PCS', rate: 0, qc_status: 'Pending' }])}
+                  <button onClick={() => setGRNLines(l => [...l, { material_code: '', material_name: '', po_qty: 0, received_qty: 0, accepted_qty: 0, rejected_qty: 0, unit: 'PCS', rate: 0, qc_status: 'Pending' }])}
                     className="text-xs text-blue-600 hover:underline">+ Add Line</button></div>
+                <table className="w-full text-xs mb-2">
+                  <thead>
+                    <tr className="text-gray-500 uppercase border-b bg-gray-50">
+                      <th className="text-left py-2 px-2">Code</th>
+                      <th className="text-left py-2 px-2">Name</th>
+                      <th className="text-right py-2 px-2">Order Qty</th>
+                      <th className="text-right py-2 px-2">Received Qty</th>
+                      <th className="text-right py-2 px-2">Pass Qty</th>
+                      <th className="text-right py-2 px-2">Reject Qty</th>
+                      <th className="text-right py-2 px-2">Rate ₹</th>
+                      <th className="text-left py-2 px-2">QC</th>
+                      <th className="py-2 px-2"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
                 {grnLines.map((ln, i) => (
-                  <div key={i} className="grid grid-cols-8 gap-2 mb-2 text-sm items-center">
-                    <input placeholder="Code" value={ln.material_code} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, material_code: e.target.value } : x))} className="border rounded px-2 py-1.5" />
-                    <input placeholder="Name" value={ln.material_name} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, material_name: e.target.value } : x))} className="border rounded px-2 py-1.5" />
-                    <input type="number" placeholder="Received" value={ln.received_qty}
-                      onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, received_qty: +e.target.value, accepted_qty: +e.target.value } : x))} className="border rounded px-2 py-1.5" />
-                    <input type="number" placeholder="Accepted" value={ln.accepted_qty} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, accepted_qty: +e.target.value } : x))} className="border rounded px-2 py-1.5" />
-                    <input type="number" placeholder="Rejected" value={ln.rejected_qty} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, rejected_qty: +e.target.value } : x))} className="border rounded px-2 py-1.5" />
-                    <input type="number" placeholder="Rate ₹" value={ln.rate} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, rate: +e.target.value } : x))} className="border rounded px-2 py-1.5" />
+                  <tr key={i} className="border-t border-gray-100">
+                    <td className="py-1 px-1"><input placeholder="Code" value={ln.material_code} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, material_code: e.target.value } : x))} className="border rounded px-2 py-1.5 w-full" /></td>
+                    <td className="py-1 px-1"><input placeholder="Name" value={ln.material_name} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, material_name: e.target.value } : x))} className="border rounded px-2 py-1.5 w-full" /></td>
+                    <td className="py-1 px-1"><input type="number" step="0.01" title="Order Qty" value={ln.po_qty ?? 0} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, po_qty: +e.target.value } : x))} className="border rounded px-2 py-1.5 w-20 text-right" /></td>
+                    <td className="py-1 px-1"><input type="number" step="0.01" title="Received Qty" value={ln.received_qty}
+                      onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, received_qty: +e.target.value, accepted_qty: +e.target.value } : x))} className="border rounded px-2 py-1.5 w-20 text-right" /></td>
+                    <td className="py-1 px-1"><input type="number" step="0.01" title="Pass Qty" value={ln.accepted_qty} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, accepted_qty: +e.target.value } : x))} className="border rounded px-2 py-1.5 w-20 text-right" /></td>
+                    <td className="py-1 px-1"><input type="number" step="0.01" title="Reject Qty" value={ln.rejected_qty} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, rejected_qty: +e.target.value } : x))} className="border rounded px-2 py-1.5 w-20 text-right" /></td>
+                    <td className="py-1 px-1"><input type="number" step="0.01" value={ln.rate} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, rate: +e.target.value } : x))} className="border rounded px-2 py-1.5 w-20 text-right" /></td>
+                    <td className="py-1 px-1">
                     <select value={ln.qc_status} onChange={e => setGRNLines(l => l.map((x, j) => j === i ? { ...x, qc_status: e.target.value } : x))} className="border rounded px-2 py-1.5">
                       {['Pending','Pass','Fail'].map(s => <option key={s}>{s}</option>)}
                     </select>
-                    <button onClick={() => setGRNLines(l => l.filter((_, j) => j !== i))} className="text-red-400">✕</button>
-                  </div>
+                    </td>
+                    <td className="py-1 px-1"><button type="button" onClick={() => setGRNLines(l => l.filter((_, j) => j !== i))} className="text-red-400">✕</button></td>
+                  </tr>
                 ))}
+                  </tbody>
+                </table>
               </div>
               <div className="flex gap-2">
                 <button onClick={() => createGRNMut.mutate({ ...grnForm, lines: grnLines.map(l => ({ ...l, amount: l.accepted_qty * l.rate })) })}
@@ -1888,11 +2091,12 @@ export default function Purchase() {
                 {expanded === grn.id && (
                   <div className="border-t px-4 pb-3">
                     <table className="w-full text-xs mt-3">
-                      <thead><tr className="text-gray-400 uppercase"><th className="text-left">Code</th><th className="text-left">Name</th><th className="text-right">Received</th><th className="text-right">Accepted</th><th className="text-right">Rejected</th><th className="text-right">QC</th></tr></thead>
+                      <thead><tr className="text-gray-400 uppercase"><th className="text-left">Code</th><th className="text-left">Name</th><th className="text-right">Order Qty</th><th className="text-right">Received</th><th className="text-right">Pass Qty</th><th className="text-right">Reject Qty</th><th className="text-right">QC</th></tr></thead>
                       <tbody>{grn.lines.map(l => (
                         <tr key={l.id} className="border-t border-gray-50">
                           <td className="py-1.5 font-medium">{l.material_code}</td>
                           <td className="py-1.5 text-gray-600">{l.material_name || '—'}</td>
+                          <td className="py-1.5 text-right text-gray-500">{l.po_qty ?? '—'}</td>
                           <td className="py-1.5 text-right">{l.received_qty}</td>
                           <td className="py-1.5 text-right text-green-600">{l.accepted_qty}</td>
                           <td className="py-1.5 text-right text-red-500">{l.rejected_qty}</td>
@@ -1966,6 +2170,30 @@ export default function Purchase() {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(min.status)}`}>{min.status}</span>
+                    {min.status === 'Draft' && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={e => {
+                            e.stopPropagation()
+                            if (!window.confirm('Confirm material issue? Stock will be deducted from Item Master.')) return
+                            confirmMINMut.mutate({ id: min.id, status: 'Confirmed' })
+                          }}
+                          disabled={confirmMINMut.isPending}
+                          className="text-xs px-2 py-1 rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          type="button"
+                          onClick={e => { e.stopPropagation(); confirmMINMut.mutate({ id: min.id, status: 'Cancelled' }) }}
+                          disabled={confirmMINMut.isPending}
+                          className="text-xs px-2 py-1 rounded border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    )}
                     <button
                       type="button"
                       onClick={e => { e.stopPropagation(); printDocument(buildMINPrintHTML(min), `MIN - ${min.min_number}`) }}

@@ -105,6 +105,14 @@ class POIn(BaseModel):
     pr_reference: Optional[str] = ''
     so_reference: Optional[str] = ''
     remarks: Optional[str] = ''
+    bill_to_name: Optional[str] = ''
+    bill_to_address: Optional[str] = ''
+    bill_to_gst: Optional[str] = ''
+    ship_to_name: Optional[str] = ''
+    ship_to_address: Optional[str] = ''
+    ship_to_contact: Optional[str] = ''
+    ship_to_phone: Optional[str] = ''
+    ship_to_gst: Optional[str] = ''
     lines: List[POLineIn] = []
 
 class JWOLineIn(BaseModel):
@@ -352,7 +360,11 @@ def post_min(body: MINIn):
 
 @router.patch("/min/{minid}/status")
 def patch_min_status(minid: int, body: StatusUpdate):
-    update_min_status(minid, body.status)
+    from fastapi import HTTPException
+    try:
+        update_min_status(minid, body.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}
 
 @router.get("/min/by-number/{min_number}")

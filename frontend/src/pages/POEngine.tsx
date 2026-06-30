@@ -388,6 +388,7 @@ export default function POEngine() {
         group_by_parent: params.group_by_parent,
         enforce_two_size_minimum: params.enforce_two_size_minimum,
         enforce_lead_time_release_gate: params.enforce_lead_time_release_gate,
+        use_oms_inventory_only: params.use_oms_inventory_only,
         urgent_all_sizes_days: params.urgent_all_sizes_days,
       }
       const [invRes, auditRes] = await Promise.all([
@@ -608,6 +609,7 @@ export default function POEngine() {
     useSeasonality: params.use_seasonality,
     seasonalWeight: params.seasonal_weight,
     enforceLeadGate: false,
+    useOmsInventoryOnly: params.use_oms_inventory_only,
     safetyPct: params.safety_pct,
     raiseViewDate: ledgerImportDate,
   }), [params, ledgerImportDate])
@@ -1550,6 +1552,13 @@ export default function POEngine() {
                 formulaKey="enforce_two_size_minimum"
                 onFormulaOpen={openFormulaCol}
                 onChange={v => setParams({ ...params, enforce_two_size_minimum: v })}
+              />
+              <Toggle
+                label="OMS inventory only"
+                checked={params.use_oms_inventory_only}
+                formulaKey="use_oms_inventory_only"
+                onFormulaOpen={openFormulaCol}
+                onChange={v => setParams({ ...params, use_oms_inventory_only: v })}
               />
             </div>
 

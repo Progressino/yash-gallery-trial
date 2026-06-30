@@ -497,17 +497,16 @@ _FILENAME_END_RE = re.compile(
     r"(?:\bto\b|\bthrough\b|\buntil\b)\s+(\d{1,2})[\-\s]([A-Za-z]{3,9})[\-\s](\d{2,4})",
     re.I,
 )
+_FILENAME_START_RE = re.compile(
+    r"(?:\bfrom\b\s+)?(\d{1,2})[\-\s]([A-Za-z]{3,9})(?:[\-\s](\d{2,4}))?\s+(?:\bto\b|\bthrough\b|\buntil\b)",
+    re.I,
+)
 
 
-def inventory_sheet_end_date_from_filename(filename: str) -> str:
-    """Best-effort sheet end date from operator filenames (e.g. '… To 25-Jun-26.xlsx')."""
+def _parse_filename_calendar_date(day_s: str, mon_s: str, yr_s: str | None, *, fallback_year: int | None = None) -> str:
     from datetime import datetime
 
-    m = _FILENAME_END_RE.search(str(filename or ""))
-    if not m:
-        return ""
-    day_s, mon_s, yr_s = m.groups()
-    yr = int(yr_s)
+    yr = int(yr_s) if yr_s else int(fallback_year or datetime.now().year)
     if yr < 100:
         yr += 2000
     for fmt in ("%d-%b-%Y", "%d-%B-%Y"):
@@ -516,6 +515,60 @@ def inventory_sheet_end_date_from_filename(filename: str) -> str:
         except ValueError:
             continue
     return ""
+
+
+def inventory_sheet_end_date_from_filename(filename: str) -> str:
+    """Best-effort sheet end date from operator filenames (e.g. '… To 25-Jun-26.xlsx')."""
+    m = _FILENAME_END_RE.search(str(filename or ""))
+    if not m:
+        return ""
+    day_s, mon_s, yr_s = m.groups()
+    return _parse_filename_calendar_date(day_s, mon_s, yr_s)
+
+
+def inventory_sheet_start_date_from_filename(filename: str) -> str:
+    """Best-effort sheet start date (e.g. '… 1-May To 29-Jun-26.xlsx')."""
+    text = str(filename or "")
+    end = inventory_sheet_end_date_from_filename(text)
+    fallback_year = int(end[:4]) if len(end) >= 4 else None
+    m = _FILENAME_START_RE.search(text)
+    if not m:
+        return ""
+    day_s, mon_s, yr_s = m.group(1), m.group(2), m.group(3)
+    return _parse_filename_calendar_date(day_s, mon_s, yr_s, fallback_year=fallback_year)
+
+
+def inventory_history_min_date(df: Optional[pd.DataFrame]) -> Optional[pd.Timestamp]:
+    if df is None or df.empty or "Date" not in df.columns:
+        return None
+    mn = pd.to_datetime(df["Date"], errors="coerce").min()
+    return pd.Timestamp(mn).normalize() if pd.notna(mn) else None
+
+
+def is_full_matrix_inventory_reupload(
+    existing: Optional[pd.DataFrame],
+    incoming: pd.DataFrame,
+    filename: str,
+) -> bool:
+    """
+    True when a wide-matrix Excel replaces the authoritative snapshot grid.
+
+    Re-uploads must not merge stale pre-range days (e.g. Apr-30) or snapshot
+    overrides inside the matrix window.
+    """
+    if incoming is None or incoming.empty:
+        return False
+    fn_end = inventory_sheet_end_date_from_filename(filename or "")
+    in_max = inventory_history_max_date(incoming)
+    if not fn_end or in_max is None or str(in_max.date()) != fn_end:
+        return False
+    in_skus = int(incoming["OMS_SKU"].astype(str).nunique())
+    if in_skus < 500:
+        return False
+    if existing is None or getattr(existing, "empty", True):
+        return True
+    ex_skus = int(existing["OMS_SKU"].astype(str).nunique())
+    return in_skus >= max(500, int(ex_skus * 0.85))
 
 
 def promote_daily_inventory_matrix_max_date(sess, candidate: str | None) -> None:
@@ -550,10 +603,17 @@ def recanonicalize_inventory_history_skus(
     out = out.dropna(subset=["Date", "Qty", "OMS_SKU"])
     if out.empty:
         return pd.DataFrame(columns=_TALL_COLS)
+    out = _ensure_source_column(out)
+    out = _ensure_channel_column(out)
+    keys = (
+        ["OMS_SKU", "Date", "Channel"]
+        if out["Channel"].astype(str).str.strip().str.lower().isin(["oms", "amazon"]).any()
+        else ["OMS_SKU", "Date"]
+    )
     return (
-        out.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"]
-        .max()
-        .sort_values(["OMS_SKU", "Date"])
+        out.groupby(keys, as_index=False)
+        .agg(Qty=("Qty", "max"), Source=("Source", "first"))
+        .sort_values(keys)
         .reset_index(drop=True)
     )
 

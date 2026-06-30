@@ -42,6 +42,7 @@ interface POParams {
   enforce_two_size_minimum: boolean
   urgent_all_sizes_days: number
   enforce_lead_time_release_gate: boolean
+  use_oms_inventory_only: boolean
 }
 
 interface POState {
@@ -90,6 +91,7 @@ export const usePOStore = create<POState>()(
     enforce_two_size_minimum: true,
     urgent_all_sizes_days: 45,
     enforce_lead_time_release_gate: false,
+    use_oms_inventory_only: false,
   },
   result: null,
   quarterly: null,
@@ -117,7 +119,7 @@ export const usePOStore = create<POState>()(
     }),
     {
       name: 'po-store-v1',
-      version: 5,
+      version: 6,
       migrate: (persisted, fromVersion) => {
         const p = persisted as Partial<POState> | undefined
         if (!p) return persisted as POState
@@ -131,6 +133,9 @@ export const usePOStore = create<POState>()(
         // App-only PO mode: keep lead-time gate off by default.
         if (fromVersion < 5 && params) {
           params.enforce_lead_time_release_gate = false
+        }
+        if (fromVersion < 6 && params && params.use_oms_inventory_only === undefined) {
+          params.use_oms_inventory_only = false
         }
         return p as POState
       },

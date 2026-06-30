@@ -613,44 +613,14 @@ def get_item_tracking(
                                 'amount': float(r['amount'] or 0), 'so_ref': r['so_reference'] or ''})
 
             jwo_filter, jwo_bind = _date_clause("h.jwo_date", frm, to)
-            for r in pc.execute(
-                "SELECT h.jwo_number,h.jwo_date,h.processor_name,"
-                "l.input_material,l.output_material,"
-                "l.input_qty,l.output_qty,l.input_unit,l.output_unit,l.rate,l.amount "
-                "FROM jwo_lines l JOIN jwo_headers h ON h.id=l.jwo_id "
-                "WHERE (l.input_material LIKE ? OR l.output_material LIKE ?)" + jwo_filter +
-                " ORDER BY h.jwo_date DESC",
-                [like, like, *jwo_bind],
-            ).fetchall():
-                if r["input_material"] and like.strip("%") in str(r["input_material"]):
-                    results.append({
-                        'date': r['jwo_date'], 'direction': 'OUT', 'txn_type': 'JWO Issue',
-                        'doc_number': r['jwo_number'], 'doc_ref': '',
-                        'party': r['processor_name'], 'item_code': r['input_material'],
-                        'item_name': r['input_material'],
-                        'qty': float(r['input_qty'] or 0),
-                        'unit': r['input_unit'] or 'MTR',
-                        'rate': float(r['rate'] or 0),
-                        'amount': float(r['amount'] or 0), 'so_ref': '',
-                    })
-                if r["output_material"] and like.strip("%") in str(r["output_material"]):
-                    results.append({
-                        'date': r['jwo_date'], 'direction': 'IN', 'txn_type': 'JWO Receipt',
-                        'doc_number': r['jwo_number'], 'doc_ref': '',
-                        'party': r['processor_name'], 'item_code': r['output_material'],
-                        'item_name': r['output_material'],
-                        'qty': float(r['output_qty'] or 0),
-                        'unit': r['output_unit'] or 'MTR',
-                        'rate': float(r['rate'] or 0),
-                        'amount': float(r['amount'] or 0), 'so_ref': '',
-                    })
+            # JWO material issue is recorded on confirmed MIN — not at JWO creation.
 
             min_filter, min_bind = _date_clause("h.min_date", frm, to)
             for r in pc.execute(
-                "SELECT h.min_number,h.min_date,h.to_vendor,l.material_code,l.material_name,"
+                "SELECT h.min_number,h.min_date,h.to_vendor,h.status,l.material_code,l.material_name,"
                 "l.issue_qty,l.unit,l.rate,l.amount "
                 "FROM min_lines l JOIN material_issue_notes h ON h.id=l.min_id "
-                "WHERE l.material_code LIKE ?" + min_filter +
+                "WHERE l.material_code LIKE ? AND h.status IN ('Confirmed','Issued')" + min_filter +
                 " ORDER BY h.min_date DESC",
                 [like, *min_bind],
             ).fetchall():
@@ -660,7 +630,7 @@ def get_item_tracking(
                                 'item_name': r['material_name'] or r['material_code'],
                                 'qty': float(r['issue_qty'] or 0),
                                 'unit': r['unit'] or 'MTR', 'rate': float(r['rate'] or 0),
-                                'amount': float(r['amount'] or 0) * float(r['rate'] or 0),
+                                'amount': float(r['amount'] or 0),
                                 'so_ref': ''})
             pc.close()
         except Exception:

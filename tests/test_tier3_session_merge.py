@@ -129,8 +129,8 @@ def test_build_po_ads_platform_sales_fast_path_uses_session_sales(monkeypatch):
         sess,
         planning_date="2026-06-18",
         period_days=30,
-        use_seasonality=True,
-        use_ly_fallback=True,
+        use_seasonality=False,
+        use_ly_fallback=False,
     )
     assert not out.empty
     assert out["TxnDate"].max() <= pd.Timestamp("2026-06-18")
@@ -164,6 +164,8 @@ def test_build_po_ads_platform_sales_incremental_gap(monkeypatch):
         "backend.services.daily_store.platforms_with_uploads_in_range",
         lambda _s, _e: ["amazon"],
     )
+    monkeypatch.setattr("backend.services.daily_store.get_summary", lambda: {"amazon": {"file_count": 1}})
+    monkeypatch.setattr("backend.local_dev.local_dev_mode", lambda: False)
     monkeypatch.setattr(
         "backend.services.daily_store.load_platform_data_for_report_range",
         lambda plat, _s, _e, dedup=True, columns_only=False: pd.DataFrame(
@@ -181,8 +183,8 @@ def test_build_po_ads_platform_sales_incremental_gap(monkeypatch):
         sess,
         planning_date="2026-06-18",
         period_days=30,
-        use_seasonality=True,
-        use_ly_fallback=True,
+        use_seasonality=False,
+        use_ly_fallback=False,
     )
     assert pd.Timestamp(out["TxnDate"].max()).date() == pd.Timestamp("2026-06-17").date()
     assert int(out.loc[out["TxnDate"] >= "2026-06-15", "Quantity"].sum()) >= 6
@@ -215,11 +217,53 @@ def test_build_po_ads_platform_sales_bulk_path_when_lag_large(monkeypatch):
         sess,
         planning_date="2026-06-18",
         period_days=30,
-        use_seasonality=True,
-        use_ly_fallback=True,
+        use_seasonality=False,
+        use_ly_fallback=False,
     )
     assert not out.empty
     assert out["TxnDate"].max() <= pd.Timestamp("2026-03-01")
+
+
+def test_build_po_ads_platform_sales_uses_platform_bulk_for_ly(monkeypatch):
+    """LY/seasonal must read Tier-1 platform bulk, not shallow unified sales_df."""
+    sess = AppSession()
+    sess.sku_mapping = {"SKU1": "SKU1"}
+    # Shallow sales_df: only recent rows (would under-count LY)
+    sess.sales_df = pd.DataFrame(
+        {
+            "TxnDate": pd.date_range("2026-06-01", "2026-06-17", freq="D"),
+            "Quantity": [1] * 17,
+            "Transaction Type": ["Shipment"] * 17,
+            "Sku": ["SKU1"] * 17,
+            "Source": ["Amazon"] * 17,
+            "Units_Effective": [1] * 17,
+        }
+    )
+    # Platform bulk includes prior-year Q2 history
+    q2 = pd.date_range("2025-04-01", "2025-06-30", freq="D")
+    sess.mtr_df = pd.DataFrame(
+        {
+            "Date": q2,
+            "SKU": ["SKU1"] * len(q2),
+            "Transaction_Type": ["Shipment"] * len(q2),
+            "Quantity": [1] * len(q2),
+        }
+    )
+
+    monkeypatch.setattr("backend.services.daily_store.get_summary", lambda: {})
+
+    out = t3.build_po_ads_platform_sales(
+        sess,
+        planning_date="2026-06-18",
+        period_days=30,
+        use_ly_fallback=True,
+        use_seasonality=False,
+    )
+    assert not out.empty
+    ly_window = out[
+        (out["TxnDate"] >= "2025-04-01") & (out["TxnDate"] <= "2025-06-30")
+    ]
+    assert int(ly_window["Quantity"].sum()) >= 80, "platform bulk must supply prior-year Q2 for LY ADS"
 
 
 def test_po_fingerprint_includes_tier3_token(monkeypatch):

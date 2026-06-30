@@ -14,6 +14,7 @@ export type POFreshParams = {
   safety_pct: number
   use_seasonality: boolean
   use_ly_fallback: boolean
+  use_oms_inventory_only: boolean
   enforce_two_size_minimum: boolean
   raise_view_date: string
   raise_ledger_lookback_days: number
@@ -30,6 +31,7 @@ export const DEFAULT_PO_FRESH_PARAMS: POFreshParams = {
   use_seasonality: true,
   use_ly_fallback: true,
   enforce_two_size_minimum: true,
+  use_oms_inventory_only: false,
   raise_view_date: '2026-05-16',
   raise_ledger_lookback_days: 45,
 }

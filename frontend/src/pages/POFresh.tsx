@@ -93,6 +93,7 @@ function buildBody(p: Params, opts?: { useSharedCache?: boolean }) {
     safety_pct: p.safety_pct,
     use_seasonality: p.use_seasonality,
     use_ly_fallback: p.use_ly_fallback,
+    use_oms_inventory_only: p.use_oms_inventory_only,
     seasonal_weight: 0.5,
     enforce_two_size_minimum: p.enforce_two_size_minimum,
     enforce_lead_time_release_gate: true,
@@ -949,6 +950,16 @@ function POFreshInner() {
                     LY ADS fallback
                     <span className="text-xs opacity-60 ml-1">(uses last-year demand for zero-sales SKUs)</span>
                   </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={params.use_oms_inventory_only}
+                      onChange={e => setParams(p => ({ ...p, use_oms_inventory_only: e.target.checked }))}
+                      className="accent-[var(--po-primary)]"
+                    />
+                    OMS inventory only
+                    <span className="text-xs opacity-60 ml-1">(exclude marketplace stock from cover / PO qty)</span>
+                  </label>
                 </div>
               </div>
             )}
@@ -1192,6 +1203,7 @@ function POFreshInner() {
                 periodDays={params.period_days}
                 targetDays={params.target_days}
                 enteredLeadDays={params.lead_time}
+                useOmsInventoryOnly={params.use_oms_inventory_only}
                 editedQty={editedQty}
                 onEditedQtyChange={(sku, qty) => setEditedQty(prev => ({ ...prev, [sku]: qty }))}
                 onEditedQtyReset={sku =>
@@ -1363,11 +1375,19 @@ export default function POFresh() {
   )
 }
 
-/** Mirror of backend ``(Total_Inventory + PO_Pipeline_Effective + PO_Qty) / ADS``. */
-function computePostPoCover(row: Row, finalQty: number): number {
+/** Inventory column used for PO cover math (mirrors backend ``use_oms_inventory_only``). */
+function inventoryForPo(row: Row, useOmsInventoryOnly: boolean): number {
+  const hasOms =
+    row['OMS_Inventory'] !== undefined && row['OMS_Inventory'] !== null && row['OMS_Inventory'] !== ''
+  if (useOmsInventoryOnly && hasOms) return Number(row['OMS_Inventory'] ?? 0)
+  return Number(row['Total_Inventory'] ?? 0)
+}
+
+/** Mirror of backend post-PO cover using inventory for PO. */
+function computePostPoCover(row: Row, finalQty: number, useOmsInventoryOnly = false): number {
   const ads = Number(row['ADS'] ?? 0)
   if (!Number.isFinite(ads) || ads <= 0) return 999
-  const inv = Number(row['Total_Inventory'] ?? 0)
+  const inv = inventoryForPo(row, useOmsInventoryOnly)
   const pipeEff = Number(row['PO_Pipeline_Effective'] ?? row['PO_Pipeline_Total'] ?? 0)
   const q = Math.max(0, Math.floor(finalQty))
   return Math.round(((inv + pipeEff + q) / ads) * 10) / 10
@@ -1381,6 +1401,7 @@ function PoTable({
   periodDays,
   targetDays = 180,
   enteredLeadDays = 60,
+  useOmsInventoryOnly = false,
   editedQty,
   onEditedQtyChange,
   onEditedQtyReset,
@@ -1396,6 +1417,7 @@ function PoTable({
   periodDays: number
   targetDays?: number
   enteredLeadDays?: number
+  useOmsInventoryOnly?: boolean
   editedQty?: Record<string, number>
   onEditedQtyChange?: (sku: string, qty: number) => void
   onEditedQtyReset?: (sku: string) => void
@@ -1507,7 +1529,7 @@ function PoTable({
                     )
                   }
                   if (c === 'Post_PO_Cover_Days_Capped' && editedQty?.[poSkuKey(sku)] !== undefined) {
-                    const live = computePostPoCover(r, finalQty)
+                    const live = computePostPoCover(r, finalQty, useOmsInventoryOnly)
                     const display = live >= 999 ? '—' : live.toFixed(1)
                     return (
                       <td key={c} className={`${poCellClass(c, live)} font-semibold`} title="Recalculated from your edited qty">
@@ -1539,6 +1561,7 @@ function PoTable({
           periodDays={periodDays}
           targetDays={targetDays}
           enteredLeadDays={enteredLeadDays}
+          useOmsInventoryOnly={useOmsInventoryOnly}
           editedQty={editedQty?.[poSkuKey(String(selectedRow.OMS_SKU ?? ''))]}
           onClose={() => setSelectedRow(null)}
         />
@@ -1553,6 +1576,7 @@ function SkuDetailDrawer({
   periodDays,
   targetDays,
   enteredLeadDays,
+  useOmsInventoryOnly = false,
   editedQty,
   onClose,
 }: {
@@ -1560,6 +1584,7 @@ function SkuDetailDrawer({
   periodDays: number
   targetDays: number
   enteredLeadDays: number
+  useOmsInventoryOnly?: boolean
   editedQty?: number
   onClose: () => void
 }) {
@@ -1578,7 +1603,8 @@ function SkuDetailDrawer({
   const seasonAds = n('Seasonal_Month_ADS')
   const flat30Ads = n('Flat30_ADS')
   const ads = n('ADS')
-  const totalInv = n('Total_Inventory')
+  const totalInv = inventoryForPo(row, useOmsInventoryOnly)
+  const invLabel = useOmsInventoryOnly ? 'OMS inventory' : 'Total inventory'
   const pipeline = n('PO_Pipeline_Effective') || n('PO_Pipeline_Total')
   const projDays = n('Projected_Running_Days')
   const daysLeft = n('Days_Left')
@@ -1586,7 +1612,7 @@ function SkuDetailDrawer({
   const poQtyBase = n('PO_Qty')
   const poQty = editedQty !== undefined ? editedQty : poQtyBase
   const postCoverBase = n('Post_PO_Cover_Days_Capped')
-  const postCover = editedQty !== undefined ? computePostPoCover(row, editedQty) : postCoverBase
+  const postCover = editedQty !== undefined ? computePostPoCover(row, editedQty, useOmsInventoryOnly) : postCoverBase
   const drawerQtyEdited = editedQty !== undefined && editedQty !== poQtyBase
   const sheetLeadDays = n('Lead_Time_Days') || 0
   const gateLeadDays = enteredLeadDays > 0 ? enteredLeadDays : sheetLeadDays
@@ -1595,6 +1621,7 @@ function SkuDetailDrawer({
   const priority = s('Priority')
 
   type Step = { label: string; formula: string; result: string; note?: string; highlight?: boolean }
+  const primaryBlend = lyAds > 0 ? recentAds * 0.5 + lyAds * 0.5 : recentAds
   const steps: Step[] = [
     {
       label: `① Sales (${periodDays}-day window)`,
@@ -1615,14 +1642,14 @@ function SkuDetailDrawer({
     },
     {
       label: '③ ADS Signals',
-      formula: `max(Recent, Last Year, Seasonal, Flat30)`,
+      formula: `Primary = Recent×50% + LY×50% (when LY fallback on)`,
       result: `Recent=${fmt(recentAds)} · LY=${fmt(lyAds)} · Season=${fmt(seasonAds)} · Flat30=${fmt(flat30Ads)}`,
-      note: `→ ADS used = ${fmt(ads, 2)}/day (capped primary + floors)`,
+      note: `→ blend ≈ ${fmt(primaryBlend, 2)}/day · ADS used = ${fmt(ads, 2)}/day (after sold÷${periodDays} cap + Flat30 floor)`,
       highlight: true,
     },
     {
       label: '④ Inventory Cover',
-      formula: `Total Inventory ÷ ADS`,
+      formula: `${invLabel} ÷ ADS`,
       result: `${fmtInt(totalInv)} ÷ ${fmt(ads, 2)} = ${fmt(daysLeft, 0)} days left`,
       note: daysLeft > 90 ? '✅ Covered without new PO' : daysLeft < 30 ? '🔴 Critically low stock' : '🟡 Approaching reorder point',
     },

@@ -401,6 +401,9 @@ def _resolve_ads_sales_source(
         use_seasonality=bool(body.get("use_seasonality", False)),
         use_ly_fallback=bool(body.get("use_ly_fallback", True)),
     )
+    use_ly = bool(body.get("use_ly_fallback", True))
+    use_season = bool(body.get("use_seasonality", False))
+    needs_platform_history = use_ly or use_season
     mat_sales = None
     if po_inputs_from_pg_enabled() and not sales_df.empty and inputs.sales_source.startswith(
         "postgres"
@@ -420,7 +423,10 @@ def _resolve_ads_sales_source(
         except Exception:
             logger.exception("load_po_sales_df failed — falling back to raw sales")
 
-    if mat_sales is not None and not mat_sales.empty:
+    if needs_platform_history and not platform_sales.empty:
+        ads_source = platform_sales
+        ads_label = "platform"
+    elif mat_sales is not None and not mat_sales.empty:
         ads_source = mat_sales
         ads_label = (
             inputs.ads_source_label

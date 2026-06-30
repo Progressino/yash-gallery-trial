@@ -63,6 +63,61 @@ def test_ly_and_seasonal_use_prior_calendar_quarter():
     assert float(row["ADS"]) >= 0.77, f"ADS={row['ADS']}"
 
 
+def test_quarterly_ads_floor_lifts_ly_from_prior_year_quarter():
+    """Quarterly Apr–Jun units must floor LY/Season when sales_df under-counts."""
+    from backend.services.po_quarterly_warmup import attach_quarterly_columns_to_po_df
+    from backend.session import AppSession
+
+    sku = "1003YKMUSTARD-5XL"
+    po = pd.DataFrame(
+        {
+            "OMS_SKU": [sku],
+            "Recent_ADS": [0.8],
+            "LY_ADS": [0.1],
+            "Seasonal_Month_ADS": [0.1],
+            "Flat30_ADS": [0.8],
+            "ADS": [0.8],
+            "Sold_Units": [60],
+        }
+    )
+    sess = AppSession()
+    payload = {
+        "loaded": True,
+        "columns": ["OMS_SKU", "Apr-Jun 2025"],
+        "rows": [{"OMS_SKU": sku, "Apr-Jun 2025": 154}],
+    }
+
+    import backend.services.po_quarterly_warmup as qw
+
+    orig = qw.get_quarterly_payload_for_po
+    qw.get_quarterly_payload_for_po = lambda *_a, **_kw: payload
+    try:
+        out = attach_quarterly_columns_to_po_df(
+            po,
+            sess,
+            planning_date="2026-06-30",
+            period_days=30,
+            use_ly_fallback=True,
+            use_seasonality=False,
+            seasonal_weight=0.5,
+        )
+    finally:
+        qw.get_quarterly_payload_for_po = orig
+
+    # 154 units / 91 days ≈ 1.692/day LY signal; ADS blends recent + LY (50/50) when seasonality off
+    assert float(out["LY_ADS"].iloc[0]) >= 1.5
+    ads = float(out["ADS"].iloc[0])
+    assert 1.2 <= ads <= 1.45, f"ADS should blend 0.8 and ~1.69, got {ads}"
+
+
+def test_ly_blend_midpoint_without_seasonality():
+    from backend.services.po_engine import _primary_ads_from_signals, _final_ads_from_signals
+
+    prim = _primary_ads_from_signals(0.7, 1.7, use_seasonality=False, use_ly_fallback=True, seasonal_weight=0.5)
+    ads = float(_final_ads_from_signals(prim, 1.7, 0.7, use_seasonality=False))
+    assert abs(ads - 1.2) < 0.05
+
+
 def test_ly_fallback_still_lifts_when_only_forward_window_has_sales():
     rows = []
     for d in pd.date_range("2025-11-01", periods=5, freq="D"):

@@ -9,6 +9,7 @@ export interface POFormulaContext {
   useSeasonality: boolean
   seasonalWeight: number
   enforceLeadGate: boolean
+  useOmsInventoryOnly?: boolean
   safetyPct: number
   finalPoQty?: number
   raiseViewDate?: string
@@ -89,15 +90,28 @@ export const PO_COLUMN_FORMULAS: Record<string, POFormulaDef> = {
     formula: 'Sum from latest inventory snapshot',
     steps: [
       'Includes OMS warehouse, FBA, and other channel columns when present',
-      'Used for Days_Left and projected cover display',
+      'Used for Days_Left and projected cover when OMS inventory only is off',
+    ],
+    sources: ['Inventory upload'],
+  },
+  OMS_Inventory: {
+    title: 'OMS inventory',
+    summary: 'Warehouse on-hand only (excludes marketplace shelf / FBA).',
+    formula: 'OMS column from latest inventory snapshot',
+    steps: [
+      'Used for Days_Left, projected cover, and PO quantity when OMS inventory only is on',
     ],
     sources: ['Inventory upload'],
   },
   Days_Left: {
     title: 'Days left (inventory only)',
     summary: 'How many days current stock lasts at ADS — pipeline is not included.',
-    formula: 'Days_Left = Total_Inventory ÷ ADS',
-    steps: ['Rounded to 1 decimal', 'Shows 999 when ADS = 0'],
+    formula: 'Days_Left = inventory for PO ÷ ADS',
+    steps: [
+      'Inventory for PO = OMS_Inventory when OMS-only toggle is on, else Total_Inventory',
+      'Rounded to 1 decimal',
+      'Shows 999 when ADS = 0',
+    ],
   },
   Sold_Units: {
     title: 'Sold units',
@@ -187,7 +201,7 @@ export const PO_COLUMN_FORMULAS: Record<string, POFormulaDef> = {
     summary: 'Final average daily sales used for all cover and PO math.',
     formula: 'ADS = max(capped_primary, Seasonal_Month_ADS, Flat30_ADS)',
     steps: [
-      'Primary = max(Recent_ADS, LY_ADS) when LY fallback is on',
+      'Primary = blend(Recent_ADS, LY_ADS) when LY fallback is on (default 50/50)',
       'Recent_ADS = demand_units ÷ Eff_Days',
       'Non-sparse sellers cap inflated short-span Recent_ADS at sold÷Period',
     ],
@@ -305,13 +319,13 @@ export const PO_COLUMN_FORMULAS: Record<string, POFormulaDef> = {
   Projected_Running_Days: {
     title: 'Projected running days',
     summary: 'Stock cover before any new PO — inventory plus effective pipeline.',
-    formula: 'Projected_Running_Days = (Total_Inventory + PO_Pipeline_Effective) ÷ ADS',
+    formula: 'Projected_Running_Days = (inventory for PO + PO_Pipeline_Effective) ÷ ADS',
     steps: ['Rounded to 1 decimal', 'Compared against lead time when the gate is on'],
   },
   Post_PO_Cover_Days_Capped: {
     title: 'Post-PO cover',
     summary: 'Expected cover after the new PO quantity (uses your edited qty when changed).',
-    formula: 'Post_PO_Cover = (Total_Inventory + PO_Pipeline_Effective + PO_Qty) ÷ ADS',
+    formula: 'Post_PO_Cover = (inventory for PO + PO_Pipeline_Effective + PO_Qty) ÷ ADS',
     steps: ['Updates live when you edit New PO Qty'],
   },
   PO_Qty: {
@@ -396,10 +410,10 @@ export const PO_PARAM_FORMULAS: Record<string, POFormulaDef> = {
     ],
   },
   use_ly_fallback: {
-    title: 'Last-year ADS floor',
-    summary: 'When seasonality is off, ADS uses max(Recent, same 30-day window last year).',
-    formula: 'Primary = max(Recent_ADS, LY_ADS)',
-    steps: ['On by default — helps when this year started slow vs last year same period'],
+    title: 'Last-year ADS blend',
+    summary: 'Blend recent ADS with last year using the Seasonal weight slider (default 50/50).',
+    formula: 'Primary = Recent_ADS × weight + LY_ADS × (1 − weight)',
+    steps: ['On by default — PO ADS sits between weak recent and strong LY signals'],
   },
   seasonal_weight: {
     title: 'Seasonal weight',
@@ -426,8 +440,19 @@ export const PO_PARAM_FORMULAS: Record<string, POFormulaDef> = {
     steps: [
       'Lead time > 0 in Demand Parameters → same entered days for every SKU',
       'Lead time 0 or blank → per-SKU Lead_Time_Days from the status sheet',
-      'Projected days = (inventory + pipeline) ÷ ADS',
+      'Projected days = (inventory for PO + pipeline) ÷ ADS',
       'Requires ≥2 sizes with PO when two-size minimum is on',
+    ],
+  },
+  use_oms_inventory_only: {
+    title: 'OMS inventory only',
+    summary:
+      'Calculate PO cover and quantity from warehouse stock only — excludes marketplace channels in Total_Inventory.',
+    formula: 'Cover uses OMS_Inventory instead of Total_Inventory',
+    steps: [
+      'Off (default): Days_Left, projected cover, and PO qty use Total_Inventory',
+      'On: same metrics use OMS_Inventory only',
+      'Both columns remain visible in the table for reference',
     ],
   },
 }
@@ -467,7 +492,11 @@ export function buildPORowBreakdown(
   ctx: POFormulaContext,
 ): PORowBreakdownLine[] {
   const ads = num(row, 'ADS')
-  const inv = num(row, 'Total_Inventory')
+  const invTotal = num(row, 'Total_Inventory')
+  const invOms = num(row, 'OMS_Inventory')
+  const hasOmsCol = row['OMS_Inventory'] !== undefined && row['OMS_Inventory'] !== null && row['OMS_Inventory'] !== ''
+  const inv = ctx.useOmsInventoryOnly && hasOmsCol ? invOms : invTotal
+  const invLabel = ctx.useOmsInventoryOnly && hasOmsCol ? 'OMS inventory' : 'Total inventory'
   const pipe = num(row, 'PO_Pipeline_Effective') || num(row, 'PO_Pipeline_Total')
   const lead = num(row, 'Lead_Time_Days') || ctx.leadTime
   const sold = num(row, 'Sold_Units')
@@ -527,7 +556,7 @@ export function buildPORowBreakdown(
       break
     case 'Days_Left':
       lines.push(
-        { label: 'Total inventory', value: fmt(inv, 0) },
+        { label: invLabel, value: fmt(inv, 0) },
         { label: 'ADS', value: fmt(ads) },
         {
           label: 'Days left',
@@ -539,7 +568,7 @@ export function buildPORowBreakdown(
       break
     case 'Projected_Running_Days':
       lines.push(
-        { label: 'Total inventory', value: fmt(inv, 0) },
+        { label: invLabel, value: fmt(inv, 0) },
         { label: 'Eff. pipeline', value: fmt(pipe, 0) },
         { label: 'ADS', value: fmt(ads) },
         {
@@ -553,7 +582,7 @@ export function buildPORowBreakdown(
       break
     case 'Post_PO_Cover_Days_Capped':
       lines.push(
-        { label: 'Total inventory', value: fmt(inv, 0) },
+        { label: invLabel, value: fmt(inv, 0) },
         { label: 'Eff. pipeline', value: fmt(pipe, 0) },
         { label: 'New PO qty', value: fmt(poQty, 0) },
         { label: 'ADS', value: fmt(ads) },

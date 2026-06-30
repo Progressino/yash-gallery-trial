@@ -394,6 +394,133 @@ def build_parity_report(sess, *, planning_date: str | None = None) -> dict[str, 
     }
 
 
+def _session_platform_frames(sess) -> dict[str, pd.DataFrame]:
+    """Tier-1 bulk platform history from session or process warm cache."""
+    from .shared_frames import warm_frame
+
+    out: dict[str, pd.DataFrame] = {}
+    for _plat, attr in _PLATFORM_ATTRS:
+        df = warm_frame(attr, sess)
+        if df is not None and not getattr(df, "empty", True):
+            out[attr] = df
+    return out
+
+
+def _overlay_tier3_on_platform_frames(
+    sess,
+    frame_overrides: dict[str, pd.DataFrame],
+    *,
+    start: str,
+    end: str,
+    window_plats: list[str],
+) -> tuple[dict[str, pd.DataFrame], bool]:
+    """Merge Tier-3 authoritative rows into bulk platform frames for ``start..end``."""
+    from .daily_store import load_platform_data_for_report_range, merge_platform_data
+
+    used_tier3 = False
+    out = dict(frame_overrides)
+    for platform, attr in _PLATFORM_ATTRS:
+        tier = pd.DataFrame()
+        if platform in window_plats:
+            tier = load_platform_data_for_report_range(
+                platform, start, end, dedup=True, columns_only=True
+            )
+        if tier.empty:
+            if attr not in out:
+                cur = getattr(sess, attr, pd.DataFrame())
+                if cur is not None and not getattr(cur, "empty", True):
+                    out[attr] = cur
+            continue
+        used_tier3 = True
+        cur = out.get(attr, getattr(sess, attr, pd.DataFrame()))
+        lo, _hi = platform_df_date_bounds(tier)
+        if (
+            cur is not None
+            and not getattr(cur, "empty", True)
+            and lo is not None
+            and pd.notna(lo)
+        ):
+            col = platform_date_column(cur)
+            if col:
+                cur_dates = pd.to_datetime(cur[col], errors="coerce")
+                older = cur.loc[cur_dates < lo].copy()
+                out[attr] = merge_platform_data(older, tier, platform) if not older.empty else tier
+            else:
+                out[attr] = tier
+        else:
+            out[attr] = tier
+    return out, used_tier3
+
+
+def _build_po_ads_from_platform_history(
+    sess,
+    *,
+    planning_date: str,
+    period_days: int,
+    use_seasonality: bool,
+    use_ly_fallback: bool,
+) -> pd.DataFrame:
+    """
+    ADS input from Tier-1 platform bulk (+ Tier-3 overlay when uploads exist).
+
+    Used when LY or seasonal signals need full marketplace history — unified
+    ``sales_df`` is often shallow (OMS-only) while quarterly / PO columns use
+  platform parquets.
+    """
+    from .daily_store import get_summary, platforms_with_uploads_in_range
+    from .po_calculate_run import _build_platform_sales_df
+
+    plan = _normalize_planning_date(planning_date)
+    bulk_frames = _session_platform_frames(sess)
+    if not bulk_frames:
+        return pd.DataFrame()
+
+    horizon = _po_ads_horizon_days(period_days, use_seasonality, use_ly_fallback)
+    end = plan
+    start = str((pd.Timestamp(plan) - pd.Timedelta(days=horizon)).date())
+
+    summary = get_summary() or {}
+    tier3_any = any(int((summary.get(p) or {}).get("file_count") or 0) > 0 for p in summary)
+    frame_overrides = bulk_frames
+    if tier3_any:
+        window_plats = platforms_with_uploads_in_range(start, end)
+        if window_plats:
+            frame_overrides, _used = _overlay_tier3_on_platform_frames(
+                sess,
+                bulk_frames,
+                start=start,
+                end=end,
+                window_plats=window_plats,
+            )
+
+    base = _build_platform_sales_df(sess, frame_overrides=frame_overrides)
+    if base.empty:
+        return pd.DataFrame()
+
+    thru = session_sales_through(sess)
+    lag = sales_data_lag_days(plan, thru)
+    if lag is not None and 1 < lag <= 21 and thru:
+        gap_start = str((pd.Timestamp(thru) + pd.Timedelta(days=1)).date())
+        if gap_start <= plan:
+            gap_sales = _build_tier3_gap_sales(sess, gap_start, plan)
+            if not gap_sales.empty:
+                trimmed = _trim_sales_to_ads_window(
+                    base, plan, period_days, use_seasonality, use_ly_fallback
+                )
+                return _merge_sales_tail(
+                    trimmed,
+                    gap_sales,
+                    plan,
+                    period_days,
+                    use_seasonality,
+                    use_ly_fallback,
+                )
+
+    return _trim_sales_to_ads_window(
+        base, plan, period_days, use_seasonality, use_ly_fallback
+    )
+
+
 def ensure_tier3_merged_for_po(
     sess,
     *,
@@ -428,8 +555,6 @@ def build_po_ads_platform_sales(
     """
     from .daily_store import (
         get_summary,
-        load_platform_data_for_report_range,
-        merge_platform_data,
         platforms_with_uploads_in_range,
     )
 
@@ -437,6 +562,23 @@ def build_po_ads_platform_sales(
     sdf = getattr(sess, "sales_df", None)
     thru = session_sales_through(sess)
     lag = sales_data_lag_days(plan, thru)
+
+    needs_platform_history = use_ly_fallback or use_seasonality
+    if needs_platform_history:
+        bulk = _build_po_ads_from_platform_history(
+            sess,
+            planning_date=plan,
+            period_days=period_days,
+            use_seasonality=use_seasonality,
+            use_ly_fallback=use_ly_fallback,
+        )
+        if not bulk.empty:
+            _log.info(
+                "PO ADS platform-history path (LY/seasonal): %s rows (lag=%sd)",
+                len(bulk),
+                lag,
+            )
+            return bulk
 
     if sdf is not None and not getattr(sdf, "empty", True):
         if _sales_has_ads_history(sdf, plan, period_days, use_seasonality, use_ly_fallback):
@@ -507,41 +649,16 @@ def build_po_ads_platform_sales(
     if not window_plats:
         return pd.DataFrame()
 
-    frame_overrides: dict[str, pd.DataFrame] = {}
-    used_tier3 = False
-    for platform, attr in _PLATFORM_ATTRS:
-        cur = getattr(sess, attr, pd.DataFrame())
-        tier = pd.DataFrame()
-        if platform in window_plats:
-            tier = load_platform_data_for_report_range(
-                platform, start, end, dedup=True, columns_only=True
-            )
-        if not tier.empty:
-            lo, _hi = platform_df_date_bounds(tier)
-            if (
-                cur is not None
-                and not getattr(cur, "empty", True)
-                and lo is not None
-                and pd.notna(lo)
-            ):
-                col = platform_date_column(cur)
-                if col:
-                    cur_dates = pd.to_datetime(cur[col], errors="coerce")
-                    older = cur.loc[cur_dates < lo].copy()
-                    frame_overrides[attr] = (
-                        merge_platform_data(older, tier, platform)
-                        if not older.empty
-                        else tier
-                    )
-                else:
-                    frame_overrides[attr] = tier
-            else:
-                frame_overrides[attr] = tier
-            used_tier3 = True
-        elif cur is not None and not getattr(cur, "empty", True):
-            frame_overrides[attr] = cur
+    bulk_frames = _session_platform_frames(sess)
+    frame_overrides, used_tier3 = _overlay_tier3_on_platform_frames(
+        sess,
+        bulk_frames,
+        start=start,
+        end=end,
+        window_plats=window_plats,
+    )
 
-    if not used_tier3:
+    if not used_tier3 and not frame_overrides:
         return pd.DataFrame()
 
     from .po_calculate_run import _build_platform_sales_df

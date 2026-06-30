@@ -93,7 +93,11 @@ def execute_daily_inventory_upload(
 ) -> dict[str, Any]:
     from .daily_inventory_history import (
         filter_inventory_history_window,
+        inventory_history_max_date,
+        inventory_history_min_date,
         inventory_sheet_end_date_from_filename,
+        inventory_sheet_start_date_from_filename,
+        is_full_matrix_inventory_reupload,
         merge_inventory_history,
         parse_daily_inventory_history_upload,
         promote_daily_inventory_matrix_max_date,
@@ -107,12 +111,22 @@ def execute_daily_inventory_upload(
         if sess is not None:
             sess.daily_inventory_upload_message = msg
 
+    fn_end = inventory_sheet_end_date_from_filename(filename or "")
+    fn_start = inventory_sheet_start_date_from_filename(filename or "")
+    history_days = _MAX_HISTORY_DAYS
+    if fn_start and fn_end:
+        try:
+            span = int((pd.Timestamp(fn_end) - pd.Timestamp(fn_start)).days) + 1
+            history_days = max(history_days, span)
+        except Exception:
+            pass
+
     _progress("Parsing daily inventory sheet…")
     df = parse_daily_inventory_history_upload(
         BytesIO(raw),
         filename,
         sku_mapping=sess.sku_mapping or None,
-        max_days=_MAX_HISTORY_DAYS,
+        max_days=history_days,
         on_progress=_progress,
     )
     if df.empty:
@@ -122,26 +136,23 @@ def execute_daily_inventory_upload(
             "column 2 = parent (optional), then daily snapshot columns whose first row is the date.",
         }
 
-    from .daily_inventory_history import recanonicalize_inventory_history_skus
-
     if sess.sku_mapping:
         df = recanonicalize_inventory_history_skus(df, sess.sku_mapping)
     df = drop_zero_derived_rows(df)
-
-    from .daily_inventory_history import inventory_history_max_date
 
     sheet_max = inventory_history_max_date(df)
     end_anchor = str(sheet_max.date()) if sheet_max is not None else None
     fn_end = inventory_sheet_end_date_from_filename(filename or "")
     if fn_end and (not end_anchor or fn_end > end_anchor):
         end_anchor = fn_end
-    df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS, end_date=end_anchor)
+    df = filter_inventory_history_window(df, days=history_days, end_date=end_anchor)
     trim_note = (
-        f"Kept last {_MAX_HISTORY_DAYS} calendar days ending "
+        f"Kept last {history_days} calendar days ending "
         f"{end_anchor or 'today (IST)'}."
     )
 
     existing = getattr(sess, "daily_inventory_history_df", None)
+    full_matrix = is_full_matrix_inventory_reupload(existing, df, filename or "")
     if existing is not None and not existing.empty:
         incoming_dates = set(
             pd.to_datetime(df["Date"], errors="coerce").dt.normalize().dropna().unique()
@@ -152,13 +163,27 @@ def execute_daily_inventory_upload(
         ex_max = inventory_history_max_date(existing)
         in_skus = int(df["OMS_SKU"].astype(str).nunique())
         ex_skus = int(existing["OMS_SKU"].astype(str).nunique())
-        full_reupload = (
+        full_reupload = full_matrix or (
             in_max is not None
             and ex_max is not None
             and in_max >= ex_max
             and in_skus >= max(500, int(ex_skus * 0.85))
         )
-        if full_reupload or (incoming_dates and incoming_dates >= ex_date_set):
+        if full_reupload:
+            in_min = inventory_history_min_date(df)
+            if in_min is not None and in_max is not None:
+                # Drop every existing row inside (or before) the matrix — only keep post-matrix tail.
+                kept = existing.loc[ex_dates > in_max]
+                if len(kept) < len(existing):
+                    _progress("Replacing wide-matrix date range…")
+                    df = merge_inventory_history(kept, df) if not kept.empty else df
+                snap_dates = list(getattr(sess, "daily_inventory_history_snapshot_dates", None) or [])
+                in_lo = str(pd.Timestamp(in_min).date())
+                in_hi = str(pd.Timestamp(in_max).date())
+                sess.daily_inventory_history_snapshot_dates = [
+                    d for d in snap_dates if d < in_lo or d > in_hi
+                ]
+        elif incoming_dates and incoming_dates >= ex_date_set:
             # Full wide-matrix re-upload — skip merge with stale derived/zero rows.
             pass
         elif incoming_dates:
@@ -172,9 +197,9 @@ def execute_daily_inventory_upload(
         fn_end = inventory_sheet_end_date_from_filename(filename or "")
         if fn_end and (not end_anchor or fn_end > end_anchor):
             end_anchor = fn_end
-        df = filter_inventory_history_window(df, days=_MAX_HISTORY_DAYS, end_date=end_anchor)
+        df = filter_inventory_history_window(df, days=history_days, end_date=end_anchor)
         trim_note = (
-            f"Replaced overlapping dates; kept last {_MAX_HISTORY_DAYS} days ending "
+            f"Replaced overlapping dates; kept last {history_days} days ending "
             f"{end_anchor or 'today (IST)'}."
         )
 

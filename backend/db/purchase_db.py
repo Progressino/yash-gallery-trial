@@ -30,6 +30,99 @@ def _item_db_path() -> str:
     )
 
 
+def _sync_item_master_stock(
+    lines: list[dict],
+    *,
+    grn_or_min_number: str,
+    entry_date: str,
+    direction: str,
+    qty_field: str,
+    reason: str,
+) -> None:
+    """Apply IN/OUT to Item Master stock for material lines."""
+    from ..db.item_db import adjust_item_stock, get_item_by_code
+
+    dir_u = str(direction or "").strip().upper()
+    if dir_u not in ("IN", "OUT"):
+        return
+    for ln in lines:
+        code = str(ln.get("material_code") or "").strip()
+        qty = float(ln.get(qty_field) or 0)
+        if not code or qty <= 0:
+            continue
+        item = get_item_by_code(code)
+        if not item:
+            _log.warning("Item Master stock skip — unknown code %s (%s)", code, grn_or_min_number)
+            continue
+        try:
+            adjust_item_stock(
+                int(item["id"]),
+                qty,
+                dir_u,
+                entry_date=entry_date or datetime.now().strftime("%Y-%m-%d"),
+                reason=reason,
+                reference_no=grn_or_min_number,
+                unit=str(ln.get("unit") or item.get("uom") or "PCS"),
+            )
+        except Exception as exc:
+            _log.warning("Item Master stock %s failed for %s: %s", dir_u, code, exc)
+
+
+def _post_min_grey_ledger(note: dict, lines: list[dict], *, reverse: bool = False) -> None:
+    """Grey-fabric tracker ledger — only when a confirmed MIN is posted or reversed."""
+    jwo_ref = str(note.get("jwo_reference") or "").strip()
+    so_ref = str(note.get("so_reference") or "").strip()
+    min_num = str(note.get("min_number") or "")
+    try:
+        gconn = sqlite3.connect(_grey_db_path())
+        gconn.row_factory = sqlite3.Row
+        for ln in lines:
+            mat_code = str(ln.get("material_code") or "").strip()
+            qty = float(ln.get("issue_qty") or 0)
+            if not mat_code or qty <= 0:
+                continue
+            tracker = gconn.execute(
+                """SELECT id, material_code, material_name FROM grey_tracker
+                   WHERE material_code=? AND (job_work_order_no=? OR so_reference=? OR so_reference='')
+                   ORDER BY CASE WHEN job_work_order_no=? THEN 0 ELSE 1 END, id DESC LIMIT 1""",
+                (mat_code, jwo_ref, so_ref, jwo_ref),
+            ).fetchone()
+            if not tracker:
+                continue
+            txn = "Reverse: MIN Cancelled" if reverse else "MIN Confirmed - Material Issue"
+            gconn.execute(
+                """INSERT INTO grey_ledger(entry_date,tracker_id,material_code,
+                   material_name,transaction_type,qty,unit,from_location,to_location,reference_no,remarks)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    note.get("min_date") or datetime.now().strftime("%Y-%m-%d"),
+                    tracker["id"],
+                    tracker["material_code"],
+                    tracker["material_name"],
+                    txn,
+                    qty,
+                    str(ln.get("unit") or "MTR"),
+                    "Factory/Warehouse",
+                    note.get("to_location") or "Processor",
+                    min_num,
+                    f"MIN: {min_num}" + (" (reversed)" if reverse else ""),
+                ),
+            )
+            if not reverse:
+                gconn.execute(
+                    """UPDATE grey_tracker SET status=?, updated_at=? WHERE id=?""",
+                    (
+                        "Sent to Printer",
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        tracker["id"],
+                    ),
+                )
+        gconn.commit()
+        gconn.close()
+    except Exception as exc:
+        _log.warning("MIN grey ledger sync failed: %s", exc)
+
+
 _GREY_HINT_TOKENS = ("grey", "gray", "greige", "fabric", "knit", "woven")
 _GREY_ITEM_TYPE_NAMES = {"grey fabric", "greige", "greige fabric"}
 _GREY_ITEM_TYPE_CODES = {"GF", "GREY", "GREIGE"}
@@ -388,6 +481,16 @@ def init_db():
         "ALTER TABLE pr_lines ADD COLUMN po_qty REAL DEFAULT 0",
         "ALTER TABLE po_lines ADD COLUMN grn_accepted_qty REAL DEFAULT 0",
         "ALTER TABLE grn_headers ADD COLUMN inventory_posted INTEGER DEFAULT 0",
+        "ALTER TABLE grn_headers ADD COLUMN item_stock_posted INTEGER DEFAULT 0",
+        "ALTER TABLE material_issue_notes ADD COLUMN stock_posted INTEGER DEFAULT 0",
+        "ALTER TABLE po_headers ADD COLUMN bill_to_name TEXT DEFAULT ''",
+        "ALTER TABLE po_headers ADD COLUMN bill_to_address TEXT DEFAULT ''",
+        "ALTER TABLE po_headers ADD COLUMN bill_to_gst TEXT DEFAULT ''",
+        "ALTER TABLE po_headers ADD COLUMN ship_to_name TEXT DEFAULT ''",
+        "ALTER TABLE po_headers ADD COLUMN ship_to_address TEXT DEFAULT ''",
+        "ALTER TABLE po_headers ADD COLUMN ship_to_contact TEXT DEFAULT ''",
+        "ALTER TABLE po_headers ADD COLUMN ship_to_phone TEXT DEFAULT ''",
+        "ALTER TABLE po_headers ADD COLUMN ship_to_gst TEXT DEFAULT ''",
     ]:
         try: conn.execute(sql)
         except: pass
@@ -592,14 +695,19 @@ def create_po(data: dict):
     subtotal = sum(_line_amount(l) for l in lines)
     gst = sum(_line_amount(l) * float(l.get('gst_pct') or 0) / 100 for l in lines)
     conn.execute("""INSERT INTO po_headers(po_number,po_date,supplier_id,supplier_name,currency,payment_terms,
-        delivery_location,delivery_date,pr_reference,so_reference,status,subtotal,gst_amount,total,remarks)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        delivery_location,delivery_date,pr_reference,so_reference,status,subtotal,gst_amount,total,remarks,
+        bill_to_name,bill_to_address,bill_to_gst,ship_to_name,ship_to_address,ship_to_contact,ship_to_phone,ship_to_gst)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (num, data.get('po_date') or datetime.now().strftime('%Y-%m-%d'),
         data.get('supplier_id'), data.get('supplier_name') or '',
         data.get('currency') or 'INR', data.get('payment_terms') or '',
         data.get('delivery_location') or '', data.get('delivery_date') or '',
         data.get('pr_reference') or '', data.get('so_reference') or '',
-        'Draft', subtotal, gst, subtotal+gst, data.get('remarks') or ''))
+        'Draft', subtotal, gst, subtotal+gst, data.get('remarks') or '',
+        data.get('bill_to_name') or '', data.get('bill_to_address') or '',
+        data.get('bill_to_gst') or '', data.get('ship_to_name') or '',
+        data.get('ship_to_address') or '', data.get('ship_to_contact') or '',
+        data.get('ship_to_phone') or '', data.get('ship_to_gst') or ''))
     poid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in lines:
         amt = _line_amount(ln)
@@ -627,7 +735,11 @@ def update_po_status(poid: int, status: str):
 
 def update_po(poid: int, data: dict):
     conn = _connect()
-    allowed = ['supplier_id','supplier_name','payment_terms','delivery_location','delivery_date','so_reference','remarks']
+    allowed = [
+        'supplier_id', 'supplier_name', 'payment_terms', 'delivery_location', 'delivery_date',
+        'so_reference', 'remarks', 'bill_to_name', 'bill_to_address', 'bill_to_gst',
+        'ship_to_name', 'ship_to_address', 'ship_to_contact', 'ship_to_phone', 'ship_to_gst',
+    ]
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]
     if sets:
@@ -845,14 +957,7 @@ def create_jwo(data: dict):
                     (input_mat, so_ref)).fetchone()
                 if tracker:
                     gconn.execute("""UPDATE grey_tracker SET job_work_order_no=?, status=?, updated_at=? WHERE id=?""",
-                        (num, 'Sent to Printer', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), tracker['id']))
-                    gconn.execute("""INSERT INTO grey_ledger(entry_date,tracker_id,material_code,
-                        material_name,transaction_type,qty,unit,from_location,to_location,reference_no,remarks)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                        (datetime.now().strftime('%Y-%m-%d'), tracker['id'],
-                        tracker['material_code'], tracker['material_name'],
-                        'JWO Created - Sent to Printer', float(ln.get('input_qty',0)),
-                        'MTR', 'Factory/Warehouse', 'Printer', num, f"JWO: {num}"))
+                        (num, 'Job Work Ordered', datetime.now().strftime('%Y-%m-%d %H:%M:%S'), tracker['id']))
             gconn.commit(); gconn.close()
         except Exception: pass
     line_snapshots = [
@@ -1416,6 +1521,16 @@ def create_grn(data: dict):
     elif data.get("grn_type") == "JWO Receipt" and ref:
         _maybe_close_jwo_after_grn(conn, ref)
     _post_grn_inventory_sync(conn, grnid, num, data)
+    grn_date = data.get("grn_date") or datetime.now().strftime("%Y-%m-%d")
+    _sync_item_master_stock(
+        lines,
+        grn_or_min_number=num,
+        entry_date=grn_date,
+        direction="IN",
+        qty_field="accepted_qty",
+        reason="GRN Receipt",
+    )
+    conn.execute("UPDATE grn_headers SET item_stock_posted=1 WHERE id=?", (grnid,))
     conn.commit()
     conn.close()
     return num
@@ -1435,6 +1550,16 @@ def update_grn_status(grnid: int, status: str, qc_by: str = ""):
         data["lines"] = lines
         if int(hdr["inventory_posted"] or 0):
             _reverse_grn_inventory_sync(conn, grnid, hdr["grn_number"], data)
+        if int(hdr["item_stock_posted"] or 0):
+            _sync_item_master_stock(
+                lines,
+                grn_or_min_number=hdr["grn_number"],
+                entry_date=hdr["grn_date"] or datetime.now().strftime("%Y-%m-%d"),
+                direction="OUT",
+                qty_field="accepted_qty",
+                reason="Reverse: GRN Cancelled",
+            )
+            conn.execute("UPDATE grn_headers SET item_stock_posted=0 WHERE id=?", (grnid,))
         if hdr["grn_type"] == "PO Receipt" and ref:
             _apply_po_grn_accepted(conn, ref, lines, subtract=True)
             conn.execute(
@@ -1579,8 +1704,56 @@ def create_min(data: dict):
 
 def update_min_status(minid: int, status: str):
     conn = _connect()
-    conn.execute("UPDATE material_issue_notes SET status=? WHERE id=?", (status, minid))
-    conn.commit(); conn.close()
+    row = conn.execute("SELECT * FROM material_issue_notes WHERE id=?", (minid,)).fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("Material issue note not found")
+    note = dict(row)
+    lines = [dict(l) for l in conn.execute("SELECT * FROM min_lines WHERE min_id=?", (minid,)).fetchall()]
+    cur_status = str(note.get("status") or "")
+    new_status = str(status or "").strip()
+
+    if new_status == "Confirmed":
+        if cur_status != "Draft":
+            conn.close()
+            raise ValueError("Only Draft issue notes can be confirmed")
+        if int(note.get("stock_posted") or 0):
+            conn.close()
+            raise ValueError("Stock already posted for this issue note")
+        _sync_item_master_stock(
+            lines,
+            grn_or_min_number=note.get("min_number") or "",
+            entry_date=note.get("min_date") or datetime.now().strftime("%Y-%m-%d"),
+            direction="OUT",
+            qty_field="issue_qty",
+            reason="Material Issue Note",
+        )
+        _post_min_grey_ledger(note, lines, reverse=False)
+        conn.execute(
+            "UPDATE material_issue_notes SET status='Confirmed', stock_posted=1 WHERE id=?",
+            (minid,),
+        )
+    elif new_status == "Cancelled":
+        if cur_status == "Confirmed" and int(note.get("stock_posted") or 0):
+            _sync_item_master_stock(
+                lines,
+                grn_or_min_number=note.get("min_number") or "",
+                entry_date=note.get("min_date") or datetime.now().strftime("%Y-%m-%d"),
+                direction="IN",
+                qty_field="issue_qty",
+                reason="Reverse: MIN Cancelled",
+            )
+            _post_min_grey_ledger(note, lines, reverse=True)
+            conn.execute(
+                "UPDATE material_issue_notes SET status='Cancelled', stock_posted=0 WHERE id=?",
+                (minid,),
+            )
+        else:
+            conn.execute("UPDATE material_issue_notes SET status='Cancelled' WHERE id=?", (minid,))
+    else:
+        conn.execute("UPDATE material_issue_notes SET status=? WHERE id=?", (new_status, minid))
+    conn.commit()
+    conn.close()
 
 def get_min_by_number(min_number: str):
     conn = _connect()

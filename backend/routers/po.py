@@ -252,6 +252,8 @@ class PORequest(BaseModel):
     # When False, ADS uses only the current-period sales (no Last Year fallback).
     # Set True to blend LY data for seasonal planning, False for current-demand-only PO.
     use_ly_fallback: bool = True
+    # When True, PO cover / days-left / quantity use OMS warehouse stock only.
+    use_oms_inventory_only: bool = False
     # When True (default), reuse another session's PO result on this server if planning
     # date, settings, and data snapshot match (see ``po_shared_cache``).
     use_shared_cache: bool = True
@@ -1517,6 +1519,7 @@ def po_dashboard(request: Request, body: PODashboardRequest):
             po_return_overlay_df=_return_overlay_for_po_calc(sess),
             urgent_all_sizes_days=body.urgent_all_sizes_days,
             use_ly_fallback=body.use_ly_fallback,
+            use_oms_inventory_only=body.use_oms_inventory_only,
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}
@@ -1793,6 +1796,7 @@ def po_shared_cache_info(request: Request):
             "enforce_lead_time_release_gate",
             "auto_import_yesterday_ledger",
             "use_ly_fallback",
+            "use_oms_inventory_only",
         ):
             body[k] = str(raw).strip().lower() in ("1", "true", "yes", "on")
         elif k in ("period_days", "lead_time", "target_days", "min_denominator", "grace_days", "urgent_all_sizes_days", "raise_ledger_lookback_days"):

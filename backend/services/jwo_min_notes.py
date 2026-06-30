@@ -161,6 +161,13 @@ def create_min_for_jwo(jwoid: int, jwo_number: str, jwo: dict, jwo_lines: list[d
     if existing:
         min_id = int(existing["id"])
         min_num = str(existing["min_number"])
+        locked = conn.execute(
+            "SELECT status, stock_posted FROM material_issue_notes WHERE id=?",
+            (min_id,),
+        ).fetchone()
+        if locked and str(locked["status"]) == "Confirmed":
+            conn.close()
+            return get_min_by_jwo_id(jwoid)
         conn.execute("DELETE FROM min_lines WHERE min_id=?", (min_id,))
         conn.execute(
             """UPDATE material_issue_notes SET min_date=?, jwo_id=?, jwo_date=?,

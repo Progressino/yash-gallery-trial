@@ -252,6 +252,7 @@ def execute_po_calculate(
             po_return_overlay_df=snap.po_return_overlay_df,
             urgent_all_sizes_days=int(body.get("urgent_all_sizes_days", 45)),
             use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+            use_oms_inventory_only=bool(body.get("use_oms_inventory_only", False)),
             stage_timer=stage_timer,
             manual_existing_po_raise_skus=_manual_raise_skus or None,
             manual_existing_po_raise_date=_manual_raise_date,
@@ -266,7 +267,16 @@ def execute_po_calculate(
             from .po_quarterly_warmup import attach_quarterly_columns_to_po_df
 
             po_df = attach_quarterly_columns_to_po_df(
-                po_df, sess, group_by_parent=group_by_parent, n_quarters=8
+                po_df,
+                sess,
+                group_by_parent=group_by_parent,
+                n_quarters=8,
+                planning_date=body.get("planning_date"),
+                period_days=int(body.get("period_days", 30)),
+                demand_basis=str(body.get("demand_basis", "Sold")),
+                use_ly_fallback=bool(body.get("use_ly_fallback", True)),
+                use_seasonality=bool(body.get("use_seasonality", False)),
+                seasonal_weight=float(body.get("seasonal_weight", 0.5)),
             )
         except Exception:
             logger.exception("attach_quarterly_columns_to_po_df failed (non-fatal)")

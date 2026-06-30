@@ -568,6 +568,12 @@ def attach_quarterly_columns_to_po_df(
     *,
     group_by_parent: bool = False,
     n_quarters: int = 8,
+    planning_date: str | None = None,
+    period_days: int = 30,
+    demand_basis: str = "Sold",
+    use_ly_fallback: bool = True,
+    use_seasonality: bool = False,
+    seasonal_weight: float = 0.5,
 ) -> pd.DataFrame:
     """Merge quarterly shipment history columns into PO result rows (inline in Calculate PO)."""
     if po_df is None or po_df.empty or "OMS_SKU" not in po_df.columns:
@@ -593,7 +599,18 @@ def attach_quarterly_columns_to_po_df(
     out = po_df.merge(q_sub, on="OMS_SKU", how="left")
     for c in merge_cols:
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
-    return out
+
+    from .po_engine import apply_quarterly_ads_floors
+
+    return apply_quarterly_ads_floors(
+        out,
+        planning_date=planning_date,
+        period_days=period_days,
+        demand_basis=demand_basis,
+        use_ly_fallback=use_ly_fallback,
+        use_seasonality=use_seasonality,
+        seasonal_weight=seasonal_weight,
+    )
 
 
 def schedule_shared_quarterly_prewarm() -> None:

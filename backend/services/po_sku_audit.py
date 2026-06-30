@@ -24,6 +24,7 @@ def _body_from_query(qp: dict) -> dict[str, Any]:
             "enforce_lead_time_release_gate",
             "auto_import_yesterday_ledger",
             "use_ly_fallback",
+            "use_oms_inventory_only",
         ):
             body[k] = str(raw).strip().lower() in ("1", "true", "yes", "on")
         elif k in (

@@ -456,6 +456,139 @@ def _calendar_quarter_span(ref: pd.Timestamp, years_ago: int) -> tuple[pd.Timest
     return start.normalize(), end.normalize()
 
 
+def _primary_ads_from_signals(
+    recent_ads,
+    ly_ads,
+    *,
+    use_seasonality: bool,
+    use_ly_fallback: bool,
+    seasonal_weight: float,
+):
+    """Blend recent with LY — midpoint when weight=0.5 (not max(recent, ly))."""
+    recent = np.asarray(pd.to_numeric(recent_ads, errors="coerce"), dtype=float)
+    ly = np.asarray(pd.to_numeric(ly_ads, errors="coerce"), dtype=float)
+    recent = np.nan_to_num(recent, nan=0.0)
+    ly = np.nan_to_num(ly, nan=0.0)
+    w = float(seasonal_weight)
+    if use_seasonality or use_ly_fallback:
+        return np.where(ly > 0, recent * w + ly * (1.0 - w), recent)
+    return recent
+
+
+def _final_ads_from_signals(
+    prim_ads,
+    seasonal_ads,
+    flat_ads,
+    *,
+    use_seasonality: bool,
+):
+    flat = np.asarray(pd.to_numeric(flat_ads, errors="coerce"), dtype=float)
+    prim = np.asarray(pd.to_numeric(prim_ads, errors="coerce"), dtype=float)
+    flat = np.nan_to_num(flat, nan=0.0)
+    prim = np.nan_to_num(prim, nan=0.0)
+    if use_seasonality:
+        seasonal = np.asarray(pd.to_numeric(seasonal_ads, errors="coerce"), dtype=float)
+        seasonal = np.nan_to_num(seasonal, nan=0.0)
+        return np.maximum.reduce([prim, seasonal, flat])
+    return np.maximum(prim, flat)
+
+
+def _apply_period_burst_cap(prim_ads, sold_units, flat_ads, *, period_days: int):
+    """Short-span Recent_ADS cannot exceed the period average (sold ÷ period_days).
+
+    Applies to all sellers — e.g. 6 sold in 30d → max 0.2/day even when Eff_Days=6.
+    Must be applied everywhere ``prim_ads`` is computed (main pass and bundled
+    fan-out recompute) — a burst SKU re-scored after fan-out must obey the same cap.
+    """
+    sold = np.asarray(pd.to_numeric(pd.Series(sold_units), errors="coerce").fillna(0), dtype=float)
+    flat = np.asarray(pd.to_numeric(pd.Series(flat_ads), errors="coerce").fillna(0), dtype=float)
+    prim = np.asarray(pd.to_numeric(pd.Series(prim_ads), errors="coerce").fillna(0), dtype=float)
+    period_rate = np.clip(sold / float(period_days or 1), 0.0, None)
+    ceil = np.maximum(flat, period_rate)
+    cap_mask = (sold >= 6) & (prim > ceil)
+    return np.where(cap_mask, np.minimum(prim, ceil), prim)
+
+
+def apply_quarterly_ads_floors(
+    po_df: pd.DataFrame,
+    *,
+    planning_date: str | None,
+    period_days: int = 30,
+    demand_basis: str = "Sold",
+    use_ly_fallback: bool = True,
+    use_seasonality: bool = False,
+    seasonal_weight: float = 0.5,
+) -> pd.DataFrame:
+    """
+    Floor LY / Seasonal ADS from the same prior-year quarter column shown in PO.
+
+    Unified sales used for ADS often under-counts Tier-1 bulk; quarterly cache
+    (Tier-1 + Tier-3 streaming + sales supplement) is what users verify in the UI.
+    """
+    if po_df is None or po_df.empty or "OMS_SKU" not in po_df.columns:
+        return po_df
+    if not use_ly_fallback and not use_seasonality:
+        return po_df
+    if "LY_ADS" not in po_df.columns:
+        return po_df
+
+    try:
+        plan = pd.Timestamp(pd.to_datetime(str(planning_date or pd.Timestamp.today()).strip()[:10]))
+    except Exception:
+        plan = pd.Timestamp.today().normalize()
+
+    q_start, q_end = _calendar_quarter_span(plan, 1)
+    fy, qn = get_indian_fy_quarter(q_start)
+    col = quarter_col_name(fy, qn)
+    if col not in po_df.columns:
+        return po_df
+
+    q_days = max(int((q_end.normalize() - q_start.normalize()).days) + 1, 7)
+    q_units = pd.to_numeric(po_df[col], errors="coerce").fillna(0).clip(lower=0)
+    q_rate = (q_units / float(q_days)).round(3)
+    if not bool((q_rate > 0).any()):
+        return po_df
+
+    ly = pd.to_numeric(po_df["LY_ADS"], errors="coerce").fillna(0.0)
+    po_df["LY_ADS"] = np.maximum(ly, q_rate).round(3)
+
+    if "Seasonal_Month_ADS" in po_df.columns:
+        sea = pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0)
+        po_df["Seasonal_Month_ADS"] = np.maximum(sea, q_rate).round(3)
+
+    if "ADS" not in po_df.columns:
+        return po_df
+
+    recent = pd.to_numeric(po_df.get("Recent_ADS", 0), errors="coerce").fillna(0.0)
+    ly_ads = pd.to_numeric(po_df["LY_ADS"], errors="coerce").fillna(0.0)
+    seasonal_ads = pd.to_numeric(po_df.get("Seasonal_Month_ADS", 0), errors="coerce").fillna(0.0)
+    flat_ads = pd.to_numeric(po_df.get("Flat30_ADS", 0), errors="coerce").fillna(0.0)
+    ads_window = max(int(period_days), 1)
+
+    prim = _primary_ads_from_signals(
+        recent,
+        ly_ads,
+        use_seasonality=use_seasonality,
+        use_ly_fallback=use_ly_fallback,
+        seasonal_weight=seasonal_weight,
+    )
+
+    _sold_cap = (
+        pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
+        if str(demand_basis).strip().lower() == "net"
+        else pd.to_numeric(po_df.get("Sold_Units", 0), errors="coerce").fillna(0)
+    )
+    _period_rate = (_sold_cap / float(ads_window)).clip(lower=0.0)
+    _ceil = np.maximum(flat_ads, _period_rate)
+    prim_ads = pd.Series(prim, index=po_df.index, dtype=float)
+    _cap_mask = (_sold_cap >= 6) & (prim_ads > _ceil)
+    prim_ads = np.where(_cap_mask, np.minimum(prim_ads, _ceil), prim_ads)
+    po_df["ADS"] = _final_ads_from_signals(
+        prim_ads, seasonal_ads, flat_ads, use_seasonality=use_seasonality
+    ).round(3)
+    return po_df
+
+
 def _seasonal_adjacent_months_ads(
     sales_df: pd.DataFrame,
     max_date: pd.Timestamp,
@@ -967,6 +1100,25 @@ def _apply_sibling_cut_from_pending(po_df: pd.DataFrame, target_cover_days: floa
     return po_df
 
 
+def _po_inventory_for_calc(
+    po_df: pd.DataFrame,
+    *,
+    use_oms_inventory_only: bool,
+) -> tuple[str, pd.Series]:
+    """Column label and numeric on-hand series used for PO cover / days-left math."""
+    if use_oms_inventory_only and "OMS_Inventory" in po_df.columns:
+        col = "OMS_Inventory"
+    elif not use_oms_inventory_only and "Total_Inventory" in po_df.columns:
+        col = "Total_Inventory"
+    elif "OMS_Inventory" in po_df.columns:
+        col = "OMS_Inventory"
+    elif "Total_Inventory" in po_df.columns:
+        col = "Total_Inventory"
+    else:
+        col = po_df.columns[1] if len(po_df.columns) > 1 else "OMS_SKU"
+    return str(col), pd.to_numeric(po_df[col], errors="coerce").fillna(0.0)
+
+
 def calculate_po_base(
     sales_df: pd.DataFrame,
     inv_df: pd.DataFrame,
@@ -1000,6 +1152,9 @@ def calculate_po_base(
     po_return_overlay_df: Optional[pd.DataFrame] = None,
     urgent_all_sizes_days: int = 45,
     use_ly_fallback: bool = True,
+    # When True, PO cover / days-left / quantity math uses OMS warehouse stock only
+    # (excludes marketplace columns rolled into Total_Inventory).
+    use_oms_inventory_only: bool = False,
     stage_timer: Any = None,
     manual_existing_po_raise_skus: Optional[set[str]] = None,
     manual_existing_po_raise_date: Optional[str] = None,
@@ -1802,10 +1957,7 @@ def calculate_po_base(
             po_df["Recent_ADS"],
         )
     else:
-        if use_ly_fallback:
-            blended = np.maximum(po_df["Recent_ADS"], po_df["LY_ADS"])
-        else:
-            blended = po_df["Recent_ADS"]
+        blended = po_df["Recent_ADS"]
 
     # Final ADS for PO: recent signal (sold ÷ Eff_Days), optionally lifted by LY,
     # capped for non-sparse bursty SKUs, then floored by seasonal + Flat30 (sheet FREQ).
@@ -1816,40 +1968,32 @@ def calculate_po_base(
     if use_seasonality:
         prim_ads = pd.to_numeric(pd.Series(blended, index=po_df.index), errors="coerce").fillna(0.0)
     else:
-        if use_ly_fallback:
-            prim_ads = np.maximum(recent_ads, ly_ads)
-        else:
-            prim_ads = recent_ads
-    # Short-span Recent_ADS cannot exceed the period average (sold ÷ period_days).
-    # Applies to all sellers — e.g. 6 sold in 30d → max 0.2/day even when Eff_Days=6.
+        prim_ads = _primary_ads_from_signals(
+            recent_ads,
+            ly_ads,
+            use_seasonality=False,
+            use_ly_fallback=use_ly_fallback,
+            seasonal_weight=seasonal_weight,
+        )
     _sold_cap = (
         pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
         if demand_basis == "Net"
         else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
     )
-    _period_rate = (_sold_cap / float(ADS_WINDOW)).clip(lower=0.0)
-    _ceil = np.maximum(flat_ads, _period_rate)
-    prim_ads = pd.Series(prim_ads, index=po_df.index, dtype=float)
-    _cap_mask = (_sold_cap >= 6) & (prim_ads > _ceil)
-    prim_ads = np.where(_cap_mask, np.minimum(prim_ads, _ceil), prim_ads)
-    po_df["ADS"] = np.maximum.reduce([prim_ads, seasonal_ads, flat_ads]).round(3)
+    prim_ads = _apply_period_burst_cap(
+        prim_ads, _sold_cap, flat_ads, period_days=ADS_WINDOW
+    )
+    po_df["ADS"] = _final_ads_from_signals(
+        prim_ads, seasonal_ads, flat_ads, use_seasonality=use_seasonality
+    ).round(3)
     po_df.drop(columns=["_sparse_intermittent"], inplace=True, errors="ignore")
 
     if stage_timer is not None and _engine_start is not None:
         stage_timer.mark("forecast", since=_engine_start)
 
-    # PO formula uses OMS_Inventory (physical warehouse only) when available.
-    # Total_Inventory includes marketplace stock (FBA, Myntra shelf, etc.) which is
-    # already deployed and shouldn't reduce the warehouse replenishment order —
-    # this matches how the team manually calculates PO.
-    if "OMS_Inventory" in po_df.columns:
-        inv_col = "OMS_Inventory"
-    elif "Total_Inventory" in po_df.columns:
-        inv_col = "Total_Inventory"
-    else:
-        inv_col = po_df.columns[1]
-
-    inv_vals = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
+    inv_col, inv_vals = _po_inventory_for_calc(
+        po_df, use_oms_inventory_only=use_oms_inventory_only
+    )
 
     # Gross/Net PO is finalised after pipeline merge below (sheet-style balance-days formula).
     po_df["Gross_PO_Qty"] = 0
@@ -1937,18 +2081,32 @@ def calculate_po_base(
                             (_recent * (1 - seasonal_weight)) + (_ly * seasonal_weight),
                             _recent,
                         )
-                    elif use_ly_fallback:
-                        _prim = np.maximum(_recent, _ly)
                     else:
-                        _prim = _recent
-                    po_df.loc[_fan_active, "ADS"] = (
-                        np.maximum.reduce(
-                            [
-                                pd.Series(_prim, index=po_df.index).loc[_fan_active],
-                                _seasonal.loc[_fan_active],
-                                _flat.loc[_fan_active],
-                            ]
+                        _prim = _primary_ads_from_signals(
+                            _recent,
+                            _ly,
+                            use_seasonality=False,
+                            use_ly_fallback=use_ly_fallback,
+                            seasonal_weight=seasonal_weight,
                         )
+                    _prim_series = pd.Series(_prim, index=po_df.index)
+                    _fan_sold = (
+                        pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
+                        if demand_basis == "Net"
+                        else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
+                    )
+                    _prim_capped = _prim_series.copy()
+                    _prim_capped.loc[_fan_active] = _apply_period_burst_cap(
+                        _prim_series.loc[_fan_active],
+                        _fan_sold.loc[_fan_active],
+                        _flat.loc[_fan_active],
+                        period_days=ADS_WINDOW,
+                    )
+                    po_df.loc[_fan_active, "ADS"] = _final_ads_from_signals(
+                        _prim_capped.loc[_fan_active],
+                        _seasonal.loc[_fan_active],
+                        _flat.loc[_fan_active],
+                        use_seasonality=use_seasonality,
                     ).round(3)
                 _fan_zero = _fan_idx & ~_has_eff
                 if _fan_zero.any():
@@ -1966,7 +2124,10 @@ def calculate_po_base(
                 pd.to_numeric(po_df.get("Eff_Days_Inventory"), errors="coerce").fillna(0) <= 0
             )
             _has_ship_ctx = pd.to_numeric(po_df.get("Ship_Units_150d"), errors="coerce").fillna(0) > 0
-            _has_stock = pd.to_numeric(po_df.get("Total_Inventory"), errors="coerce").fillna(0) > 0
+            _, _stock_for_eff = _po_inventory_for_calc(
+                po_df, use_oms_inventory_only=use_oms_inventory_only
+            )
+            _has_stock = _stock_for_eff > 0
             # Keep ship-150 / in-stock Eff_Days set earlier — do not wipe after unbundle.
             po_df.loc[
                 _no_row_demand & _no_inv_hist & ~_has_ship_ctx & ~_has_stock,
@@ -1994,10 +2155,9 @@ def calculate_po_base(
         po_df["PO_Pipeline_Total"] = 0
 
     # Days of stock remaining = current inventory cover only (no pipeline).
-    if "Total_Inventory" in po_df.columns:
-        inv_days_left = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0)
-    else:
-        inv_days_left = inv_vals
+    _, inv_days_left = _po_inventory_for_calc(
+        po_df, use_oms_inventory_only=use_oms_inventory_only
+    )
     po_df["Days_Left"] = np.where(
         po_df["ADS"] > 0,
         (inv_days_left / po_df["ADS"]).round(1),
@@ -2033,6 +2193,7 @@ def calculate_po_base(
                 {"OMS_SKU": [existing_po_merge_key(x) for x in missing_po["OMS_SKU"].values]},
             )
             ghost["Total_Inventory"] = 0
+            ghost["OMS_Inventory"] = 0
             ghost["Sold_Units"]      = 0
             ghost["Return_Units"]    = 0
             ghost["Net_Units"]       = 0
@@ -2413,7 +2574,7 @@ def calculate_po_base(
     #           = max(PO_Pipeline_Total, confirmed_raises)
     po_df["PO_Pipeline_Effective"] = np.maximum(_pipe_total_s.to_numpy(), _conf_raise_s.to_numpy()).astype(int)
 
-    # projected_days_now = (Total_Inventory + effective pipeline) / ADS
+    # projected_days_now = (on-hand for PO + effective pipeline) / ADS
     #
     # PO quantity (hybrid lead gate):
     # • Lead gate ON  — release when projected cover (inv + pipeline) is below lead days:
@@ -2423,10 +2584,9 @@ def calculate_po_base(
     target_cover_days = float(max(0, target_days + grace_days))
     _lt_gate_arr = _lead_time_release_gate_days(po_df, lead_time)
     _lt_gate_uses_entered = _lead_time_gate_uses_entered(lead_time)
-    if "Total_Inventory" in po_df.columns:
-        inv_for_cover = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0.0)
-    else:
-        inv_for_cover = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0.0)
+    _, inv_for_cover = _po_inventory_for_calc(
+        po_df, use_oms_inventory_only=use_oms_inventory_only
+    )
     ads_num = pd.to_numeric(po_df["ADS"], errors="coerce").fillna(0.0)
     pipe_num = pd.to_numeric(po_df["PO_Pipeline_Effective"], errors="coerce").fillna(0.0)
     projected_days_now = np.where(ads_num > 0, (inv_for_cover + pipe_num) / ads_num, 999.0)
@@ -2656,10 +2816,9 @@ def calculate_po_base(
 
     # Formula-sheet aligned:
     # Projected_Running_Days = current cover before new release.
-    if "Total_Inventory" in po_df.columns:
-        inv_days_left = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0)
-    else:
-        inv_days_left = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0)
+    _, inv_days_left = _po_inventory_for_calc(
+        po_df, use_oms_inventory_only=use_oms_inventory_only
+    )
     po_df["Projected_Running_Days"] = np.where(
         po_df["ADS"] > 0,
         ((inv_days_left + po_df["PO_Pipeline_Effective"]) / po_df["ADS"]).round(1),
@@ -2850,10 +3009,9 @@ def calculate_po_base(
 
             logging.getLogger(__name__).exception("manual existing PO raise block failed")
 
-    if "Total_Inventory" in po_df.columns:
-        _inv_final = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0.0)
-    else:
-        _inv_final = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0.0)
+    _, _inv_final = _po_inventory_for_calc(
+        po_df, use_oms_inventory_only=use_oms_inventory_only
+    )
     po_df["Post_PO_Cover_Days_Capped"] = np.where(
         po_df["ADS"] > 0,
         ((_inv_final + po_df["PO_Pipeline_Effective"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),
@@ -2947,10 +3105,9 @@ def calculate_po_base(
                     br + "; " + _msg_two,
                 )
 
-        if "Total_Inventory" in po_df.columns:
-            _inv_fin2 = pd.to_numeric(po_df["Total_Inventory"], errors="coerce").fillna(0.0)
-        else:
-            _inv_fin2 = pd.to_numeric(po_df[inv_col], errors="coerce").fillna(0.0)
+        _, _inv_fin2 = _po_inventory_for_calc(
+            po_df, use_oms_inventory_only=use_oms_inventory_only
+        )
         po_df["Post_PO_Cover_Days_Capped"] = np.where(
             po_df["ADS"] > 0,
             ((_inv_fin2 + po_df["PO_Pipeline_Effective"] + po_df["PO_Qty"]) / po_df["ADS"]).round(1),

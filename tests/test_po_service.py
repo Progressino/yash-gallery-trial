@@ -4863,3 +4863,46 @@ def test_merge_po_optional_sheets_includes_raise_ledger():
     assert cached is not None and not cached.empty
     assert int(cached.iloc[0]["Raised_Qty"]) == 40
 
+
+def test_use_oms_inventory_only_changes_cover_and_po_qty():
+    """OMS-only toggle should exclude marketplace stock from cover / PO math."""
+    from backend.services.po_engine import calculate_po_base
+
+    sku = "OMS-INV-TOGGLE-1"
+    sales = pd.DataFrame(
+        {
+            "Sku": [sku] * 30,
+            "TxnDate": pd.date_range("2026-05-01", periods=30, freq="D"),
+            "Transaction Type": ["Shipment"] * 30,
+            "Quantity": [1] * 30,
+            "Units_Effective": [1.0] * 30,
+            "Source": ["Myntra"] * 30,
+        }
+    )
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": [sku],
+            "Total_Inventory": [100],
+            "OMS_Inventory": [50],
+        }
+    )
+    common = dict(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=0,
+        target_days=180,
+        grace_days=0,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        enforce_two_size_minimum=False,
+        enforce_lead_time_release_gate=False,
+    )
+    po_total = calculate_po_base(**common, use_oms_inventory_only=False)
+    po_oms = calculate_po_base(**common, use_oms_inventory_only=True)
+    row_total = po_total.iloc[0]
+    row_oms = po_oms.iloc[0]
+    assert float(row_total["Days_Left"]) == 100.0
+    assert float(row_oms["Days_Left"]) == 50.0
+    assert int(row_total["PO_Qty"]) < int(row_oms["PO_Qty"])
+

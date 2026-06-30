@@ -31,19 +31,22 @@ def _expected_ads_row(
     *,
     period_days: int,
     use_ly_fallback: bool,
+    seasonal_weight: float = 0.5,
 ) -> float:
     """Mirror engine ADS layering + period burst cap (rounded to 3 dp)."""
     sold = float(row.get("Sold_Units") or 0)
     recent = float(row.get("Recent_ADS") or 0)
     ly = float(row.get("LY_ADS") or 0)
-    seasonal = float(row.get("Seasonal_Month_ADS") or 0)
     flat = float(row.get("Flat30_ADS") or 0)
-    prim = max(recent, ly) if use_ly_fallback else recent
+    if use_ly_fallback and ly > 0:
+        prim = recent * seasonal_weight + ly * (1.0 - seasonal_weight)
+    else:
+        prim = recent
     period_rate = sold / float(period_days) if period_days else 0.0
     ceil = max(flat, period_rate)
     if sold >= 6 and prim > ceil:
         prim = ceil
-    return round(max(prim, seasonal, flat), 3)
+    return round(max(prim, flat), 3)
 
 
 def _formula_mismatches(
@@ -216,6 +219,32 @@ def test_sparse_burst_synthetic_cases():
     assert int(r2["Sold_Units"]) == 96
     assert float(r2["Recent_ADS"]) == pytest.approx(4.0, abs=0.05)
     assert float(r2["ADS"]) == pytest.approx(3.2, abs=0.05)
+
+
+def test_apply_period_burst_cap_used_by_both_main_and_fanout_paths():
+    """Regression: bundled-fan-out ADS recompute must obey the same period-burst
+    cap as the main pass — previously the fan-out block skipped the cap entirely,
+    letting sibling-size rows (e.g. when a bundled parent fans demand to in-stock
+    children) report uncapped, inflated Recent_ADS and over-order PO quantity."""
+    from backend.services.po_engine import _apply_period_burst_cap
+
+    # 6 sold over a short Eff_Days window (burst) → must cap to sold/period_days.
+    capped = _apply_period_burst_cap(
+        prim_ads=[3.0], sold_units=[6], flat_ads=[0.1], period_days=30
+    )
+    assert capped[0] == pytest.approx(0.2, abs=1e-6)
+
+    # Below the sold>=6 threshold → no cap applied.
+    uncapped = _apply_period_burst_cap(
+        prim_ads=[3.0], sold_units=[5], flat_ads=[0.1], period_days=30
+    )
+    assert uncapped[0] == pytest.approx(3.0, abs=1e-6)
+
+    # Flat30 floor still wins when it exceeds the period rate.
+    floored = _apply_period_burst_cap(
+        prim_ads=[3.0], sold_units=[6], flat_ads=[0.5], period_days=30
+    )
+    assert floored[0] == pytest.approx(0.5, abs=1e-6)
 
 
 def test_catalog_ads_with_ly_fallback_enabled():
