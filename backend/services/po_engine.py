@@ -437,6 +437,25 @@ def apply_quarterly_bundled_fan_out(
     return pivot
 
 
+def _calendar_quarter_span(ref: pd.Timestamp, years_ago: int) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Calendar quarter containing ``ref`` shifted back *years_ago* full years."""
+    y = int(ref.year) - int(years_ago)
+    m = int(ref.month)
+    if m <= 3:
+        start = pd.Timestamp(year=y, month=1, day=1)
+        end = pd.Timestamp(year=y, month=3, day=31)
+    elif m <= 6:
+        start = pd.Timestamp(year=y, month=4, day=1)
+        end = pd.Timestamp(year=y, month=6, day=30)
+    elif m <= 9:
+        start = pd.Timestamp(year=y, month=7, day=1)
+        end = pd.Timestamp(year=y, month=9, day=30)
+    else:
+        start = pd.Timestamp(year=y, month=10, day=1)
+        end = pd.Timestamp(year=y, month=12, day=31)
+    return start.normalize(), end.normalize()
+
+
 def _seasonal_adjacent_months_ads(
     sales_df: pd.DataFrame,
     max_date: pd.Timestamp,
@@ -501,6 +520,21 @@ def _seasonal_adjacent_months_ads(
             if float(qty) <= 0:
                 continue
             rate_lists[str(sku)].append(float(qty) / float(days_span))
+
+        # Same calendar quarter last year(s) — e.g. Apr–Jun when planning in June.
+        q_start, q_end = _calendar_quarter_span(max_date, yo)
+        q_days = max((q_end - q_start).days + 1, min_denominator)
+        q_chunk = work[(work["TxnDate"] >= q_start) & (work["TxnDate"] <= q_end)]
+        if not q_chunk.empty:
+            if demand_basis == "Net":
+                qg = q_chunk.groupby("Sku")["Units_Effective"].sum().clip(lower=0)
+            else:
+                _qsh = q_chunk["Transaction Type"].astype(str).str.strip().str.lower().eq("shipment")
+                qg = q_chunk.loc[_qsh].groupby("Sku")["Quantity"].sum()
+            for sku, qty in qg.items():
+                if float(qty) <= 0:
+                    continue
+                rate_lists[str(sku)].append(float(qty) / float(q_days))
 
     if not rate_lists:
         return pd.DataFrame(columns=["OMS_SKU", "Seasonal_Month_ADS"])
@@ -1701,30 +1735,53 @@ def calculate_po_base(
     )
     po_df["Flat30_ADS"] = pd.to_numeric(po_df["Flat30_ADS"], errors="coerce").fillna(0.0)
 
-    # ── Last-year same-window ADS (always computed) ──────────────────────────────
-    # For the same calendar window one year ago, compute LY_ADS.
-    # e.g. today = April 3, 2026 → LY window = April 3, 2025 → July 2, 2025
-    # If April 2025 sold more than recent 90 days suggest, the PO reflects that.
-    # This is the core seasonal-uplift logic the team uses manually.
-    ly_window_start = max_date - timedelta(days=365)
-    ly_window_end   = ly_window_start + timedelta(days=ADS_WINDOW)
-    ly_window = df[(df["TxnDate"] >= ly_window_start) & (df["TxnDate"] < ly_window_end)]
+    # ── Last-year ADS (parallel + forward windows, take stronger signal) ─────────
+    # Parallel: same ``period_days`` window as Recent, ending one calendar year ago.
+    # Forward: period starting on the anniversary date last year (legacy uplift path).
+    ly_par_end = max_date - timedelta(days=365)
+    ly_par_start = ly_par_end - timedelta(days=ADS_WINDOW)
+    ly_par_window = df[(df["TxnDate"] >= ly_par_start) & (df["TxnDate"] <= ly_par_end)]
 
-    ly_sold_grp = (
-        ly_window[ly_window["_is_ship"]]
-        .groupby("Sku")["Quantity"].sum().reset_index()
-        .rename(columns={"Sku": "OMS_SKU", "Quantity": "LY_Sold_Units"})
-    )
-    ly_net_grp = (
-        ly_window.groupby("Sku")["Units_Effective"].sum().reset_index()
-        .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "LY_Net_Units"})
-    )
-    ly_summary = ly_sold_grp.merge(ly_net_grp, on="OMS_SKU", how="outer").fillna(0)
-    po_df = _merge_metric_with_parent_fallback(
-        po_df, ly_summary, ["LY_Sold_Units", "LY_Net_Units"]
-    ).fillna(
-        {"LY_Sold_Units": 0, "LY_Net_Units": 0}
-    )
+    ly_fwd_start = max_date - timedelta(days=365)
+    ly_fwd_end = ly_fwd_start + timedelta(days=ADS_WINDOW)
+    ly_fwd_window = df[(df["TxnDate"] >= ly_fwd_start) & (df["TxnDate"] < ly_fwd_end)]
+
+    def _ly_group(win: pd.DataFrame) -> pd.DataFrame:
+        if win.empty:
+            return pd.DataFrame(columns=["OMS_SKU", "LY_Sold_Units", "LY_Net_Units"])
+        ly_sold_grp = (
+            win[win["_is_ship"]]
+            .groupby("Sku")["Quantity"].sum().reset_index()
+            .rename(columns={"Sku": "OMS_SKU", "Quantity": "LY_Sold_Units"})
+        )
+        ly_net_grp = (
+            win.groupby("Sku")["Units_Effective"].sum().reset_index()
+            .rename(columns={"Sku": "OMS_SKU", "Units_Effective": "LY_Net_Units"})
+        )
+        return ly_sold_grp.merge(ly_net_grp, on="OMS_SKU", how="outer").fillna(0)
+
+    ly_par = _ly_group(ly_par_window)
+    ly_fwd = _ly_group(ly_fwd_window)
+    if ly_par.empty and ly_fwd.empty:
+        po_df["LY_Sold_Units"] = 0
+        po_df["LY_Net_Units"] = 0
+    else:
+        ly_summary = ly_par.merge(
+            ly_fwd, on="OMS_SKU", how="outer", suffixes=("_par", "_fwd")
+        ).fillna(0)
+        ly_summary["LY_Sold_Units"] = np.maximum(
+            ly_summary.get("LY_Sold_Units_par", 0),
+            ly_summary.get("LY_Sold_Units_fwd", 0),
+        )
+        ly_summary["LY_Net_Units"] = np.maximum(
+            ly_summary.get("LY_Net_Units_par", 0),
+            ly_summary.get("LY_Net_Units_fwd", 0),
+        )
+        po_df = _merge_metric_with_parent_fallback(
+            po_df,
+            ly_summary[["OMS_SKU", "LY_Sold_Units", "LY_Net_Units"]],
+            ["LY_Sold_Units", "LY_Net_Units"],
+        ).fillna({"LY_Sold_Units": 0, "LY_Net_Units": 0})
     ly_demand_col = po_df["LY_Net_Units"].clip(lower=0) if demand_basis == "Net" else po_df["LY_Sold_Units"]
     po_df["LY_ADS"] = (ly_demand_col / ADS_WINDOW).round(3)
 

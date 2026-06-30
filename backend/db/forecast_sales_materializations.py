@@ -511,7 +511,16 @@ def load_po_sales_df(
 
     lookback = int(max(30, period_days) + 365 + period_days + 7)
     if use_seasonality or use_ly_fallback:
-        lookback = max(lookback, _DAILY_LOOKBACK_DAYS - 30)
+        from ..services.po_ads_horizon import po_ads_history_horizon_days
+
+        lookback = max(
+            lookback,
+            po_ads_history_horizon_days(
+                period_days,
+                use_seasonality=use_seasonality,
+                use_ly_fallback=use_ly_fallback,
+            ),
+        )
 
     daily = _load_daily_from_pg(lookback_days=lookback, planning_date=planning_date)
     if daily is None or daily.empty:

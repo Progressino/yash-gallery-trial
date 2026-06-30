@@ -106,7 +106,7 @@ def test_build_po_ads_platform_sales_overlays_tier3(monkeypatch):
 def test_build_po_ads_platform_sales_fast_path_uses_session_sales(monkeypatch):
     """When sales_df is T-1 fresh, skip Tier-3 rebuild entirely."""
     sess = AppSession()
-    days = pd.date_range("2025-02-01", "2026-06-17", freq="D")
+    days = pd.date_range("2024-01-01", "2026-06-17", freq="D")
     sess.sales_df = pd.DataFrame(
         {
             "TxnDate": days,
@@ -139,7 +139,7 @@ def test_build_po_ads_platform_sales_fast_path_uses_session_sales(monkeypatch):
 def test_build_po_ads_platform_sales_incremental_gap(monkeypatch):
     sess = AppSession()
     sess.sku_mapping = {"SKU1": "SKU1"}
-    days = pd.date_range("2025-02-01", "2026-06-14", freq="D")
+    days = pd.date_range("2024-01-01", "2026-06-14", freq="D")
     sess.sales_df = pd.DataFrame(
         {
             "TxnDate": days,

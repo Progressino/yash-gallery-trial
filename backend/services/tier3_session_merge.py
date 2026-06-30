@@ -112,10 +112,13 @@ def merge_tier3_light(sess, *, only_platforms: list[str] | None = None) -> bool:
 
 
 def _po_ads_horizon_days(period_days: int, use_seasonality: bool, use_ly_fallback: bool) -> int:
-    horizon = max(int(period_days), 90)
-    if use_seasonality or use_ly_fallback:
-        horizon = max(horizon, 400)
-    return horizon
+    from .po_ads_horizon import po_ads_history_horizon_days
+
+    return po_ads_history_horizon_days(
+        period_days,
+        use_seasonality=use_seasonality,
+        use_ly_fallback=use_ly_fallback,
+    )
 
 
 def _trim_sales_to_ads_window(

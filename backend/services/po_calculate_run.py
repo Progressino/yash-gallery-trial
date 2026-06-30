@@ -24,6 +24,7 @@ def _trim_sales_for_po_memory(
         return sales_df
     try:
         from backend.main import warm_cache_po_session_only
+        from .po_ads_horizon import po_ads_history_horizon_days
 
         if not warm_cache_po_session_only():
             return sales_df
@@ -31,9 +32,11 @@ def _trim_sales_for_po_memory(
         return sales_df
     if "TxnDate" not in sales_df.columns:
         return sales_df
-    horizon = max(int(period_days), 90)
-    if use_seasonality or use_ly_fallback:
-        horizon = max(horizon, 400)
+    horizon = po_ads_history_horizon_days(
+        period_days,
+        use_seasonality=use_seasonality,
+        use_ly_fallback=use_ly_fallback,
+    )
     dates = pd.to_datetime(sales_df["TxnDate"], errors="coerce")
     end = dates.max()
     if pd.isna(end):
