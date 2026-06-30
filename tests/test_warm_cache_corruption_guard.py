@@ -15,6 +15,11 @@ import pytest
 import backend.main as main
 
 
+@pytest.fixture(autouse=True)
+def _production_warm_cache_mode(monkeypatch):
+    monkeypatch.delenv("WARM_CACHE_PO_SESSION_ONLY", raising=False)
+
+
 def _empty_disk_cache() -> dict:
     return {
         "mtr_df": pd.DataFrame(),

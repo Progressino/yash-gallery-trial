@@ -207,24 +207,7 @@ def bootstrap_warm_cache_if_empty() -> bool:
             return True
         disk_ok, disk_data = _load_warm_cache_from_disk(ignore_age=True)
         if disk_ok and disk_data:
-            loose = _warm_cache_loose_parquets_from_dir(Path(_DISK_CACHE_DIR))
-            for key, val in loose.items():
-                if key == "mtr_df":
-                    continue
-                cur = disk_data.get(key)
-                replace = cur is None
-                if not replace and hasattr(val, "__len__") and hasattr(cur, "__len__"):
-                    if key == "daily_inventory_history_df":
-                        try:
-                            from .services.daily_inventory_history import inventory_history_is_newer_than
-
-                            replace = inventory_history_is_newer_than(val, cur)
-                        except Exception:
-                            replace = len(val) > len(cur)
-                    else:
-                        replace = len(val) > len(cur)
-                if replace:
-                    disk_data[key] = val
+            disk_data = _merge_loose_disk_into_cache_dict(disk_data)
             _warm_cache = disk_data
             _warm_cache_loaded_at = datetime.now(IST)
             if _warm_cache_generation < 1:
@@ -956,6 +939,8 @@ _DISK_CACHE_MIN_MTR_ROWS = int(_os_main.environ.get("WARM_CACHE_MIN_MTR_ROWS", "
 # Set WARM_CACHE_HARD_MIN_ROWS=0 to disable even this safety net (not recommended).
 _DISK_CACHE_HARD_MIN_ROWS = int(_os_main.environ.get("WARM_CACHE_HARD_MIN_ROWS", "1"))
 _WARM_PLATFORM_KEYS = ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
+# When WARM_CACHE_MIN_MTR_ROWS=0 (production), fast-path still needs a sane mtr floor.
+_FAST_PATH_MIN_MTR_ROWS = int(_os_main.environ.get("WARM_CACHE_FAST_PATH_MIN_MTR_ROWS", "50000"))
 
 
 def warm_cache_po_session_only() -> bool:
@@ -973,6 +958,72 @@ def _disk_manifest_keys(keys: list[str]) -> list[str]:
     if skipped:
         log.info("PO-session-only warm cache: skip platform keys %s", skipped)
     return [k for k in keys if k not in skip]
+
+
+def _effective_fast_path_mtr_min() -> int:
+    """Minimum mtr rows to accept warm-cache fast-path (never zero on production)."""
+    if warm_cache_po_session_only():
+        return 100_000
+    if _DISK_CACHE_MIN_MTR_ROWS > 0:
+        return _DISK_CACHE_MIN_MTR_ROWS
+    return max(1, _FAST_PATH_MIN_MTR_ROWS)
+
+
+def _merge_loose_disk_into_cache_dict(cache: dict) -> dict:
+    """Top up *cache* from loose parquets — recovers partial manifests that omitted bulk history."""
+    from pathlib import Path
+
+    if not cache:
+        cache = {}
+    loose = _warm_cache_loose_parquets_from_dir(Path(_DISK_CACHE_DIR))
+    for key, val in loose.items():
+        if key == "mtr_df":
+            continue
+        if val is None or not hasattr(val, "__len__") or len(val) <= 0:
+            continue
+        cur = cache.get(key)
+        replace = cur is None
+        if not replace and hasattr(cur, "__len__"):
+            if key == "daily_inventory_history_df":
+                try:
+                    from .services.daily_inventory_history import inventory_history_is_newer_than
+
+                    replace = inventory_history_is_newer_than(val, cur)
+                except Exception:
+                    replace = len(val) > len(cur)
+            else:
+                replace = len(val) > len(cur)
+        if replace:
+            cache[key] = val
+    return cache
+
+
+def _repair_disk_manifest_from_loose_parquets() -> None:
+    """Ensure _manifest.json lists every parquet on disk (partial saves must not hide bulk history)."""
+    import json
+    import os
+
+    try:
+        manifest_path = os.path.join(_DISK_CACHE_DIR, "_manifest.json")
+        manifest: dict = {}
+        if os.path.exists(manifest_path):
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        keys = set(manifest.get("keys") or [])
+        for name in os.listdir(_DISK_CACHE_DIR):
+            if name.endswith(".parquet"):
+                keys.add(name[: -len(".parquet")])
+            elif name == "sku_mapping.json":
+                keys.add("sku_mapping")
+        if not keys:
+            return
+        manifest["keys"] = sorted(keys)
+        if not manifest.get("saved_at"):
+            manifest["saved_at"] = datetime.now(IST).isoformat()
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+    except Exception:
+        log.exception("repair disk manifest from loose parquets failed")
 
 
 def warm_cache_sales_rows(cache: dict) -> int:
@@ -1746,6 +1797,7 @@ def _do_load_warm_cache() -> bool:
     global _warm_cache, _warm_cache_loaded_at, _warm_cache_generation
     _phase2_lock_held = False   # tracked here so the outer finally can release safely
     try:
+        _repair_disk_manifest_from_loose_parquets()
         from .services.github_cache import load_cache_from_drive
         from .services.daily_store import load_all_platforms, merge_platform_data as _merge
         from .services.sales import build_sales_df
@@ -1807,19 +1859,7 @@ def _do_load_warm_cache() -> bool:
         # new uploads that arrived since the last deploy.
         disk_ok, disk_data = _load_warm_cache_from_disk()
         if disk_ok and disk_data:
-            from pathlib import Path
-
-            loose = _warm_cache_loose_parquets_from_dir(Path(_DISK_CACHE_DIR))
-            for key, val in loose.items():
-                if key == "mtr_df":
-                    continue
-                cur = disk_data.get(key)
-                if cur is None or (
-                    hasattr(val, "__len__")
-                    and hasattr(cur, "__len__")
-                    and len(val) > len(cur)
-                ):
-                    disk_data[key] = val
+            disk_data = _merge_loose_disk_into_cache_dict(disk_data)
         # ── Fast-path: if disk is fresh AND healthy, skip all of Phase 1+2 ──────
         # Phase 1+2 causes 6-7 GB memory spikes (session DataFrames + GitHub DL)
         # that trigger health-check failures and autoheal restarts.  When the disk
@@ -1848,7 +1888,10 @@ def _do_load_warm_cache() -> bool:
                         _p0_r = len(_p0_m) if _p0_m is not None else 0
                         del _p0_m
                         _p0_total = _warm_total_platform_rows(disk_data)
-                        _p0_min = _DISK_CACHE_MIN_MTR_ROWS
+                        _p0_min = _effective_fast_path_mtr_min()
+                    _mtr_parquet = _os_main.path.exists(
+                        _os_main.path.join(_DISK_CACHE_DIR, "mtr_df.parquet")
+                    )
                     _stale_vs_gh = None
                     try:
                         from .services.github_cache import warm_cache_needs_full_rebuild
@@ -1856,10 +1899,16 @@ def _do_load_warm_cache() -> bool:
                         _stale_vs_gh = warm_cache_needs_full_rebuild(disk_data)
                     except Exception:
                         pass
+                    _platform_ok = _p0_total >= _DISK_CACHE_HARD_MIN_ROWS
+                    _mtr_ok = _p0_r >= _p0_min or (
+                        _mtr_parquet
+                        and _platform_ok
+                        and warm_cache_sales_rows(disk_data) >= 100_000
+                    )
                     if (
                         _age_h < _FAST_SKIP_MAX_AGE_HOURS
-                        and _p0_r >= _p0_min
-                        and _p0_total >= _DISK_CACHE_HARD_MIN_ROWS
+                        and _mtr_ok
+                        and _platform_ok
                         and not _stale_vs_gh
                     ):
                         log.warning(
@@ -1883,6 +1932,9 @@ def _do_load_warm_cache() -> bool:
                             _merge_recent_sqlite_into_warm_cache(months=4)
                         except Exception:
                             log.exception("fast-path SQLite top-up failed")
+                        from pathlib import Path
+
+                        _deferred_load_mtr_df(Path(_DISK_CACHE_DIR))
                         return True
                     elif _stale_vs_gh:
                         log.warning(

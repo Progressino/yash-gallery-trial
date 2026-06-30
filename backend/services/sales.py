@@ -1457,6 +1457,13 @@ def _compute_platform_metrics(
 
         # Full analytics path — shipments/monthly/daily use the calendar window.
         d = d_win if not d_win.empty else ship_df
+        if "_Date" not in d.columns or d["_Date"].isna().all():
+            stub["loaded"] = True
+            stub["total_units"] = total_units
+            stub["total_returns"] = total_returns
+            stub["net_units"] = net_units
+            stub["return_rate"] = return_rate
+            return stub
         qty = qty_ship
         shipped_mask = d[txn_col].astype(str).str.strip() == ship_val
         refund_mask_win = d[txn_col].astype(str).str.strip() == refund_val

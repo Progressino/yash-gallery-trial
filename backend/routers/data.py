@@ -3283,6 +3283,7 @@ def _apply_light_coverage_hydrate(sess: AppSession) -> None:
     try:
         import backend.main as _main
 
+        _main._repair_disk_manifest_from_loose_parquets()
         if not _main._warm_cache:
             _main.bootstrap_warm_cache_if_empty()
         elif _main.session_needs_warm_cache_topup(sess):
