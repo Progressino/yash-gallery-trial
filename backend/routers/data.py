@@ -2060,6 +2060,11 @@ def _bundle_cache_lookup(
             payload, start_date, end_date, sess=sess
         ):
             continue
+        # Never serve a cached "partial" bundle (e.g. only Flipkart/Snapdeal tier-3
+        # data) when bulk warm-cache platform parquets are available — the gap-fill
+        # path will produce a complete bundle with Amazon/Myntra/Meesho included.
+        if payload.get("data_completeness") == "partial" and _disk_bulk_history_available():
+            continue
         if sess is not None and payload.get("tier3_auto_pull"):
             s = str(start_date or end_date or "")[:10]
             e = str(end_date or start_date or "")[:10]
