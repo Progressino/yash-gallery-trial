@@ -1,11 +1,11 @@
 import { Link } from 'react-router-dom'
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
 import { resetErpModuleData, clearPlatform } from '../api/client'
 import { ALL_MODULE_KEYS, MODULE_LABELS } from '../lib/modules'
-import { mayAccessErpAdmin, mayClearPlatformData, mayDeleteUploadData, useAuth } from '../store/auth'
+import { mayAccessErpAdmin, mayClearPlatformData, mayDeleteUploadData, mayManageErpDepartments, useAuth } from '../store/auth'
 
 type Tab = 'dashboard' | 'users' | 'roles' | 'activity' | 'data-reset'
 
@@ -29,8 +29,9 @@ interface ERPUser {
 }
 interface Role { id: number; role_name: string; description: string; created_at: string }
 interface ActivityLog { id: number; username: string; action: string; document_type: string; document_no: string; details: string; created_at: string }
+interface ErpDepartment { id: number; name: string; active?: number }
 
-const DEPARTMENTS = ['Sales', 'Merchandising', 'Stores', 'Production', 'Quality', 'Logistics', 'Finance', 'Admin']
+const FALLBACK_DEPARTMENTS = ['Sales', 'Merchandising', 'Stores', 'Production', 'Quality', 'Logistics', 'Finance', 'Admin']
 
 const actionColor = (a: string) => {
   if (a === 'create') return 'bg-green-100 text-green-700'
@@ -96,6 +97,8 @@ export default function Admin() {
   const [modulePick, setModulePick] = useState<string[]>([])
   const [roleForm, setRoleForm] = useState({ role_name: '', description: '' })
   const [includeInactiveUsers, setIncludeInactiveUsers] = useState(false)
+  const [newDepartmentName, setNewDepartmentName] = useState('')
+  const mayManageDepartments = mayManageErpDepartments(authUser)
 
   const { data: stats } = useQuery<AdminStats>({ queryKey: ['admin-stats'], queryFn: () => api.get('/erp-admin/stats').then(r => r.data) })
   const { data: users = [] } = useQuery<ERPUser[]>({
@@ -107,6 +110,15 @@ export default function Admin() {
     enabled: tab === 'users' || tab === 'dashboard',
   })
   const { data: roles = [] } = useQuery<Role[]>({ queryKey: ['erp-roles'], queryFn: () => api.get('/erp-admin/roles').then(r => r.data) })
+  const { data: erpDepartments = [] } = useQuery<ErpDepartment[]>({
+    queryKey: ['erp-departments'],
+    queryFn: () => api.get('/erp-admin/departments').then(r => r.data),
+    enabled: tab === 'users' && !!mayAccessErpAdmin(authUser),
+  })
+  const departmentNames = useMemo(() => {
+    const fromApi = erpDepartments.map(d => d.name).filter(Boolean)
+    return fromApi.length ? fromApi : FALLBACK_DEPARTMENTS
+  }, [erpDepartments])
   const { data: hrmDepts = [] } = useQuery({
     queryKey: ['hrm-depts-admin'],
     queryFn: () => api.get('/hrm/departments').then(r => r.data),
@@ -140,6 +152,13 @@ export default function Admin() {
   const createRoleMut = useMutation({
     mutationFn: (b: object) => api.post('/erp-admin/roles', b),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['erp-roles'] }); qc.invalidateQueries({ queryKey: ['admin-stats'] }); setShowRoleForm(false); setRoleForm({ role_name: '', description: '' }) }
+  })
+  const createDepartmentMut = useMutation({
+    mutationFn: (name: string) => api.post('/erp-admin/departments', { name }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['erp-departments'] })
+      setNewDepartmentName('')
+    },
   })
   const resetModuleMut = useMutation({
     mutationFn: (module: string) => resetErpModuleData(module),
@@ -295,6 +314,49 @@ export default function Admin() {
             <button onClick={openNewUserForm} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">+ Add User</button>
           </div>
 
+          <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <h3 className="font-semibold text-gray-700 text-sm">User departments</h3>
+              <p className="text-xs text-gray-400">{departmentNames.length} options in the Department dropdown</p>
+            </div>
+            <div className="flex flex-wrap gap-2 mb-3">
+              {departmentNames.map(d => (
+                <span key={d} className="text-xs px-2 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
+                  {d}
+                </span>
+              ))}
+            </div>
+            {mayManageDepartments ? (
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="min-w-[12rem] flex-1">
+                  <label className="text-xs text-gray-500">Add department</label>
+                  <input
+                    value={newDepartmentName}
+                    onChange={e => setNewDepartmentName(e.target.value)}
+                    placeholder="e.g. E-commerce"
+                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const name = newDepartmentName.trim()
+                    if (name) createDepartmentMut.mutate(name)
+                  }}
+                  disabled={createDepartmentMut.isPending || !newDepartmentName.trim()}
+                  className="px-4 py-2 bg-emerald-700 text-white rounded-lg text-sm font-medium disabled:opacity-50"
+                >
+                  {createDepartmentMut.isPending ? 'Adding…' : 'Add department'}
+                </button>
+              </div>
+            ) : (
+              <p className="text-xs text-gray-400">Ask an Admin or Manager to add new departments.</p>
+            )}
+            {createDepartmentMut.isError && (
+              <p className="text-xs text-red-500 mt-2">Error: {formatUserCreateError(createDepartmentMut.error)}</p>
+            )}
+          </div>
+
           {showUserForm && (
             <div className="bg-white rounded-xl border p-4 space-y-3">
               <h3 className="font-semibold text-gray-700">New User</h3>
@@ -316,7 +378,7 @@ export default function Admin() {
                 <div><label className="text-xs text-gray-500">Department</label>
                   <select value={userForm.department} onChange={e => setUserForm(f => ({ ...f, department: e.target.value }))}
                     className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
-                    {DEPARTMENTS.map(d => <option key={d}>{d}</option>)}
+                    {departmentNames.map(d => <option key={d}>{d}</option>)}
                   </select>
                 </div>
                 {newUserRole === 'Karigar' && (
@@ -409,7 +471,7 @@ export default function Admin() {
                   <select value={editData.department as string ?? editUser.department}
                     onChange={e => setEditData(d => ({ ...d, department: e.target.value }))}
                     className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
-                    {DEPARTMENTS.map(d => <option key={d}>{d}</option>)}
+                    {departmentNames.map(d => <option key={d}>{d}</option>)}
                   </select>
                 </div>
                 <div><label className="text-xs text-gray-500">New Password (optional)</label>

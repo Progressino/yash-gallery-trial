@@ -55,6 +55,16 @@ def may_access_erp_admin(role_name: str) -> bool:
     return role_name in _ERP_ADMIN_ROLES
 
 
+_DEPARTMENT_ADMIN_USERS = frozenset({"harsh"})
+
+
+def may_manage_erp_departments(role_name: str, username: str | None = None) -> bool:
+    """Add ERP user departments (Admin → Users dropdown). Managers/Admins + named ops users."""
+    if may_access_erp_admin(role_name):
+        return True
+    return (username or "").strip().lower() in _DEPARTMENT_ADMIN_USERS
+
+
 def may_delete_stitching_attendance(role_name: str | None, username: str | None = None) -> bool:
     """Managers and Himanshu may delete karigar attendance rows."""
     if (role_name or "").strip() == "Manager":

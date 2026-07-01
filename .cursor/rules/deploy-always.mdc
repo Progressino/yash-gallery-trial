@@ -1,5 +1,5 @@
 ---
-description: Push to main after shipping so VPS auto-deploy runs
+description: Push to main after shipping so VPS auto-deploy runs — never SCP to production
 alwaysApply: true
 ---
 
@@ -7,12 +7,22 @@ alwaysApply: true
 
 Production deploys via **GitHub Actions** (`.github/workflows/deploy.yml`) on **push to `origin/main`** (self-hosted runner at `/root/app`).
 
-**After you implement or fix anything in this repo that should reach production:**
+## Required workflow
+
+**After you implement or fix anything that should reach production:**
 
 1. Commit with a clear message.
-2. Run **`git push origin main`** (request `git_write`, `network`, and `all` if needed so `.git` and push work).
-3. Do **not** stop with only local commits — the user expects the VPS to update.
+2. Run **`git push origin main`** (request `git_write`, `network`, and `all` if needed).
+3. Confirm deploy: GitHub → Actions → “Deploy to VPS” — green = success, red = failed (read logs).
+4. Do **not** deploy by SCP/rsync of individual files to the VPS (drifts git, hides failures, wrong build label).
 
 **Skip push** only when the user explicitly asks for local-only work or a branch/PR flow.
 
-**Manual deploy:** In GitHub → Actions → “Deploy to VPS” → **Run workflow** (requires `workflow_dispatch` in the workflow file).
+**Manual deploy:** GitHub → Actions → “Deploy to VPS” → **Run workflow**.
+
+**On-server manual:** `cd /root/app && ./deploy.sh main` (pulls git, then `docker compose build`).
+
+## Verify after deploy
+
+- App footer / `/api/health` → `git_sha` matches the pushed commit.
+- Smoke: Intelligence 30D loads, Admin loads for Manager role.

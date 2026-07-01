@@ -36,6 +36,8 @@ export interface AuthUser {
   upload_delete_locked?: boolean
   /** Wide PO inventory history + SKU status/lead; Admin-only when org historical lock is on. */
   may_upload_po_baseline?: boolean
+  /** Add ERP user departments in Admin → Users. */
+  may_manage_erp_departments?: boolean
 }
 
 function readStoredUser(): AuthUser | null {
@@ -103,7 +105,18 @@ export function isHrmOnlyUser(user: AuthUser | null | undefined): boolean {
 }
 
 export function mayAccessErpAdmin(user: AuthUser | null | undefined): boolean {
-  return user?.role === 'Super Admin' || user?.role === 'Admin' || user?.role === 'Manager' || user?.role === 'Sir'
+  if (!user) return false
+  if (user.modules?.includes('admin')) {
+    return user.role === 'Super Admin' || user.role === 'Admin' || user.role === 'Manager' || user.role === 'Sir'
+  }
+  return user.role === 'Super Admin' || user.role === 'Admin' || user.role === 'Manager' || user.role === 'Sir'
+}
+
+export function mayManageErpDepartments(user: AuthUser | null | undefined): boolean {
+  if (!user) return false
+  if (user.may_manage_erp_departments === true) return true
+  if (user.may_manage_erp_departments === false) return false
+  return mayAccessErpAdmin(user) || String(user.username || '').trim().toLowerCase() === 'harsh'
 }
 
 /** Bulk history / platform clears — Admin & Manager when org lock is on. */

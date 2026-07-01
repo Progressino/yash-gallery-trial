@@ -136,6 +136,8 @@ def may_upload_po_baseline(role: str, username: str | None = None) -> bool:
 
 
 def upload_policy_for_role(role: str, username: str | None = None) -> dict:
+    from .permissions import may_manage_erp_departments
+
     locked = historical_upload_locked()
     can_delete = may_delete_upload_data(role, username)
     hist = may_upload_historical(role)
@@ -150,6 +152,7 @@ def upload_policy_for_role(role: str, username: str | None = None) -> dict:
         "may_delete_daily_upload": can_delete,
         "may_upload_po_baseline": may_upload_po_baseline(role, username),
         "upload_delete_locked": not can_delete,
+        "may_manage_erp_departments": may_manage_erp_departments(role, username),
     }
 
 

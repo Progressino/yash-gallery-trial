@@ -106,8 +106,9 @@ def init_db():
         )
     except Exception:
         pass
+    ensure_erp_departments_seeded(conn)
     ensure_super_admin(conn)
-    ensure_user_has_modules(conn, "harsh", ["hrm"])
+    ensure_harsh_admin_access(conn)
     ensure_irfan_upload_account(conn)
     conn.commit(); conn.close()
 
@@ -430,6 +431,86 @@ def get_user_auth_profile(username: str) -> dict | None:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+# ── ERP user departments (Admin → Users dropdown) ─────────────────────────────
+def ensure_erp_departments_seeded(conn) -> None:
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS erp_departments (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        name        TEXT UNIQUE NOT NULL,
+        active      INTEGER DEFAULT 1,
+        created_at  TEXT DEFAULT (datetime('now'))
+    );
+    """)
+    for name in DEPARTMENTS:
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO erp_departments(name, active) VALUES (?, 1)",
+                (name.strip(),),
+            )
+        except Exception:
+            pass
+
+
+def list_erp_departments(*, active_only: bool = True) -> list[dict]:
+    conn = _connect()
+    ensure_erp_departments_seeded(conn)
+    conn.commit()
+    q = "SELECT id, name, active, created_at FROM erp_departments"
+    if active_only:
+        q += " WHERE active=1"
+    q += " ORDER BY name COLLATE NOCASE"
+    rows = conn.execute(q).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_erp_department(name: str) -> dict:
+    label = (name or "").strip()
+    if not label:
+        raise ValueError("Department name is required")
+    if len(label) > 80:
+        raise ValueError("Department name is too long (max 80 characters)")
+    conn = _connect()
+    ensure_erp_departments_seeded(conn)
+    try:
+        conn.execute(
+            "INSERT INTO erp_departments(name, active) VALUES (?, 1)",
+            (label,),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id, name, active, created_at FROM erp_departments WHERE name=?",
+            (label,),
+        ).fetchone()
+    except sqlite3.IntegrityError as e:
+        conn.close()
+        raise ValueError(f"Department “{label}” already exists") from e
+    conn.close()
+    return dict(row) if row else {"name": label, "active": 1}
+
+
+def ensure_harsh_admin_access(conn) -> None:
+    """Harsh — Admin module + Manager role for user and department management."""
+    uname = "harsh"
+    row = conn.execute(
+        """SELECT u.id, r.role_name FROM erp_users u
+           LEFT JOIN roles r ON r.id = u.role_id
+           WHERE lower(u.username)=lower(?) AND u.active=1""",
+        (uname,),
+    ).fetchone()
+    if not row:
+        ensure_user_has_modules(conn, uname, ["hrm"])
+        return
+    mgr = conn.execute("SELECT id FROM roles WHERE role_name='Manager'").fetchone()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if mgr and (row["role_name"] or "") not in ("Super Admin", "Admin", "Manager", "Sir"):
+        conn.execute(
+            "UPDATE erp_users SET role_id=?, updated_at=? WHERE id=?",
+            (mgr["id"], now, row["id"]),
+        )
+    ensure_user_has_modules(conn, uname, ["hrm", "admin"])
+
 
 # ── Activity Log ───────────────────────────────────────────────────────────────
 def log_activity(username: str, action: str, doc_type: str, doc_no: str, details: str = ''):

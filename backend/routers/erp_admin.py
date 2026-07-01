@@ -8,8 +8,10 @@ from typing import Optional
 from ..db.users_db import (
     list_roles, create_role,
     list_users, create_user, update_user, deactivate_user,
-    list_activity, get_admin_stats, log_activity
+    list_activity, get_admin_stats, log_activity,
+    list_erp_departments, create_erp_department,
 )
+from ..services.permissions import may_manage_erp_departments
 from ..services.upload_policy import may_admin_po_session_edits
 
 router = APIRouter()
@@ -54,6 +56,10 @@ class ActivityIn(BaseModel):
     details: Optional[str] = ''
 
 
+class DepartmentIn(BaseModel):
+    name: str
+
+
 class ModuleDataResetIn(BaseModel):
     module: str
 
@@ -71,6 +77,11 @@ _ALLOWED_RESET_MODULES = {
 def _request_role(request: Request) -> str:
     auth = getattr(request.state, "auth", None) or {}
     return str(auth.get("role") or "Admin")
+
+
+def _request_username(request: Request) -> str:
+    auth = getattr(request.state, "auth", None) or {}
+    return str(auth.get("sub") or "")
 
 
 @contextmanager
@@ -224,6 +235,36 @@ def get_roles():
 def post_role(body: RoleIn):
     create_role(body.role_name, body.description or '')
     return {"ok": True}
+
+
+# ── Departments (user assignment dropdown) ────────────────────────────────────
+@router.get("/departments")
+def get_departments():
+    return list_erp_departments(active_only=True)
+
+
+@router.post("/departments")
+def post_department(request: Request, body: DepartmentIn):
+    role = _request_role(request)
+    username = _request_username(request)
+    if not may_manage_erp_departments(role, username):
+        raise HTTPException(status_code=403, detail="Not allowed to add departments")
+    try:
+        row = create_erp_department(body.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    try:
+        log_activity(
+            username,
+            "create",
+            "erp_department",
+            row.get("name") or body.name,
+            f"Added department: {row.get('name') or body.name}",
+        )
+    except Exception:
+        pass
+    return {"ok": True, **row}
+
 
 # ── Users ─────────────────────────────────────────────────────────────────────
 @router.get("/users")
