@@ -4614,7 +4614,9 @@ def _intelligence_bundle_sync(
             tier3_window = False
 
     # Tier-3 before warm-cache bootstrap — loading full parquets on every GET OOMs small VPS hosts.
-    if tier3_window:
+    # Skip this fast path when warm-cache parquets are already on disk — gap-fill will produce
+    # a complete bundle (all 5 platforms) far faster than returning a partial Tier-3 result.
+    if tier3_window and not _disk_bulk_history_available():
         tier3_early = _try_serve_tier3_intelligence_bundle(
             sess,
             cache_key,
@@ -4626,7 +4628,7 @@ def _intelligence_bundle_sync(
             include_extras,
             allow_undercount=True,
         )
-        if tier3_early is not None:
+        if tier3_early is not None and tier3_early.get("data_completeness") != "partial":
             return tier3_early
 
     try:
@@ -4710,7 +4712,7 @@ def _intelligence_bundle_sync(
             basis,
             include_extras,
         )
-        if tier3_immediate is not None:
+        if tier3_immediate is not None and tier3_immediate.get("data_completeness") != "partial":
             return tier3_immediate
 
     if not use_fast:
@@ -4732,7 +4734,7 @@ def _intelligence_bundle_sync(
         tier3_first = _try_serve_tier3_intelligence_bundle(
             sess, cache_key, bundle_cache, s_win, e_win, limit, basis, include_extras, ts=now,
         )
-        if tier3_first is not None:
+        if tier3_first is not None and tier3_first.get("data_completeness") != "partial":
             _schedule_background_bundle_build(
                 sid or None, cache_key, s_win, e_win, limit, basis, include_extras
             )
