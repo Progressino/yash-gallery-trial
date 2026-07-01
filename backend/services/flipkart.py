@@ -567,6 +567,7 @@ def _parse_flipkart_xlsb(
         return pd.DataFrame()
 
 
+@contextmanager
 def _open_flipkart_zip(zip_input: Union[bytes, bytearray, str, Path]):
     """ZIP from RAM or filesystem path (path avoids duplicating huge Tier-1 uploads in memory)."""
     if isinstance(zip_input, (bytes, bytearray)):
