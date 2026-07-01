@@ -1403,8 +1403,9 @@ def _compute_platform_metrics(
 
     try:
         d = df.copy()
+        # Meesho's raw warm-cache frame uses "TxnDate", not "Date" — fall back to it.
         d["_Date"] = txn_reporting_naive_ist(
-            pd.to_datetime(d.get("Date", d.get("_Date")), errors="coerce")
+            pd.to_datetime(d.get("Date", d.get("_Date", d.get("TxnDate"))), errors="coerce")
         )
         d = d.dropna(subset=["_Date"])
         if d.empty:

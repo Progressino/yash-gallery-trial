@@ -1156,18 +1156,34 @@ def _warm_disk_platform_frame(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> "pd.DataFrame":
-    """Read one platform parquet from warm-cache disk (PO-session-only skips RAM load)."""
+    """Read one platform parquet from warm-cache disk (PO-session-only skips RAM load).
+
+    When a date window is requested, verify the in-memory frame actually covers it
+    before returning it — mtr_df is trimmed to 180 days in memory, so old windows
+    (e.g. Jan 2025, Oct 2025) must be read from the full-history disk parquet.
+    """
     import os
     from pathlib import Path
 
     import pandas as pd
+
+    s = str(start_date or "")[:10]
+    e = str(end_date or "")[:10]
+    has_window = len(s) == 10 and len(e) == 10
 
     try:
         import backend.main as _main
 
         mem = (_main._warm_cache or {}).get(attr)
         if mem is not None and hasattr(mem, "empty") and not mem.empty:
-            return mem
+            if not has_window:
+                return mem  # no date filter requested — return full in-memory frame
+            # Check whether the in-memory frame covers the requested window.
+            in_w = _filter_platform_df_by_window(mem, s, e)
+            if not in_w.empty:
+                return mem  # memory has data for this window — fast path
+            # Memory doesn't cover this window (e.g. mtr_df trimmed to 180d).
+            # Fall through to read the full-history disk parquet.
     except Exception:
         pass
 
@@ -1176,9 +1192,7 @@ def _warm_disk_platform_frame(
     if not path.is_file():
         return pd.DataFrame()
     try:
-        s = str(start_date or "")[:10]
-        e = str(end_date or "")[:10]
-        if len(s) == 10 and len(e) == 10:
+        if has_window:
             try:
                 return pd.read_parquet(
                     path,
@@ -1291,7 +1305,12 @@ def _filter_platform_df_by_window(
     if df is None or not hasattr(df, "empty") or df.empty:
         return pd.DataFrame()
     if date_col not in df.columns:
-        return df
+        # Meesho's raw warm-cache frame uses "TxnDate", not "Date" — fall back to it
+        # instead of silently returning the unfiltered frame.
+        if date_col == "Date" and "TxnDate" in df.columns:
+            date_col = "TxnDate"
+        else:
+            return df
     d = df.copy()
     d["_Date"] = txn_reporting_naive_ist(
         pd.to_datetime(d[date_col], errors="coerce")
@@ -2337,18 +2356,28 @@ def _serve_intelligence_bundle_fast(
         allow_undercount=True,
         store_cache=False,
     )
-    if tier3 is not None:
-        if tier3.get("data_completeness") == "partial" and sid:
-            _schedule_intelligence_refresh_async(sid)
+
+    if tier3 is not None and tier3.get("data_completeness") != "partial":
         return tier3
 
+    # Tier-3 missing or only covers a subset of platforms (e.g. only Flipkart/Snapdeal
+    # have daily uploads for this window, while Amazon/Myntra/Meesho only exist in the
+    # bulk warm-cache parquets) — try gap-fill, which reads full platform history.
     gapfill = _build_intelligence_gapfill_bundle_payload(
         sess, s_win, e_win, limit, basis, include_extras
     )
     if gapfill is not None and _bundle_payload_has_display_data(gapfill):
-        if gapfill.get("data_completeness") == "partial" and sid:
+        t3_units = int((tier3.get("sales_summary") or {}).get("total_units") or 0) if tier3 else 0
+        gf_units = int((gapfill.get("sales_summary") or {}).get("total_units") or 0)
+        if gf_units >= t3_units:
+            if gapfill.get("data_completeness") == "partial" and sid:
+                _schedule_intelligence_refresh_async(sid)
+            return gapfill
+
+    if tier3 is not None:
+        if tier3.get("data_completeness") == "partial" and sid:
             _schedule_intelligence_refresh_async(sid)
-        return gapfill
+        return tier3
     return None
 
 
