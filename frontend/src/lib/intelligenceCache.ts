@@ -83,7 +83,7 @@ export type CachedIntelligenceBundle = IntelligenceBundle & {
   version: string
 }
 
-const STORAGE_PREFIX = 'erp_intelligence_bundle_v5'
+const STORAGE_PREFIX = 'erp_intelligence_bundle_v6'
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 
 function ttlMs(): number {
@@ -192,6 +192,7 @@ export function clearIntelligenceCache(): void {
       'erp_intelligence_bundle_v2',
       'erp_intelligence_bundle_v3',
       'erp_intelligence_bundle_v4',
+      'erp_intelligence_bundle_v5',
       STORAGE_PREFIX,
     ]
     const keys: string[] = []
@@ -221,6 +222,25 @@ export function bundleHasDisplayData(bundle: IntelligenceBundle | null | undefin
     return false
   }
   return (bundle.sales_summary?.total_units ?? 0) > 0
+}
+
+/** Prefer full completeness, then higher shipment totals (gap-fill over Tier-3 partial). */
+export function pickRicherIntelligenceBundle(
+  ...candidates: Array<IntelligenceBundle | null | undefined>
+): IntelligenceBundle | undefined {
+  const valid = candidates.filter(
+    (b): b is IntelligenceBundle => Boolean(b && bundleHasDisplayData(b)),
+  )
+  if (!valid.length) return undefined
+  return valid.reduce((best, cur) => {
+    const bestFull = best.data_completeness === 'full'
+    const curFull = cur.data_completeness === 'full'
+    if (curFull && !bestFull) return cur
+    if (bestFull && !curFull) return best
+    const bestUnits = Number(best.sales_summary?.total_units ?? 0)
+    const curUnits = Number(cur.sales_summary?.total_units ?? 0)
+    return curUnits >= bestUnits ? cur : best
+  })
 }
 
 export function summaryToCachedBundle(
@@ -264,6 +284,7 @@ function purgeLegacyIntelligenceCache(): void {
       'erp_intelligence_bundle_v2',
       'erp_intelligence_bundle_v3',
       'erp_intelligence_bundle_v4',
+      'erp_intelligence_bundle_v5',
     ]
     const keys: string[] = []
     for (let i = 0; i < localStorage.length; i++) {

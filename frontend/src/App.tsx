@@ -115,27 +115,30 @@ function ProtectedRoute() {
   const setCoverage = useSession(s => s.setCoverage)
   const invUploadRunning = useSession(s => s.inventory_upload_status === 'running')
   const setUser = useAuth(s => s.setUser)
+  const clearAuth = useAuth(s => s.clear)
   const cachedUser = useAuth(s => s.user)
 
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ['auth-me'],
     queryFn: async () => {
       const { data: me } = await api.get<AuthUser>('/auth/me', { timeout: 60_000 })
       setUser(me)
       return me
     },
-    initialData: cachedUser ?? undefined,
-    initialDataUpdatedAt: cachedUser ? Date.now() : undefined,
+    placeholderData: cachedUser ?? undefined,
     retry: (failureCount, err) => {
       if (axios.isAxiosError(err) && err.response?.status === 401) return false
       return failureCount < 3
     },
-    refetchOnWindowFocus: false,
-    staleTime: 30 * 60 * 1000,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
+    staleTime: 60_000,
   })
 
   const authUnauthorized =
     axios.isAxiosError(error) && error.response?.status === 401
+
+  const authVerified = !isLoading && !isFetching && !authUnauthorized && Boolean(data)
 
   const authUnreachable =
     !!error &&
@@ -224,13 +227,13 @@ function ProtectedRoute() {
       }
       return true
     },
-    enabled: !!activeUser && !isKarigar && !hrmOnly && !erpModuleRoute,
+    enabled: authVerified && !isKarigar && !hrmOnly && !erpModuleRoute,
     retry: 1,
     retryDelay: 5_000,
     staleTime: Infinity,
   })
 
-  const pollCoverage = !!activeUser && !isKarigar && !hrmOnly && !erpModuleRoute
+  const pollCoverage = authVerified && !isKarigar && !hrmOnly && !erpModuleRoute
   const dataStillLoading = useSession(s => {
     if (erpModuleRoute) return false
     const loaded = poOperationalLoaded(s)
@@ -251,7 +254,10 @@ function ProtectedRoute() {
       </div>
     )
   }
-  if (authUnauthorized) return <Navigate to="/login" replace />
+  if (authUnauthorized) {
+    clearAuth()
+    return <Navigate to="/login?expired=1" replace />
+  }
   if (!activeUser && !isLoading) {
     return <Navigate to="/login" replace state={{ serverUnreachable: authUnreachable }} />
   }

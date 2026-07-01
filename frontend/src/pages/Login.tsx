@@ -29,6 +29,7 @@ export default function Login() {
   const nav = useNavigate()
   const location = useLocation()
   const serverUnreachable = !!(location.state as { serverUnreachable?: boolean } | null)?.serverUnreachable
+  const sessionExpired = new URLSearchParams(location.search).get('expired') === '1'
   const [step, setStep] = useState<Step>('credentials')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -167,6 +168,11 @@ export default function Login() {
         <div className="flex-1 flex items-center justify-center p-8">
           <div className="w-full max-w-sm">
             <div className="mb-8">
+              {sessionExpired && step === 'credentials' && (
+                <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+                  Your session expired. Please sign in again to load the dashboard and datasets.
+                </p>
+              )}
               {serverUnreachable && step === 'credentials' && (
                 <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
                   Server was slow to respond. Sign in again — your session may still be valid after login.

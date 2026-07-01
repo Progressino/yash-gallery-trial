@@ -1,4 +1,4 @@
-"""Compact dashboard aggregates — prebuilt artifacts first, Tier-3 fallback only."""
+"""Compact dashboard aggregates — prebuilt artifacts first, gap-fill for bulk history."""
 from __future__ import annotations
 
 import time
@@ -143,6 +143,66 @@ def _artifact_covers_tier3_window(payload: dict[str, Any], start_date: str, end_
     return core_expected.issubset(loaded)
 
 
+def _artifact_undercounts_bulk(payload: dict[str, Any], start_date: str, end_date: str) -> bool:
+    """True when cached/hot totals are far below bulk Tier-1 history on disk."""
+    try:
+        from ..routers.data import _tier3_only_undercounts_bulk
+
+        shipped = int((payload.get("sales_summary") or {}).get("total_units") or 0)
+        if shipped <= 0:
+            for row in payload.get("platform_summary") or []:
+                shipped += int(row.get("total_units") or 0)
+        return _tier3_only_undercounts_bulk(shipped, start_date, end_date)
+    except Exception:
+        return False
+
+
+def _summary_from_gapfill(sess, start_date: str, end_date: str, limit: int) -> dict[str, Any] | None:
+    """Tier-1 bulk parquets + Tier-3 dailies — same path as intelligence-bundle gap-fill."""
+    try:
+        from ..routers.data import _build_intelligence_gapfill_bundle_payload
+
+        gapfill = _build_intelligence_gapfill_bundle_payload(
+            sess,
+            start_date,
+            end_date,
+            int(limit),
+            "gross",
+            include_extras=False,
+        )
+        if not gapfill or not gapfill.get("platform_summary"):
+            return None
+        return {
+            "source": "gapfill_bulk_history",
+            "platforms": _compact_platforms(gapfill.get("platform_summary") or []),
+            "platform_summary": gapfill.get("platform_summary") or [],
+            "top_skus": gapfill.get("top_skus") or [],
+            "sales_summary": gapfill.get("sales_summary") or {},
+            "data_completeness": gapfill.get("data_completeness") or "full",
+        }
+    except Exception:
+        return None
+
+
+def _pick_richer_summary(
+    primary: dict[str, Any] | None,
+    secondary: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not primary:
+        return secondary
+    if not secondary:
+        return primary
+    p_units = int((primary.get("sales_summary") or {}).get("total_units") or 0)
+    s_units = int((secondary.get("sales_summary") or {}).get("total_units") or 0)
+    p_full = str(primary.get("data_completeness") or "") == "full"
+    s_full = str(secondary.get("data_completeness") or "") == "full"
+    if s_full and not p_full:
+        return secondary
+    if p_full and not s_full:
+        return primary
+    return secondary if s_units >= p_units else primary
+
+
 def build_dashboard_summary(
     sess,
     *,
@@ -151,7 +211,7 @@ def build_dashboard_summary(
     limit: int = 10,
 ) -> dict[str, Any]:
     """
-    Hot path: prebuilt artifact → in-process cache → Tier-3 fallback (last resort).
+    Hot path: prebuilt artifact → gap-fill bulk history → Tier-3 fallback → PG.
     """
     s = str(start_date or "")[:10]
     e = str(end_date or "")[:10]
@@ -162,7 +222,7 @@ def build_dashboard_summary(
         hit = _SUMMARY_CACHE.get(cache_key)
         if hit and (time.time() - float(hit.get("_ts", 0))) < _SUMMARY_CACHE_TTL_SEC:
             cached = {k: v for k, v in hit.items() if k != "_ts"}
-            if _artifact_covers_tier3_window(cached, s, e):
+            if _artifact_covers_tier3_window(cached, s, e) and not _artifact_undercounts_bulk(cached, s, e):
                 return cached
 
         try:
@@ -175,13 +235,14 @@ def build_dashboard_summary(
 
             artifact, meta = load_hot_summary_for_request(sess, s, e, limit)
             if artifact and _artifact_covers_tier3_window(artifact, s, e):
-                payload = _attach_version_meta(artifact, meta)
-                _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
-                return payload
+                if not _artifact_undercounts_bulk(artifact, s, e):
+                    payload = _attach_version_meta(artifact, meta)
+                    _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
+                    return payload
         except Exception:
             pass
 
-        # Tier-3 fallback when no artifact exists or session lags SQLite dailies.
+        tier3_payload: dict[str, Any] | None = None
         try:
             from ..routers.data import _build_intelligence_bundle_payload_from_tier3
             from .intelligence_artifacts import save_artifact, schedule_artifact_build, KIND_HOT
@@ -196,7 +257,7 @@ def build_dashboard_summary(
                 headline_only=True,
             )
             if tier3 and tier3.get("platform_summary"):
-                payload = {
+                tier3_payload = {
                     "source": "tier3_sqlite_fallback",
                     "platforms": _compact_platforms(tier3.get("platform_summary") or []),
                     "platform_summary": tier3.get("platform_summary") or [],
@@ -204,17 +265,30 @@ def build_dashboard_summary(
                     "sales_summary": tier3.get("sales_summary") or {},
                     "data_completeness": "partial",
                 }
-                try:
-                    from .intelligence_artifacts import intelligence_version_for_window
-
-                    ver = save_artifact(s, e, KIND_HOT, payload)
-                    payload["version"] = ver
-                except Exception:
-                    schedule_artifact_build(s, e, KIND_HOT, limit=limit)
-                _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
-                return payload
         except Exception:
             pass
+
+        gapfill_payload: dict[str, Any] | None = None
+        needs_gapfill = tier3_payload is None or _artifact_undercounts_bulk(tier3_payload, s, e)
+        if needs_gapfill:
+            gapfill_payload = _summary_from_gapfill(sess, s, e, limit)
+        elif tier3_payload is not None:
+            tier3_payload = {**tier3_payload, "data_completeness": "full"}
+
+        payload = _pick_richer_summary(gapfill_payload, tier3_payload)
+        if payload:
+            try:
+                from .intelligence_artifacts import save_artifact, schedule_artifact_build, KIND_HOT
+
+                if str(payload.get("data_completeness") or "") == "full":
+                    ver = save_artifact(s, e, KIND_HOT, payload)
+                    payload["version"] = ver
+                else:
+                    schedule_artifact_build(s, e, KIND_HOT, limit=limit)
+            except Exception:
+                pass
+            _SUMMARY_CACHE[cache_key] = {**payload, "_ts": time.time()}
+            return payload
 
         pg = _summary_from_pg(s, e, limit)
         if pg:

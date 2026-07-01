@@ -2241,7 +2241,7 @@ export async function getUploadReconciliation(
   return data
 }
 
-// ── 401 interceptor — only hard-logout when token is truly invalid ─────────────
+// ── 401 interceptor — expired/missing auth_token must not leave a zombie session ─
 api.interceptors.response.use(
   res => res,
   err => {
@@ -2251,21 +2251,19 @@ api.interceptors.response.use(
       err.response?.status === 502 ||
       err.response?.status === 503 ||
       err.response?.status === 504
-    let hasStoredAuth = false
-    try {
-      hasStoredAuth = !!sessionStorage.getItem('erp_auth_profile_v1')
-    } catch {
-      hasStoredAuth = false
-    }
     if (
       err.response?.status === 401 &&
       !isTimeout &&
       !url.includes('/auth/') &&
       !window.location.pathname.startsWith('/login') &&
-      !isUploadBusy() &&
-      !hasStoredAuth
+      !isUploadBusy()
     ) {
-      window.location.href = '/login'
+      try {
+        sessionStorage.removeItem('erp_auth_profile_v1')
+      } catch {
+        /* private mode */
+      }
+      window.location.href = '/login?expired=1'
     }
     return Promise.reject(err)
   }

@@ -25,6 +25,7 @@ import {
   bundleHasDisplayData,
   clearIntelligenceCache,
   clearIntelligenceCacheForRange,
+  pickRicherIntelligenceBundle,
   readIntelligenceCache,
   readIntelligenceCacheStale,
   summaryToCachedBundle,
@@ -1225,7 +1226,7 @@ export default function Dashboard() {
 
   const serverCacheVersion = intelligenceVersion?.version
 
-  const { data: rangeSummary, isFetching: fetchingSummary, isFetched: summaryFetched, isError: summaryError } = useQuery({
+  const { data: rangeSummary, isFetching: fetchingSummary, isFetched: summaryFetched } = useQuery({
     queryKey: ['dashboard-summary', dateStart, dateEnd, topSkuLimit, salesBasis, serverCacheVersion],
     queryFn: () =>
       getDashboardSummary({
@@ -1365,10 +1366,12 @@ export default function Dashboard() {
   }, [dateStart, dateEnd, topSkuLimit, salesBasis])
 
   const summaryUsable = Boolean(summaryBundle && bundleHasDisplayData(summaryBundle))
+  const summaryPartial = summaryBundle?.data_completeness === 'partial'
   const hasDsrDataEarly = Boolean(isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle))
-  const summarySettled = summaryFetched || summaryError
-  const needBundleFallback =
-    summarySettled && !summaryUsable && !hasDsrDataEarly
+  const wantBundleFetch =
+    Boolean(dateStart && dateEnd) &&
+    !hasDsrDataEarly &&
+    (!summaryUsable || summaryPartial || !summaryFetched)
 
   const bundleFullParams = useMemo(() => {
     const p = new URLSearchParams({
@@ -1428,9 +1431,9 @@ export default function Dashboard() {
     },
     staleTime: 300_000,
     gcTime: 600_000,
-    retry: needBundleFallback ? 3 : 0,
+    retry: wantBundleFetch ? 3 : 0,
     retryDelay: attempt => Math.min(10_000, 3_000 * (attempt + 1)),
-    enabled: Boolean(dateStart && dateEnd) && summarySettled && needBundleFallback,
+    enabled: wantBundleFetch,
     refetchOnWindowFocus: false,
     placeholderData: (previousData, previousQuery) => {
       const prevKey = previousQuery?.queryKey as unknown[] | undefined
@@ -1450,7 +1453,7 @@ export default function Dashboard() {
     refetchInterval: q => {
       const d = q.state.data
       if (dsrBundle && bundleHasDisplayData(dsrBundle) && isSingleDay) return false
-      if (summaryBundle && bundleHasDisplayData(summaryBundle)) return false
+      if (summaryBundle && bundleHasDisplayData(summaryBundle) && !summaryPartial) return false
       if (d?.status === 'warming' || (d as { computing?: boolean })?.computing) return 8_000
       if (q.state.fetchStatus === 'fetching') return false
       if (!bundleHasDisplayData(d)) return 8_000
@@ -1460,9 +1463,9 @@ export default function Dashboard() {
   })
 
   const needsFullBundle =
-    intelligenceCore?.data_completeness === 'partial' &&
-    intelligenceCore?.status !== 'warming' &&
-    bundleHasDisplayData(intelligenceCore)
+    (intelligenceCore?.data_completeness === 'partial' || summaryPartial) &&
+    (intelligenceCore?.status !== 'warming' || !intelligenceCore) &&
+    (bundleHasDisplayData(intelligenceCore) || summaryUsable)
 
   const { data: intelligenceFull } = useQuery<IntelligenceBundle>({
     queryKey: ['intelligence-bundle-full', dateStart, dateEnd, topSkuLimit, salesBasis],
@@ -1490,7 +1493,10 @@ export default function Dashboard() {
       )
       return data
     },
-    enabled: summaryUsable && fetchBundleExtras && Boolean(summaryBundle),
+    enabled:
+      (summaryUsable || bundleHasDisplayData(intelligenceCore)) &&
+      fetchBundleExtras &&
+      Boolean(dateStart && dateEnd),
     staleTime: 300_000,
     retry: 0,
   })
@@ -1508,16 +1514,14 @@ export default function Dashboard() {
               intelligenceExtras.dsr_brand_monthly ?? core.dsr_brand_monthly,
           }
     }
-    if (merged && bundleHasDisplayData(merged) && merged.data_completeness !== 'partial') {
-      return merged
-    }
-    if (summaryBundle && bundleHasDisplayData(summaryBundle)) return summaryBundle
-    if (isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle)) return dsrBundle
-    if (merged && bundleHasDisplayData(merged)) return merged
-    if (cachedBundleHint && bundleHasDisplayData(cachedBundleHint.bundle)) {
-      return cachedBundleHint.bundle
-    }
-    return merged ?? dsrBundle ?? summaryBundle
+    return (
+      pickRicherIntelligenceBundle(
+        merged,
+        summaryBundle,
+        isSingleDay ? dsrBundle : undefined,
+        cachedBundleHint?.bundle,
+      ) ?? merged ?? dsrBundle ?? summaryBundle
+    )
   }, [
     intelligenceCore,
     intelligenceFull,
@@ -1537,7 +1541,10 @@ export default function Dashboard() {
 
   const hasSummaryData = Boolean(summaryBundle && bundleHasDisplayData(summaryBundle))
   const hasDsrData = Boolean(isSingleDay && dsrBundle && bundleHasDisplayData(dsrBundle))
-  const showingSummaryOnly = hasSummaryData && !bundleHasDisplayData(intelligenceFull ?? intelligenceCore)
+  const showingSummaryOnly =
+    hasSummaryData &&
+    summaryPartial &&
+    !bundleHasDisplayData(intelligenceFull ?? intelligenceCore)
   const showingDsrOnly = hasDsrData && !bundleHasDisplayData(intelligenceFull ?? intelligenceCore) && !hasSummaryData
 
   const awaitingDashboardReady = false
@@ -1549,7 +1556,8 @@ export default function Dashboard() {
     (fetchingSummary ||
       bundleWarming ||
       loadingBundle ||
-      (fetchingBundle && !intelligenceCore))
+      fetchingBundle ||
+      (wantBundleFetch && !bundleFetched && !bundleError))
   const bundleLoadActive =
     !hasDisplayData &&
     !hasSummaryData &&
