@@ -17,13 +17,51 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import logging
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 _log = logging.getLogger("ingest_platform_zip_disk")
+
+
+def _warm_cache_dir() -> Path:
+    return Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
+
+
+def _existing_frame(attr: str, main_mod) -> pd.DataFrame:
+    """Current Tier-1 frame for *attr*: prefer live warm cache, else disk parquet.
+
+    Standalone ingest runs in a separate process where ``_warm_cache`` is empty,
+    so we must fall back to the durable parquet to avoid overwriting bulk history.
+    """
+    existing = (getattr(main_mod, "_warm_cache", None) or {}).get(attr)
+    if isinstance(existing, pd.DataFrame) and not existing.empty:
+        return existing
+    pq = _warm_cache_dir() / f"{attr}.parquet"
+    if pq.is_file():
+        try:
+            return pd.read_parquet(pq)
+        except Exception:
+            _log.exception("Could not read existing parquet %s", pq)
+    return pd.DataFrame()
+
+
+def _refresh_manifest(attr: str) -> None:
+    """Add *attr* to the disk manifest keys and bump saved_at (fresh fast-path)."""
+    mf = _warm_cache_dir() / "_manifest.json"
+    keys: set[str] = set()
+    if mf.is_file():
+        try:
+            keys = set(json.loads(mf.read_text()).get("keys") or [])
+        except Exception:
+            pass
+    keys.add(attr)
+    mf.write_text(json.dumps({"saved_at": datetime.now(timezone.utc).isoformat(), "keys": sorted(keys)}))
 
 PLATFORMS = ("myntra", "flipkart", "meesho", "snapdeal", "amazon")
 PLATFORM_ATTR = {
@@ -169,13 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         from backend.services.daily_store import merge_platform_data
 
-        existing = (main_mod._warm_cache or {}).get(attr)
-        if not isinstance(existing, pd.DataFrame):
-            from pathlib import Path as _P
-            import os as _os
-
-            pq = _P(_os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")) / f"{attr}.parquet"
-            existing = pd.read_parquet(pq) if pq.is_file() else pd.DataFrame()
+        existing = _existing_frame(attr, main_mod)
         merged = merge_platform_data(existing, df, args.platform, source_filename=label)
         ed = pd.to_datetime(existing["Date"], errors="coerce") if "Date" in existing.columns and len(existing) else pd.Series([], dtype="datetime64[ns]")
         md = pd.to_datetime(merged["Date"], errors="coerce")
@@ -202,27 +234,60 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         _log.info("Tier-3 saved: file_date=%s rows=%s", file_date, saved_rows)
         full = load_platform_data(args.platform, dedup=True)
-    else:
-        # Tier-1: merge archive into the durable warm-cache bulk frame.
-        from backend.services.daily_store import merge_platform_data
 
-        existing = (main_mod._warm_cache or {}).get(attr)
-        if not isinstance(existing, pd.DataFrame):
-            existing = pd.DataFrame()
-        full = merge_platform_data(existing, df, args.platform, source_filename=label)
-        _log.info("Tier-1 merged %s: %s existing + archive → %s rows", attr, f"{len(existing):,}", f"{len(full):,}")
+        sess = AppSession()
+        sess.sku_mapping = mapping
+        setattr(sess, attr, full)
+        main_mod.publish_warm_cache_from_session(sess)
+        try:
+            main_mod._save_warm_cache_to_disk(main_mod._warm_cache)
+        except Exception:
+            _log.exception("_save_warm_cache_to_disk failed")
+        _log.info("Tier-3 warm cache %s rows: %s", attr, f"{len(full):,}")
+        del df, full
+        gc.collect()
+        return 0
 
-    sess = AppSession()
-    sess.sku_mapping = mapping
-    setattr(sess, attr, full)
-    main_mod.publish_warm_cache_from_session(sess)
-    try:
-        main_mod._save_warm_cache_to_disk(main_mod._warm_cache)
-    except Exception:
-        _log.exception("_save_warm_cache_to_disk failed")
+    # ── Tier-1 (default): process-safe single-frame durable write ──────────────
+    # Load existing from live warm cache OR disk parquet, merge the archive, and
+    # write ONLY this platform's parquet. We deliberately do NOT publish the full
+    # warm cache or rewrite sku_mapping/sales_df here: this runs as a separate
+    # process, so touching those would risk shrinking maps or corrupting derived
+    # frames. The running backend picks up the new parquet on its next restart.
+    from backend.services.daily_store import merge_platform_data
+    from backend.services.helpers import _coerce_df_for_parquet
 
-    warm_rows = len((main_mod._warm_cache or {}).get(attr, pd.DataFrame()))
-    _log.info("Tier-1 warm cache %s rows: %s (persisted to WARM_CACHE_DIR)", attr, f"{warm_rows:,}")
+    existing = _existing_frame(attr, main_mod)
+    full = merge_platform_data(existing, df, args.platform, source_filename=label)
+    _log.info(
+        "Tier-1 merge %s: existing %s + archive %s → %s rows (net new %s)",
+        attr,
+        f"{len(existing):,}",
+        f"{len(df):,}",
+        f"{len(full):,}",
+        f"{len(full) - len(existing):,}",
+    )
+    if len(full) < len(existing):
+        _log.error(
+            "ABORT: merged frame (%s) is smaller than existing (%s) — refusing to shrink Tier-1.",
+            f"{len(full):,}",
+            f"{len(existing):,}",
+        )
+        return 2
+
+    parquet_path = _warm_cache_dir() / f"{attr}.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    _coerce_df_for_parquet(full).to_parquet(parquet_path, index=False)
+    _refresh_manifest(attr)
+    fd = pd.to_datetime(full["Date"], errors="coerce") if "Date" in full.columns else pd.Series([], dtype="datetime64[ns]")
+    _log.info(
+        "Tier-1 wrote %s: %s rows (%s→%s) → %s",
+        attr,
+        f"{len(full):,}",
+        str(fd.min())[:10] if len(fd) and fd.notna().any() else "NA",
+        str(fd.max())[:10] if len(fd) and fd.notna().any() else "NA",
+        parquet_path,
+    )
     del df, full
     gc.collect()
     return 0
