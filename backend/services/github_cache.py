@@ -111,8 +111,47 @@ def warm_cache_stale_vs_github(cache: dict) -> str | None:
     return None
 
 
+# Tier-3 ``total_rows`` is a PRE-dedup ``SUM(rows)`` across overlapping daily uploads,
+# so it routinely exceeds a deduped disk/warm frame (e.g. Myntra dedups ~20%). Comparing a
+# deduped frame to that raw sum falsely flags disk as "corrupt" on every restart, which then
+# triggers a GitHub Phase-2 rebuild that can resurrect trimmed/stale frames (Snapdeal, SKU map).
+# Instead treat disk as stale vs Tier-3 only when it is (a) dramatically smaller than Tier-3
+# (true corruption / empty frame) or (b) genuinely behind on DATES that Tier-3 already covers.
+_TIER3_CORRUPTION_RATIO = float(os.environ.get("WARM_CACHE_TIER3_CORRUPTION_RATIO", "0.30"))
+_TIER3_MAXDATE_SLACK_DAYS = int(os.environ.get("WARM_CACHE_TIER3_MAXDATE_SLACK_DAYS", "3"))
+
+
+def _frame_max_date(df) -> "pd.Timestamp | None":
+    try:
+        import pandas as pd
+
+        if df is None or not hasattr(df, "columns") or "Date" not in df.columns or len(df) == 0:
+            return None
+        d = pd.to_datetime(df["Date"], errors="coerce")
+        m = d.max()
+        return None if pd.isna(m) else m.normalize()
+    except Exception:
+        return None
+
+
+def _parse_summary_date(raw) -> "pd.Timestamp | None":
+    try:
+        import pandas as pd
+
+        if not raw:
+            return None
+        m = pd.to_datetime(str(raw), errors="coerce")
+        return None if pd.isna(m) else m.normalize()
+    except Exception:
+        return None
+
+
 def warm_cache_stale_vs_tier3(cache: dict) -> str | None:
-    """Compare warm/disk cache to Tier-3 SQLite totals (source of truth when GitHub was overwritten)."""
+    """Compare warm/disk cache to Tier-3 SQLite (source of truth when GitHub was overwritten).
+
+    Uses a corruption floor + date-coverage signal rather than a raw row-count ratio, because
+    Tier-3 totals are pre-dedup sums that legitimately exceed a deduped disk frame.
+    """
     try:
         from backend.main import warm_cache_po_session_only, warm_cache_sales_rows
 
@@ -127,13 +166,24 @@ def warm_cache_stale_vs_tier3(cache: dict) -> str | None:
         for plat, key in _WARM_PLATFORM_PAIRS:
             if skip_mtr and key == "mtr_df":
                 continue
-            want = int((summary.get(plat) or {}).get("total_rows") or 0)
+            info = summary.get(plat) or {}
+            want = int(info.get("total_rows") or 0)
             if want < 1_000:
                 continue
             df = cache.get(key)
             have = len(df) if df is not None and hasattr(df, "__len__") else 0
-            if have < want * _GITHUB_GAP_RATIO:
-                return f"{key} has {have:,} rows but Tier-3 SQLite has {want:,}"
+            # (a) True corruption / empty disk frame.
+            if have < want * _TIER3_CORRUPTION_RATIO:
+                return f"{key} has {have:,} rows but Tier-3 SQLite has {want:,} (below corruption floor)"
+            # (b) Disk behind on recent dates that Tier-3 already covers.
+            t3_max = _parse_summary_date(info.get("max_date"))
+            disk_max = _frame_max_date(df)
+            if t3_max is not None and disk_max is not None:
+                if (t3_max - disk_max).days > _TIER3_MAXDATE_SLACK_DAYS:
+                    return (
+                        f"{key} disk max date {disk_max.date()} is behind "
+                        f"Tier-3 {t3_max.date()}"
+                    )
     except Exception:
         return None
     return None

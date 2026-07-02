@@ -161,6 +161,7 @@ def test_warm_cache_stale_vs_tier3_detects_gap(monkeypatch):
 
 
 def test_warm_cache_stale_vs_tier3_flags_myntra_gap(monkeypatch):
+    """Genuine gap: disk is dramatically below Tier-3 (below the corruption floor)."""
     from backend.services import github_cache as gh
     import backend.services.daily_store as ds
 
@@ -174,8 +175,57 @@ def test_warm_cache_stale_vs_tier3_flags_myntra_gap(monkeypatch):
     )
     cache = {
         "mtr_df": pd.DataFrame({"OMS_SKU": ["A1"] * 1_200_000}),
-        "myntra_df": pd.DataFrame({"OMS_SKU": ["B"] * 80_000}),
+        # 40k of 190k → below the 0.30 corruption floor → genuinely corrupt.
+        "myntra_df": pd.DataFrame({"OMS_SKU": ["B"] * 40_000}),
     }
     reason = gh.warm_cache_stale_vs_tier3(cache)
     assert reason is not None
     assert "myntra_df" in reason
+
+
+def test_warm_cache_stale_vs_tier3_ignores_dedup_shrinkage(monkeypatch):
+    """Regression: Tier-3 totals are PRE-dedup sums. A deduped disk frame that is a bit
+    smaller than Tier-3 but covers the SAME max date must NOT be flagged stale — otherwise
+    every restart forces a needless GitHub rebuild that resurrects trimmed frames
+    (the production Snapdeal / SKU-map reversion incident)."""
+    from backend.services import github_cache as gh
+    import backend.services.daily_store as ds
+
+    monkeypatch.setattr(
+        ds,
+        "get_summary",
+        lambda: {
+            # Mirrors production: Myntra dedups ~20% (0.80), Meesho ~0.88, both date-current.
+            "myntra": {"total_rows": 260_319, "max_date": "2026-06-30"},
+            "meesho": {"total_rows": 113_516, "max_date": "2026-06-29"},
+        },
+    )
+    cache = {
+        "myntra_df": pd.DataFrame(
+            {"OMS_SKU": ["B"] * 208_942, "Date": pd.Timestamp("2026-06-30")}
+        ),
+        "meesho_df": pd.DataFrame(
+            {"OMS_SKU": ["C"] * 100_068, "Date": pd.Timestamp("2026-06-29")}
+        ),
+    }
+    assert gh.warm_cache_stale_vs_tier3(cache) is None
+
+
+def test_warm_cache_stale_vs_tier3_flags_disk_behind_on_dates(monkeypatch):
+    """Disk with plenty of rows but missing recent DATES that Tier-3 covers is stale."""
+    from backend.services import github_cache as gh
+    import backend.services.daily_store as ds
+
+    monkeypatch.setattr(
+        ds,
+        "get_summary",
+        lambda: {"myntra": {"total_rows": 200_000, "max_date": "2026-06-30"}},
+    )
+    cache = {
+        "myntra_df": pd.DataFrame(
+            {"OMS_SKU": ["B"] * 195_000, "Date": pd.Timestamp("2026-06-10")}
+        ),
+    }
+    reason = gh.warm_cache_stale_vs_tier3(cache)
+    assert reason is not None
+    assert "behind" in reason
