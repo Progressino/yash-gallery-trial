@@ -1,17 +1,38 @@
 #!/usr/bin/env python3
-"""Ingest platform ZIP(s) on the server: Tier-3 SQLite + warm-cache publish."""
+"""Ingest historical platform ZIP(s) on the server.
+
+Default mode = **Tier-1** (bulk historical): parse → optional date filter →
+merge into the warm-cache platform frame (``{platform}_df``) → persist durable
+parquet in ``WARM_CACHE_DIR``. Tier-1 bulk frames are the primary quarterly PO
+source and survive restarts/redeploys (Docker volume), which is where multi-year
+historical archives belong.
+
+Use ``--tier3`` only for incremental daily uploads that should live in the
+capped SQLite ``daily_uploads`` store.
+
+PO uses the last 8 quarters, so historical archives are typically filtered with
+``--min-date 2025-01-01`` to drop stale 2024 rows.
+"""
 from __future__ import annotations
 
 import argparse
 import gc
 import logging
-import sys
 from pathlib import Path
 
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 _log = logging.getLogger("ingest_platform_zip_disk")
+
+PLATFORMS = ("myntra", "flipkart", "meesho", "snapdeal", "amazon")
+PLATFORM_ATTR = {
+    "myntra": "myntra_df",
+    "flipkart": "flipkart_df",
+    "meesho": "meesho_df",
+    "snapdeal": "snapdeal_df",
+    "amazon": "mtr_df",
+}
 
 
 def _mapping() -> dict:
@@ -35,27 +56,51 @@ def _parse_zip(platform: str, path: Path, mapping: dict) -> tuple[pd.DataFrame, 
 
         df, _n, skipped = load_flipkart_from_zip(path, mapping, source_filename=path.name)
         return df, skipped
-    raise ValueError(platform)
+    if platform == "meesho":
+        from backend.services.meesho import load_meesho_from_zip
+
+        df, _n, skipped = load_meesho_from_zip(path.read_bytes(), source_filename=path.name)
+        return df, skipped
+    if platform == "snapdeal":
+        from backend.services.snapdeal import load_snapdeal_from_zip
+
+        df, _n, skipped, _info = load_snapdeal_from_zip(path.read_bytes(), mapping, filename=path.name)
+        return df, skipped
+    raise ValueError(f"Unsupported platform: {platform}")
+
+
+def _has_usable_sku(df: pd.DataFrame) -> bool:
+    if "OMS_SKU" not in df.columns or df.empty:
+        return False
+    s = df["OMS_SKU"].astype(str).str.strip().str.upper()
+    good = ~(s.eq("") | s.isin(["NAN", "NONE", "UNKNOWN"]))
+    return bool(good.any())
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("platform", choices=["myntra", "flipkart"])
+    p.add_argument("platform", choices=PLATFORMS)
     p.add_argument("zip_path", type=Path)
+    p.add_argument("--filename", default="", help="Label for the archive (default: zip_path.name).")
     p.add_argument(
-        "--filename",
+        "--min-date",
         default="",
-        help="Tier-3 filename label (default: zip_path.name).",
+        help="Drop rows before this ISO date (e.g. 2025-01-01 to exclude 2024).",
     )
     p.add_argument(
-        "--save-only",
+        "--tier3",
         action="store_true",
-        help="Only persist to Tier-3; skip warm-cache reload (use for batch ingests).",
+        help="Persist to Tier-3 SQLite daily_uploads instead of Tier-1 bulk frames.",
+    )
+    p.add_argument(
+        "--allow-empty-sku",
+        action="store_true",
+        help="Proceed even when parsed rows have no usable OMS_SKU (not recommended).",
     )
     args = p.parse_args(argv)
 
     path = args.zip_path
-    save_name = (args.filename or path.name).strip()
+    label = (args.filename or path.name).strip()
     if not path.is_file():
         _log.error("Missing %s", path)
         return 1
@@ -64,43 +109,60 @@ def main(argv: list[str] | None = None) -> int:
     _log.info("SKU mapping keys: %s", f"{len(mapping):,}")
 
     df, skipped = _parse_zip(args.platform, path, mapping)
-    if df.empty:
-        _log.error("No rows parsed from %s — %s", save_name, skipped[:5])
+    if df is None or df.empty:
+        _log.error("No rows parsed from %s — %s", label, skipped[:5])
         return 1
 
     d = pd.to_datetime(df["Date"], errors="coerce")
-    _log.info(
-        "Parsed %s: %s rows, %s → %s",
-        save_name,
-        f"{len(df):,}",
-        str(d.min())[:10],
-        str(d.max())[:10],
-    )
+    _log.info("Parsed %s: %s rows, %s → %s", label, f"{len(df):,}", str(d.min())[:10], str(d.max())[:10])
     if skipped:
         _log.info("Parse notes (%s):", len(skipped))
         for s in skipped[:8]:
             _log.info("  %s", s)
 
-    from backend.services.daily_store import load_platform_data, save_daily_file
+    if not _has_usable_sku(df) and not args.allow_empty_sku:
+        _log.error(
+            "ABORT: parsed rows have no usable OMS_SKU — this looks like a tax/settlement "
+            "export, not a per-SKU sales/order report. Use --allow-empty-sku to override."
+        )
+        return 2
+
+    if args.min_date:
+        cutoff = pd.Timestamp(args.min_date)
+        before = len(df)
+        df = df.loc[d >= cutoff].copy()
+        _log.info("Filtered < %s: dropped %s rows, kept %s", args.min_date, f"{before - len(df):,}", f"{len(df):,}")
+        if df.empty:
+            _log.error("Nothing left after min-date filter.")
+            return 1
+
     from backend.session import AppSession
     import backend.main as main_mod
 
-    file_date, saved_rows, block = save_daily_file(args.platform, save_name, df)
-    if block:
-        _log.error("save_daily_file blocked: %s", block)
-        return 1
-    _log.info("Tier-3 saved: file_date=%s rows=%s", file_date, saved_rows)
+    attr = PLATFORM_ATTR[args.platform]
 
-    if args.save_only:
-        return 0
+    if args.tier3:
+        from backend.services.daily_store import load_platform_data, save_daily_file
 
-    attr = f"{args.platform}_df"
+        file_date, saved_rows, block = save_daily_file(args.platform, label, df)
+        if block:
+            _log.error("save_daily_file blocked: %s", block)
+            return 1
+        _log.info("Tier-3 saved: file_date=%s rows=%s", file_date, saved_rows)
+        full = load_platform_data(args.platform, dedup=True)
+    else:
+        # Tier-1: merge archive into the durable warm-cache bulk frame.
+        from backend.services.daily_store import merge_platform_data
+
+        existing = (main_mod._warm_cache or {}).get(attr)
+        if not isinstance(existing, pd.DataFrame):
+            existing = pd.DataFrame()
+        full = merge_platform_data(existing, df, args.platform, source_filename=label)
+        _log.info("Tier-1 merged %s: %s existing + archive → %s rows", attr, f"{len(existing):,}", f"{len(full):,}")
+
     sess = AppSession()
     sess.sku_mapping = mapping
-    full = load_platform_data(args.platform, dedup=True)
     setattr(sess, attr, full)
-    _log.info("Tier-3 reload %s: %s rows", args.platform, f"{len(full):,}")
-
     main_mod.publish_warm_cache_from_session(sess)
     try:
         main_mod._save_warm_cache_to_disk(main_mod._warm_cache)
@@ -108,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         _log.exception("_save_warm_cache_to_disk failed")
 
     warm_rows = len((main_mod._warm_cache or {}).get(attr, pd.DataFrame()))
-    _log.info("Warm cache %s rows: %s", attr, f"{warm_rows:,}")
+    _log.info("Tier-1 warm cache %s rows: %s (persisted to WARM_CACHE_DIR)", attr, f"{warm_rows:,}")
     del df, full
     gc.collect()
     return 0
