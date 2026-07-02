@@ -179,7 +179,12 @@ def _accumulate_shipment_frame(
         platform=platform,
         skip_days=skip_days,
         record_days=record_days,
-        platform_day_keys=platform_day_keys or set(),
+        # Pass the caller's set BY REFERENCE even when it is currently empty. Using
+        # ``platform_day_keys or set()`` handed a throwaway set to the recorder whenever
+        # the accumulator was empty (a falsy set) — so Tier-1 (SKU, day) keys were never
+        # recorded, and the Tier-3 gap-fill + sales_df supplement then re-counted days
+        # already present in Tier-1, inflating every SKU's quarterly units.
+        platform_day_keys=platform_day_keys if platform_day_keys is not None else set(),
     )
     if work.empty:
         return 0
