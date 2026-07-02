@@ -1185,6 +1185,27 @@ def test_myntra_shipment_and_refund_different_days_keeps_both():
     assert len(out) == 2
 
 
+def test_myntra_same_day_shipment_and_refund_same_batch_keeps_both_for_gross():
+    """Seller export can show Shipment + Refund same day — gross MTR must count both."""
+    from backend.services.daily_store import merge_platform_data
+    import pandas as pd
+
+    batch = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-04-10", "2026-04-10"]),
+            "OMS_SKU": ["S1", "S1"],
+            "TxnType": ["Shipment", "Refund"],
+            "Quantity": [1.0, 1.0],
+            "LineKey": ["L1", "L1"],
+            "OrderId": ["L1", "L1"],
+            "RawStatus": ["SH", "RTO"],
+        }
+    )
+    out = merge_platform_data(pd.DataFrame(), batch, "myntra")
+    assert len(out) == 2
+    assert set(out["TxnType"]) == {"Shipment", "Refund"}
+
+
 def test_flipkart_strong_dedup_keeps_two_skus_same_order_id():
     from backend.services.daily_store import merge_platform_data
     import pandas as pd

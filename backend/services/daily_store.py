@@ -672,10 +672,14 @@ def _dedup_shipment_superseded_by_same_day_refund(d: pd.DataFrame) -> pd.DataFra
     Tier-3 merges (concat existing + new upload) keep Shipment and Refund as distinct keys,
     so a line that moved to **RTO / return** can leave a stale **Shipment** row from an older
     snapshot alongside the current **Refund** row — same marketplace line id, same SKU/qty,
-    same reporting day. Drop the shadow Shipment so gross/return counts match seller exports.
+    same reporting day. Drop only **older-generation** shadow Shipments when a newer upload
+    carries the Refund (``_merge_gen`` stamped by ``merge_platform_data``).
 
-    Used for **Myntra** and **Meesho**. Different calendar days (ship in January, return in
-    February) are left intact.
+    Rows from the **same** upload batch share a generation and both Shipment + Refund are kept
+    (gross sales + returns on the same calendar day, matching seller MTR exports). Different
+    calendar days (ship in January, return in February) are always left intact.
+
+    Used for **Myntra** and **Meesho**.
     """
     if d.empty or "TxnType" not in d.columns:
         return d
@@ -683,6 +687,10 @@ def _dedup_shipment_superseded_by_same_day_refund(d: pd.DataFrame) -> pd.DataFra
     if not all(c in d.columns for c in required):
         return d
     work = d.copy()
+    if "_merge_gen" not in work.columns:
+        work["_merge_gen"] = 0
+    else:
+        work["_merge_gen"] = pd.to_numeric(work["_merge_gen"], errors="coerce").fillna(0).astype("int64")
     oid = work["OrderId"].astype(str).str.strip()
     if "LineKey" in work.columns:
         lk = work["LineKey"].fillna("").astype(str).str.strip()
@@ -701,11 +709,13 @@ def _dedup_shipment_superseded_by_same_day_refund(d: pd.DataFrame) -> pd.DataFra
             continue
         txns = set(g["_txn"])
         if "Shipment" in txns and "Refund" in txns:
-            drop_idx.extend(g.index[g["_txn"] == "Shipment"].tolist())
+            refund_gen = int(g.loc[g["_txn"] == "Refund", "_merge_gen"].max())
+            stale_ship = g[(g["_txn"] == "Shipment") & (g["_merge_gen"] < refund_gen)]
+            drop_idx.extend(stale_ship.index.tolist())
 
     if not drop_idx:
-        return d
-    return d.drop(index=drop_idx, errors="ignore").reset_index(drop=True)
+        return d.drop(columns=["_merge_gen"], errors="ignore")
+    return d.drop(index=drop_idx, errors="ignore").drop(columns=["_merge_gen"], errors="ignore").reset_index(drop=True)
 
 
 def _dedup_platform_df(df: pd.DataFrame, platform: str, *, is_merge: bool = False) -> pd.DataFrame:
@@ -727,10 +737,10 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str, *, is_merge: bool = Fals
       collapse to one row — avoids ~2× counts when exports disagree on ids only.
     - ``_dedup_shipment_superseded_by_same_day_refund`` only runs when ``is_merge=True``
       (i.e. concatenating a NEW upload onto EXISTING session data). It removes a stale
-      Shipment row left over from an older snapshot once the same line now shows as
-      Refund/RTO. Within a single freshly-parsed export (``is_merge=False``), a Shipment
-      row and a same-day Refund row for the same order/SKU/qty are both genuine, distinct
-      events (a sale and its later return) and must both be kept for net-sales accuracy.
+      Shipment row from an **older** ``_merge_gen`` once the same line now shows as
+      Refund/RTO in a **newer** upload. Within a single freshly-parsed export (``is_merge=False``),
+      or when Shipment and Refund share the same generation, both rows are kept so gross
+      sales match seller MTR exports (sale + same-day return are separate events).
     """
     if df.empty:
         return df
@@ -1158,11 +1168,24 @@ def merge_platform_data(
             apply_dsr_segment_to_df_inplace(new_df, source_filename, tail)
 
     if existing.empty:
-        return _dedup_platform_df(new_df.copy() if not new_df.empty else new_df, platform)
+        out = new_df.copy() if not new_df.empty else new_df
+        if not out.empty:
+            out["_merge_gen"] = 0
+        out = _dedup_platform_df(out, platform)
+        return out.drop(columns=["_merge_gen"], errors="ignore")
     if new_df.empty:
-        return existing
-    combined = pd.concat([existing, new_df], ignore_index=True)
-    return _dedup_platform_df(combined, platform, is_merge=True)
+        return existing.drop(columns=["_merge_gen"], errors="ignore")
+    ex = existing.copy()
+    nw = new_df.copy()
+    if "_merge_gen" in ex.columns:
+        ex["_merge_gen"] = pd.to_numeric(ex["_merge_gen"], errors="coerce").fillna(0).astype("int64")
+    else:
+        ex["_merge_gen"] = 0
+    next_gen = int(ex["_merge_gen"].max()) + 1
+    nw["_merge_gen"] = next_gen
+    combined = pd.concat([ex, nw], ignore_index=True)
+    merged = _dedup_platform_df(combined, platform, is_merge=True)
+    return merged.drop(columns=["_merge_gen"], errors="ignore")
 
 
 def list_uploads() -> List[dict]:
