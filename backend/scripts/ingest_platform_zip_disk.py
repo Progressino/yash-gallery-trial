@@ -66,13 +66,30 @@ def _parse_zip(platform: str, path: Path, mapping: dict) -> tuple[pd.DataFrame, 
 
         df, _n, skipped, _info = load_snapdeal_from_zip(path.read_bytes(), mapping, filename=path.name)
         return df, skipped
+    if platform == "amazon":
+        # India Amazon MTR (GST B2C/B2B). Accepts a master ZIP (nested monthly
+        # ZIPs / CSVs) or a directory of extracted month ZIPs / CSVs.
+        if path.is_dir():
+            from backend.services.mtr import load_mtr_from_extracted_files
+
+            files = [(f.name, f.read_bytes()) for f in sorted(path.rglob("*")) if f.is_file()]
+            df, _n, skipped = load_mtr_from_extracted_files(files)
+        else:
+            from backend.services.mtr import load_mtr_from_zip
+
+            df, _n, skipped = load_mtr_from_zip(path.read_bytes())
+        return df, skipped
     raise ValueError(f"Unsupported platform: {platform}")
 
 
 def _has_usable_sku(df: pd.DataFrame) -> bool:
-    if "OMS_SKU" not in df.columns or df.empty:
+    # Marketplace frames carry OMS_SKU; Amazon MTR carries the raw seller SKU.
+    if df.empty:
         return False
-    s = df["OMS_SKU"].astype(str).str.strip().str.upper()
+    col = "OMS_SKU" if "OMS_SKU" in df.columns else ("SKU" if "SKU" in df.columns else None)
+    if col is None:
+        return False
+    s = df[col].astype(str).str.strip().str.upper()
     good = ~(s.eq("") | s.isin(["NAN", "NONE", "UNKNOWN"]))
     return bool(good.any())
 
@@ -97,12 +114,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Proceed even when parsed rows have no usable OMS_SKU (not recommended).",
     )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse + merge in memory and report before/after counts, but do NOT persist.",
+    )
     args = p.parse_args(argv)
 
     path = args.zip_path
     label = (args.filename or path.name).strip()
-    if not path.is_file():
+    if not path.exists():
         _log.error("Missing %s", path)
+        return 1
+    if path.is_dir() and args.platform != "amazon":
+        _log.error("Directory input is only supported for amazon MTR (%s given)", args.platform)
         return 1
 
     mapping = _mapping()
@@ -140,6 +165,33 @@ def main(argv: list[str] | None = None) -> int:
     import backend.main as main_mod
 
     attr = PLATFORM_ATTR[args.platform]
+
+    if args.dry_run:
+        from backend.services.daily_store import merge_platform_data
+
+        existing = (main_mod._warm_cache or {}).get(attr)
+        if not isinstance(existing, pd.DataFrame):
+            from pathlib import Path as _P
+            import os as _os
+
+            pq = _P(_os.environ.get("WARM_CACHE_DIR", "/data/warm_cache")) / f"{attr}.parquet"
+            existing = pd.read_parquet(pq) if pq.is_file() else pd.DataFrame()
+        merged = merge_platform_data(existing, df, args.platform, source_filename=label)
+        ed = pd.to_datetime(existing["Date"], errors="coerce") if "Date" in existing.columns and len(existing) else pd.Series([], dtype="datetime64[ns]")
+        md = pd.to_datetime(merged["Date"], errors="coerce")
+        _log.info(
+            "DRY-RUN %s: BEFORE %s rows (%s→%s) + archive %s rows → AFTER %s rows (%s→%s); net new = %s",
+            attr,
+            f"{len(existing):,}",
+            str(ed.min())[:10] if len(ed) and ed.notna().any() else "NA",
+            str(ed.max())[:10] if len(ed) and ed.notna().any() else "NA",
+            f"{len(df):,}",
+            f"{len(merged):,}",
+            str(md.min())[:10] if md.notna().any() else "NA",
+            str(md.max())[:10] if md.notna().any() else "NA",
+            f"{len(merged) - len(existing):,}",
+        )
+        return 0
 
     if args.tier3:
         from backend.services.daily_store import load_platform_data, save_daily_file
