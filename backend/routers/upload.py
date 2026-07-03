@@ -2853,7 +2853,13 @@ async def upload_amazon_b2b(request: Request, file: UploadFile = File(...)):
 # ── Existing PO Sheet ──────────────────────────────────────────
 
 def _persist_existing_po_after_upload(sess, session_id: str | None) -> None:
-    """Sync PostgreSQL + GitHub cache immediately after Existing PO upload."""
+    """Sync PostgreSQL + GitHub cache immediately after Existing PO upload.
+
+    Only pushes the existing_po_df and existing_po_meta keys to GitHub — not the
+    full warm cache. Uploading 90 MB of platform data on every PO sheet upload
+    caused the upload UI to appear stuck (the GitHub push ran synchronously in the
+    finally block of the worker thread and took ~90 s to complete).
+    """
     if session_id:
         setattr(sess, "_persist_sid", session_id)
         try:
@@ -2868,10 +2874,29 @@ def _persist_existing_po_after_upload(sess, session_id: str | None) -> None:
         _main.merge_existing_po_into_warm_cache(sess)
     except Exception:
         _log.exception("merge_existing_po_into_warm_cache after existing PO upload")
+    # Targeted GitHub push: only existing_po_df + existing_po_meta.
+    # The full _auto_save_cache (all platform parquets, ~90 s) is not needed here
+    # because no platform sales data changed — only the PO sheet was updated.
     try:
-        _auto_save_cache(sess)
+        from ..services.github_cache import save_cache_to_drive
+        from ..services.existing_po import read_existing_po_disk_meta
+        from ..services.sku_mapping import load_sku_mapping_from_disk
+
+        ep = getattr(sess, "existing_po_df", None)
+        meta = read_existing_po_disk_meta()
+        if ep is not None and not getattr(ep, "empty", True):
+            payload: dict = {
+                "existing_po_df": ep,
+                "existing_po_meta": meta or {},
+                "sku_mapping": load_sku_mapping_from_disk() or {},
+            }
+            ok, msg = save_cache_to_drive(payload)
+            if ok:
+                _log.info("Existing PO GitHub push ok: %s", msg)
+            else:
+                _log.warning("Existing PO GitHub push skipped/failed: %s", msg)
     except Exception:
-        _log.exception("auto-save after existing PO upload")
+        _log.exception("targeted GitHub push after existing PO upload failed")
 
 
 def _parse_existing_po_into_session(sess, file_bytes: bytes, orig_fn: str) -> UploadResponse:
