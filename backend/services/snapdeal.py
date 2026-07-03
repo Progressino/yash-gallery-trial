@@ -39,8 +39,11 @@ _SHEET_TXNTYPE: Dict[str, str] = {
     "cancelled":     "Cancel",
     "cancellation":  "Cancel",
 }
-# Sheets to skip entirely (summary/report sheets with no row-level order data)
-_SKIP_SHEET_KEYWORDS = ["summary", "report", "dashboard", "pivot", "master"]
+# Sheets to skip entirely (summary/report/settlement tabs with no per-SKU order lines)
+_SKIP_SHEET_KEYWORDS = [
+    "summary", "report", "dashboard", "pivot", "master", "help",
+    "commission", "payment", "closing", "tcs", "non order",
+]
 
 
 def _find_col(cols: List[str], candidates: List[str]) -> Optional[str]:
@@ -103,7 +106,7 @@ def _snapdeal_txn(status: str) -> str:
     """Map Snapdeal order status → Shipment / Refund / Cancel."""
     s = str(status).strip().lower()
     if not is_non_rto_forward_milestone_status(status) and any(
-        x in s for x in ["return", "rto", "refund", "returned", "reverse"]
+        x in s for x in ["return", "rto", "rts", "refund", "returned", "reverse"]
     ):
         return "Refund"
     if any(x in s for x in ["cancel", "cancelled", "cancellation"]):
@@ -135,11 +138,24 @@ def _parse_snapdeal_df(
     field_map: dict = {"raw_cols": cols}
 
     # ── Date — name-based first, then value-based fallback ───────
+    # ORDER MATTERS. Prefer the order/transaction/invoice date (when the sale happened).
+    # ``Settlement Date`` / ``Payment Date`` on Snapdeal *settlement* XLSX lag the sale by
+    # weeks and forward-shift volume across months, so they are LAST-resort only. Using them
+    # as the primary date made Q1 sales read ~2,773 instead of the true 5,980 (Transaction Date).
     date_col = _find_col(cols, [
         "Order Date", "Order Placed Date", "Order Created Date",
-        "Created Date", "Placed Date", "Date", "Order_Date",
-        "Dispatch Date", "Ship Date", "Settlement Date", "Payment Date",
-    ]) or _find_col_fuzzy(cols, ["order date", "placed date", "created date", "dispatch date", "settlement date", "payment date"])
+        "Created Date", "Placed Date", "Order_Date",
+        "Transaction Date", "Order Invoice Date", "Invoice Date",
+        "Dispatch Date", "Ship Date", "Date",
+    ]) or _find_col_fuzzy(cols, [
+        "order date", "placed date", "created date",
+        "transaction date", "invoice date", "dispatch date",
+    ])
+
+    # Settlement / payment date only if no sale-date column exists at all.
+    if date_col is None:
+        date_col = _find_col(cols, ["Settlement Date", "Payment Date"]) \
+            or _find_col_fuzzy(cols, ["settlement date", "payment date"])
 
     if date_col is None:
         date_col = _find_date_col_by_value(df)
