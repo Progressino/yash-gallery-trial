@@ -1,0 +1,166 @@
+"""
+Ingest Meesho monthly TCS-sales RAR archives into Tier-1 warm cache.
+
+The RAR structure expected:
+  <root>/<gst_SUPPLIER_MM_YYYY>/tcs_sales.xlsx
+  <root>/<gst_SUPPLIER_MM_YYYY>/tcs_sales_return.xlsx
+
+Run inside the backend container (PYTHONPATH=/srv, workdir /srv):
+  python3 backend/scripts/_ingest_meesho_rar_tier1.py \
+      --rar /tmp/meesho_pe.rar --rar /tmp/meesho_ag.rar [--dry-run]
+"""
+
+import argparse, io, json, sys, zipfile, logging
+from pathlib import Path
+
+import pandas as pd
+import rarfile
+
+sys.path.insert(0, "/srv")
+from backend.services.meesho import _parse_meesho_inner_zip
+from backend.services.daily_store import _dedup_platform_df, merge_platform_data
+from backend.services.helpers import apply_dsr_segment_from_upload_filename
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+_log = logging.getLogger(__name__)
+
+WARM_CACHE_DIR = Path("/data/warm_cache")
+PARQUET_PATH   = WARM_CACHE_DIR / "meesho_df.parquet"
+MANIFEST_PATH  = WARM_CACHE_DIR / "manifest.json"
+MIN_DATE       = pd.Timestamp("2025-01-01")
+
+
+def parse_rar_meesho(rar_path: str, label: str) -> pd.DataFrame:
+    rf = rarfile.RarFile(rar_path)
+    month_data: dict[str, dict[str, bytes]] = {}
+    for name in rf.namelist():
+        if name.endswith("/"):
+            continue
+        base = Path(name).name.lower()
+        if not base.endswith(".xlsx"):
+            continue
+        folder = str(Path(name).parent)
+        month_data.setdefault(folder, {})[base] = rf.read(name)
+
+    dfs = []
+    for folder, files in sorted(month_data.items()):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for fname, data in files.items():
+                zf.writestr(fname, data)
+        buf.seek(0)
+        with zipfile.ZipFile(buf) as inner_zf:
+            df = _parse_meesho_inner_zip(inner_zf)
+        if not df.empty:
+            _log.info("  %s: %d rows", folder, len(df))
+            dfs.append(df)
+        else:
+            _log.warning("  %s: EMPTY", folder)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    combined = pd.concat(dfs, ignore_index=True)
+    combined = _dedup_platform_df(combined, "meesho")
+    combined = apply_dsr_segment_from_upload_filename(combined, label, "Meesho")
+    return combined
+
+
+def qsummary(df: pd.DataFrame, label: str = "") -> None:
+    if df is None or df.empty:
+        _log.info("%s: EMPTY", label)
+        return
+    ship = df[df.get("TxnType", df.get("txntype", pd.Series(dtype=str))).astype(str).str.lower().eq("shipment")]
+    dt = pd.to_datetime(ship["Date"], errors="coerce")
+    ship = ship[dt.notna()]
+    dt   = dt[dt.notna()]
+    if ship.empty:
+        _log.info("%s: no shipments", label)
+        return
+    q = dt.dt.year.astype(str) + "Q" + dt.dt.quarter.astype(str)
+    n = pd.to_numeric(ship["Quantity"], errors="coerce").fillna(0).groupby(q).sum().astype(int)
+    rows = " | ".join(f"{k}={v}" for k, v in sorted(n.items()) if v > 0)
+    _log.info("%s: %s  [total ships=%d]", label, rows, int(n.sum()))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rar", action="append", required=True, help="RAR file path (repeat for multiple)")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    # Parse all RARs and merge
+    new_df = pd.DataFrame()
+    for rar_path in args.rar:
+        label = Path(rar_path).name
+        _log.info("Parsing %s", label)
+        df = parse_rar_meesho(rar_path, label)
+        if df.empty:
+            _log.warning("  -> EMPTY after parse, skipping")
+            continue
+        qsummary(df, f"  {label}")
+        new_df = merge_platform_data(new_df, df, "meesho", source_filename=label) if not new_df.empty else df
+
+    if new_df.empty:
+        _log.error("No data parsed from any RAR — aborting")
+        sys.exit(1)
+
+    qsummary(new_df, "NEW total (pre-merge with existing)")
+
+    # Load existing Tier-1 meesho_df
+    existing = pd.DataFrame()
+    if PARQUET_PATH.exists():
+        _log.info("Loading existing %s", PARQUET_PATH)
+        existing = pd.read_parquet(PARQUET_PATH)
+        qsummary(existing, "EXISTING meesho_df")
+    else:
+        _log.warning("No existing Tier-1 meesho_df found — will create fresh")
+
+    # Merge
+    merged = merge_platform_data(existing, new_df, "meesho", source_filename="meesho_rar_ingest")
+    qsummary(merged, "MERGED")
+
+    # Apply min-date filter
+    dt_col = pd.to_datetime(merged["Date"], errors="coerce")
+    before = len(merged)
+    merged = merged[dt_col.ge(MIN_DATE) | dt_col.isna()].reset_index(drop=True)
+    _log.info("Min-date filter (%s): %d -> %d rows", MIN_DATE.date(), before, len(merged))
+
+    # Refuse to shrink (safety)
+    if not existing.empty and len(merged) < len(existing):
+        _log.error(
+            "Merge would shrink from %d to %d rows — safety abort. "
+            "Check for OMS_SKU mismatch or date filter issue.",
+            len(existing), len(merged),
+        )
+        sys.exit(1)
+
+    qsummary(merged, "FINAL (after filter)")
+    _log.info("OMS_SKU fill: %d/%d", int(merged["OMS_SKU"].astype(str).str.strip().ne("").sum()), len(merged))
+
+    if args.dry_run:
+        _log.info("DRY RUN — no files written")
+        return
+
+    WARM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _log.info("Writing %s (%d rows)", PARQUET_PATH, len(merged))
+    merged.to_parquet(PARQUET_PATH, index=False)
+
+    # Update manifest
+    manifest = {}
+    if MANIFEST_PATH.exists():
+        with open(MANIFEST_PATH) as f:
+            manifest = json.load(f)
+    manifest["meesho_df"] = {
+        "rows": len(merged),
+        "updated": pd.Timestamp.utcnow().isoformat(),
+        "source": "rar_ingest",
+    }
+    with open(MANIFEST_PATH, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    _log.info("Done — meesho Tier-1 updated successfully")
+
+
+if __name__ == "__main__":
+    main()
