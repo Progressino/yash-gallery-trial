@@ -272,11 +272,24 @@ def _myntra_line_dedup_series(df: pd.DataFrame) -> pd.Series:
     if df.empty:
         return pd.Series(dtype=str)
     keys = pd.Series("", index=df.index, dtype=str)
+    # Prefer true line-level ids (one physical item per id). PPMP master CSVs use
+    # underscore headers (``order_id`` / ``item_id`` are unique per shipped line, one SKU
+    # each); seller reports use spaced headers (``order line id``). Without a strong
+    # per-line id, distinct same-day/SKU/qty orders were collapsed by the attribute-based
+    # dedup passes, undercounting gross sales ~8-10%.
     for col in (
         "order line id",
+        "order_line_id",
+        "item_id",
+        "item id",
+        "order_id",
+        "pps_item_id",
         "packet id",
+        "packet_id",
         "seller order id",
+        "seller_order_id",
         "order id fk",
+        "order_id_fk",
     ):
         if col not in df.columns:
             continue

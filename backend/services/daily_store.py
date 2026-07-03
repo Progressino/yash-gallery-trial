@@ -651,19 +651,34 @@ _CROSS_EXPORT_ID_COLS = frozenset({
 })
 
 
-def _dedup_cross_export_id_twins(d: pd.DataFrame) -> pd.DataFrame:
+def _dedup_cross_export_id_twins(d: pd.DataFrame, platform: str | None = None) -> pd.DataFrame:
     """
     After LineKey / OrderId dedup, still remove rows whose **substantive** fields are
     identical — duplicate monthly + daily uploads, PPMP vs seller report, or two id
     columns populated differently for the same line (different LineKey only).
 
     Excludes identity-ish columns from the fingerprint so true twin rows collapse.
+
+    **Myntra** carries a genuine per-line marketplace id in ``LineKey`` (``order_id`` /
+    ``item_id``, one physical item each), so two rows with *distinct real* LineKeys are
+    distinct sales, not export twins — collapsing them by attribute fingerprint alone
+    under-counts high-volume SKUs that ship many identical units per day. For Myntra we
+    therefore keep one row per (fingerprint, real LineKey); rows with empty/weak LineKeys
+    still collapse by fingerprint. Other platforms (Meesho / Flipkart) use synthetic
+    LineKeys for the *same* line across exports, so they keep the original behaviour.
     """
     if d.empty or len(d) < 2:
         return d
     subset = [c for c in d.columns if c not in _CROSS_EXPORT_ID_COLS]
     if len(subset) < 4:
         return d
+    if platform == "myntra" and "LineKey" in d.columns:
+        lk = d["LineKey"].fillna("").astype(str).str.strip()
+        real = lk.ne("") & ~lk.str.lower().isin(["nan", "none"])
+        if real.any():
+            keep_real = d[real].drop_duplicates(subset=subset + ["LineKey"], keep="last")
+            collapse_weak = d[~real].drop_duplicates(subset=subset, keep="last")
+            return pd.concat([keep_real, collapse_weak], ignore_index=True)
     return d.drop_duplicates(subset=subset, keep="last").reset_index(drop=True)
 
 
@@ -816,7 +831,7 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str, *, is_merge: bool = Fals
             elif platform == "flipkart":
                 out = _dedup_flipkart_cross_source_overlay(out)
             if platform in ("myntra", "meesho", "flipkart"):
-                out = _dedup_cross_export_id_twins(out)
+                out = _dedup_cross_export_id_twins(out, platform)
             return out
     except Exception:
         pass
