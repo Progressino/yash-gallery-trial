@@ -76,13 +76,26 @@ def _history_dedupe_keys(work: pd.DataFrame) -> list[str]:
 
 
 def combine_inventory_channels(df: pd.DataFrame | None) -> pd.DataFrame:
-    """Max on-hand per SKU-day across OMS + Amazon (PO combined view)."""
+    """Max on-hand per SKU-day across OMS + Amazon (PO combined view).
+
+    Blank-channel (Channel='') rows are used only as a fallback for dates
+    that have no explicit 'oms' or 'amazon' rows.  On dates where per-channel
+    data is available, blank rows are dropped to prevent snapshot-sourced
+    combined values from inflating the per-SKU maximum (snapshot rows contain
+    OMS + Amazon FBA combined, so keeping them alongside separate channel rows
+    causes double-counting and large artificial spikes in the history).
+    """
     work = _coalesce_history_rows(_ensure_channel_column(df))
     if work.empty:
         return pd.DataFrame(columns=_STORE_COLS)
     ch = work["Channel"].astype(str).str.strip().str.lower()
     if not ch.isin(["oms", "amazon"]).any():
+        # Legacy / no channel split: return blank-channel rows as-is.
         return work.drop(columns=["Channel"], errors="ignore")
+    # Drop blank-channel rows for any date that already has explicit
+    # oms or amazon rows, so they don't inflate the combined max.
+    explicit_dates = work.loc[ch.isin(["oms", "amazon"]), "Date"].unique()
+    work = work[~((ch == "") & work["Date"].isin(explicit_dates))]
     work["_rank"] = work["Source"].astype(str).str.strip().str.lower().map(_SOURCE_RANK).fillna(1)
     work = work.sort_values(
         ["OMS_SKU", "Date", "_rank", "Qty"],
