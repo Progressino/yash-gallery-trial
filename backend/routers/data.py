@@ -5165,9 +5165,19 @@ def sku_deepdive(
         plat_grp["shipped"] = 0
     if "returns" not in plat_grp.columns:
         plat_grp["returns"] = 0
-    plat_grp["return_rate"] = (plat_grp["returns"] / plat_grp["shipped"].replace(0, float("nan")) * 100).fillna(0).round(1)
+    plat_grp["return_rate"] = (
+        plat_grp["returns"] / plat_grp["shipped"].replace(0, float("nan")) * 100
+    ).fillna(0).apply(lambda x: round(float(x), 1))
     plat_grp = plat_grp.rename(columns={"Source": "platform"})
-    by_platform = plat_grp[["platform", "shipped", "returns", "return_rate"]].sort_values("shipped", ascending=False).to_dict("records")
+    by_platform = [
+        {
+            "platform": str(r["platform"]),
+            "shipped": int(r["shipped"]),
+            "returns": int(r["returns"]),
+            "return_rate": float(r["return_rate"]),
+        }
+        for r in plat_grp[["platform", "shipped", "returns", "return_rate"]].sort_values("shipped", ascending=False).to_dict("records")
+    ]
 
     # Daily trend (shipments only)
     _ship_m = txn == "Shipment"
