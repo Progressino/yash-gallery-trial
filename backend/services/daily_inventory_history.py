@@ -1706,24 +1706,25 @@ def project_inventory_calendar(
                 chunk.set_index("OMS_SKU")["Net_Units"].astype(float)
             )
 
+    # Precompute per-day auth lookup to avoid O(N) row scan inside the loop.
+    auth_by_day: dict[pd.Timestamp, pd.Series] = {}
+    window_auth = auth[(auth["Date"] >= cs) & (auth["Date"] <= ce)]
+    if not window_auth.empty:
+        for day_ts, chunk in window_auth.groupby("Date"):
+            auth_by_day[pd.Timestamp(day_ts).normalize()] = chunk.set_index("OMS_SKU")["Qty"].astype(float)
+
+    skus_set = set(skus)
     out_frames: list[pd.DataFrame] = []
     for day in calendar:
         day_ts = pd.Timestamp(day).normalize()
-        auth_day = auth[auth["Date"] == day_ts]
-        auth_qty = (
-            auth_day.set_index("OMS_SKU")["Qty"].astype(float)
-            if not auth_day.empty
-            else pd.Series(dtype=float)
-        )
+        auth_qty = auth_by_day.get(day_ts, pd.Series(dtype=float))
         net = sales_by_day.get(day_ts, pd.Series(0.0, index=skus)).reindex(skus).fillna(0.0)
         rolled = (prev.reindex(skus).fillna(0.0) - net).clip(lower=0.0)
         new_prev = rolled.copy()
         if not auth_qty.empty:
             new_prev.loc[auth_qty.index.astype(str)] = auth_qty.values
-        sources = [
-            "uploaded" if str(sku) in set(auth_qty.index.astype(str)) else "derived"
-            for sku in skus
-        ]
+        uploaded_skus = skus_set & set(auth_qty.index.astype(str)) if not auth_qty.empty else set()
+        sources = ["uploaded" if sku in uploaded_skus else "derived" for sku in skus]
         out_frames.append(
             pd.DataFrame(
                 {
