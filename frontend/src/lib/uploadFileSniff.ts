@@ -32,7 +32,7 @@ const SKU_STATUS_NAME =
 
 const TARGET_SECTION: Record<UploadTarget, string> = {
   snapshot_inventory: 'Daily uploads → Snapshot inventory',
-  daily_inventory_history: 'History & setup → Daily inventory history matrix (PO)',
+  daily_inventory_history: 'Daily uploads → Snapshot inventory',
   daily_sales: 'Daily uploads → Daily order upload',
   returns: 'Daily uploads → Returns (for PO)',
   sku_status_lead: 'History & setup → SKU status & lead time',
@@ -84,7 +84,6 @@ export function sniffUploadFilename(filename: string): {
 
 const BLOCKED: Record<UploadTarget, Set<UploadDocCategory>> = {
   snapshot_inventory: new Set([
-    'daily_inventory_history_matrix',
     'returns',
     'daily_sales',
     'sku_status_lead',

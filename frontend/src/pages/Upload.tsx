@@ -1751,7 +1751,7 @@ export default function Upload() {
 
         <UploadCard
           title="📦 Snapshot inventory"
-          subtitle="Today's stock only — OMS CSV/XLSX, Flipkart & Myntra PPMP CSVs, Amazon RAR. Not the wide multi-day history matrix (use History & setup → Daily inventory history matrix)."
+          subtitle="Today's stock only — OMS CSV/XLSX, Flipkart &amp; Myntra PPMP CSVs, Amazon RAR. Upload one snapshot per day to build the Inventory History matrix."
           loaded={coverage.inventory}
           onClear={mayClearPlatform ? handleClear('inventory') : undefined}
           clearing={loading['clear_inventory']}
