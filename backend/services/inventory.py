@@ -486,6 +486,17 @@ def apply_inventory_session_meta(sess: Any, meta: dict[str, Any] | None) -> None
     sources = meta.get("inventory_snapshot_date_sources")
     if sources is not None:
         sess.inventory_snapshot_date_sources = list(sources)
+    # When syncing from warm cache, strip any stale "OMS missing" warning from
+    # inventory_upload_result if OMS is now present in the restored debug.
+    if isinstance(dbg, dict) and oms_loaded_in_debug(dbg):
+        inv_result = getattr(sess, "inventory_upload_result", None)
+        if isinstance(inv_result, dict) and inv_result.get("warnings"):
+            cleaned = [
+                w for w in inv_result["warnings"]
+                if "OMS inventory CSV missing" not in w
+            ]
+            if len(cleaned) != len(inv_result["warnings"]):
+                sess.inventory_upload_result = {**inv_result, "warnings": cleaned}
 
 
 def ensure_inventory_snapshot_metadata(sess: Any) -> None:

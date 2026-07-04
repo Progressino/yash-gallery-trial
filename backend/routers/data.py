@@ -52,6 +52,7 @@ from ..services.inventory import (
     inventory_missing_marketplace_warnings,
     inventory_rows_for_api,
     inventory_snapshot_meta_for_api,
+    oms_loaded_in_debug,
     refresh_inventory_api_cache,
     sync_inventory_snapshot_from_warm,
 )
@@ -3650,7 +3651,11 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
             else None
         ),
         inventory_upload_warnings=(
-            list(sess.inventory_upload_result.get("warnings") or [])
+            [
+                w for w in (sess.inventory_upload_result.get("warnings") or [])
+                if "OMS inventory CSV missing" not in w
+                or not oms_loaded_in_debug(getattr(sess, "inventory_debug", {}) or {})
+            ]
             if getattr(sess, "inventory_upload_result", None)
             else None
         ),
@@ -5839,6 +5844,14 @@ def get_inventory(
     inv_result = getattr(sess, "inventory_upload_result", None) or {}
     if isinstance(inv_result, dict):
         upload_warnings = list(inv_result.get("warnings") or [])
+    # Strip stale "OMS missing" warnings when OMS IS actually loaded in the current snapshot.
+    # This can happen when inventory_upload_result was persisted from an earlier partial upload
+    # but the session's inventory data was since synced from a newer successful upload.
+    if upload_warnings and oms_loaded_in_debug(dbg):
+        upload_warnings = [
+            w for w in upload_warnings
+            if "OMS inventory CSV missing" not in w
+        ]
     return {
         "loaded": True,
         "rows": rows,
