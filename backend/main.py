@@ -1209,10 +1209,9 @@ def _rebuild_warm_cache_from_tier3_full() -> bool:
 def _merge_recent_sqlite_into_warm_cache(months: int = 4) -> None:
     """Light Tier-3 top-up into ``_warm_cache`` without GitHub Phase 2.
 
-    Only merges new platform rows — does NOT rebuild sales_df.  Rebuilding
-    sales_df with a 980K-row mtr_df takes 10–15 min and blocks the health
-    check, causing autoheal restarts.  User sessions rebuild sales lazily via
-    _restore_daily_if_needed when they first load data.
+    Merges new platform rows then spawns a background thread to rebuild
+    sales_df so Dashboard / SKU Deepdive always reflects the latest daily
+    uploads without blocking the health check on startup.
     """
     global _warm_cache
     from .services.daily_store import load_platform_data, merge_platform_data
@@ -1236,10 +1235,86 @@ def _merge_recent_sqlite_into_warm_cache(months: int = 4) -> None:
                 _warm_cache[key] = merged
                 new_rows_added = True
     if new_rows_added:
-        log.info("Warm-cache SQLite top-up: merged new rows — sales_df will rebuild on first session load.")
-    # NOTE: sales_df is intentionally NOT rebuilt here.  With large mtr_df
-    # (980K+ rows) build_sales_df takes 10-15 minutes and blocks health checks.
-    # The disk cache already holds a valid sales_df from the last Phase 2 save.
+        log.info(
+            "Warm-cache SQLite top-up: merged new rows — "
+            "spawning background sales_df rebuild."
+        )
+        _spawn_background_sales_rebuild()
+    else:
+        log.info("Warm-cache SQLite top-up: no new rows (Tier-3 already in sync).")
+
+
+def _spawn_background_sales_rebuild() -> None:
+    """Rebuild sales_df from the current _warm_cache platform DFs in a background thread.
+
+    Runs after a Tier-3 top-up so the Dashboard / SKU Deepdive pick up the
+    latest daily uploads without blocking container health checks.
+    Updates _warm_cache["sales_df"] and saves sales_df.parquet to disk when done.
+    """
+    import threading
+
+    def _rebuild() -> None:
+        global _warm_cache
+        try:
+            import time, os
+            import pandas as pd
+            from .services.sales import build_sales_df
+            from .services.sku_mapping import load_sku_mapping_from_disk
+
+            t0 = time.time()
+            log.info("Background sales_df rebuild starting…")
+
+            wc = _warm_cache or {}
+            mtr_df      = wc.get("mtr_df",      pd.DataFrame())
+            myntra_df   = wc.get("myntra_df",    pd.DataFrame())
+            meesho_df   = wc.get("meesho_df",    pd.DataFrame())
+            flipkart_df = wc.get("flipkart_df",  pd.DataFrame())
+            snapdeal_df = wc.get("snapdeal_df",  pd.DataFrame())
+            sku_mapping = wc.get("sku_mapping")
+            if not sku_mapping or not isinstance(sku_mapping, dict):
+                sku_mapping = load_sku_mapping_from_disk() or {}
+
+            # Return overlay (optional)
+            ov = wc.get("po_return_overlay_df", pd.DataFrame())
+            try:
+                from .services.po_return_import import aggregate_return_overlay_for_use
+                ov = aggregate_return_overlay_for_use(ov)
+            except Exception:
+                ov = None
+
+            new_sales = build_sales_df(
+                mtr_df      = mtr_df,
+                myntra_df   = myntra_df,
+                meesho_df   = meesho_df,
+                flipkart_df = flipkart_df,
+                snapdeal_df = snapdeal_df,
+                sku_mapping = sku_mapping,
+                return_overlay_df = ov,
+            )
+
+            if new_sales.empty:
+                log.warning("Background sales_df rebuild returned empty — keeping existing.")
+                return
+
+            _warm_cache["sales_df"] = new_sales
+            log.info(
+                "Background sales_df rebuild complete: %d rows (%.0fs). Saving to disk…",
+                len(new_sales), time.time() - t0,
+            )
+
+            # Persist to disk so the next restart fast-path loads fresh data
+            parquet_path = os.path.join(_DISK_CACHE_DIR, "sales_df.parquet")
+            try:
+                new_sales.to_parquet(parquet_path, index=False)
+                log.info("sales_df.parquet saved to %s", parquet_path)
+            except Exception:
+                log.exception("Failed to save sales_df.parquet to disk")
+
+        except Exception:
+            log.exception("Background sales_df rebuild failed")
+
+    t = threading.Thread(target=_rebuild, name="sales-df-bg-rebuild", daemon=True)
+    t.start()
 
 
 def _save_warm_cache_to_disk(cache_dict: dict) -> None:
