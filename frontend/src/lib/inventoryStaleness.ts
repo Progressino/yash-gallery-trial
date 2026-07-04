@@ -50,13 +50,9 @@ export function buildInventoryStalenessWarnings(
   if (cov.daily_inventory_history && histMax) {
     if (histStale) {
       warnings.push(
-        `Inventory history matrix ends ${histMax}. Re-upload the wide Excel on Upload → History & setup — Eff_Days in PO may be wrong.`,
+        `Inventory history ends ${histMax}. Upload today's snapshot on Upload → Daily uploads → Snapshot inventory — Eff_Days in PO may be wrong.`,
       )
     }
-  } else if (cov.inventory && !cov.daily_inventory_history) {
-    warnings.push(
-      'No daily inventory history matrix loaded. Upload the wide Inventory History Excel (OMS + Amazon sheets) for accurate Eff_Days in PO.',
-    )
   }
   if (cov.inventory && cov.inventory_snapshot_date && !histStale) {
     if (inventoryDataGapNeedsWarning(referenceIso, cov.inventory_snapshot_date)) {

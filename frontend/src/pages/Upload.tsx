@@ -8,7 +8,7 @@ import {
   uploadSkuMapping, uploadMtr, uploadMyntra, uploadMeesho,
   uploadFlipkart, uploadSnapdeal, uploadInventoryAuto, waitForInventoryUpload, resetStuckInventoryUpload, buildSales, getCoverage, restoreFullFromServer,
   uploadAmazonB2C, uploadAmazonB2B, uploadExistingPO, uploadFinishingReceipt, uploadDailyAuto, uploadPoReturnsImport,
-  uploadPoSkuStatusLead, uploadPoDailyInventoryHistoryFile, uploadPoManualIntransitSheet, resetStuckDailyInventoryUpload,
+  uploadPoSkuStatusLead, uploadPoManualIntransitSheet,
   getCoverageResilient,
   type ManualIntransitParseReport,
   waitForDailyAutoIngest, waitForReturnsImport, waitForSalesRebuild, waitForTier1Bulk, verifyDailyUpload,
@@ -757,18 +757,6 @@ export default function Upload() {
     } finally { setL('inv_reset', false) }
   }
 
-  const handleClearStuckDailyInv = async () => {
-    setL('po_daily_inv_reset', true)
-    try {
-      const res = await resetStuckDailyInventoryUpload()
-      showToast('success', res.message)
-      setBuildingMsg('')
-      await refresh({ light: true })
-    } catch (e: unknown) {
-      showToast('error', e instanceof Error ? e.message : 'Could not reset')
-    } finally { setL('po_daily_inv_reset', false) }
-  }
-
   const anyLoaded = coverage.mtr || coverage.myntra || coverage.meesho || coverage.flipkart
 
   const handleResetAllAppData = async () => {
@@ -1455,27 +1443,6 @@ export default function Upload() {
 
       {showAdminTab && uploadTab === 'admin' && allowHistorical && (
         <Section title="PO Engine — baseline sheets (optional)">
-          {(coverage.daily_inventory_upload_status === 'running' || (loading['po_daily_inv'] && !!buildingMsg)) && (
-            <div className="col-span-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 mb-2">
-              <div className="flex items-center gap-2 text-xs text-blue-800">
-                <svg className="animate-spin h-3 w-3 text-blue-600 shrink-0" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-                </svg>
-                <span className="flex-1 truncate">
-                  {buildingMsg || coverage.daily_inventory_upload_message || 'Parsing daily inventory matrix on server…'}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => void handleClearStuckDailyInv()}
-                  disabled={loading['po_daily_inv_reset']}
-                  className="shrink-0 px-2.5 py-0.5 rounded border border-blue-300 bg-white text-blue-900 hover:bg-blue-100 disabled:opacity-50 text-xs"
-                >
-                  {loading['po_daily_inv_reset'] ? 'Clearing…' : 'Clear stuck'}
-                </button>
-              </div>
-            </div>
-          )}
           {allowAdminBaseline ? (
             <>
               <UploadCard
@@ -1525,66 +1492,6 @@ export default function Upload() {
                     }
                   }}
                   uploading={loading['po_sku_status']}
-                />
-              </UploadCard>
-              <UploadCard
-                title="Daily inventory history matrix (PO)"
-                subtitle="Wide Excel: rows = SKUs, columns = daily snapshot totals (OMS / Amazon Inventory sheets). For speed, the server keeps only the latest 30 calendar days of history (set env DAILY_INV_MAX_DAYS to keep more). Not for today's OMS RAR/CSV — use Daily uploads → Snapshot inventory for that."
-                loaded={!!coverage.daily_inventory_history}
-                rows={coverage.daily_inventory_history_rows}
-                alert={showImportCompleteness ? uploadAlertsBySource['po_daily_inv'] : undefined}
-                onClearAlert={() => clearUploadAlert('po_daily_inv')}
-              >
-                <FileUpload
-                  label="Upload .xlsx, .xls, or .csv"
-                  accept={{
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-                    'application/vnd.ms-excel': ['.xls'],
-                    'text/csv': ['.csv'],
-                    'application/octet-stream': ['.xlsx', '.xls'],
-                  }}
-                  onUpload={async (file: File) => {
-                    const wrong = checkFileForUploadTarget(file.name, 'daily_inventory_history')
-                    if (wrong) {
-                      showToast('error', wrong, 14000)
-                      return
-                    }
-                    setL('po_daily_inv', true)
-                    setBuildingMsg('')
-                    try {
-                      await withUploadGuard(async () => {
-                        const result = await uploadPoDailyInventoryHistoryFile(file, msg => setBuildingMsg(msg))
-                        setBuildingMsg('')
-                        if (result.ok) {
-                          captureGenericAlert('po_daily_inv', [], {
-                            parsed: result.rows,
-                            kept: result.skus,
-                          })
-                          showToast('success', result.message || `Loaded ${(result.rows ?? 0).toLocaleString()} matrix rows.`)
-                          setCoverage({
-                            ...coverage,
-                            daily_inventory_history: true,
-                            daily_inventory_history_rows: result.rows ?? coverage.daily_inventory_history_rows,
-                            daily_inventory_history_skus: result.skus ?? coverage.daily_inventory_history_skus,
-                          })
-                          await refresh({ light: true })
-                        } else {
-                          showToast(
-                            'error',
-                            result.message || 'Upload failed',
-                            result.wrong_upload_target ? 14_000 : 8000,
-                          )
-                        }
-                      })
-                    } catch (e: unknown) {
-                      setBuildingMsg('')
-                      showToast('error', e instanceof Error ? e.message : 'Upload failed')
-                    } finally {
-                      setL('po_daily_inv', false)
-                    }
-                  }}
-                  uploading={loading['po_daily_inv']}
-                  progressText={buildingMsg || null}
                 />
               </UploadCard>
               <UploadCard

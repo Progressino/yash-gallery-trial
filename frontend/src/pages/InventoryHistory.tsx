@@ -131,8 +131,8 @@ export default function InventoryHistory() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">📅 Inventory History</h1>
           <p className="text-sm text-gray-600 mt-1 max-w-2xl">
-            Last {HISTORY_WINDOW_DAYS} snapshot days of daily inventory (wide matrix from Upload → History &amp; setup,
-            or snapshot columns from Upload → Daily uploads). Use this matrix to verify on-hand counts match PO{' '}
+            Last {HISTORY_WINDOW_DAYS} days of daily inventory snapshots. Each day you upload a snapshot adds one column.
+            Use this matrix to verify on-hand counts match PO{' '}
             <code className="font-mono text-xs">Eff_Days</code>.
           </p>
         </div>
@@ -178,9 +178,9 @@ export default function InventoryHistory() {
           {summaryQ.data.max_date &&
           summaryQ.data.max_date < todayIsoIST().slice(0, 10) ? (
             <>
-              Inventory history matrix ends <strong>{summaryQ.data.max_date}</strong> (today{' '}
-              {todayIsoIST()}). Re-upload the wide Excel under Upload → History &amp; setup → Daily
-              inventory history matrix (PO).
+              Inventory history ends <strong>{summaryQ.data.max_date}</strong> (today{' '}
+              {todayIsoIST()}). Upload today's snapshot on{' '}
+              <Link to="/upload" className="underline font-medium">Upload → Daily uploads → Snapshot inventory</Link>.
             </>
           ) : (
             <>
