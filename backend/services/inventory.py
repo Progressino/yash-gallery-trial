@@ -1466,6 +1466,7 @@ def load_inventory_consolidated(
                 else "no myntra csv found in RAR"
             )
 
+            _rar_oms_blobs: list = []
             if not oms_bytes:
                 oms_blobs, oms_dedup_n = _dedupe_identical_byte_payloads(extracted["oms_csvs"])
                 debug["oms_rar_deduped_identical"] = oms_dedup_n
@@ -1475,12 +1476,17 @@ def load_inventory_consolidated(
                     p = _parse_oms_csv(ob)
                     if not p.empty:
                         oms_parts.append(p)
+                        _rar_oms_blobs.append(ob)
                 if oms_blobs:
                     debug["oms_rar"] = f"{len(oms_blobs)} OMS file(s) merged"
             else:
                 debug["oms_rar"] = "skipped (separate OMS file takes precedence)"
 
-            if not oms_bytes:
+            # Combo SKUs are a FALLBACK for when no OMS CSV is present — if an OMS CSV was found
+            # (either as a separate upload or inside the RAR), combo is skipped to avoid
+            # double-counting physical inventory that is already represented in the OMS rows.
+            _has_oms = bool(oms_bytes) or bool(_rar_oms_blobs)
+            if not _has_oms:
                 combo_blobs, combo_dedup = _dedupe_identical_byte_payloads(extracted["combo_csvs"])
                 debug["combo_rar_deduped_identical"] = combo_dedup
                 for cb in combo_blobs:
@@ -1490,7 +1496,7 @@ def load_inventory_consolidated(
                 if combo_blobs:
                     debug["combo_rar"] = f"{len(combo_blobs)} combo file(s) merged"
             else:
-                debug["combo_rar"] = "skipped (separate OMS file takes precedence)"
+                debug["combo_rar"] = "skipped (OMS file present — combo would double-count)"
 
         else:
             part = _parse_amz_csv(raw, mapping)

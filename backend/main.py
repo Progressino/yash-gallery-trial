@@ -911,11 +911,17 @@ def merge_inventory_into_warm_cache(sess) -> None:
         pass
     _warm_cache_loaded_at = datetime.now(IST)
     try:
-        inv_sidecar = {
-            k: _warm_cache[k]
-            for k in (*_INVENTORY_WARM_KEYS, _INVENTORY_META_WARM_KEY)
-            if k in _warm_cache
-        }
+        # Build sidecar directly from session data (not _warm_cache) to avoid a race
+        # where a concurrent warm-cache reload clears inventory_df_variant between the
+        # copy-to-warm-cache step above and this disk-save step.
+        inv_sidecar: dict = {}
+        for key in _INVENTORY_WARM_KEYS:
+            df = getattr(sess, key, None)
+            if df is not None and hasattr(df, "empty") and not df.empty:
+                inv_sidecar[key] = df
+        meta_val = _warm_cache.get(_INVENTORY_META_WARM_KEY)
+        if meta_val is not None:
+            inv_sidecar[_INVENTORY_META_WARM_KEY] = meta_val
         if inv_sidecar:
             _save_warm_cache_to_disk(inv_sidecar)
     except Exception:
