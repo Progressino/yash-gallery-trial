@@ -58,8 +58,33 @@ def stamp_quarterly_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     out = dict(payload)
     out["tier3_sync_token"] = _current_tier3_token()
+    # Record build time *after* parquets are read so the mtime comparison is correct.
     out["built_at"] = datetime.now(timezone.utc).isoformat()
     return out
+
+
+_TIER1_PARQUET_FILES = (
+    "sales_df.parquet",
+    "meesho_df.parquet",
+    "myntra_df.parquet",
+    "flipkart_df.parquet",
+    "mtr_df.parquet",
+    "snapdeal_df.parquet",
+)
+
+
+def _tier1_max_mtime() -> float:
+    """Return the most-recent modification time among Tier-1 platform parquets."""
+    latest = 0.0
+    for fname in _TIER1_PARQUET_FILES:
+        path = os.path.join(_DISK_CACHE_DIR, fname)
+        try:
+            mtime = os.path.getmtime(path)
+            if mtime > latest:
+                latest = mtime
+        except OSError:
+            pass
+    return latest
 
 
 def quarterly_is_stale(payload: dict[str, Any] | None) -> bool:
@@ -68,7 +93,22 @@ def quarterly_is_stale(payload: dict[str, Any] | None) -> bool:
     stored = payload.get("tier3_sync_token")
     if not isinstance(stored, dict):
         return True
-    return dict(stored) != _current_tier3_token()
+    if dict(stored) != _current_tier3_token():
+        return True
+    # Also invalidate when any Tier-1 platform parquet was updated after the cache was built.
+    built_at_str = payload.get("built_at")
+    if built_at_str:
+        try:
+            built_at_ts = datetime.fromisoformat(built_at_str).timestamp()
+            if _tier1_max_mtime() > built_at_ts:
+                logger.info(
+                    "Quarterly cache stale: a Tier-1 parquet is newer than built_at=%s",
+                    built_at_str,
+                )
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def merge_incremental_quarterly_payload(
