@@ -1212,6 +1212,12 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
         (c for c in df.columns if c.strip().lower() in ("buffer stock", "buffer_stock", "bufferstock", "buffer")),
         None,
     )
+    # Inventory Blocked — stock reserved for pending orders; included in OMS total
+    # because it is physical stock in the warehouse (relevant for PO planning).
+    inv_blocked_col = next(
+        (c for c in df.columns if c.strip().lower() in ("inventory blocked", "inventory_blocked", "blocked inventory")),
+        None,
+    )
 
     # Auto-detect marketplace inventory columns
     col_lower = {c.strip().lower(): c for c in df.columns}
@@ -1266,6 +1272,9 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
 
     # Convert to numeric before groupby
     df["OMS_Inventory"] = pd.to_numeric(df["Inventory"], errors="coerce").fillna(0)
+    if inv_blocked_col:
+        blocked = pd.to_numeric(df[inv_blocked_col], errors="coerce").fillna(0)
+        df["OMS_Inventory"] = df["OMS_Inventory"] + blocked
     if buf_col:
         df["Buffer_Stock"] = pd.to_numeric(df[buf_col], errors="coerce").fillna(0)
     for out_col, (src_col, _) in {k: v for k, v in agg_cols.items() if k not in ("OMS_Inventory", "Buffer_Stock")}.items():
