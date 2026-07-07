@@ -2227,8 +2227,9 @@ def get_anomalies(
     sales_df: pd.DataFrame = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    platform_summary: Optional[List[dict]] = None,
 ) -> List[dict]:
-    """Runs 5 anomaly rules. Returns list sorted critical → warning → info."""
+    """Runs anomaly rules (return rate sanity + inventory + data-quality). Returns list sorted critical → warning → info."""
     if inventory_df is None:
         inventory_df = pd.DataFrame()
     if sales_df is None:
@@ -2412,6 +2413,47 @@ def get_anomalies(
                 ),
                 "sku": None,
             })
+    except Exception:
+        pass
+
+    # Rule 6: Return rate sanity check — catches upload_blob / date-mismatch bugs
+    # before they reach the dashboard.  A platform showing > 60 % returns against
+    # its current-period gross almost always means all-time returns are being mixed
+    # with a short window's shipments.
+    _RETURN_RATE_WARN  = 60.0   # %  — yellow warning
+    _RETURN_RATE_CRIT  = 120.0  # %  — red critical (logically impossible at >100 %)
+    try:
+        for card in (platform_summary or []):
+            pname   = str(card.get("platform") or "")
+            shipped = int(card.get("total_units") or 0)
+            returns = int(card.get("total_returns") or 0)
+            if shipped <= 0:
+                continue
+            rate = returns / shipped * 100
+            if rate >= _RETURN_RATE_CRIT:
+                alerts.append({
+                    "type": "data_quality", "severity": "critical",
+                    "platform": pname,
+                    "message": (
+                        f"{pname} shows {rate:.0f}% return rate "
+                        f"({returns:,} returns vs {shipped:,} shipped) — "
+                        "this is logically impossible and indicates a data "
+                        "mismatch (e.g. all-time returns vs period shipments). "
+                        "Re-upload or contact support."
+                    ),
+                    "sku": None,
+                })
+            elif rate >= _RETURN_RATE_WARN:
+                alerts.append({
+                    "type": "data_quality", "severity": "warning",
+                    "platform": pname,
+                    "message": (
+                        f"{pname} return rate is unusually high: "
+                        f"{rate:.1f}% ({returns:,} returns vs {shipped:,} shipped). "
+                        "Verify return data covers only the selected period."
+                    ),
+                    "sku": None,
+                })
     except Exception:
         pass
 

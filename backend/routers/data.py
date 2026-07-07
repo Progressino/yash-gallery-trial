@@ -1528,8 +1528,11 @@ def _apply_return_overlay_to_intelligence_bundle(
         and not sales_for_returns.empty
         else _sales_slice_for_intelligence_returns(sess, s, e)
     )
+    # Use "calendar" scope so returns are filtered to the same window as gross
+    # shipments. "upload_blob" counted ALL historical returns (since 2025) against
+    # only the current period's gross, producing >300% phantom return rates.
     platform_summary = enrich_platform_summaries_with_all_returns(
-        platform_summary, sales_slice, s, e, refund_scope="upload_blob"
+        platform_summary, sales_slice, s, e, refund_scope="calendar"
     )
     platform_summary = merge_return_data_into_platform_summaries(
         platform_summary,
@@ -1678,7 +1681,7 @@ def _build_platform_summary_for_bundle(
 
     s = str(start_date)[:10]
     e = str(end_date)[:10]
-    kwargs = dict(start_date=s, end_date=e, refund_scope="upload_blob")
+    kwargs = dict(start_date=s, end_date=e, refund_scope="calendar")
     platform_summary = get_platform_summary(
         mtr_b,
         myntra_b,
@@ -1877,7 +1880,7 @@ def _intelligence_payload_from_tier3_direct(
                     start_date=s,
                     end_date=e,
                     headline_only=headline_only,
-                    refund_scope="upload_blob",
+                    refund_scope="calendar",
                 )
             )
         except Exception:
@@ -2443,6 +2446,7 @@ def _build_intelligence_bundle_payload_from_tier3(
             sales_for_bundle,
             start_date=None,
             end_date=None,
+            platform_summary=platform_summary,
         )
         payload["dsr_brand_monthly"] = get_dsr_brand_monthly_comparison(
             sales_for_bundle, start_date=None, end_date=None
