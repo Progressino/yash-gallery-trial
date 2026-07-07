@@ -610,6 +610,44 @@ def quarterly_ly_floor_dict(
     return out
 
 
+def quarterly_recent_ads_supplement_dict(
+    sess,
+    *,
+    group_by_parent: bool = False,
+    n_quarters: int = 8,
+) -> dict[str, dict]:
+    """Per-SKU recent-sales supplement from the quarterly cache (Units_30d, Freq_30d, ADS).
+
+    Returned when the PO engine's ADS computation used the slow path (Tier-3 daily only),
+    which misses bundle/mapped SKUs that live only in Tier-1 parquets.  The quarterly cache
+    builds Units_30d / Freq_30d / ADS from the full warm-cache sales_df — so its values are
+    authoritative and can be used to back-fill zero ADS rows in the PO result.
+
+    Returns a dict keyed by OMS_SKU → {"units_30d": int, "freq_30d": int, "ads": float}.
+    Cache-only — never blocks.
+    """
+    payload = get_quarterly_payload_for_po(
+        sess, group_by_parent=group_by_parent, n_quarters=n_quarters
+    )
+    rows = payload.get("rows") if payload else None
+    if not rows:
+        return {}
+    out: dict[str, dict] = {}
+    for row in rows:
+        sku = str(row.get("OMS_SKU") or "").strip()
+        if not sku:
+            continue
+        try:
+            units_30d = int(row.get("Units_30d") or 0)
+            freq_30d = int(row.get("Freq_30d") or 0)
+            ads = float(row.get("ADS") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if units_30d > 0 or ads > 0:
+            out[sku] = {"units_30d": units_30d, "freq_30d": freq_30d, "ads": ads}
+    return out
+
+
 def attach_quarterly_columns_to_po_df(
     po_df: pd.DataFrame,
     sess,
@@ -648,12 +686,71 @@ def attach_quarterly_columns_to_po_df(
     for c in merge_cols:
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0).astype(int)
 
-    # NOTE: the LY/seasonal ADS floor from this same quarterly data is applied
-    # earlier, inside calculate_po_base() via quarterly_ly_floor_dict() — BEFORE
-    # Days_Left / Projected_Running_Days / Gross_PO_Qty are derived from ADS.
-    # Applying it here (post-hoc, after those fields are already computed) would
-    # leave them inconsistent with the displayed ADS. This function only merges
-    # the display columns (the 8 quarter columns shown in the UI table).
+    # ── ADS supplement from quarterly cache ──────────────────────────────────────
+    # When the PO engine's ADS source used the slow path (Tier-3 daily only), it
+    # silently zeroes ADS for bundle/mapped SKUs (e.g. 1916YKRED-4XL-5XL) that exist
+    # in Tier-1 parquets but not in raw daily MTR files.  The quarterly cache builds
+    # Units_30d / Freq_30d / ADS from the full warm-cache sales_df, so it is
+    # authoritative.  For rows where the engine produced ADS=0 but the cache shows
+    # meaningful recent activity, back-fill the affected fields and recompute
+    # Days_Left so the PO recommendation stays internally consistent.
+    try:
+        import numpy as _np
+        _need_supplement = (
+            "ADS" in out.columns
+            and "Sold_Units" in out.columns
+            and "Units_30d" in q_df.columns
+            and "Freq_30d" in q_df.columns
+            and "ADS" in q_df.columns
+        )
+        if _need_supplement:
+            _q_recent = q_df[["OMS_SKU", "Units_30d", "Freq_30d", "ADS"]].copy()
+            _q_recent = _q_recent.rename(columns={
+                "Units_30d": "_q_units_30d",
+                "Freq_30d": "_q_freq_30d",
+                "ADS": "_q_ads",
+            }).drop_duplicates(subset=["OMS_SKU"], keep="last")
+            out = out.merge(_q_recent, on="OMS_SKU", how="left")
+
+            _eng_sold = pd.to_numeric(out.get("Sold_Units", 0), errors="coerce").fillna(0)
+            _eng_ads  = pd.to_numeric(out.get("ADS", 0), errors="coerce").fillna(0)
+            _q_u30    = pd.to_numeric(out.get("_q_units_30d", 0), errors="coerce").fillna(0)
+            _q_f30    = pd.to_numeric(out.get("_q_freq_30d", 0), errors="coerce").fillna(0)
+            _q_ads_v  = pd.to_numeric(out.get("_q_ads", 0), errors="coerce").fillna(0)
+
+            # Only supplement rows where engine returned 0 sold units but cache shows activity
+            _missing = (_eng_sold == 0) & (_q_u30 > 0)
+            if _missing.any():
+                logger.info(
+                    "ADS supplement from quarterly cache: %d SKUs had zero engine ADS "
+                    "but non-zero quarterly cache Units_30d — back-filling",
+                    int(_missing.sum()),
+                )
+                if "Sold_Units" in out.columns:
+                    out.loc[_missing, "Sold_Units"] = _q_u30[_missing].astype(int)
+                if "Net_Units" in out.columns:
+                    out.loc[_missing, "Net_Units"] = _q_u30[_missing].astype(int)
+                if "Eff_Days" in out.columns:
+                    out.loc[_missing, "Eff_Days"] = _q_f30[_missing].astype(int)
+                # Recent_ADS = units / Eff_Days (when Eff_Days > 0), else units / period_days
+                _eff_safe = _q_f30[_missing].clip(lower=1)
+                _recalc_recent = (_q_u30[_missing] / _eff_safe).round(3)
+                if "Recent_ADS" in out.columns:
+                    out.loc[_missing, "Recent_ADS"] = _recalc_recent
+                # Final ADS = max(Recent, LY) — only update if cache ADS is higher
+                _new_ads = _np.maximum(_recalc_recent, _q_ads_v[_missing]).round(3)
+                if "ADS" in out.columns:
+                    out.loc[_missing, "ADS"] = _new_ads
+                # Recompute Days_Left = Total_Inventory / ADS (cap at 999)
+                if "Total_Inventory" in out.columns and "Days_Left" in out.columns:
+                    _inv = pd.to_numeric(out.loc[_missing, "Total_Inventory"], errors="coerce").fillna(0)
+                    _ads_safe = _new_ads.clip(lower=1e-6)
+                    out.loc[_missing, "Days_Left"] = (_inv / _ads_safe).clip(upper=999).round(1)
+
+            out.drop(columns=["_q_units_30d", "_q_freq_30d", "_q_ads"], inplace=True, errors="ignore")
+    except Exception:
+        logger.exception("ADS supplement from quarterly cache failed (non-fatal)")
+
     return out
 
 

@@ -440,9 +440,15 @@ def _resolve_ads_sales_source(
 
             thru = session_sales_through(sess)
             lag = sales_data_lag_days(planning_date, thru)
+            # Raise threshold to 14 days: the session sales_df contains the full
+            # Tier-1 warm cache (all platforms, including bundle/mapped SKUs) and
+            # is refreshed on every platform upload.  A 3-day gate was causing the
+            # slow path (Tier-3 daily only) to fire whenever no upload occurred for
+            # 4+ days, which silently zeroed ADS for bundle SKUs (e.g. 1916YKRED-4XL-5XL)
+            # that exist in Tier-1 parquets but not in the raw daily MTR files.
             if (
                 lag is not None
-                and lag <= 3
+                and lag <= 14
                 and _sales_has_ads_history(sales_df, planning_date, period, use_season, use_ly)
             ):
                 out = _trim_sales_to_ads_window(sales_df, planning_date, period, use_season, use_ly)
