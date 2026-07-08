@@ -1810,3 +1810,59 @@ def test_apply_upload_report_day_gate_keeps_return_overlay_rows(monkeypatch):
     # Synthetic return overlay row must survive upload-day gate even on uncovered date.
     assert len(out) == 2
     assert int(out.loc[out["OrderId"] == "RETURN_SHEET", "Quantity"].sum()) == 12
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Amazon MTR unkeyed shadow dedup
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_amazon_mtr_dedup_drops_unkeyed_shadow_when_single_keyed_match():
+    """Keyed (Order_Id) + unkeyed shadow for same shipment must not double units."""
+    from backend.services.mtr import dedup_amazon_mtr_dataframe
+    import pandas as pd
+
+    df = pd.DataFrame({
+        "SKU":              ["1001YKBEIGE-XXL", "1001YKBEIGE-XXL"],
+        "Date":             [pd.Timestamp("2025-01-15 10:30:00"), pd.Timestamp("2025-01-15 10:30:00")],
+        "Transaction_Type": ["Shipment", "Shipment"],
+        "Quantity":         [8, 8],
+        "Order_Id":         ["402-1234567-9876543", ""],   # keyed + unkeyed shadow
+        "Invoice_Number":   ["", ""],
+    })
+    deduped = dedup_amazon_mtr_dataframe(df)
+    assert int(deduped["Quantity"].sum()) == 8, "Unkeyed shadow should be suppressed"
+    assert len(deduped) == 1
+
+
+def test_amazon_mtr_dedup_keeps_unkeyed_when_multiple_keyed_same_fingerprint():
+    """When ≥2 keyed orders share the same fingerprint, keep unkeyed (may be distinct)."""
+    from backend.services.mtr import dedup_amazon_mtr_dataframe
+    import pandas as pd
+
+    df = pd.DataFrame({
+        "SKU":              ["1001YKBEIGE-XXL"] * 3,
+        "Date":             [pd.Timestamp("2025-01-15")] * 3,
+        "Transaction_Type": ["Shipment"] * 3,
+        "Quantity":         [8, 8, 8],
+        "Order_Id":         ["402-1111111-1111111", "402-2222222-2222222", ""],
+        "Invoice_Number":   ["", "", ""],
+    })
+    deduped = dedup_amazon_mtr_dataframe(df)
+    assert int(deduped["Quantity"].sum()) == 24, "Unkeyed should be kept when 2 keyed share fingerprint"
+
+
+def test_amazon_mtr_dedup_keeps_unkeyed_different_qty():
+    """Unkeyed row with qty different from keyed row is a separate event — keep both."""
+    from backend.services.mtr import dedup_amazon_mtr_dataframe
+    import pandas as pd
+
+    df = pd.DataFrame({
+        "SKU":              ["1001YKBEIGE-XXL", "1001YKBEIGE-XXL"],
+        "Date":             [pd.Timestamp("2025-01-15"), pd.Timestamp("2025-01-15")],
+        "Transaction_Type": ["Shipment", "Shipment"],
+        "Quantity":         [8, 3],
+        "Order_Id":         ["402-1234567-9876543", ""],
+        "Invoice_Number":   ["", ""],
+    })
+    deduped = dedup_amazon_mtr_dataframe(df)
+    assert int(deduped["Quantity"].sum()) == 11

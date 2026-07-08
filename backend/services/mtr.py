@@ -495,7 +495,52 @@ def dedup_amazon_mtr_dataframe(combined: pd.DataFrame) -> pd.DataFrame:
     oid_ok = rest["Order_Id"].astype(str).str.strip()
     oid_ok = oid_ok.ne("") & ~oid_ok.str.lower().isin(["nan", "none"])
     by_oid = _amazon_fba_aggregate_order_lines(rest.loc[oid_ok], has_order_id=True)
-    no_oid = _amazon_fba_aggregate_order_lines(rest.loc[~oid_ok], has_order_id=False)
+    no_oid_raw = rest.loc[~oid_ok]
+
+    # Drop unkeyed shadow rows whose (canonical-SKU, day, txn_type, qty) fingerprint
+    # already exists EXACTLY ONCE in the keyed set (by_oid). Amazon MTR sometimes emits
+    # both a Customer Shipment line WITH Order_Id AND an aggregate line WITHOUT Order_Id
+    # for the same physical shipment — keeping both inflates unit counts.
+    # When multiple keyed orders share the same fingerprint, the unkeyed row may be a
+    # genuine third event and is kept (mirrors _drop_amazon_unkeyed_shadows in sales.py).
+    # Note: _amazon_fba_aggregate_order_lines renames _sk→SKU and drops _day/_qty,
+    # so we rebuild fingerprints from by_oid's output columns and compare against
+    # the preserved _sk/_day/_qty columns still present on no_oid_raw.
+    if (
+        not no_oid_raw.empty
+        and not by_oid.empty
+        and "SKU" in by_oid.columns
+        and "Quantity" in by_oid.columns
+        and "_sk" in no_oid_raw.columns
+        and "_day" in no_oid_raw.columns
+        and "_qty" in no_oid_raw.columns
+    ):
+        from collections import Counter
+
+        by_oid_fp_day = pd.to_datetime(by_oid["Date"], errors="coerce").dt.normalize()
+        by_oid_fp_qty = pd.to_numeric(by_oid["Quantity"], errors="coerce").fillna(0).round().astype("int64")
+        # Count how many keyed rows share each (sku, txn, day, qty) fingerprint
+        fp_counts: Counter = Counter(
+            zip(
+                by_oid["SKU"].astype(str),
+                by_oid["Transaction_Type"].astype(str),
+                by_oid_fp_day,
+                by_oid_fp_qty,
+            )
+        )
+        no_oid_fp = list(
+            zip(
+                no_oid_raw["_sk"].astype(str),
+                no_oid_raw["Transaction_Type"].astype(str),
+                pd.to_datetime(no_oid_raw["_day"], errors="coerce"),
+                no_oid_raw["_qty"],
+            )
+        )
+        # Keep unkeyed rows only if their fingerprint does NOT map to exactly-one keyed row
+        keep_mask = [fp_counts.get(fp, 0) != 1 for fp in no_oid_fp]
+        no_oid_raw = no_oid_raw.loc[keep_mask]
+
+    no_oid = _amazon_fba_aggregate_order_lines(no_oid_raw, has_order_id=False)
 
     out = pd.concat([inv_rows, by_oid, no_oid], ignore_index=True)
     out = out.drop(columns=["_sk", "_day", "_qty"], errors="ignore")

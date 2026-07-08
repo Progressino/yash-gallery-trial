@@ -241,6 +241,12 @@ def _deferred_load_mtr_df(disk_dir: "Path") -> None:
             return
         try:
             mtr = pd.read_parquet(p)
+            # Re-apply MTR dedup in case the parquet was saved before the
+            # unkeyed-shadow fix (which drops FBA rows that duplicate keyed
+            # Order_Id rows — without this, gross Amazon units are inflated).
+            if "Invoice_Number" in mtr.columns and "Order_Id" in mtr.columns:
+                from .services.mtr import dedup_amazon_mtr_dataframe
+                mtr = dedup_amazon_mtr_dataframe(mtr)
             if _warm_cache is not None and "mtr_df" not in _warm_cache:
                 _warm_cache["mtr_df"] = mtr
                 log.info("Deferred mtr_df loaded: %d rows", len(mtr))
