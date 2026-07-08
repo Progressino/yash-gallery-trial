@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import axios from 'axios'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RechartsTooltip,
+  Legend,
+} from 'recharts'
 import api from '../api/client'
 import { useStitchingAdmin } from '../lib/stitchingAdmin'
 import {
@@ -129,6 +141,8 @@ interface DashboardData {
   karigar_status: { Karigar_ID: string; Name: string; Skill: string; Status: string }[]
   challan_register: { Challan_No: string; Style: string; Party: string; Pending: number; Status: string }[]
   today_production: Record<string, unknown>[]
+  daily_trend?: { date: string; pieces: number; piece_value: number; avg_efficiency: number }[]
+  by_style?: { style: string; pieces: number }[]
 }
 
 function todayStr() {
@@ -336,27 +350,209 @@ function DashboardTab() {
     )
   }
   const m = data.metrics
+  const dailyTrend = data.daily_trend ?? []
+  const byStyle = data.by_style ?? []
+
   const kpiCards = [
-    { label: 'Active Karigars', value: `${m.active_karigar} / ${m.total_karigar}`, accent: '#1A2B4B', sub: 'Present today' },
-    { label: 'Pieces Today', value: m.pieces_today.toLocaleString(), accent: '#1A2B4B', sub: 'Production count' },
-    { label: 'Avg Efficiency', value: `${m.avg_efficiency}%`, accent: m.avg_efficiency >= 80 ? '#047857' : '#b45309', sub: 'vs target' },
-    { label: 'Piece Value', value: `₹${m.piece_value_today.toLocaleString()}`, accent: '#1A2B4B', sub: "Today's labour value" },
-    { label: 'Total Challans', value: String(m.total_challans), accent: '#1A2B4B', sub: 'All challans' },
-    { label: 'Pending Challans', value: String(m.pending_challans), accent: m.pending_challans > 0 ? '#b45309' : '#047857', sub: 'Qty not received' },
+    {
+      label: 'Total Pieces',
+      value: m.pieces_today.toLocaleString(),
+      sub: `${m.active_karigar} karigars active`,
+      accent: '#1A2B4B',
+      icon: '📦',
+    },
+    {
+      label: 'Active Karigars',
+      value: `${m.active_karigar}`,
+      sub: `${m.total_karigar} total · ${m.total_karigar - m.active_karigar} idle`,
+      accent: '#047857',
+      icon: '👷',
+    },
+    {
+      label: 'Avg Efficiency',
+      value: `${m.avg_efficiency}%`,
+      sub: m.avg_efficiency >= 80 ? '✓ On target' : '⚠ Below 80% target',
+      accent: m.avg_efficiency >= 80 ? '#047857' : '#b45309',
+      icon: '⚡',
+    },
+    {
+      label: 'Piece Value',
+      value: `₹${m.piece_value_today.toLocaleString()}`,
+      sub: "Today's labour value",
+      accent: '#1A2B4B',
+      icon: '💰',
+    },
+    {
+      label: 'Total Challans',
+      value: String(m.total_challans),
+      sub: `${m.pending_challans} pending receipt`,
+      accent: '#1A2B4B',
+      icon: '🧾',
+    },
+    {
+      label: 'Pending Challans',
+      value: String(m.pending_challans),
+      sub: m.pending_challans > 0 ? 'Qty not yet received' : 'All received ✓',
+      accent: m.pending_challans > 0 ? '#b45309' : '#047857',
+      icon: '⏳',
+    },
   ]
+
   return (
     <div className="space-y-5">
       {/* KPI grid */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        {kpiCards.map(({ label, value, accent, sub }) => (
+        {kpiCards.map(({ label, value, accent, sub, icon }) => (
           <div key={label} className="bg-white rounded-lg border border-[#E2E8F0] p-4">
-            <p className="text-[10px] uppercase font-semibold tracking-wide text-[#64748B]">{label}</p>
-            <p className="text-2xl font-bold mt-1" style={{ color: accent }}>{value}</p>
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-[10px] uppercase font-semibold tracking-wide text-[#64748B]">{label}</p>
+              <span className="text-base">{icon}</span>
+            </div>
+            <p className="text-2xl font-bold" style={{ color: accent }}>{value}</p>
             <p className="text-[10px] text-[#94A3B8] mt-0.5">{sub}</p>
           </div>
         ))}
       </div>
 
+      {/* Charts row */}
+      <div className="grid lg:grid-cols-5 gap-4">
+        {/* Daily Production Trends — takes 3/5 width */}
+        <div className="lg:col-span-3 bg-white rounded-lg border border-[#E2E8F0] p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <p className="text-sm font-bold text-[#1A2B4B]">Daily Production Trends</p>
+              <p className="text-[10px] text-gray-400">Real-time artisan output · last 7 days</p>
+            </div>
+          </div>
+          {dailyTrend.length > 0 ? (
+            <ResponsiveContainer width="100%" height={220}>
+              <LineChart data={dailyTrend} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 10, fill: '#64748B' }}
+                  tickFormatter={d => {
+                    const parts = String(d).split('-')
+                    return parts.length === 3 ? `${parts[2]}/${parts[1]}` : d
+                  }}
+                />
+                <YAxis tick={{ fontSize: 10, fill: '#64748B' }} width={40} />
+                <RechartsTooltip
+                  contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #E2E8F0' }}
+                  formatter={(val: number, name: string) =>
+                    name === 'pieces' ? [val.toLocaleString(), 'Pieces'] : [`${val}%`, 'Avg Efficiency']
+                  }
+                />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line
+                  type="monotone"
+                  dataKey="pieces"
+                  stroke="#1A2B4B"
+                  strokeWidth={2}
+                  dot={{ r: 3, fill: '#1A2B4B' }}
+                  activeDot={{ r: 5 }}
+                  name="Pieces"
+                />
+                <Line
+                  type="monotone"
+                  dataKey="avg_efficiency"
+                  stroke="#2563EB"
+                  strokeWidth={2}
+                  strokeDasharray="4 2"
+                  dot={false}
+                  name="Avg Efficiency %"
+                  yAxisId={0}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex items-center justify-center h-[220px] text-sm text-gray-400">
+              No production data in the last 7 days
+            </div>
+          )}
+        </div>
+
+        {/* Production by Style — takes 2/5 width */}
+        <div className="lg:col-span-2 bg-white rounded-lg border border-[#E2E8F0] p-4">
+          <div className="mb-3">
+            <p className="text-sm font-bold text-[#1A2B4B]">Production by Style</p>
+            <p className="text-[10px] text-gray-400">All-time top styles by pieces</p>
+          </div>
+          {byStyle.length > 0 ? (
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={byStyle} layout="vertical" margin={{ top: 0, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
+                <XAxis type="number" tick={{ fontSize: 10, fill: '#64748B' }} />
+                <YAxis
+                  type="category"
+                  dataKey="style"
+                  tick={{ fontSize: 9, fill: '#64748B' }}
+                  width={80}
+                  tickFormatter={(v: string) => v.length > 12 ? v.slice(0, 12) + '…' : v}
+                />
+                <RechartsTooltip
+                  contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #E2E8F0' }}
+                  formatter={(val: number) => [val.toLocaleString(), 'Pieces']}
+                />
+                <Bar dataKey="pieces" fill="#1A2B4B" radius={[0, 3, 3, 0]} name="Pieces" />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="flex items-center justify-center h-[220px] text-sm text-gray-400">
+              No style data yet
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Recent Production Entries */}
+      <Section title="Recent Production Entries">
+        {(data.today_production?.length ?? 0) === 0 ? (
+          <p className="text-sm text-gray-400 text-center py-6">No entries for today — use Daily Entry to add production</p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-[#E2E8F0]">
+            <table className="w-full text-xs">
+              <thead className="bg-[#1A2B4B] text-white">
+                <tr>
+                  {['Karigar Name', 'Style ID', 'Stage', 'Piece Count', 'Efficiency %', 'Piece Value', 'Status'].map(h => (
+                    <th key={h} className="text-left px-3 py-2.5 font-semibold uppercase text-[10px] tracking-wide whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(data.today_production ?? []).map((r: Record<string, unknown>, i: number) => {
+                  const eff = Number(r.Efficiency_% ?? r['Efficiency_%'] ?? 0)
+                  return (
+                    <tr key={i} className={`border-b border-[#E2E8F0] ${i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
+                      <td className="px-3 py-2.5 font-medium">{String(r.Karigar_Name ?? '')}</td>
+                      <td className="px-3 py-2.5 font-mono text-[#1A2B4B]">{String(r.Style ?? '')}</td>
+                      <td className="px-3 py-2.5 text-gray-500">{String(r.Operation ?? '')}</td>
+                      <td className="px-3 py-2.5 font-semibold">{String(r.Total_Pieces ?? '')}</td>
+                      <td className="px-3 py-2.5">
+                        <span className={`font-semibold ${eff >= 80 ? 'text-green-700' : eff >= 60 ? 'text-amber-700' : 'text-red-600'}`}>
+                          {eff.toFixed(1)}%
+                        </span>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {r.Piece_Value_Rs != null ? `₹${Number(r.Piece_Value_Rs).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                          eff >= 80 ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-900'
+                        }`}>
+                          {eff >= 80 ? 'SYNCED' : 'PENDING'}
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Section>
+
+      {/* Bottom: Karigar status + Challan register */}
       <div className="grid md:grid-cols-2 gap-4">
         <Section title="Karigar Status">
           <div className="overflow-x-auto rounded-lg border border-[#E2E8F0]">
@@ -369,18 +565,16 @@ function DashboardTab() {
                 </tr>
               </thead>
               <tbody>
-                {(data.karigar_status ?? []).map((r: Record<string, unknown>, i: number) => (
+                {(data.karigar_status ?? []).map((r, i) => (
                   <tr key={i} className={`border-b border-[#E2E8F0] ${i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
-                    <td className="px-3 py-2 font-mono text-[#1A2B4B]">{String(r.Karigar_ID ?? '')}</td>
-                    <td className="px-3 py-2 font-medium">{String(r.Name ?? '')}</td>
-                    <td className="px-3 py-2 text-gray-500">{String(r.Skill ?? '')}</td>
+                    <td className="px-3 py-2 font-mono text-[#1A2B4B]">{r.Karigar_ID}</td>
+                    <td className="px-3 py-2 font-medium">{r.Name}</td>
+                    <td className="px-3 py-2 text-gray-500">{r.Skill}</td>
                     <td className="px-3 py-2">
                       <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                        String(r.Status).toLowerCase() === 'active'
-                          ? 'bg-green-100 text-green-800'
-                          : 'bg-gray-100 text-gray-600'
+                        r.Status === 'Working' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'
                       }`}>
-                        {String(r.Status ?? '')}
+                        {r.Status}
                       </span>
                     </td>
                   </tr>
@@ -400,19 +594,17 @@ function DashboardTab() {
                 </tr>
               </thead>
               <tbody>
-                {(data.challan_register ?? []).map((r: Record<string, unknown>, i: number) => (
+                {(data.challan_register ?? []).map((r, i) => (
                   <tr key={i} className={`border-b border-[#E2E8F0] ${i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
-                    <td className="px-3 py-2 font-semibold text-[#1A2B4B]">{String(r.Challan_No ?? '')}</td>
-                    <td className="px-3 py-2">{String(r.Style ?? '')}</td>
-                    <td className="px-3 py-2 text-gray-500">{String(r.Party ?? '')}</td>
-                    <td className="px-3 py-2 text-right">{String(r.Pending ?? '')}</td>
+                    <td className="px-3 py-2 font-semibold text-[#1A2B4B]">{r.Challan_No}</td>
+                    <td className="px-3 py-2">{r.Style}</td>
+                    <td className="px-3 py-2 text-gray-500">{r.Party}</td>
+                    <td className="px-3 py-2 text-right">{r.Pending}</td>
                     <td className="px-3 py-2">
                       <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                        Number(r.Pending ?? 0) === 0
-                          ? 'bg-green-100 text-green-800'
-                          : 'bg-amber-100 text-amber-900'
+                        r.Pending === 0 ? 'bg-green-100 text-green-800' : 'bg-amber-100 text-amber-900'
                       }`}>
-                        {Number(r.Pending ?? 0) === 0 ? 'Complete' : 'Pending'}
+                        {r.Pending === 0 ? 'Complete' : 'Pending'}
                       </span>
                     </td>
                   </tr>
@@ -422,15 +614,6 @@ function DashboardTab() {
           </div>
         </Section>
       </div>
-
-      {(data.today_production?.length ?? 0) > 0 && (
-        <Section title="Today's Production">
-          <DataTable
-            rows={data.today_production}
-            cols={['Karigar_Name', 'Challan_No', 'Style', 'Operation', 'Total_Pieces', 'Efficiency_%', 'Piece_Value_Rs']}
-          />
-        </Section>
-      )}
     </div>
   )
 }
@@ -5998,6 +6181,178 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
           karigarName={detailKarigar.name}
           onClose={() => setDetailKarigar(null)}
         />
+      )}
+
+      {/* Analytics charts — only shown when karigar_master is active */}
+      {active === 'karigar_master' && !showArchived && (
+        <KarigarDirectoryCharts />
+      )}
+    </div>
+  )
+}
+
+function KarigarDirectoryCharts() {
+  const { data, isLoading } = useQuery({
+    queryKey: ['stitching-karigar-analytics'],
+    queryFn: () => api.get('/stitching/master/karigar/analytics', { params: { days: 30 } }).then(r => r.data),
+    staleTime: 5 * 60 * 1000,
+  })
+
+  if (isLoading) {
+    return (
+      <div className="grid md:grid-cols-2 gap-4 mt-4">
+        {['Efficiency Trend', 'Department Load'].map(t => (
+          <div key={t} className="bg-white rounded-lg border border-[#E2E8F0] p-4 h-64 flex items-center justify-center">
+            <p className="text-sm text-gray-400">Loading {t}…</p>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  const efficiencyTrend = (data?.efficiency_trend ?? []) as { date: string; avg_efficiency: number; pieces: number; karigars: number }[]
+  const departmentLoad = (data?.department_load ?? []) as { department: string; pieces: number; piece_value: number; karigars: number }[]
+  const karigarEfficiency = (data?.karigar_efficiency ?? []) as { Karigar_ID: string; Name: string; Skill: string; Pieces_30d: number; Avg_Efficiency_: number; Days_Active: number }[]
+
+  return (
+    <div className="space-y-4 mt-4">
+      <div className="grid md:grid-cols-2 gap-4">
+        {/* Efficiency Trend chart */}
+        <div className="bg-white rounded-lg border border-[#E2E8F0] p-4">
+          <div className="mb-3">
+            <p className="text-sm font-bold text-[#1A2B4B]">Efficiency Trend</p>
+            <p className="text-[10px] text-gray-400">Avg daily efficiency % — last 30 days</p>
+          </div>
+          {efficiencyTrend.length > 0 ? (
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={efficiencyTrend} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 9, fill: '#64748B' }}
+                  tickFormatter={d => {
+                    const p = String(d).split('-')
+                    return p.length === 3 ? `${p[2]}/${p[1]}` : d
+                  }}
+                  interval="preserveStartEnd"
+                />
+                <YAxis
+                  tick={{ fontSize: 9, fill: '#64748B' }}
+                  domain={[0, 100]}
+                  unit="%"
+                  width={36}
+                />
+                <RechartsTooltip
+                  contentStyle={{ fontSize: 11, borderRadius: 8 }}
+                  formatter={(v: number, n: string) =>
+                    n === 'avg_efficiency' ? [`${v}%`, 'Avg Efficiency'] : [v.toLocaleString(), 'Pieces']
+                  }
+                />
+                <Legend wrapperStyle={{ fontSize: 10 }} />
+                <Line
+                  type="monotone"
+                  dataKey="avg_efficiency"
+                  stroke="#1A2B4B"
+                  strokeWidth={2}
+                  dot={{ r: 2 }}
+                  name="Avg Efficiency %"
+                />
+                <Line
+                  type="monotone"
+                  dataKey="pieces"
+                  stroke="#60A5FA"
+                  strokeWidth={1.5}
+                  strokeDasharray="3 2"
+                  dot={false}
+                  name="Pieces"
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[200px] flex items-center justify-center text-sm text-gray-400">
+              No production data in last 30 days
+            </div>
+          )}
+        </div>
+
+        {/* Department Load chart */}
+        <div className="bg-white rounded-lg border border-[#E2E8F0] p-4">
+          <div className="mb-3">
+            <p className="text-sm font-bold text-[#1A2B4B]">Department Load</p>
+            <p className="text-[10px] text-gray-400">Pieces produced by skill group — last 30 days</p>
+          </div>
+          {departmentLoad.length > 0 ? (
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={departmentLoad} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                <XAxis
+                  dataKey="department"
+                  tick={{ fontSize: 9, fill: '#64748B' }}
+                  tickFormatter={(v: string) => v.length > 10 ? v.slice(0, 10) + '…' : v}
+                />
+                <YAxis tick={{ fontSize: 9, fill: '#64748B' }} width={36} />
+                <RechartsTooltip
+                  contentStyle={{ fontSize: 11, borderRadius: 8 }}
+                  formatter={(v: number, n: string) =>
+                    n === 'pieces' ? [v.toLocaleString(), 'Pieces'] : [v, n]
+                  }
+                />
+                <Legend wrapperStyle={{ fontSize: 10 }} />
+                <Bar dataKey="pieces" fill="#1A2B4B" radius={[3, 3, 0, 0]} name="Pieces" />
+                <Bar dataKey="karigars" fill="#60A5FA" radius={[3, 3, 0, 0]} name="Karigars" />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-[200px] flex items-center justify-center text-sm text-gray-400">
+              No department data yet
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Karigar efficiency table */}
+      {karigarEfficiency.length > 0 && (
+        <div className="bg-white rounded-lg border border-[#E2E8F0] overflow-hidden">
+          <div className="px-4 py-2.5 bg-[#1A2B4B] text-white text-sm font-semibold">Karigar Performance Summary (Last 30 Days)</div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-[#F8FAFC] border-b border-[#E2E8F0]">
+                <tr>
+                  {['ID', 'Name', 'Skill', 'Pieces (30d)', 'Avg Efficiency %', 'Days Active'].map(h => (
+                    <th key={h} className="text-left px-3 py-2 font-semibold text-gray-500 uppercase text-[10px] tracking-wide whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {karigarEfficiency.sort((a, b) => (b['Avg_Efficiency_%' as keyof typeof b] as number) - (a['Avg_Efficiency_%' as keyof typeof a] as number)).map((r, i) => {
+                  const eff = Number(r['Avg_Efficiency_%' as keyof typeof r] ?? r.Avg_Efficiency_ ?? 0)
+                  return (
+                    <tr key={r.Karigar_ID || i} className={`border-b border-[#E2E8F0] ${i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
+                      <td className="px-3 py-2 font-mono text-[#1A2B4B]">{r.Karigar_ID}</td>
+                      <td className="px-3 py-2 font-medium">{r.Name}</td>
+                      <td className="px-3 py-2 text-gray-500">{r.Skill}</td>
+                      <td className="px-3 py-2 text-right">{r.Pieces_30d.toLocaleString()}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 bg-gray-100 rounded-full h-1.5">
+                            <div
+                              className={`h-1.5 rounded-full ${eff >= 80 ? 'bg-green-500' : eff >= 60 ? 'bg-amber-400' : 'bg-red-400'}`}
+                              style={{ width: `${Math.min(eff, 100)}%` }}
+                            />
+                          </div>
+                          <span className={`text-[11px] font-semibold ${eff >= 80 ? 'text-green-700' : eff >= 60 ? 'text-amber-700' : 'text-red-600'}`}>
+                            {eff.toFixed(1)}%
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-center">{r.Days_Active}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
     </div>
   )

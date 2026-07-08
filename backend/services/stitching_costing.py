@@ -344,6 +344,89 @@ def set_karigar_active(karigar_id: str, active: bool) -> dict:
     return {"ok": True, "message": f"Marked {kid} as {state}.", "karigar_id": kid, "active": bool(active)}
 
 
+def karigar_directory_analytics(days: int = 30) -> dict[str, Any]:
+    """Return efficiency trend (last N days) and department load for karigar directory charts."""
+    pl = get_sheet_df("production_log")
+    km = get_sheet_df("karigar_master")
+
+    efficiency_trend: list[dict] = []
+    department_load: list[dict] = []
+
+    if not pl.empty and "Date" in pl.columns:
+        work = pl.copy()
+        work["Date"] = work["Date"].astype(str)
+        work["Total_Pieces"] = safe_num(work.get("Total_Pieces", 0))
+        work["Piece_Value_Rs"] = safe_num(work.get("Piece_Value_Rs", 0)) if "Piece_Value_Rs" in work.columns else 0.0
+        eff_col = "Efficiency_%" if "Efficiency_%" in work.columns else None
+
+        cutoff = str(date.today() - __import__("datetime").timedelta(days=days - 1))
+        recent = work[work["Date"] >= cutoff]
+
+        if not recent.empty and eff_col:
+            # Daily avg efficiency trend
+            for d_str, g in recent.groupby("Date"):
+                efficiency_trend.append({
+                    "date": str(d_str),
+                    "avg_efficiency": round(float(safe_num(g[eff_col]).mean()), 1),
+                    "pieces": int(g["Total_Pieces"].sum()),
+                    "karigars": int(g["Karigar_ID"].nunique()) if "Karigar_ID" in g.columns else 0,
+                })
+            efficiency_trend.sort(key=lambda x: x["date"])
+
+        # Department load: pieces per skill (department)
+        if not km.empty and "Karigar_ID" in km.columns and "Skill" in km.columns:
+            skill_map: dict[str, str] = {}
+            for _, r in km.iterrows():
+                skill_map[clean_key(str(r.get("Karigar_ID", "")))] = str(r.get("Skill", "Unknown") or "Unknown").strip() or "Unknown"
+
+            if not recent.empty and "Karigar_ID" in recent.columns:
+                dep_work = recent.copy()
+                dep_work["_skill"] = dep_work["Karigar_ID"].apply(lambda x: skill_map.get(clean_key(str(x)), "Unknown"))
+                dep_grp = dep_work.groupby("_skill", as_index=False).agg(
+                    pieces=("Total_Pieces", "sum"),
+                    piece_value=("Piece_Value_Rs", "sum"),
+                    karigars=("Karigar_ID", "nunique"),
+                )
+                department_load = [
+                    {
+                        "department": str(r["_skill"]),
+                        "pieces": int(r["pieces"]),
+                        "piece_value": round(float(r["piece_value"]), 2),
+                        "karigars": int(r["karigars"]),
+                    }
+                    for _, r in dep_grp.sort_values("pieces", ascending=False).iterrows()
+                ]
+
+    # Karigar-level efficiency summary for the directory
+    karigar_efficiency: list[dict] = []
+    if not km.empty and not pl.empty and "Karigar_ID" in pl.columns:
+        km_work = km.copy()
+        pl_work = pl.copy()
+        pl_work["Total_Pieces"] = safe_num(pl_work.get("Total_Pieces", 0))
+        eff_col2 = "Efficiency_%" if "Efficiency_%" in pl_work.columns else None
+        cutoff2 = str(date.today() - __import__("datetime").timedelta(days=29))
+        recent2 = pl_work[pl_work["Date"].astype(str) >= cutoff2] if "Date" in pl_work.columns else pl_work
+
+        for _, kr in km_work.iterrows():
+            kid = clean_key(str(kr.get("Karigar_ID", "")))
+            kg = recent2[recent2["Karigar_ID"].apply(clean_key) == kid] if not recent2.empty else pd.DataFrame()
+            karigar_efficiency.append({
+                "Karigar_ID": str(kr.get("Karigar_ID", "")),
+                "Name": str(kr.get("Name", "")),
+                "Skill": str(kr.get("Skill", "")),
+                "Pieces_30d": int(kg["Total_Pieces"].sum()) if not kg.empty else 0,
+                "Avg_Efficiency_%": round(float(safe_num(kg[eff_col2]).mean()), 1) if not kg.empty and eff_col2 else 0.0,
+                "Days_Active": int(kg["Date"].nunique()) if not kg.empty and "Date" in kg.columns else 0,
+            })
+
+    return {
+        "ok": True,
+        "efficiency_trend": efficiency_trend,
+        "department_load": department_load,
+        "karigar_efficiency": karigar_efficiency,
+    }
+
+
 def list_archived_karigars() -> list[dict]:
     """Return karigars marked inactive/resigned."""
     km = get_sheet_df("karigar_master")
@@ -1179,6 +1262,7 @@ def calc_salary(in_str: str, out_str: str, daily_rate: float, ot_mult: float = 1
 
 def dashboard_summary(planning_date: str | None = None) -> dict:
     today = planning_date or str(date.today())
+    today_dt = date.fromisoformat(today)
     pl = get_sheet_df("production_log")
     km = get_sheet_df("karigar_master")
     cm = get_sheet_df("challan_master")
@@ -1231,6 +1315,48 @@ def dashboard_summary(planning_date: str | None = None) -> dict:
                 if k in tdpl.columns
             })
 
+    # --- Daily production trend: last 7 days ---
+    daily_trend: list[dict] = []
+    if not pl.empty and "Date" in pl.columns and "Total_Pieces" in pl.columns:
+        work = pl.copy()
+        work["Date"] = work["Date"].astype(str)
+        work["Total_Pieces"] = safe_num(work["Total_Pieces"])
+        work["Piece_Value_Rs"] = safe_num(work.get("Piece_Value_Rs", 0)) if "Piece_Value_Rs" in work.columns else 0.0
+        eff_col = "Efficiency_%" if "Efficiency_%" in work.columns else None
+        start_dt = today_dt - __import__("datetime").timedelta(days=6)
+        start_str = str(start_dt)
+        filtered = work[work["Date"] >= start_str]
+        if not filtered.empty:
+            grp_dict: dict[str, Any] = {}
+            for d_str, g in filtered.groupby("Date"):
+                grp_dict[str(d_str)] = {
+                    "date": str(d_str),
+                    "pieces": int(g["Total_Pieces"].sum()),
+                    "piece_value": round(float(g["Piece_Value_Rs"].sum()), 2),
+                    "avg_efficiency": round(float(safe_num(g[eff_col]).mean()), 1) if eff_col else 0.0,
+                }
+            # Fill all 7 days even if no data
+            for i in range(7):
+                d = str(start_dt + __import__("datetime").timedelta(days=i))
+                if d not in grp_dict:
+                    grp_dict[d] = {"date": d, "pieces": 0, "piece_value": 0.0, "avg_efficiency": 0.0}
+            daily_trend = sorted(grp_dict.values(), key=lambda x: x["date"])
+
+    # --- Production by style: top 8 styles by pieces ---
+    by_style: list[dict] = []
+    if not pl.empty and "Style" in pl.columns and "Total_Pieces" in pl.columns:
+        work_s = pl.copy()
+        work_s["Total_Pieces"] = safe_num(work_s["Total_Pieces"])
+        work_s["Style"] = work_s["Style"].astype(str).str.strip()
+        style_grp = work_s.groupby("Style", as_index=False).agg(
+            pieces=("Total_Pieces", "sum"),
+        )
+        style_grp = style_grp.sort_values("pieces", ascending=False).head(8)
+        by_style = [
+            {"style": str(r["Style"]), "pieces": int(r["pieces"])}
+            for _, r in style_grp.iterrows()
+        ]
+
     return {
         "date": today,
         "metrics": {
@@ -1245,6 +1371,8 @@ def dashboard_summary(planning_date: str | None = None) -> dict:
         "karigar_status": karigar_status,
         "challan_register": challan_register,
         "today_production": today_production,
+        "daily_trend": daily_trend,
+        "by_style": by_style,
     }
 
 

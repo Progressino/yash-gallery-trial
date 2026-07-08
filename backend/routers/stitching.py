@@ -1036,6 +1036,12 @@ def list_archived_karigars():
     return {"rows": svc.list_archived_karigars()}
 
 
+@router.get("/master/karigar/analytics")
+def karigar_directory_analytics(days: int = 30):
+    """Efficiency trend, department load, and 30-day karigar stats for karigar directory charts."""
+    return svc.karigar_directory_analytics(days=days)
+
+
 @router.get("/master/karigar/{karigar_id}/detail")
 def get_karigar_detail(karigar_id: str, date_from: str, date_to: str):
     out = svc.karigar_detail_report(karigar_id, date_from, date_to)
