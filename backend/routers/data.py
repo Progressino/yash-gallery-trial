@@ -5000,7 +5000,13 @@ def sku_deepdive(
     if unified is None or unified.empty:
         return {"loaded": False, "message": "No sales data loaded"}
 
-    sales = build_deepdive_sales_frame(sess, sku, all_sizes=all_sizes)
+    sales = build_deepdive_sales_frame(
+        sess,
+        sku,
+        all_sizes=all_sizes,
+        start_date=start_date,
+        end_date=end_date,
+    )
     df0 = apply_upload_report_day_gate(sales) if sales is not None and not sales.empty else pd.DataFrame()
 
     # Detect whether Meesho is loaded but has no per-SKU data (TCS ZIP format)

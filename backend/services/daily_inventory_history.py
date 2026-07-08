@@ -75,6 +75,68 @@ def _history_dedupe_keys(work: pd.DataFrame) -> list[str]:
     return ["OMS_SKU", "Date"]
 
 
+def repair_snapshot_channel_totals(
+    hist_df: pd.DataFrame | None,
+    variant_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Fix under-counted snapshot rows written as channel=oms (OMS_Inventory only).
+
+    When inventory_df_variant is available, rebuild the latest snapshot date's rows
+    using Total_Inventory (blank channel). Also strip erroneous amazon-channel
+    snapshot rows and collapse oms-channel snapshots to blank channel.
+    """
+    if hist_df is None or hist_df.empty:
+        return hist_df if hist_df is not None else pd.DataFrame(columns=_STORE_COLS)
+    work = _ensure_channel_column(hist_df.copy())
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    src = work["Source"].astype(str).str.strip().str.lower()
+    ch = work["Channel"].astype(str).str.strip().str.lower()
+    snap_mask = src == "snapshot"
+    if not snap_mask.any():
+        return work.reset_index(drop=True)
+
+    # Drop amazon-channel snapshot rows (double-counted FBA when combined with oms).
+    bad_amz = snap_mask & (ch == "amazon")
+    if bad_amz.any():
+        work = work.loc[~bad_amz]
+
+    # Collapse oms-channel snapshots to blank channel (qty may still be OMS-only).
+    oms_snap = work[snap_mask & (work["Channel"].astype(str).str.strip().str.lower() == "oms")]
+    if not oms_snap.empty:
+        work.loc[oms_snap.index, "Channel"] = ""
+
+    if variant_df is None or getattr(variant_df, "empty", True):
+        return _coalesce_history_rows(work)
+
+    qty = _variant_snapshot_qty_series(variant_df)
+    if qty is None:
+        return _coalesce_history_rows(work)
+
+    snap_dates = work.loc[work["Source"].astype(str).str.strip().str.lower() == "snapshot", "Date"].dropna()
+    if snap_dates.empty:
+        return _coalesce_history_rows(work)
+    latest = pd.Timestamp(snap_dates.max()).normalize()
+
+    var = variant_df.copy()
+    var["OMS_SKU"] = var["OMS_SKU"].astype(str).str.strip().str.upper()
+    var["Qty"] = pd.to_numeric(qty, errors="coerce").fillna(0.0)
+    var = var[var["OMS_SKU"].str.len() > 0]
+    if var.empty:
+        return _coalesce_history_rows(work)
+
+    # Replace latest snapshot date with authoritative Total_Inventory rows.
+    work = work[~((work["Date"] == latest) & (work["Source"].astype(str).str.strip().str.lower() == "snapshot"))]
+    incoming = pd.DataFrame({
+        "OMS_SKU": var["OMS_SKU"].values,
+        "Date": latest,
+        "Qty": var["Qty"].values,
+        "Source": "snapshot",
+        "Channel": "",
+    })
+    work = pd.concat([work, incoming], ignore_index=True)
+    return _coalesce_history_rows(work)
+
+
 def combine_inventory_channels(df: pd.DataFrame | None) -> pd.DataFrame:
     """Max on-hand per SKU-day across OMS + Amazon (PO combined view).
 
@@ -958,31 +1020,19 @@ def refresh_inventory_history_rollforward(
                 hist_skus = set(merged["OMS_SKU"].astype(str).str.strip().str.upper())
                 work = work[work["OMS_SKU"].isin(hist_skus)]
                 if not work.empty:
-                    # Store OMS_Inventory as the authoritative "oms" channel row.
-                    # We intentionally do NOT store Amazon_Inventory as a separate
-                    # "amazon" channel here: the OMS_Inventory figure already captures
-                    # the full warehouse + FBA tracking. Storing Amazon separately
-                    # caused the Combined (max) total to inflate because Amazon-only
-                    # PL-SKUs (not in OMS) were added on top, showing 220K+ instead
-                    # of the correct ~163K. The OMS channel is the single source of
-                    # truth for the daily inventory matrix.
-                    if "OMS_Inventory" in work.columns:
-                        oms_qty = pd.to_numeric(work["OMS_Inventory"], errors="coerce").fillna(0.0)
-                        incoming = pd.DataFrame({
-                            "OMS_SKU": work["OMS_SKU"].values,
-                            "Date": snap_ts,
-                            "Qty": oms_qty.values,
-                            "Source": "snapshot",
-                            "Channel": "oms",
-                        })
-                    else:
-                        # Fallback for legacy snapshots without OMS_Inventory column.
-                        incoming = pd.DataFrame({
-                            "OMS_SKU": work["OMS_SKU"].values,
-                            "Date": snap_ts,
-                            "Qty": work["Qty"].values,
-                            "Source": "snapshot",
-                        })
+                    # Store Total_Inventory (work["Qty"] from _variant_snapshot_qty_series)
+                    # as a blank-channel snapshot row — this is the PO combined on-hand
+                    # total (OMS + marketplace in-transit etc.). Do NOT store
+                    # OMS_Inventory as a separate "oms" channel: that under-counts the
+                    # Combined view (~130K vs ~163K). Also do NOT store Amazon_Inventory
+                    # as a separate "amazon" channel: that double-counts FBA SKUs.
+                    incoming = pd.DataFrame({
+                        "OMS_SKU": work["OMS_SKU"].values,
+                        "Date": snap_ts,
+                        "Qty": work["Qty"].values,
+                        "Source": "snapshot",
+                        "Channel": "",
+                    })
                     merged = merged[
                         ~((merged["Date"] == snap_ts) & (merged["Source"].astype(str) == "derived"))
                     ]

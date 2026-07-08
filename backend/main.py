@@ -1749,26 +1749,25 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
                                 df = dedup_amazon_mtr_dataframe(df)
                             except Exception:
                                 pass
-                    if key == "daily_inventory_history_df" and not df.empty:
-                        # Strip "amazon" channel snapshot rows that were incorrectly
-                        # written by a previous fix that stored Amazon_Inventory as a
-                        # separate channel alongside OMS_Inventory. Keeping them inflates
-                        # the combined total (OMS + Amazon-only SKUs) showing 220K+
-                        # instead of the correct ~163K. OMS is the authoritative source.
-                        if "Channel" in df.columns and "Source" in df.columns:
-                            bad_mask = (
-                                df["Channel"].astype(str).str.strip().str.lower() == "amazon"
-                            ) & (
-                                df["Source"].astype(str).str.strip().str.lower() == "snapshot"
-                            )
-                            if bad_mask.any():
-                                log.info(
-                                    "Stripping %d bad amazon-snapshot rows from "
-                                    "daily_inventory_history_df parquet",
-                                    int(bad_mask.sum()),
-                                )
-                                df = df[~bad_mask].reset_index(drop=True)
                     loaded[key] = df
+
+        if "daily_inventory_history_df" in loaded:
+            try:
+                from .services.daily_inventory_history import repair_snapshot_channel_totals
+
+                hist = loaded["daily_inventory_history_df"]
+                variant = loaded.get("inventory_df_variant")
+                repaired = repair_snapshot_channel_totals(hist, variant)
+                if len(repaired) != len(hist):
+                    log.info(
+                        "Repaired daily_inventory_history_df snapshot channels on disk load "
+                        "(%d → %d rows)",
+                        len(hist),
+                        len(repaired),
+                    )
+                loaded["daily_inventory_history_df"] = repaired
+            except Exception:
+                log.exception("repair_snapshot_channel_totals on Phase-0 disk load failed")
 
         if not loaded:
             return False, {}
@@ -1820,19 +1819,18 @@ def _warm_cache_loose_parquets_from_dir(disk_dir: "Path") -> dict:
                         df = df[df["TxnDate"] >= cutoff].reset_index(drop=True)
                     except Exception:
                         pass
-                if key == "daily_inventory_history_df" and not df.empty:
-                    # Strip "amazon" channel snapshot rows (see _load_warm_cache_from_disk comment).
-                    if "Channel" in df.columns and "Source" in df.columns:
-                        bad_mask = (
-                            df["Channel"].astype(str).str.strip().str.lower() == "amazon"
-                        ) & (
-                            df["Source"].astype(str).str.strip().str.lower() == "snapshot"
-                        )
-                        if bad_mask.any():
-                            df = df[~bad_mask].reset_index(drop=True)
                 out[key] = df
             except Exception as ex:
                 log.warning("warm-cache parquet read %s: %s", p, ex)
+    if "daily_inventory_history_df" in out:
+        try:
+            from .services.daily_inventory_history import repair_snapshot_channel_totals
+
+            hist = out["daily_inventory_history_df"]
+            variant = out.get("inventory_df_variant")
+            out["daily_inventory_history_df"] = repair_snapshot_channel_totals(hist, variant)
+        except Exception:
+            log.warning("repair_snapshot_channel_totals on loose parquet load failed", exc_info=True)
     sm = disk_dir / "sku_mapping.json"
     if sm.is_file():
         try:

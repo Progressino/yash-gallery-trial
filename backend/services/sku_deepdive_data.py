@@ -13,6 +13,7 @@ from .sales import (
     txn_reporting_naive_ist,
 )
 from .shared_frames import (
+    platform_frame_for_window,
     session_platform_df,
     session_sales_df,
 )
@@ -124,7 +125,13 @@ def _merge_platform_and_sales(plat: pd.DataFrame, sales: pd.DataFrame) -> pd.Dat
     )
 
 
-def _build_platform_sales_parts(sess, sku_mask_fn) -> pd.DataFrame:
+def _build_platform_sales_parts(
+    sess,
+    sku_mask_fn,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
     """Convert matching rows from each platform frame to unified sales schema."""
     from .sales import (
         _build_flipkart_sales_part,
@@ -137,7 +144,7 @@ def _build_platform_sales_parts(sess, sku_mask_fn) -> pd.DataFrame:
     mapping = getattr(sess, "sku_mapping", None) or {}
     parts: list[pd.DataFrame] = []
 
-    mtr = session_platform_df(sess, "mtr_df")
+    mtr = platform_frame_for_window("mtr_df", sess, start_date=start_date, end_date=end_date)
     if not mtr.empty:
         raw = _platform_raw_sku_series(mtr)
         sub = _filter_platform_df(mtr, sku_mask_fn(raw))
@@ -160,7 +167,7 @@ def _build_platform_sales_parts(sess, sku_mask_fn) -> pd.DataFrame:
             if not part.empty:
                 parts.append(part)
 
-    myntra = session_platform_df(sess, "myntra_df")
+    myntra = platform_frame_for_window("myntra_df", sess, start_date=start_date, end_date=end_date)
     if not myntra.empty:
         raw = _platform_raw_sku_series(myntra)
         sub = _filter_platform_df(myntra, sku_mask_fn(raw))
@@ -169,7 +176,7 @@ def _build_platform_sales_parts(sess, sku_mask_fn) -> pd.DataFrame:
             if not part.empty:
                 parts.append(part)
 
-    meesho = session_platform_df(sess, "meesho_df")
+    meesho = platform_frame_for_window("meesho_df", sess, start_date=start_date, end_date=end_date)
     if not meesho.empty:
         raw = _platform_raw_sku_series(meesho)
         sub = _filter_platform_df(meesho, sku_mask_fn(raw))
@@ -178,7 +185,7 @@ def _build_platform_sales_parts(sess, sku_mask_fn) -> pd.DataFrame:
             if not part.empty:
                 parts.append(part)
 
-    flipkart = session_platform_df(sess, "flipkart_df")
+    flipkart = platform_frame_for_window("flipkart_df", sess, start_date=start_date, end_date=end_date)
     if not flipkart.empty:
         raw = _platform_raw_sku_series(flipkart)
         sub = _filter_platform_df(flipkart, sku_mask_fn(raw))
@@ -187,7 +194,7 @@ def _build_platform_sales_parts(sess, sku_mask_fn) -> pd.DataFrame:
             if not part.empty:
                 parts.append(part)
 
-    snapdeal = session_platform_df(sess, "snapdeal_df")
+    snapdeal = platform_frame_for_window("snapdeal_df", sess, start_date=start_date, end_date=end_date)
     if not snapdeal.empty:
         raw = _platform_raw_sku_series(snapdeal)
         sub = _filter_platform_df(snapdeal, sku_mask_fn(raw))
@@ -201,7 +208,14 @@ def _build_platform_sales_parts(sess, sku_mask_fn) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)
 
 
-def build_deepdive_sales_frame(sess, sku: str, *, all_sizes: bool) -> pd.DataFrame:
+def build_deepdive_sales_frame(
+    sess,
+    sku: str,
+    *,
+    all_sizes: bool,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
     """
     Rows for one deep-dive query: platform upload history plus unified sales gaps.
   """
@@ -222,21 +236,31 @@ def build_deepdive_sales_frame(sess, sku: str, *, all_sizes: bool) -> pd.DataFra
             all_sizes=all_sizes,
         )
 
-    plat = _build_platform_sales_parts(sess, sku_mask_fn)
+    plat = _build_platform_sales_parts(
+        sess,
+        sku_mask_fn,
+        start_date=start_date,
+        end_date=end_date,
+    )
 
     sales = session_sales_df(sess)
     if sales is None or sales.empty:
-        return plat
-
-    canon = canonical_sales_sku_series(sales["Sku"])
-    if all_sizes:
-        uniq = sales["Sku"].astype(str).unique()
-        parent_map = {u: deepdive_parent_tokens(str(u).strip()) for u in uniq}
-        sales_mask = canon.isin(exact_targets) | sales["Sku"].astype(str).map(
-            lambda v: bool(parent_map.get(v, set()) & parent_targets)
-        )
+        out = plat
     else:
-        sales_mask = canon.isin(exact_targets)
+        canon = canonical_sales_sku_series(sales["Sku"])
+        if all_sizes:
+            uniq = sales["Sku"].astype(str).unique()
+            parent_map = {u: deepdive_parent_tokens(str(u).strip()) for u in uniq}
+            sales_mask = canon.isin(exact_targets) | sales["Sku"].astype(str).map(
+                lambda v: bool(parent_map.get(v, set()) & parent_targets)
+            )
+        else:
+            sales_mask = canon.isin(exact_targets)
 
-    sales_part = sales.loc[sales_mask].copy()
-    return _merge_platform_and_sales(plat, sales_part)
+        sales_part = sales.loc[sales_mask].copy()
+        out = _merge_platform_and_sales(plat, sales_part)
+
+    if out is None or out.empty:
+        return pd.DataFrame()
+    from .sales import _drop_amazon_unkeyed_shadows
+    return _drop_amazon_unkeyed_shadows(out)

@@ -154,3 +154,38 @@ def test_build_deepdive_all_sizes_only_counts_matching_parent():
     total = int(out["Quantity"].sum())
     # 19 + 10 + 8 = 37 for 1001YKBEIGE sizes; 9999YKRED-3XL should be excluded
     assert total == 37, f"Expected 37 units (3 sizes of 1001YKBEIGE), got {total}"
+
+
+def test_build_deepdive_dedups_fba_shadow_rows_in_mtr():
+    """FBA shadow rows (no Order_Id) must not inflate shipped units."""
+    sess = _FakeSess()
+    rows = []
+    for i in range(8):
+        rows.append({
+            "SKU": "1001YKBEIGE-XXL",
+            "Date": f"2025-01-{15 + i:02d}",
+            "Quantity": 1,
+            "Transaction_Type": "Shipment",
+            "Order_Id": f"FBA-{i}",
+            "Invoice_Number": "",
+        })
+        rows.append({
+            "SKU": "1001YKBEIGE-XXL",
+            "Date": f"2025-01-{15 + i:02d}",
+            "Quantity": 1,
+            "Transaction_Type": "Shipment",
+            "Order_Id": "",
+            "Invoice_Number": "",
+        })
+    sess.mtr_df = pd.DataFrame(rows)
+    sess.sales_df = pd.DataFrame()
+
+    out = build_deepdive_sales_frame(
+        sess,
+        "1001YKBEIGE-XXL",
+        all_sizes=False,
+        start_date="2025-01-01",
+        end_date="2025-03-31",
+    )
+    amazon_units = int(out.loc[out["Source"].astype(str) == "Amazon", "Quantity"].sum())
+    assert amazon_units == 8, f"Expected 8 after shadow dedup, got {amazon_units}"

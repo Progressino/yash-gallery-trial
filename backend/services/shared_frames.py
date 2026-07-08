@@ -110,6 +110,52 @@ def session_platform_df(sess, platform_key: str) -> pd.DataFrame:
     return warm_frame(platform_key, sess)
 
 
+def platform_frame_for_window(
+    attr: str,
+    sess=None,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Platform frame for a calendar window — reads full-history disk parquet when RAM is trimmed."""
+    from pathlib import Path
+
+    s = str(start_date or "")[:10]
+    e = str(end_date or "")[:10]
+    has_window = len(s) == 10 and len(e) == 10
+
+    mem = warm_frame(attr, sess)
+    if mem is not None and hasattr(mem, "empty") and not mem.empty:
+        if not has_window:
+            return mem
+        date_col = "Date" if "Date" in mem.columns else None
+        if date_col:
+            d = pd.to_datetime(mem[date_col], errors="coerce")
+            in_w = mem[(d >= pd.Timestamp(s)) & (d <= pd.Timestamp(e))]
+            if not in_w.empty:
+                return mem
+
+    disk_dir = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
+    path = disk_dir / f"{attr}.parquet"
+    if not path.is_file():
+        return mem if mem is not None else pd.DataFrame()
+    try:
+        if has_window:
+            try:
+                return pd.read_parquet(
+                    path,
+                    filters=[
+                        ("Date", ">=", pd.Timestamp(s)),
+                        ("Date", "<=", pd.Timestamp(e) + pd.Timedelta(days=1)),
+                    ],
+                )
+            except Exception:
+                pass
+        return pd.read_parquet(path)
+    except Exception:
+        return mem if mem is not None else pd.DataFrame()
+
+
 def frame_row_count(key: str, sess) -> int:
     df = warm_frame(key, sess)
     try:
