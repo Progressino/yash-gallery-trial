@@ -222,6 +222,10 @@ def _apply_unified_oms_skus(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.Dat
     """
     One canonical pass: map_to_oms_sku (PL + key fallbacks) then canonical_sales_sku (PL strip).
     Ensures every marketplace uses the same final tokens as the SKU master / inventory.
+
+    Amazon rows that already keep a distinct PL seller SKU (from
+    ``protect_distinct_asin_pl_skus``) are left alone so a different-ASIN PL
+    listing is not folded back into the OMS token.
     """
     if df.empty or "Sku" not in df.columns:
         return df
@@ -229,8 +233,14 @@ def _apply_unified_oms_skus(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.Dat
     out = df.copy()
     col = out["Sku"]
 
+    skip = pd.Series(False, index=out.index)
+    if "Source" in out.columns:
+        is_amz = out["Source"].astype(str) == "Amazon"
+        skip = is_amz & col.map(_is_amazon_pl_raw_sku)
+
     if not m:
-        out["Sku"] = canonical_sales_sku_series(col)
+        resolved = canonical_sales_sku_series(col)
+        out.loc[~skip, "Sku"] = resolved.loc[~skip]
         return out
 
     def _one(raw) -> str:
@@ -245,7 +255,8 @@ def _apply_unified_oms_skus(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.Dat
 
     uniq = pd.unique(col.to_numpy())
     sku_map = {u: _one(u) for u in uniq}
-    out["Sku"] = col.map(sku_map)
+    resolved = col.map(sku_map)
+    out.loc[~skip, "Sku"] = resolved.loc[~skip]
     return out
 
 
