@@ -36,7 +36,7 @@ function formatDateCol(iso: string) {
 export default function InventoryHistory() {
   const coverage = useSession()
   const [mode, setMode] = useState<'matrix' | 'sku'>('matrix')
-  const [channel, setChannel] = useState<InventoryHistoryChannel>('combined')
+  const [channel, setChannel] = useState<InventoryHistoryChannel>('oms')
   const [skuFilter, setSkuFilter] = useState('')
   const [skuQuery, setSkuQuery] = useState('')
   const [skuWindow, setSkuWindow] = useState(30)

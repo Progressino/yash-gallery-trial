@@ -958,42 +958,31 @@ def refresh_inventory_history_rollforward(
                 hist_skus = set(merged["OMS_SKU"].astype(str).str.strip().str.upper())
                 work = work[work["OMS_SKU"].isin(hist_skus)]
                 if not work.empty:
-                    # Build per-channel snapshot rows so the combined history view
-                    # (max of OMS vs Amazon per SKU) doesn't inflate with marketplace
-                    # stock (Flipkart, Myntra, Not_In_Inventory, etc.)
-                    _snap_parts: list[pd.DataFrame] = []
-                    _has_channels = False
+                    # Store OMS_Inventory as the authoritative "oms" channel row.
+                    # We intentionally do NOT store Amazon_Inventory as a separate
+                    # "amazon" channel here: the OMS_Inventory figure already captures
+                    # the full warehouse + FBA tracking. Storing Amazon separately
+                    # caused the Combined (max) total to inflate because Amazon-only
+                    # PL-SKUs (not in OMS) were added on top, showing 220K+ instead
+                    # of the correct ~163K. The OMS channel is the single source of
+                    # truth for the daily inventory matrix.
                     if "OMS_Inventory" in work.columns:
                         oms_qty = pd.to_numeric(work["OMS_Inventory"], errors="coerce").fillna(0.0)
-                        _snap_parts.append(pd.DataFrame({
+                        incoming = pd.DataFrame({
                             "OMS_SKU": work["OMS_SKU"].values,
                             "Date": snap_ts,
                             "Qty": oms_qty.values,
                             "Source": "snapshot",
                             "Channel": "oms",
-                        }))
-                        _has_channels = True
-                    if "Amazon_Inventory" in work.columns:
-                        amz_qty = pd.to_numeric(work["Amazon_Inventory"], errors="coerce").fillna(0.0)
-                        amz_mask = amz_qty > 0
-                        if amz_mask.any():
-                            _snap_parts.append(pd.DataFrame({
-                                "OMS_SKU": work.loc[amz_mask, "OMS_SKU"].values,
-                                "Date": snap_ts,
-                                "Qty": amz_qty[amz_mask].values,
-                                "Source": "snapshot",
-                                "Channel": "amazon",
-                            }))
-                            _has_channels = True
-                    if not _has_channels:
-                        # Fallback for legacy snapshots without per-channel columns.
-                        _snap_parts.append(pd.DataFrame({
+                        })
+                    else:
+                        # Fallback for legacy snapshots without OMS_Inventory column.
+                        incoming = pd.DataFrame({
                             "OMS_SKU": work["OMS_SKU"].values,
                             "Date": snap_ts,
                             "Qty": work["Qty"].values,
                             "Source": "snapshot",
-                        }))
-                    incoming = pd.concat(_snap_parts, ignore_index=True)
+                        })
                     merged = merged[
                         ~((merged["Date"] == snap_ts) & (merged["Source"].astype(str) == "derived"))
                     ]
