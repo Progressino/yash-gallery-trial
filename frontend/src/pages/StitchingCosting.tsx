@@ -521,7 +521,7 @@ function DashboardTab() {
               </thead>
               <tbody>
                 {(data.today_production ?? []).map((r: Record<string, unknown>, i: number) => {
-                  const eff = Number(r.Efficiency_% ?? r['Efficiency_%'] ?? 0)
+                  const eff = Number(r['Efficiency_%'] ?? 0)
                   return (
                     <tr key={i} className={`border-b border-[#E2E8F0] ${i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
                       <td className="px-3 py-2.5 font-medium">{String(r.Karigar_Name ?? '')}</td>
@@ -6212,7 +6212,7 @@ function KarigarDirectoryCharts() {
 
   const efficiencyTrend = (data?.efficiency_trend ?? []) as { date: string; avg_efficiency: number; pieces: number; karigars: number }[]
   const departmentLoad = (data?.department_load ?? []) as { department: string; pieces: number; piece_value: number; karigars: number }[]
-  const karigarEfficiency = (data?.karigar_efficiency ?? []) as { Karigar_ID: string; Name: string; Skill: string; Pieces_30d: number; Avg_Efficiency_: number; Days_Active: number }[]
+  const karigarEfficiency = (data?.karigar_efficiency ?? []) as { Karigar_ID: string; Name: string; Skill: string; Pieces_30d: number; 'Avg_Efficiency_%': number; Days_Active: number }[]
 
   return (
     <div className="space-y-4 mt-4">
@@ -6324,8 +6324,8 @@ function KarigarDirectoryCharts() {
                 </tr>
               </thead>
               <tbody>
-                {karigarEfficiency.sort((a, b) => (b['Avg_Efficiency_%' as keyof typeof b] as number) - (a['Avg_Efficiency_%' as keyof typeof a] as number)).map((r, i) => {
-                  const eff = Number(r['Avg_Efficiency_%' as keyof typeof r] ?? r.Avg_Efficiency_ ?? 0)
+                {karigarEfficiency.sort((a, b) => (b['Avg_Efficiency_%'] ?? 0) - (a['Avg_Efficiency_%'] ?? 0)).map((r, i) => {
+                  const eff = Number(r['Avg_Efficiency_%'] ?? 0)
                   return (
                     <tr key={r.Karigar_ID || i} className={`border-b border-[#E2E8F0] ${i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
                       <td className="px-3 py-2 font-mono text-[#1A2B4B]">{r.Karigar_ID}</td>
