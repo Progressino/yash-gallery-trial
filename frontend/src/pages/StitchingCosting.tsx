@@ -2769,13 +2769,6 @@ function CompletedStyleCostingTab() {
                     idx={idx}
                     saving={patchMut.isPending}
                     finalizing={finalizeMut.isPending}
-                    onSave={(outsiderCost, outsiderVendor) =>
-                      patchMut.mutate({
-                        style: String(row.Style),
-                        outsider_cost_rs: outsiderCost,
-                        outsider_vendor: outsiderVendor,
-                      })
-                    }
                     onFinalize={() => finalizeMut.mutate(String(row.Style))}
                   />
                 ))}
@@ -2793,27 +2786,18 @@ function CompletedStyleCostingRow({
   idx,
   saving,
   finalizing,
-  onSave,
   onFinalize,
 }: {
   row: Record<string, unknown>
   idx: number
   saving: boolean
   finalizing: boolean
-  onSave: (outsiderCost: number, outsiderVendor: string) => void
   onFinalize: () => void
 }) {
   const locked = String(row.Status) === 'Fully Costed'
-  const [outsiderCost, setOutsiderCost] = useState(String(row.Outsider_Cost_Rs ?? ''))
-  const [outsiderVendor, setOutsiderVendor] = useState(String(row.Outsider_Vendor ?? ''))
   const internal = Number(row.Internal_Stitching_Cost_Rs ?? 0)
   // Actual overall = internal stitching only (outsider is informational)
   const actual = internal
-
-  useEffect(() => {
-    setOutsiderCost(String(row.Outsider_Cost_Rs ?? ''))
-    setOutsiderVendor(String(row.Outsider_Vendor ?? ''))
-  }, [row.Outsider_Cost_Rs, row.Outsider_Vendor])
 
   const rowBg = idx % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'
 
