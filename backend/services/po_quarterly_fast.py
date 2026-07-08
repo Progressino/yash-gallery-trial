@@ -132,6 +132,24 @@ def _accumulate_shipment_frame(
     if not cols:
         return 0
 
+    # Strip FBA shadow rows from Amazon MTR blobs before aggregating — prevents
+    # an unkeyed aggregate row (no Order_Id) duplicating a keyed row (with Order_Id)
+    # for the same shipment. This is the same dedup applied on upload; re-running
+    # here ensures historical Tier-3 blobs uploaded before the fix are also clean.
+    if (
+        platform == "amazon"
+        and len(df) > 1
+        and "Invoice_Number" in df.columns
+        and "Order_Id" in df.columns
+    ):
+        try:
+            from .mtr import dedup_amazon_mtr_dataframe
+            df = dedup_amazon_mtr_dataframe(df)
+        except Exception:
+            pass
+    if df is None or df.empty:
+        return 0
+
     sku_col = next(
         (c for c in cols if c in df.columns and c in ("SKU", "OMS_SKU")),
         None,

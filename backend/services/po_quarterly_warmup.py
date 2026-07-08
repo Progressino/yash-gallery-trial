@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 17  # bumped: Flipkart ReturnCancel/Refund/Cancel now signed in quarterly
+QUARTERLY_CACHE_SCHEMA = 18  # bumped: Amazon FBA shadow-row dedup now applied in Tier-1/3 paths
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
