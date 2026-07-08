@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import axios from 'axios'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -14,6 +14,24 @@ import {
   Legend,
 } from 'recharts'
 import api from '../api/client'
+
+class ChartBoundary extends Component<{ children: ReactNode; label?: string }, { err: boolean }> {
+  constructor(props: { children: ReactNode; label?: string }) {
+    super(props)
+    this.state = { err: false }
+  }
+  static getDerivedStateFromError() { return { err: true } }
+  render() {
+    if (this.state.err) {
+      return (
+        <div className="flex items-center justify-center h-[220px] text-sm text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-200">
+          {this.props.label ?? 'Chart'} unavailable
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 import { useStitchingAdmin } from '../lib/stitchingAdmin'
 import {
   applyHourEntryPatch,
@@ -425,46 +443,46 @@ function DashboardTab() {
             </div>
           </div>
           {dailyTrend.length > 0 ? (
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={dailyTrend} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                <XAxis
-                  dataKey="date"
-                  tick={{ fontSize: 10, fill: '#64748B' }}
-                  tickFormatter={d => {
-                    const parts = String(d).split('-')
-                    return parts.length === 3 ? `${parts[2]}/${parts[1]}` : d
-                  }}
-                />
-                <YAxis tick={{ fontSize: 10, fill: '#64748B' }} width={40} />
-                <RechartsTooltip
-                  contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #E2E8F0' }}
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  formatter={((val: number, name: string) =>
-                    name === 'pieces' ? [val.toLocaleString(), 'Pieces'] : [`${val}%`, 'Avg Efficiency']) as any}
-                />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Line
-                  type="monotone"
-                  dataKey="pieces"
-                  stroke="#1A2B4B"
-                  strokeWidth={2}
-                  dot={{ r: 3, fill: '#1A2B4B' }}
-                  activeDot={{ r: 5 }}
-                  name="Pieces"
-                />
-                <Line
-                  type="monotone"
-                  dataKey="avg_efficiency"
-                  stroke="#2563EB"
-                  strokeWidth={2}
-                  strokeDasharray="4 2"
-                  dot={false}
-                  name="Avg Efficiency %"
-                  yAxisId={0}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            <ChartBoundary label="Daily Trends">
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={dailyTrend} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fontSize: 10 }}
+                    tickFormatter={d => {
+                      const parts = String(d).split('-')
+                      return parts.length === 3 ? `${parts[2]}/${parts[1]}` : d
+                    }}
+                  />
+                  <YAxis tick={{ fontSize: 10 }} width={40} />
+                  <RechartsTooltip
+                    contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #E2E8F0' }}
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    formatter={((val: number, name: string) =>
+                      name === 'pieces' ? val.toLocaleString() : `${val}%`) as any}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Line
+                    type="monotone"
+                    dataKey="pieces"
+                    stroke="#1A2B4B"
+                    strokeWidth={2}
+                    dot={false}
+                    name="Pieces"
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="avg_efficiency"
+                    stroke="#2563EB"
+                    strokeWidth={2}
+                    strokeDasharray="4 2"
+                    dot={false}
+                    name="Avg Efficiency %"
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </ChartBoundary>
           ) : (
             <div className="flex items-center justify-center h-[220px] text-sm text-gray-400">
               No production data in the last 7 days
@@ -479,25 +497,27 @@ function DashboardTab() {
             <p className="text-[10px] text-gray-400">All-time top styles by pieces</p>
           </div>
           {byStyle.length > 0 ? (
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={byStyle} layout="vertical" margin={{ top: 0, right: 10, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
-                <XAxis type="number" tick={{ fontSize: 10, fill: '#64748B' }} />
-                <YAxis
-                  type="category"
-                  dataKey="style"
-                  tick={{ fontSize: 9, fill: '#64748B' }}
-                  width={80}
-                  tickFormatter={(v: string) => v.length > 12 ? v.slice(0, 12) + '…' : v}
-                />
-                <RechartsTooltip
-                  contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #E2E8F0' }}
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  formatter={((val: number) => [val.toLocaleString(), 'Pieces']) as any}
-                />
-                <Bar dataKey="pieces" fill="#1A2B4B" radius={[0, 3, 3, 0]} name="Pieces" />
-              </BarChart>
-            </ResponsiveContainer>
+            <ChartBoundary label="Production by Style">
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={byStyle} layout="vertical" margin={{ top: 0, right: 10, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 10 }} />
+                  <YAxis
+                    type="category"
+                    dataKey="style"
+                    tick={{ fontSize: 9 }}
+                    width={80}
+                    tickFormatter={(v: string) => v.length > 12 ? v.slice(0, 12) + '…' : v}
+                  />
+                  <RechartsTooltip
+                    contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #E2E8F0' }}
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    formatter={((val: number) => val.toLocaleString()) as any}
+                  />
+                  <Bar dataKey="pieces" fill="#1A2B4B" radius={[0, 3, 3, 0]} name="Pieces" />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartBoundary>
           ) : (
             <div className="flex items-center justify-center h-[220px] text-sm text-gray-400">
               No style data yet
@@ -6225,50 +6245,52 @@ function KarigarDirectoryCharts() {
             <p className="text-[10px] text-gray-400">Avg daily efficiency % — last 30 days</p>
           </div>
           {efficiencyTrend.length > 0 ? (
-            <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={efficiencyTrend} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                <XAxis
-                  dataKey="date"
-                  tick={{ fontSize: 9, fill: '#64748B' }}
-                  tickFormatter={d => {
-                    const p = String(d).split('-')
-                    return p.length === 3 ? `${p[2]}/${p[1]}` : d
-                  }}
-                  interval="preserveStartEnd"
-                />
-                <YAxis
-                  tick={{ fontSize: 9, fill: '#64748B' }}
-                  domain={[0, 100]}
-                  unit="%"
-                  width={36}
-                />
-                <RechartsTooltip
-                  contentStyle={{ fontSize: 11, borderRadius: 8 }}
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  formatter={((v: number, n: string) =>
-                    n === 'avg_efficiency' ? [`${v}%`, 'Avg Efficiency'] : [v.toLocaleString(), 'Pieces']) as any}
-                />
-                <Legend wrapperStyle={{ fontSize: 10 }} />
-                <Line
-                  type="monotone"
-                  dataKey="avg_efficiency"
-                  stroke="#1A2B4B"
-                  strokeWidth={2}
-                  dot={{ r: 2 }}
-                  name="Avg Efficiency %"
-                />
-                <Line
-                  type="monotone"
-                  dataKey="pieces"
-                  stroke="#60A5FA"
-                  strokeWidth={1.5}
-                  strokeDasharray="3 2"
-                  dot={false}
-                  name="Pieces"
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            <ChartBoundary label="Efficiency Trend">
+              <ResponsiveContainer width="100%" height={200}>
+                <LineChart data={efficiencyTrend} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fontSize: 9 }}
+                    tickFormatter={d => {
+                      const p = String(d).split('-')
+                      return p.length === 3 ? `${p[2]}/${p[1]}` : d
+                    }}
+                    interval="preserveStartEnd"
+                  />
+                  <YAxis
+                    tick={{ fontSize: 9 }}
+                    domain={[0, 100]}
+                    unit="%"
+                    width={36}
+                  />
+                  <RechartsTooltip
+                    contentStyle={{ fontSize: 11, borderRadius: 8 }}
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    formatter={((v: number, n: string) =>
+                      n === 'avg_efficiency' ? `${v}%` : v.toLocaleString()) as any}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 10 }} />
+                  <Line
+                    type="monotone"
+                    dataKey="avg_efficiency"
+                    stroke="#1A2B4B"
+                    strokeWidth={2}
+                    dot={false}
+                    name="Avg Efficiency %"
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="pieces"
+                    stroke="#60A5FA"
+                    strokeWidth={1.5}
+                    strokeDasharray="3 2"
+                    dot={false}
+                    name="Pieces"
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </ChartBoundary>
           ) : (
             <div className="h-[200px] flex items-center justify-center text-sm text-gray-400">
               No production data in last 30 days
@@ -6283,26 +6305,27 @@ function KarigarDirectoryCharts() {
             <p className="text-[10px] text-gray-400">Pieces produced by skill group — last 30 days</p>
           </div>
           {departmentLoad.length > 0 ? (
-            <ResponsiveContainer width="100%" height={200}>
+            <ChartBoundary label="Department Load">
+              <ResponsiveContainer width="100%" height={200}>
               <BarChart data={departmentLoad} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
                 <XAxis
                   dataKey="department"
-                  tick={{ fontSize: 9, fill: '#64748B' }}
+                  tick={{ fontSize: 9 }}
                   tickFormatter={(v: string) => v.length > 10 ? v.slice(0, 10) + '…' : v}
                 />
-                <YAxis tick={{ fontSize: 9, fill: '#64748B' }} width={36} />
+                <YAxis tick={{ fontSize: 9 }} width={36} />
                 <RechartsTooltip
                   contentStyle={{ fontSize: 11, borderRadius: 8 }}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  formatter={((v: number, n: string) =>
-                    n === 'pieces' ? [v.toLocaleString(), 'Pieces'] : [v, n]) as any}
+                  formatter={((v: number) => v.toLocaleString()) as any}
                 />
                 <Legend wrapperStyle={{ fontSize: 10 }} />
                 <Bar dataKey="pieces" fill="#1A2B4B" radius={[3, 3, 0, 0]} name="Pieces" />
                 <Bar dataKey="karigars" fill="#60A5FA" radius={[3, 3, 0, 0]} name="Karigars" />
               </BarChart>
-            </ResponsiveContainer>
+              </ResponsiveContainer>
+            </ChartBoundary>
           ) : (
             <div className="h-[200px] flex items-center justify-center text-sm text-gray-400">
               No department data yet
