@@ -1792,9 +1792,11 @@ def repair_inventory_history_spikes(
     sales = _sales_net_by_sku_day(sales_df)
     actions: list[str] = []
     out = work.copy()
-    # Only repair the latest snapshot column — earlier matrix uploads can ramp SKU
-    # coverage without being bad data.
-    pairs = [(dates[-2], dates[-1])]
+    # Check ALL consecutive date pairs for spikes (not just the last one).
+    # Historical spikes (e.g. 163K → 247K two days ago) are just as invalid as
+    # a spike on the latest snapshot. The strict conditions (>12% jump, >5K units,
+    # similar SKU universe) prevent false-positives from legitimate stock receives.
+    pairs = list(zip(dates[:-1], dates[1:]))
     for d_prev, d_next in pairs:
         d_prev = pd.Timestamp(d_prev).normalize()
         d_next = pd.Timestamp(d_next).normalize()
