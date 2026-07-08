@@ -1324,9 +1324,17 @@ def _spawn_background_sales_rebuild() -> None:
                 return
 
             _warm_cache["sales_df"] = new_sales
+            # Bump the warm-cache generation so that existing sessions (which still
+            # hold the old, inflated sales_df) are forced to re-attach on their next
+            # request.  Without this, _warm_cache_has_more() returns False (the
+            # clean rebuild has *fewer* rows after shadow-row dedup) and sessions
+            # never see the corrected data until they restart.
+            global _warm_cache_generation
+            _warm_cache_generation = max(int(_warm_cache_generation or 0) + 1, 2)
             log.info(
-                "Background sales_df rebuild complete: %d rows (%.0fs). Saving to disk…",
-                len(new_sales), time.time() - t0,
+                "Background sales_df rebuild complete: %d rows (%.0fs), "
+                "warm_cache_generation bumped to %d. Saving to disk…",
+                len(new_sales), time.time() - t0, _warm_cache_generation,
             )
 
             # Persist to disk so the next restart fast-path loads fresh data
