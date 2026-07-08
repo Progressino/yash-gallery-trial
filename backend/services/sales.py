@@ -300,6 +300,67 @@ def canonical_sales_sku_series(skus: pd.Series) -> pd.Series:
     return s.str.replace(_PL_RE, r"\1\2", regex=True)
 
 
+def _is_amazon_pl_raw_sku(sku) -> bool:
+    """True when the marketplace SKU still contains the Amazon ``PL`` infix (1023PLYK…)."""
+    t = str(sku or "").strip().upper()
+    return bool(_PL_RE.match(t))
+
+
+def protect_distinct_asin_pl_skus(
+    raw_skus: pd.Series,
+    resolved_skus: pd.Series,
+    asins: pd.Series | None,
+) -> pd.Series:
+    """Keep PL seller SKUs distinct when they map to an OMS SKU that sells under another ASIN.
+
+    Amazon often lists the same style as ``1001YKBEIGE-XXL`` (ASIN A) and
+    ``1001PLYKBEIGE-XXL`` (ASIN B). Mapping both onto the OMS token via PL-strip
+    double-counts demand for replenishment/deepdive (83 instead of 61 for XXL).
+
+    Rules:
+    - If a canon has non-PL rows, take their mode ASIN as the OMS listing.
+    - PL raw rows whose ASIN differs from that OMS ASIN keep their PL SKU.
+    - PL-only canons (no non-PL sibling in the frame) still resolve to OMS.
+    """
+    if raw_skus is None or resolved_skus is None or len(raw_skus) == 0:
+        return resolved_skus
+    if asins is None or getattr(asins, "empty", True):
+        return resolved_skus
+
+    raw = raw_skus.astype(str).str.strip().str.upper()
+    resolved = resolved_skus.astype(str).str.strip().str.upper()
+    asin = asins.astype(str).str.strip()
+    asin = asin.mask(asin.str.lower().isin(["", "nan", "none", "null"]), "")
+
+    is_pl = raw.map(_is_amazon_pl_raw_sku)
+    if not bool(is_pl.any()):
+        return resolved_skus
+
+    non_pl = ~is_pl
+    # Mode ASIN among non-PL rows for each resolved OMS token.
+    oms_asin: dict[str, str] = {}
+    if bool(non_pl.any()):
+        work = pd.DataFrame({"_c": resolved[non_pl].values, "_a": asin[non_pl].values})
+        work = work[work["_a"].astype(str).str.len() > 0]
+        if not work.empty:
+            for canon, grp in work.groupby("_c", sort=False):
+                mode = grp["_a"].mode()
+                if len(mode):
+                    oms_asin[str(canon)] = str(mode.iloc[0])
+
+    if not oms_asin:
+        return resolved_skus
+
+    out = resolved.copy()
+    for idx in raw.index[is_pl]:
+        canon = str(resolved.loc[idx])
+        row_asin = str(asin.loc[idx]) if idx in asin.index else ""
+        oms = oms_asin.get(canon, "")
+        if oms and row_asin and row_asin != oms:
+            out.loc[idx] = str(raw.loc[idx])
+    return out
+
+
 def _mtr_to_sales_df(
     mtr_df: pd.DataFrame,
     sku_mapping: Optional[Dict[str, str]] = None,
@@ -324,7 +385,11 @@ def _mtr_to_sales_df(
     _raw_skus = m["Sku"]
     _uniq = pd.unique(_raw_skus.to_numpy())
     _resolved = {u: _resolve_mtr_sku(u, _map) for u in _uniq}
-    m["Sku"] = canonical_sales_sku_series(_raw_skus.map(_resolved))
+    tentative = canonical_sales_sku_series(_raw_skus.map(_resolved))
+    asin_series = None
+    if "ASIN" in mtr_df.columns:
+        asin_series = mtr_df.loc[m.index, "ASIN"]
+    m["Sku"] = protect_distinct_asin_pl_skus(_raw_skus, tentative, asin_series)
 
     # Line-level keys for build_sales_df dedup (Amazon MTR exposes Order_Id / Invoice_Number).
     idx = m.index

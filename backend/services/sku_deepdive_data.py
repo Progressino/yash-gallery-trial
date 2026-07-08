@@ -100,7 +100,12 @@ def _filter_platform_df(df: pd.DataFrame, mask: pd.Series) -> pd.DataFrame:
 
 
 def _merge_platform_and_sales(plat: pd.DataFrame, sales: pd.DataFrame) -> pd.DataFrame:
-    """Platform bulk history wins on (canonical SKU, day); append non-overlapping sales rows."""
+    """Platform bulk history wins on (canonical SKU, day); append non-overlapping sales rows.
+
+    When Amazon platform history is present for a SKU, also drop extra Amazon sales
+    rows on days the platform frame already covers — stale unified sales_df can still
+    carry PL-twin shipments that were wrongly mapped to the OMS SKU.
+    """
     if plat.empty:
         return sales.copy() if sales is not None else pd.DataFrame()
     if sales is None or sales.empty:
@@ -119,6 +124,24 @@ def _merge_platform_and_sales(plat: pd.DataFrame, sales: pd.DataFrame) -> pd.Dat
     extra = merged[merged["_in_plat"].isna()].drop(
         columns=["_day", "_skukey", "_in_plat"], errors="ignore"
     )
+
+    # If Amazon plat history is present for a skukey, do not supplement more Amazon
+    # sales days for that skukey — those gap days are typically PL twins that share
+    # the OMS token in a stale sales_df after PL-strip.
+    if (
+        not plat.empty
+        and "Source" in plat.columns
+        and not extra.empty
+        and "Source" in extra.columns
+    ):
+        amz_skus = set(
+            plat.loc[plat["Source"].astype(str) == "Amazon", "_skukey"].astype(str)
+        )
+        if amz_skus:
+            extra_skukey = canonical_sales_sku_series(extra["Sku"])
+            drop = (extra["Source"].astype(str) == "Amazon") & extra_skukey.isin(amz_skus)
+            extra = extra.loc[~drop]
+
     return pd.concat(
         [plat.drop(columns=["_day", "_skukey"], errors="ignore"), extra],
         ignore_index=True,
@@ -164,6 +187,13 @@ def _build_platform_sales_parts(
                 except Exception:
                     pass
             part = _build_mtr_sales_tagged(sub, mapping)
+            if not part.empty:
+                # After ASIN-aware MTR conversion, PL twins with a different ASIN keep
+                # their PL seller SKU. Drop those here so a deepdive for the OMS form
+                # (1001YKBEIGE-XXL) does not also count 1001PLYKBEIGE-XXL units.
+                from .sales import _is_amazon_pl_raw_sku
+
+                part = part.loc[~part["Sku"].map(_is_amazon_pl_raw_sku)].copy()
             if not part.empty:
                 parts.append(part)
 

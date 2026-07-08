@@ -173,15 +173,24 @@ def _accumulate_shipment_frame(
         _extract_cols = [sku_col, date_col, qty_col, txn_col]
     else:
         _extract_cols = [sku_col, date_col, qty_col]
+    asin_col = "ASIN" if "ASIN" in df.columns else None
+    if asin_col:
+        _extract_cols = list(_extract_cols) + [asin_col]
     work = df.loc[ship_mask, _extract_cols].copy()
     if txn_col:
-        work.columns = ["SKU", "Date", "Qty", "_Txn"]
+        rename = {sku_col: "SKU", date_col: "Date", qty_col: "Qty", txn_col: "_Txn"}
+        if asin_col:
+            rename[asin_col] = "ASIN"
+        work = work.rename(columns=rename)
         _neg = work["_Txn"].astype(str).str.strip().str.lower().isin(_NEGATIVE_TXN_TYPES)
         work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
         work["Qty"] = np.where(_neg, -work["Qty"].abs(), work["Qty"].abs())
         work = work.drop(columns=["_Txn"])
     else:
-        work.columns = ["SKU", "Date", "Qty"]
+        rename = {sku_col: "SKU", date_col: "Date", qty_col: "Qty"}
+        if asin_col:
+            rename[asin_col] = "ASIN"
+        work = work.rename(columns=rename)
         work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
     work = work.dropna(subset=["Date"])
@@ -190,9 +199,9 @@ def _accumulate_shipment_frame(
     if work.empty:
         return 0
 
-    raw_skus = work["SKU"].astype(str).unique()
+    raw_skus = work["SKU"].astype(str)
     canon: dict[str, str] = {}
-    for s in raw_skus:
+    for s in raw_skus.unique():
         if strip_pl:
             if sku_mapping:
                 k = _strip_pl(s, sku_mapping)
@@ -204,7 +213,14 @@ def _accumulate_shipment_frame(
             k = canonical_oms_key(s, sku_mapping) if sku_mapping else str(s).strip().upper()
         if k:
             canon[s] = get_parent_sku(k) if group_by_parent else k
-    work["SKU"] = work["SKU"].map(canon)
+    tentative = raw_skus.map(canon)
+    if platform == "amazon" and "ASIN" in work.columns:
+        from .sales import protect_distinct_asin_pl_skus
+
+        work["SKU"] = protect_distinct_asin_pl_skus(raw_skus, tentative, work["ASIN"])
+        work = work.drop(columns=["ASIN"], errors="ignore")
+    else:
+        work["SKU"] = tentative
     work = work[work["SKU"].astype(str).str.len() > 0]
     if work.empty:
         return 0

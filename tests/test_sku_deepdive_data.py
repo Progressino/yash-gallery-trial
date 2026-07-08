@@ -189,3 +189,60 @@ def test_build_deepdive_dedups_fba_shadow_rows_in_mtr():
     )
     amazon_units = int(out.loc[out["Source"].astype(str) == "Amazon", "Quantity"].sum())
     assert amazon_units == 8, f"Expected 8 after shadow dedup, got {amazon_units}"
+
+
+def test_build_deepdive_excludes_pl_twin_with_different_asin():
+    """1001PLYKBEIGE-XXL with a different ASIN must not count toward 1001YKBEIGE-XXL."""
+    sess = _FakeSess()
+    sess.mtr_df = pd.DataFrame(
+        {
+            "SKU": ["1001YKBEIGE-XXL", "1001YKBEIGE-XXL", "1001PLYKBEIGE-XXL"],
+            "Date": ["2025-01-15", "2025-02-10", "2025-01-20"],
+            "Quantity": [50, 30, 22],
+            "Transaction_Type": ["Shipment", "Shipment", "Shipment"],
+            "Order_Id": ["A1", "A2", "A3"],
+            "Invoice_Number": ["I1", "I2", "I3"],
+            "ASIN": ["B07VM7DXDW", "B07VM7DXDW", "B08292BLQD"],
+        }
+    )
+    sess.sku_mapping = {
+        "1001YKBEIGE-XXL": "1001YKBEIGE-XXL",
+        "1001PLYKBEIGE-XXL": "1001YKBEIGE-XXL",
+    }
+    # Stale sales_df that already merged PL onto OMS (inflated).
+    sess.sales_df = pd.DataFrame(
+        {
+            "Sku": ["1001YKBEIGE-XXL", "1001YKBEIGE-XXL"],
+            "TxnDate": ["2025-01-15", "2025-01-20"],
+            "Quantity": [50, 22],
+            "Transaction Type": ["Shipment", "Shipment"],
+            "Units_Effective": [50, 22],
+            "Source": ["Amazon", "Amazon"],
+            "OrderId": ["A1", "A3"],
+            "LineKey": ["", ""],
+        }
+    )
+
+    out = build_deepdive_sales_frame(
+        sess,
+        "1001YKBEIGE-XXL",
+        all_sizes=False,
+        start_date="2025-01-01",
+        end_date="2025-03-31",
+    )
+    amazon = out.loc[
+        (out["Source"].astype(str) == "Amazon")
+        & (out["Transaction Type"].astype(str) == "Shipment"),
+        "Quantity",
+    ].sum()
+    assert int(amazon) == 80, f"Expected 80 OMS units (not 102), got {amazon}"
+
+
+def test_protect_distinct_asin_pl_skus():
+    from backend.services.sales import protect_distinct_asin_pl_skus
+
+    raw = pd.Series(["1001YKBEIGE-XXL", "1001PLYKBEIGE-XXL", "1001PLYKBEIGE-XXL"])
+    resolved = pd.Series(["1001YKBEIGE-XXL", "1001YKBEIGE-XXL", "1001YKBEIGE-XXL"])
+    asins = pd.Series(["B07VM7DXDW", "B08292BLQD", "B07VM7DXDW"])  # third PL shares OMS ASIN
+    out = protect_distinct_asin_pl_skus(raw, resolved, asins)
+    assert list(out) == ["1001YKBEIGE-XXL", "1001PLYKBEIGE-XXL", "1001YKBEIGE-XXL"]
