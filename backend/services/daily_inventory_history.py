@@ -1818,9 +1818,13 @@ def repair_inventory_history_spikes(
         similar_universe = 0.92 <= sku_ratio <= 1.12
         big_total_jump = t_next > t_prev * 1.12 and (t_next - t_prev) > max(5000.0, t_prev * 0.08)
         new_sku_surge = (next_skus - prev_skus) > 400 and t_next > t_prev * 1.08
+        # Extreme jump: >40% total increase AND >8% in absolute terms — catch spikes
+        # even when SKU count shrinks (e.g. OMS report dropped some SKUs while inflating
+        # others), so similar_universe / new_sku_surge conditions would both be False.
+        extreme_jump = t_next > t_prev * 1.40 and (t_next - t_prev) > max(10000.0, t_prev * 0.30)
         spike = (
             t_next > expected + tol
-            and (big_total_jump and similar_universe or new_sku_surge)
+            and (big_total_jump and similar_universe or new_sku_surge or extreme_jump)
         )
         if not spike:
             continue

@@ -142,6 +142,20 @@ def _build_platform_sales_parts(sess, sku_mask_fn) -> pd.DataFrame:
         raw = _platform_raw_sku_series(mtr)
         sub = _filter_platform_df(mtr, sku_mask_fn(raw))
         if not sub.empty:
+            # Re-apply FBA shadow-row dedup on the small per-SKU slice to guarantee
+            # correctness regardless of whether the session-level mtr_df was already
+            # cleaned (the full-DataFrame dedup may have missed rows due to
+            # session-merge ordering or warm-cache generation timing).
+            if (
+                "Invoice_Number" in sub.columns
+                and "Order_Id" in sub.columns
+                and len(sub) > 1
+            ):
+                try:
+                    from .mtr import dedup_amazon_mtr_dataframe
+                    sub = dedup_amazon_mtr_dataframe(sub)
+                except Exception:
+                    pass
             part = _build_mtr_sales_tagged(sub, mapping)
             if not part.empty:
                 parts.append(part)
