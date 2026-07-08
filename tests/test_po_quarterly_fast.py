@@ -222,3 +222,148 @@ def test_tier1_records_days_into_empty_keyset_so_tier3_dedups():
         skip_days=platform_day_keys, **common,
     )
     assert quarter_sums[("SKU-A", "Jul-Sep 2025")] == 5
+
+
+# ── Flipkart Event Sub Type sign logic ───────────────────────────────────────
+
+def _make_quarterly_kwargs(q_label_map: dict) -> dict:
+    """Shared kwargs for accumulate tests."""
+    today = pd.Timestamp.today()
+    start_ts = pd.Timestamp("2024-04-01")
+    end_ts = pd.Timestamp("2026-06-30")
+    return dict(
+        strip_pl=False,
+        canonical_oms=True,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=defaultdict(int),
+        units_90=defaultdict(int),
+        units_30=defaultdict(int),
+        days_30=defaultdict(set),
+    )
+
+
+def test_flipkart_return_cancel_adds_to_quarterly():
+    """Return Cancellation (TxnType='ReturnCancel') must add to net quarterly units."""
+    q_label_map = {(2025, 4): "Jan-Mar 2025"}
+    kwargs = _make_quarterly_kwargs(q_label_map)
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2025-01-15", "2025-01-16"]),
+        "OMS_SKU": ["SKU-X", "SKU-X"],
+        "TxnType": ["Shipment", "ReturnCancel"],
+        "Quantity": [10, 2],
+    })
+    _accumulate_shipment_frame(df, "flipkart", None, **kwargs)
+    assert kwargs["quarter_sums"][("SKU-X", "Jan-Mar 2025")] == 12
+
+
+def test_flipkart_refund_subtracts_from_quarterly():
+    """Return (TxnType='Refund') must subtract from net quarterly units."""
+    q_label_map = {(2025, 4): "Jan-Mar 2025"}
+    kwargs = _make_quarterly_kwargs(q_label_map)
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2025-01-15", "2025-01-15"]),
+        "OMS_SKU": ["SKU-X", "SKU-X"],
+        "TxnType": ["Shipment", "Refund"],
+        "Quantity": [10, 3],
+    })
+    _accumulate_shipment_frame(df, "flipkart", None, **kwargs)
+    assert kwargs["quarter_sums"][("SKU-X", "Jan-Mar 2025")] == 7
+
+
+def test_flipkart_cancel_subtracts_from_quarterly():
+    """Cancellation (TxnType='Cancel') must subtract from net quarterly units."""
+    q_label_map = {(2025, 4): "Jan-Mar 2025"}
+    kwargs = _make_quarterly_kwargs(q_label_map)
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2025-02-10", "2025-02-10"]),
+        "OMS_SKU": ["SKU-Y", "SKU-Y"],
+        "TxnType": ["Shipment", "Cancel"],
+        "Quantity": [8, 2],
+    })
+    _accumulate_shipment_frame(df, "flipkart", None, **kwargs)
+    assert kwargs["quarter_sums"][("SKU-Y", "Jan-Mar 2025")] == 6
+
+
+def test_flipkart_net_all_four_event_types():
+    """Net = Sale + ReturnCancel - Return - Cancel across all four Flipkart event types."""
+    q_label_map = {(2025, 4): "Jan-Mar 2025"}
+    kwargs = _make_quarterly_kwargs(q_label_map)
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2025-01-20"] * 4),
+        "OMS_SKU": ["SKU-Z"] * 4,
+        "TxnType": ["Shipment", "ReturnCancel", "Refund", "Cancel"],
+        "Quantity": [20, 3, 4, 1],
+    })
+    _accumulate_shipment_frame(df, "flipkart", None, **kwargs)
+    # Net = 20 + 3 - 4 - 1 = 18
+    assert kwargs["quarter_sums"][("SKU-Z", "Jan-Mar 2025")] == 18
+
+
+def test_flipkart_return_only_day_not_counted_as_selling_day():
+    """A day with only returns (negative net) must NOT inflate Freq_30d."""
+    from backend.services.po_quarterly_fast import _accumulate_shipment_frame
+    today = pd.Timestamp.today()
+    recent_day = today - timedelta(days=5)
+    q_label_map = {}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+    df = pd.DataFrame({
+        "Date": [recent_day],
+        "OMS_SKU": ["SKU-R"],
+        "TxnType": ["Refund"],
+        "Quantity": [5],
+    })
+    _accumulate_shipment_frame(
+        df, "flipkart", None,
+        strip_pl=False, canonical_oms=True, group_by_parent=False,
+        start_ts=today - timedelta(days=180), end_ts=today,
+        cutoff_90=today - timedelta(days=90), cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums, units_90=units_90, units_30=units_30, days_30=days_30,
+    )
+    assert len(days_30["SKU-R"]) == 0, "Return-only day should not count as selling day"
+
+
+def test_flipkart_sales_df_returncancel_adds():
+    """ReturnCancel in sales_df supplement must also add to quarterly via signed logic."""
+    from backend.services.po_quarterly_fast import _accumulate_sales_df_shipments
+    from backend.services.po_engine import get_indian_fy_quarter, quarter_col_name
+
+    fy, qn = get_indian_fy_quarter(pd.Timestamp("2025-02-01"))
+    q_label_map = {(fy, qn): quarter_col_name(fy, qn)}
+    today = pd.Timestamp.today()
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+    sales = pd.DataFrame({
+        "Sku": ["FK-SKU", "FK-SKU", "FK-SKU", "FK-SKU"],
+        "TxnDate": pd.to_datetime(["2025-02-01"] * 4),
+        "Transaction Type": ["Shipment", "ReturnCancel", "Refund", "Cancel"],
+        "Quantity": [15, 2, 3, 1],
+    })
+    n = _accumulate_sales_df_shipments(
+        sales,
+        None,
+        group_by_parent=False,
+        start_ts=pd.Timestamp("2024-04-01"),
+        end_ts=pd.Timestamp("2026-04-01"),
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+        platform_day_keys=set(),
+    )
+    assert n > 0
+    # Net = 15 + 2 - 3 - 1 = 13
+    assert quarter_sums[("FK-SKU", quarter_col_name(fy, qn))] == 13

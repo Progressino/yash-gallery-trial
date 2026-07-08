@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 16
+QUARTERLY_CACHE_SCHEMA = 17  # bumped: Flipkart ReturnCancel/Refund/Cancel now signed in quarterly
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:

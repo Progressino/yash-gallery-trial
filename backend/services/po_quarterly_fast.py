@@ -51,6 +51,12 @@ _WARM_FRAME_ATTRS = (
 
 _SALES_READ_COLS = ["Sku", "TxnDate", "Quantity", "Transaction Type"]
 
+# Transaction types that contribute positively (net sold) vs negatively (returns/cancels).
+# "ReturnCancel" = customer cancelled their return → unit stays with customer → positive.
+_POSITIVE_TXN_TYPES = frozenset({"shipment", "returncancel"})
+_NEGATIVE_TXN_TYPES = frozenset({"refund", "cancel"})
+_NET_TXN_TYPES = _POSITIVE_TXN_TYPES | _NEGATIVE_TXN_TYPES
+
 
 def _quarter_seq(n_quarters: int) -> list[tuple[int, int]]:
     today = pd.Timestamp.today()
@@ -139,18 +145,30 @@ def _accumulate_shipment_frame(
     if not sku_col or not date_col or not qty_col:
         return 0
 
+    # Net sold = Sale + ReturnCancel (positive) − Return − Cancellation (negative).
+    # Prior versions only counted "Shipment" (gross); now all four event types are
+    # included with the correct sign so the quarterly reflects true net sold units.
     ship_mask = pd.Series(True, index=df.index)
     if txn_col:
-        ship_mask &= (
-            df[txn_col].astype(str).str.strip().str.lower().eq("shipment")
-        )
-    work = df.loc[ship_mask, [sku_col, date_col, qty_col]].copy()
-    work.columns = ["SKU", "Date", "Qty"]
+        _txn_str = df[txn_col].astype(str).str.strip().str.lower()
+        ship_mask &= _txn_str.isin(_NET_TXN_TYPES)
+        _extract_cols = [sku_col, date_col, qty_col, txn_col]
+    else:
+        _extract_cols = [sku_col, date_col, qty_col]
+    work = df.loc[ship_mask, _extract_cols].copy()
+    if txn_col:
+        work.columns = ["SKU", "Date", "Qty", "_Txn"]
+        _neg = work["_Txn"].astype(str).str.strip().str.lower().isin(_NEGATIVE_TXN_TYPES)
+        work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
+        work["Qty"] = np.where(_neg, -work["Qty"].abs(), work["Qty"].abs())
+        work = work.drop(columns=["_Txn"])
+    else:
+        work.columns = ["SKU", "Date", "Qty"]
+        work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
-    work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
     work = work.dropna(subset=["Date"])
     work = work[(work["Date"] >= start_ts) & (work["Date"] <= end_ts)]
-    work = work[work["Qty"] > 0]
+    work = work[work["Qty"] != 0]
     if work.empty:
         return 0
 
@@ -224,8 +242,12 @@ def _accumulate_shipment_frame(
             units_30[str(sku)] += int(q)
         for sku, grp in recent30.groupby("SKU"):
             days = days_30[str(sku)]
-            for d in grp["Date"].dt.normalize().unique():
-                days.add(d)
+            # Only count days with positive net contribution as "selling days"
+            # so that return-only days do not inflate Freq_30d / reduce ADS.
+            day_net = grp.groupby(grp["Date"].dt.normalize())["Qty"].sum()
+            for d, net in day_net.items():
+                if net > 0:
+                    days.add(d)
 
     return len(work)
 
@@ -430,12 +452,19 @@ def _accumulate_sales_df_shipments(
     if part.empty:
         return 0
     work = part.copy()
-    work = work[work["TxnType"].astype(str).str.strip().str.lower().eq("shipment")]
+    # Include all net-relevant TxnTypes with correct signs (mirrors _accumulate_shipment_frame).
+    _txn_lower = work["TxnType"].astype(str).str.strip().str.lower()
+    work = work[_txn_lower.isin(_NET_TXN_TYPES)].copy()
+    if work.empty:
+        return 0
+    _txn_lower2 = work["TxnType"].astype(str).str.strip().str.lower()
+    _neg = _txn_lower2.isin(_NEGATIVE_TXN_TYPES)
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
     work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
+    work["Qty"] = np.where(_neg, -work["Qty"].abs(), work["Qty"].abs())
     work = work.dropna(subset=["Date"])
     work = work[(work["Date"] >= start_ts) & (work["Date"] <= end_ts)]
-    work = work[work["Qty"] > 0]
+    work = work[work["Qty"] != 0]
     if work.empty:
         return 0
 
@@ -492,8 +521,11 @@ def _accumulate_sales_df_shipments(
             units_30[str(sku)] += int(q)
         for sku, grp in recent30.groupby("SKU"):
             days = days_30[str(sku)]
-            for d in grp["Date"].dt.normalize().unique():
-                days.add(d)
+            # Only count days with positive net contribution as "selling days".
+            day_net = grp.groupby(grp["Date"].dt.normalize())["Qty"].sum()
+            for d, net in day_net.items():
+                if net > 0:
+                    days.add(d)
     return len(work)
 
 
@@ -657,7 +689,9 @@ def calculate_quarterly_from_tier3_streaming(
     last4 = ordered_q_cols[-4:]
     pivot["Avg_Monthly"] = (pivot[last4].mean(axis=1) / 3).round(1)
     pivot["Units_90d"] = pivot["OMS_SKU"].map(lambda s: units_90.get(s, 0)).astype(int)
-    pivot["ADS"] = (pivot["Units_90d"] / 90).round(3)
+    # Floor at 0: net-negative 90-day periods (more returns than sales) yield ADS=0,
+    # not a negative rate — a negative ADS would give nonsensical Days_Left / PO Qty.
+    pivot["ADS"] = (pivot["Units_90d"].clip(lower=0) / 90).round(3)
     pivot["Units_30d"] = pivot["OMS_SKU"].map(lambda s: units_30.get(s, 0)).astype(int)
     pivot["Freq_30d"] = pivot["OMS_SKU"].map(lambda s: len(days_30.get(s, set()))).astype(int)
 

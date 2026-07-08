@@ -280,12 +280,18 @@ def calculate_quarterly_history(
         return pd.DataFrame()
 
     hist = pd.concat(parts, ignore_index=True)
+    # Net sold = Sale + ReturnCancel (positive) − Return/Cancellation (negative).
+    _POSITIVE_TXN = frozenset({"shipment", "returncancel"})
+    _NEGATIVE_TXN = frozenset({"refund", "cancel"})
+    _ALL_NET_TXN = _POSITIVE_TXN | _NEGATIVE_TXN
     _txn = hist["TxnType"].astype(str).str.strip().str.lower()
-    hist = hist[_txn.eq("shipment")]
+    hist = hist[_txn.isin(_ALL_NET_TXN)].copy()
     hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
     hist = hist.dropna(subset=["Date"])
     hist["Qty"] = pd.to_numeric(hist["Qty"], errors="coerce").fillna(0)
-    hist = hist[hist["Qty"] > 0]
+    _neg = hist["TxnType"].astype(str).str.strip().str.lower().isin(_NEGATIVE_TXN)
+    hist["Qty"] = np.where(_neg, -hist["Qty"].abs(), hist["Qty"].abs())
+    hist = hist[hist["Qty"] != 0]
     if hist.empty:
         return pd.DataFrame()
 
