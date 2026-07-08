@@ -434,7 +434,11 @@ export default function SKUDeepDive() {
       <div className="flex flex-wrap gap-3 items-center bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
         <SKUSearch
           value={activeSku}
-          onChange={(sku, type) => apply(sku, start, end, type === 'parent' ? true : allSizes, channel)}
+          onChange={(sku, type) => {
+            // parent suggestion → all-sizes mode; variant or manual entry → single-SKU mode
+            const nextAllSizes = type === 'parent'
+            apply(sku, start, end, nextAllSizes, channel)
+          }}
         />
 
         <select
@@ -457,9 +461,9 @@ export default function SKUDeepDive() {
                 ? 'bg-indigo-600 text-white border-indigo-600'
                 : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
             }`}
-            title={allSizes ? 'Showing all sizes combined — click to filter to exact SKU' : 'Click to view all sizes of this base SKU combined'}
+            title={allSizes ? 'Showing ALL sizes combined — click to see only this specific SKU/size' : 'Click to see all sizes of this style combined'}
           >
-            📦 {allSizes ? 'All Sizes (on)' : 'All Sizes'}
+            📦 {allSizes ? 'All Sizes ON ▾' : 'All Sizes OFF'}
           </button>
         )}
 
