@@ -313,13 +313,15 @@ def set_karigar_active(karigar_id: str, active: bool) -> dict:
         return {"ok": False, "message": "Karigar ID is required"}
 
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    # Store Active as "true"/"false" strings so pandas fillna("") doesn't coerce bool False→""
+    active_str = "true" if active else "false"
     changed = 0
     km = get_sheet_df("karigar_master")
     if not km.empty and "Karigar_ID" in km.columns:
         mask = km["Karigar_ID"].apply(clean_key) == kid
         if mask.any():
             idx = km[mask].index[0]
-            km.at[idx, "Active"] = bool(active)
+            km.at[idx, "Active"] = active_str
             if not active:
                 km.at[idx, "Resign_Date"] = today_str
             else:
@@ -332,7 +334,7 @@ def set_karigar_active(karigar_id: str, active: bool) -> dict:
         mask = em["E_Code"].apply(clean_key) == kid
         if mask.any():
             idx = em[mask].index[0]
-            em.at[idx, "Active"] = bool(active)
+            em.at[idx, "Active"] = active_str
             save_sheet_df("employee_master", em)
             changed += 1
 
@@ -1659,10 +1661,11 @@ def style_costing_report(
         has_recv, cm_sc["Target_Labour_Ordered_Rs"]
     ).round(2)
     cm_sc["Total_Expense_Rs"] = (cm_sc["Actual_Labour_Rs"] + cm_sc["Deposit_Rs"]).round(2)
-    cm_sc["PL_Rs"] = (cm_sc["Party_Value_Rs"] - cm_sc["Total_Expense_Rs"]).round(2)
+    # P&L = Target Labour − Actual Labour (manufacturing efficiency: positive = under budget)
+    cm_sc["PL_Rs"] = (cm_sc["Target_Labour_Rs"] - cm_sc["Actual_Labour_Rs"]).round(2)
     costing_qty = cm_sc["Received_Qty"].where(has_recv, cm_sc["Total_Qty"]).replace(0, 1)
     cm_sc["PL_Per_Pc"] = (cm_sc["PL_Rs"] / costing_qty).round(2)
-    cm_sc["Margin_%"] = (cm_sc["PL_Rs"] / cm_sc["Party_Value_Rs"].replace(0, 1) * 100).round(1)
+    cm_sc["Margin_%"] = (cm_sc["PL_Rs"] / cm_sc["Target_Labour_Rs"].replace(0, 1) * 100).round(1)
     cm_sc["Cost_vs_Target_%"] = (
         cm_sc["Actual_Labour_Rs"] / cm_sc["Target_Labour_Rs"].replace(0, 1) * 100
     ).round(1)
@@ -1679,6 +1682,8 @@ def style_costing_report(
         "party_value": float(cm_sc["Party_Value_Rs"].sum()),
         "actual_expense": float(cm_sc["Total_Expense_Rs"].sum()),
         "net_pl": float(cm_sc["PL_Rs"].sum()),
+        "target_labour": float(cm_sc["Target_Labour_Rs"].sum()),
+        "actual_labour": float(cm_sc["Actual_Labour_Rs"].sum()),
     }
 
     style_rollup = (
@@ -1688,6 +1693,7 @@ def style_costing_report(
             Qty_Ordered=("Total_Qty", "sum"),
             Qty_Received=("Received_Qty", "sum"),
             Actual_Labour=("Actual_Labour_Rs", "sum"),
+            Target_Labour=("Target_Labour_Rs", "sum"),
             Party_Value=("Party_Value_Rs", "sum"),
             Party_Value_Ordered=("Party_Value_Ordered_Rs", "sum"),
             Total_Expense=("Total_Expense_Rs", "sum"),
@@ -1699,9 +1705,9 @@ def style_costing_report(
     style_rollup["Qty"] = style_rollup["Qty_Received"].where(
         style_rollup["Qty_Received"] > 0, style_rollup["Qty_Ordered"]
     )
-    style_rollup["Margin_%"] = (style_rollup["PL"] / style_rollup["Party_Value"].replace(0, 1) * 100).round(1)
+    style_rollup["Margin_%"] = (style_rollup["PL"] / style_rollup["Target_Labour"].replace(0, 1) * 100).round(1)
     style_rollup["Result"] = style_rollup["PL"].apply(
-        lambda x: "Profit" if x > 0 else ("Loss" if x < 0 else "Break-even")
+        lambda x: "Under_Budget" if x > 0 else ("Over_Budget" if x < 0 else "On_Target")
     )
 
     rows = cm_sc.fillna("").to_dict(orient="records")
@@ -1766,11 +1772,37 @@ def _upsert_style_cost_finalize(style: str, updates: dict[str, Any]) -> dict[str
 
 
 def completed_style_costing_report() -> dict[str, Any]:
-    """Ledger of fully received styles with internal + outsider cost reconciliation."""
+    """Ledger of fully received styles with internal stitching cost reconciliation.
+
+    Outsider_Cost_Rs is informational only (the rate given to the challan vendor);
+    it is NOT added to Actual_Overall_Cost_Rs, which reflects internal stitching cost only.
+    """
     costing = style_costing_report(month="All", style="All", party="All")
     rollup = costing.get("style_rollup") or []
     stitch_costs = _internal_stitching_cost_by_style()
     finalize_map = _finalize_rows_by_style()
+
+    # Build a map: style → list of (challan_no, party, party_value_rs)
+    cm = get_sheet_df("challan_master")
+    style_challan_map: dict[str, list[str]] = {}
+    style_vendor_map: dict[str, str] = {}
+    style_outsider_party_value: dict[str, float] = {}
+    if not cm.empty and "Style" in cm.columns and "Challan_No" in cm.columns:
+        for _, crow in cm.iterrows():
+            sty = str(crow.get("Style") or "").strip()
+            cno = str(crow.get("Challan_No") or "").strip()
+            party = str(crow.get("Party") or "").strip()
+            rate_per_pc = float(safe_num(pd.Series([crow.get("Rate_Per_Pc", 0)])).iloc[0])
+            recv_qty = float(safe_num(pd.Series([crow.get("Received_Qty", 0)])).iloc[0])
+            total_qty = float(safe_num(pd.Series([crow.get("Total_Qty", 0)])).iloc[0])
+            pv = rate_per_pc * (recv_qty if recv_qty > 0 else total_qty)
+            if sty:
+                style_challan_map.setdefault(sty, [])
+                if cno and cno not in style_challan_map[sty]:
+                    style_challan_map[sty].append(cno)
+                if party and sty not in style_vendor_map:
+                    style_vendor_map[sty] = party
+                style_outsider_party_value[sty] = style_outsider_party_value.get(sty, 0.0) + pv
 
     rows: list[dict] = []
     for sr in rollup:
@@ -1783,17 +1815,27 @@ def completed_style_costing_report() -> dict[str, Any]:
             continue
         internal = float(stitch_costs.get(style, sr.get("Actual_Labour") or 0))
         fin = finalize_map.get(style, {})
+        # Keep the existing manually-entered outsider subcontractor cost
         outsider = float(safe_num(pd.Series([fin.get("Outsider_Cost_Rs", 0)])).iloc[0])
+        outsider_vendor = str(fin.get("Outsider_Vendor") or "").strip()
+        # Party value from challan = what the vendor was given for the job (informational)
+        party_value_info = round(style_outsider_party_value.get(style, 0.0), 2)
+        vendor_from_challan = style_vendor_map.get(style, "")
+        challan_nos = ", ".join(style_challan_map.get(style, []))
         status = str(fin.get("Status") or "Pending").strip() or "Pending"
-        actual = round(internal + outsider, 2)
+        # Actual overall cost = internal stitching only (outsider not added — informational only)
+        actual = round(internal, 2)
         rows.append(
             {
                 "Style": style,
+                "Challan_Nos": challan_nos,
+                "Vendor_Name": vendor_from_challan or outsider_vendor,
                 "Challans": challans,
                 "Qty": float(sr.get("Qty") or 0),
                 "Internal_Stitching_Cost_Rs": round(internal, 2),
                 "Outsider_Cost_Rs": round(outsider, 2),
-                "Outsider_Vendor": str(fin.get("Outsider_Vendor") or "").strip(),
+                "Outsider_Vendor": outsider_vendor,
+                "Party_Value_Rs": party_value_info,
                 "Actual_Overall_Cost_Rs": actual,
                 "Status": status,
                 "Finalized_At": str(fin.get("Finalized_At") or "").strip(),
@@ -1926,6 +1968,8 @@ def challan_detail_report(challan_no: str) -> dict[str, Any]:
                     "Operation",
                     "Style",
                     "Total_Pieces",
+                    "Rate_Rs",
+                    "Daily_Rate_Rs",
                     "Avg_Efficiency_%",
                     "Piece_Value_Rs",
                     "Budgeted_Expense_Rs",
@@ -1941,33 +1985,52 @@ def challan_detail_report(challan_no: str) -> dict[str, Any]:
             if "Operation" in work.columns:
                 op = work.copy()
                 op["_op_norm"] = op["Operation"].apply(normalize_operation_name)
-                by_operation = (
-                    op.groupby("_op_norm", as_index=False)
-                    .agg(
-                        Operation=("_op_norm", "first"),
-                        Pieces=("Total_Pieces", "sum"),
-                        Piece_Value_Rs=("Piece_Value_Rs", "sum"),
-                        PL_Rs=("PL_Rs", "sum"),
+                # Compute rate per piece for the operation (weighted avg if mixed)
+                agg_map: dict[str, Any] = {
+                    "Operation": ("_op_norm", "first"),
+                    "Pieces": ("Total_Pieces", "sum"),
+                    "Piece_Value_Rs": ("Piece_Value_Rs", "sum"),
+                    "PL_Rs": ("PL_Rs", "sum"),
+                }
+                if "Rate_Rs" in op.columns:
+                    op["Rate_Rs"] = safe_num(op["Rate_Rs"])
+                    agg_map["Rate_Rs"] = ("Rate_Rs", "mean")
+                by_op_df = op.groupby("_op_norm", as_index=False).agg(**agg_map)
+                # Derive piece_value calculation formula string for each row
+                if "Rate_Rs" in by_op_df.columns:
+                    by_op_df["Calc_Formula"] = by_op_df.apply(
+                        lambda r: f"{int(r['Pieces'])} pcs × ₹{round(float(r['Rate_Rs']), 2)}/pc = ₹{round(float(r['Piece_Value_Rs']), 2)}",
+                        axis=1,
                     )
-                    .fillna("")
-                    .to_dict(orient="records")
-                )
+                by_operation = by_op_df.fillna("").to_dict(orient="records")
 
             if "Karigar_ID" in work.columns:
                 kg = work.copy()
                 kg["_kid"] = kg["Karigar_ID"].apply(clean_key)
-                by_karigar = (
-                    kg.groupby("_kid", as_index=False)
-                    .agg(
-                        Karigar_ID=("_kid", "first"),
-                        Karigar_Name=("Karigar_Name", "first"),
-                        Pieces=("Total_Pieces", "sum"),
-                        Piece_Value_Rs=("Piece_Value_Rs", "sum"),
-                        PL_Rs=("PL_Rs", "sum"),
+                if "Rate_Rs" in kg.columns:
+                    kg["Rate_Rs"] = safe_num(kg["Rate_Rs"])
+                agg_k: dict[str, Any] = {
+                    "Karigar_ID": ("_kid", "first"),
+                    "Karigar_Name": ("Karigar_Name", "first"),
+                    "Pieces": ("Total_Pieces", "sum"),
+                    "Piece_Value_Rs": ("Piece_Value_Rs", "sum"),
+                    "PL_Rs": ("PL_Rs", "sum"),
+                }
+                if "Daily_Rate_Rs" in kg.columns:
+                    kg["Daily_Rate_Rs"] = safe_num(kg["Daily_Rate_Rs"])
+                    agg_k["Daily_Rate_Rs"] = ("Daily_Rate_Rs", "mean")
+                if "Rate_Rs" in kg.columns:
+                    agg_k["Rate_Rs"] = ("Rate_Rs", "mean")
+                by_kg_df = kg.groupby("_kid", as_index=False).agg(**agg_k)
+                if "Rate_Rs" in by_kg_df.columns and "Daily_Rate_Rs" in by_kg_df.columns:
+                    by_kg_df["Calc_Formula"] = by_kg_df.apply(
+                        lambda r: (
+                            f"{int(r['Pieces'])} pcs × ₹{round(float(r['Rate_Rs']), 2)}/pc = ₹{round(float(r['Piece_Value_Rs']), 2)}"
+                            f" | Daily rate: ₹{round(float(r['Daily_Rate_Rs']), 2)}/day"
+                        ),
+                        axis=1,
                     )
-                    .fillna("")
-                    .to_dict(orient="records")
-                )
+                by_karigar = by_kg_df.fillna("").to_dict(orient="records")
 
     exp = get_sheet_df("karigar_expenses")
     expenses: list[dict[str, Any]] = []

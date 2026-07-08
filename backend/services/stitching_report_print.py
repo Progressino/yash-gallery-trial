@@ -84,6 +84,124 @@ def _table(title: str, rows: list[dict], cols: list[str], *, money_cols: set[str
 """
 
 
+def challan_detail_html(detail: dict[str, Any]) -> str:
+    """Print-ready HTML for a single challan detail report (browser Print → Save PDF)."""
+    from datetime import datetime
+
+    challan_no = _esc(detail.get("challan_no", ""))
+    master = detail.get("master", {}) or {}
+    costing = detail.get("costing", {}) or {}
+    production = detail.get("production", {}) or {}
+    expenses = detail.get("expenses", []) or []
+
+    style = _esc(master.get("Style", ""))
+    party = _esc(master.get("Party", ""))
+    now_str = datetime.now().strftime("%d %b %Y, %I:%M %p")
+
+    pl_rs = costing.get("PL_Rs", 0)
+    try:
+        pl_val = float(pl_rs)
+        pl_cls = "profit" if pl_val >= 0 else "loss"
+        pl_label = "Under Budget" if pl_val >= 0 else "Over Budget"
+    except (TypeError, ValueError):
+        pl_val = 0.0
+        pl_cls = ""
+        pl_label = ""
+
+    kpi_html = f"""
+<div class="kpi-row">
+  <div class="kpi"><div class="kpi-label">Ordered Qty</div>
+    <div class="kpi-value">{_esc(master.get("Total_Qty", "—"))}</div></div>
+  <div class="kpi"><div class="kpi-label">Received Qty</div>
+    <div class="kpi-value">{_esc(master.get("Received_Qty", "—"))}</div></div>
+  <div class="kpi"><div class="kpi-label">Rate / pc</div>
+    <div class="kpi-value">{_money(master.get("Rate_Per_Pc", "—"))}</div></div>
+  <div class="kpi"><div class="kpi-label">Party Value</div>
+    <div class="kpi-value">{_money(costing.get("Party_Value_Rs", 0))}</div></div>
+  <div class="kpi"><div class="kpi-label">Target Labour</div>
+    <div class="kpi-value">{_money(costing.get("Target_Labour_Rs", 0))}</div></div>
+  <div class="kpi"><div class="kpi-label">Actual Labour</div>
+    <div class="kpi-value">{_money(costing.get("Actual_Labour_Rs", 0))}</div></div>
+  <div class="kpi"><div class="kpi-label">Net P&amp;L ({_esc(pl_label)})</div>
+    <div class="kpi-value" style="color:{'#047857' if pl_val >= 0 else '#b91c1c'}">{_money(pl_val)}</div></div>
+  <div class="kpi"><div class="kpi-label">Actual Cost / pc</div>
+    <div class="kpi-value">{_money(costing.get("Actual_Cost", 0))}</div></div>
+  <div class="kpi"><div class="kpi-label">Target Cost / pc</div>
+    <div class="kpi-value">{_money(costing.get("Target_Cost", 0))}</div></div>
+</div>
+"""
+
+    prod_summary = production.get("summary", {}) or {}
+    prod_note = (
+        f'Production: {prod_summary.get("pieces", 0)} pcs · '
+        f'{_money(prod_summary.get("piece_value_rs", 0))} · '
+        f'{prod_summary.get("karigars", 0)} karigar(s) · '
+        f'{prod_summary.get("operations", 0)} operation(s)'
+    )
+
+    op_rows = production.get("by_operation", []) or []
+    kg_rows = production.get("by_karigar", []) or []
+    detail_rows = production.get("detail", []) or []
+
+    sections = [
+        kpi_html,
+        f'<p class="note">{_esc(prod_note)}</p>',
+        _table(
+            "Production by Operation",
+            op_rows,
+            [c for c in ["Operation", "Pieces", "Rate_Rs", "Piece_Value_Rs", "Calc_Formula"] if op_rows and c in op_rows[0]],
+            money_cols={"Piece_Value_Rs", "Rate_Rs"},
+        ),
+        _table(
+            "Production by Karigar",
+            kg_rows,
+            [c for c in ["Karigar_ID", "Karigar_Name", "Pieces", "Rate_Rs", "Daily_Rate_Rs", "Piece_Value_Rs", "Calc_Formula"] if kg_rows and c in kg_rows[0]],
+            money_cols={"Piece_Value_Rs", "Rate_Rs", "Daily_Rate_Rs"},
+        ),
+        _table(
+            "Production Log (Detail)",
+            detail_rows,
+            [c for c in ["Date", "Karigar_Name", "Operation", "Total_Pieces", "Rate_Rs", "Piece_Value_Rs", "Avg_Efficiency_%"] if detail_rows and c in detail_rows[0]],
+            money_cols={"Piece_Value_Rs", "Rate_Rs"},
+        ),
+    ]
+    if expenses:
+        sections.append(
+            _table(
+                "Karigar Expenses",
+                expenses,
+                [c for c in ["Date", "Karigar_Name", "Task_Type", "Description", "Amount_Rs"] if expenses and c in expenses[0]],
+                money_cols={"Amount_Rs"},
+            )
+        )
+
+    body = "\n".join(sections)
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Challan {challan_no} Report</title>
+<style>{_PRINT_CSS}</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <div class="company">Garment ERP — Stitching Costing</div>
+    <div style="font-size:11px;color:#64748b;margin-top:4px">{style} · {party}</div>
+  </div>
+  <div>
+    <div class="doc-title">CHALLAN REPORT</div>
+    <div class="doc-sub">Challan No: {challan_no}</div>
+    <div class="doc-sub">Generated: {_esc(now_str)}</div>
+  </div>
+</div>
+{body}
+<div class="footer">Use Print → Save as PDF · Progressino Garment ERP</div>
+<script>window.onload=function(){{window.focus();window.print();}}</script>
+</body>
+</html>"""
+
+
 def stitching_reports_print_html(hub: dict[str, Any]) -> str:
     """Full report pack HTML from ``stitching_reports_hub`` payload."""
     date_from = _esc(hub.get("date_from", ""))

@@ -43,24 +43,57 @@ function normStyleKey(s: string) {
   return s.trim().toLowerCase()
 }
 
-const TABS: { id: TabId; label: string }[] = [
-  { id: 'dashboard', label: '🏠 Dashboard' },
-  { id: 'production', label: '📋 Production Entry' },
-  { id: 'target_control', label: '🎯 Target Control' },
-  { id: 'ltl_setup', label: '📐 LTL Setup' },
-  { id: 'expenses', label: '💸 Karigar Expenses' },
-  { id: 'comparison', label: '📈 P&L Compare' },
-  { id: 'challan', label: '🧾 Challans' },
-  { id: 'style', label: '💎 Style Costing' },
-  { id: 'completed_style_costing', label: '✅ Completed Style Costing' },
-  { id: 'efficiency', label: '📊 Efficiency' },
-  { id: 'payroll', label: '💰 Payroll' },
-  { id: 'attendance', label: '🕐 Karigar Attendance' },
-  { id: 'operating', label: '🏢 Operating Staff' },
-  { id: 'performance', label: '🌟 Performance' },
-  { id: 'reports', label: '📑 Reports' },
-  { id: 'master', label: '⚙️ Master Data' },
+// Sidebar nav groups for Precision ERP layout
+type NavGroup = { label: string; items: { id: TabId; label: string; icon: string }[] }
+const NAV_GROUPS: NavGroup[] = [
+  {
+    label: 'Overview',
+    items: [
+      { id: 'dashboard', label: 'Overview', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
+    ],
+  },
+  {
+    label: 'Production',
+    items: [
+      { id: 'production', label: 'Daily Entry', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2' },
+      { id: 'comparison', label: 'P&L Compare', icon: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z' },
+      { id: 'efficiency', label: 'Efficiency', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
+    ],
+  },
+  {
+    label: 'Costing',
+    items: [
+      { id: 'challan', label: 'Challans', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+      { id: 'style', label: 'Style Costing', icon: 'M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
+      { id: 'completed_style_costing', label: 'Completed Styles', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' },
+    ],
+  },
+  {
+    label: 'Payroll',
+    items: [
+      { id: 'payroll', label: 'Payroll', icon: 'M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2m2 4h10a2 2 0 002-2v-6a2 2 0 00-2-2H9a2 2 0 00-2 2v6a2 2 0 002 2zm7-5a2 2 0 11-4 0 2 2 0 014 0z' },
+      { id: 'attendance', label: 'Karigar Attendance', icon: 'M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z' },
+      { id: 'operating', label: 'Operating Staff', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
+      { id: 'expenses', label: 'Karigar Expenses', icon: 'M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21l-7-7-7 7V5a2 2 0 012-2h10a2 2 0 012 2v16z' },
+    ],
+  },
+  {
+    label: 'Directory & Reports',
+    items: [
+      { id: 'master', label: 'Karigar Directory', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
+      { id: 'performance', label: 'Performance', icon: 'M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z' },
+      { id: 'reports', label: 'Reports', icon: 'M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+    ],
+  },
+  {
+    label: 'Settings',
+    items: [
+      { id: 'target_control', label: 'Target Control', icon: 'M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z' },
+      { id: 'ltl_setup', label: 'LTL Setup', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z' },
+    ],
+  },
 ]
+
 
 interface HourDef {
   col: string
@@ -109,6 +142,7 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
   const lockedKarigarId = karigarOnly ? authUser?.karigar_id || '' : ''
   const [tab, setTab] = useState<TabId>(karigarOnly ? 'production' : 'dashboard')
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const { data: status } = useQuery({
     queryKey: ['stitching-status'],
@@ -120,59 +154,10 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
     setTimeout(() => setMsg(null), 5000)
   }
 
-  const visibleTabs = karigarOnly ? TABS.filter(t => t.id === 'production') : TABS
-
-  return (
-    <div className={`space-y-4 min-w-0 ${karigarOnly ? 'pb-8' : 'max-w-[1600px]'}`}>
-      {!karigarOnly && (
-      <div className="rounded-xl bg-gradient-to-br from-[#1a3a5c] via-[#2c5aa0] to-[#1e7ed4] text-white p-5 shadow-md">
-        <h1 className="text-xl font-bold">🧵 Stitching Costing — Yash Gallery</h1>
-        <p className="text-sm opacity-90 mt-1">
-          Karigar tracking · Challan management · Style costing · Payroll
-          · Local database
-        </p>
-        </div>
-      )}
-
-      {msg && (
-        <div
-          className={`text-sm px-4 py-2 rounded-lg border ${
-            msg.type === 'ok' ? 'bg-green-50 text-green-800 border-green-200' : 'bg-rose-50 text-rose-800 border-rose-200'
-          }`}
-        >
-          {msg.text}
-        </div>
-      )}
-
-      {!karigarOnly && (
-        <>
-          <BackupRestoreBar
-            onFlash={flash}
-            onRestored={() => qc.invalidateQueries({ queryKey: ['stitching'] })}
-          />
-          <AdminUnlockPanel admin={admin} onFlash={flash} />
-        </>
-      )}
-
-      {!karigarOnly && visibleTabs.length > 1 && (
-      <div className="flex flex-wrap gap-1 border-b border-gray-200 pb-1">
-        {visibleTabs.map(t => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={`text-xs sm:text-sm px-3 py-2 rounded-t-lg font-medium transition-colors ${
-              tab === t.id ? 'bg-[#002B5B] text-white' : 'text-gray-600 hover:bg-gray-100'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-      )}
-
-      {tab === 'dashboard' && !karigarOnly && <DashboardTab />}
-      {tab === 'production' && (
+  if (karigarOnly) {
+    // Minimal layout for karigar-only production entry
+    return (
+      <div className="min-w-0 pb-8 bg-[#F8FAFC] min-h-screen">
         <ProductionTab
           hours={status?.hours ?? []}
           admin={admin}
@@ -180,23 +165,149 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
           lockedKarigarId={lockedKarigarId}
           onSaved={() => qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })}
         />
+      </div>
+    )
+  }
+
+  const currentGroupLabel = NAV_GROUPS.flatMap(g => g.items).find(i => i.id === tab)?.label ?? ''
+
+  return (
+    <div className="flex min-h-screen bg-[#F8FAFC] font-sans" style={{ fontFamily: 'Inter, system-ui, sans-serif' }}>
+      {/* Sidebar overlay on mobile */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/40 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
       )}
-      {!karigarOnly && tab === 'target_control' && (
-        <TargetControlTab admin={admin} onFlash={flash} />
-      )}
-      {!karigarOnly && tab === 'ltl_setup' && <LtlSetupTab admin={admin} onFlash={flash} />}
-      {!karigarOnly && tab === 'expenses' && <KarigarExpensesTab admin={admin} onFlash={flash} />}
-      {!karigarOnly && tab === 'comparison' && <ComparisonDashboardTab />}
-      {!karigarOnly && tab === 'challan' && <ChallanTab onFlash={flash} />}
-      {!karigarOnly && tab === 'style' && <StyleCostingTab />}
-      {!karigarOnly && tab === 'completed_style_costing' && <CompletedStyleCostingTab />}
-      {!karigarOnly && tab === 'efficiency' && <EfficiencyTab />}
-      {!karigarOnly && tab === 'payroll' && <PayrollTab />}
-      {!karigarOnly && tab === 'attendance' && <AttendanceTab type="karigar" />}
-      {!karigarOnly && tab === 'operating' && <AttendanceTab type="operating" />}
-      {!karigarOnly && tab === 'performance' && <PerformanceTab />}
-      {!karigarOnly && tab === 'reports' && <StitchingReportsTab />}
-      {!karigarOnly && tab === 'master' && <MasterTab admin={admin} onFlash={flash} />}
+
+      {/* Left Sidebar */}
+      <aside
+        className={`
+          fixed top-0 left-0 z-40 h-full w-60 bg-[#1A2B4B] text-white flex flex-col
+          transform transition-transform duration-200
+          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+          md:relative md:translate-x-0 md:flex md:shrink-0
+        `}
+      >
+        {/* Brand */}
+        <div className="flex items-center gap-2 px-5 py-5 border-b border-white/10">
+          <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center text-white font-bold text-sm">SC</div>
+          <div>
+            <p className="font-bold text-sm leading-tight">Precision ERP</p>
+            <p className="text-[10px] text-white/60 leading-tight">Stitching Costing</p>
+          </div>
+          <button
+            type="button"
+            className="ml-auto md:hidden text-white/60 hover:text-white"
+            onClick={() => setSidebarOpen(false)}
+            aria-label="Close sidebar"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Nav groups */}
+        <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-4">
+          {NAV_GROUPS.map(group => (
+            <div key={group.label}>
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-white/40 px-2 mb-1">{group.label}</p>
+              {group.items.map(item => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => { setTab(item.id); setSidebarOpen(false) }}
+                  className={`
+                    w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium text-left mb-0.5
+                    transition-colors
+                    ${tab === item.id
+                      ? 'bg-white/20 text-white'
+                      : 'text-white/70 hover:bg-white/10 hover:text-white'
+                    }
+                  `}
+                >
+                  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d={item.icon} />
+                  </svg>
+                  <span className="truncate">{item.label}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+        </nav>
+
+        {/* Bottom actions */}
+        <div className="border-t border-white/10 px-3 py-3 space-y-1">
+          <BackupRestoreBar
+            onFlash={flash}
+            onRestored={() => qc.invalidateQueries({ queryKey: ['stitching'] })}
+          />
+        </div>
+      </aside>
+
+      {/* Main content area */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Top bar */}
+        <header className="sticky top-0 z-20 bg-white border-b border-[#E2E8F0] flex items-center gap-3 px-4 py-3 shadow-sm">
+          {/* Mobile menu button */}
+          <button
+            type="button"
+            className="md:hidden p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50"
+            onClick={() => setSidebarOpen(true)}
+            aria-label="Open menu"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+
+          <div className="flex-1 min-w-0">
+            <h1 className="text-base font-bold text-[#1A2B4B] truncate">{currentGroupLabel}</h1>
+            <p className="text-[11px] text-gray-400 hidden sm:block">Yash Gallery · Stitching Costing ERP</p>
+          </div>
+
+          <AdminUnlockPanel admin={admin} onFlash={flash} />
+        </header>
+
+        {/* Flash messages */}
+        {msg && (
+          <div
+            className={`mx-4 mt-3 text-sm px-4 py-2 rounded-lg border ${
+              msg.type === 'ok' ? 'bg-green-50 text-green-800 border-green-200' : 'bg-rose-50 text-rose-800 border-rose-200'
+            }`}
+          >
+            {msg.text}
+          </div>
+        )}
+
+        {/* Tab content */}
+        <main className="flex-1 p-4 md:p-6 min-w-0">
+          {tab === 'dashboard' && <DashboardTab />}
+          {tab === 'production' && (
+            <ProductionTab
+              hours={status?.hours ?? []}
+              admin={admin}
+              karigarOnly={false}
+              lockedKarigarId={lockedKarigarId}
+              onSaved={() => qc.invalidateQueries({ queryKey: ['stitching-dashboard'] })}
+            />
+          )}
+          {tab === 'target_control' && <TargetControlTab admin={admin} onFlash={flash} />}
+          {tab === 'ltl_setup' && <LtlSetupTab admin={admin} onFlash={flash} />}
+          {tab === 'expenses' && <KarigarExpensesTab admin={admin} onFlash={flash} />}
+          {tab === 'comparison' && <ComparisonDashboardTab />}
+          {tab === 'challan' && <ChallanTab onFlash={flash} />}
+          {tab === 'style' && <StyleCostingTab />}
+          {tab === 'completed_style_costing' && <CompletedStyleCostingTab />}
+          {tab === 'efficiency' && <EfficiencyTab />}
+          {tab === 'payroll' && <PayrollTab />}
+          {tab === 'attendance' && <AttendanceTab type="karigar" />}
+          {tab === 'operating' && <AttendanceTab type="operating" />}
+          {tab === 'performance' && <PerformanceTab />}
+          {tab === 'reports' && <StitchingReportsTab />}
+          {tab === 'master' && <MasterTab admin={admin} onFlash={flash} />}
+        </main>
+      </div>
     </div>
   )
 }
@@ -225,37 +336,95 @@ function DashboardTab() {
     )
   }
   const m = data.metrics
-  const cards = [
-    ['Active Karigar', `${m.active_karigar} / ${m.total_karigar}`],
-    ['Pieces today', m.pieces_today.toLocaleString()],
-    ['Avg efficiency', `${m.avg_efficiency}%`],
-    ['Piece value', `₹${m.piece_value_today.toLocaleString()}`],
-    ['Challans', String(m.total_challans)],
-    ['Pending', String(m.pending_challans)],
+  const kpiCards = [
+    { label: 'Active Karigars', value: `${m.active_karigar} / ${m.total_karigar}`, accent: '#1A2B4B', sub: 'Present today' },
+    { label: 'Pieces Today', value: m.pieces_today.toLocaleString(), accent: '#1A2B4B', sub: 'Production count' },
+    { label: 'Avg Efficiency', value: `${m.avg_efficiency}%`, accent: m.avg_efficiency >= 80 ? '#047857' : '#b45309', sub: 'vs target' },
+    { label: 'Piece Value', value: `₹${m.piece_value_today.toLocaleString()}`, accent: '#1A2B4B', sub: "Today's labour value" },
+    { label: 'Total Challans', value: String(m.total_challans), accent: '#1A2B4B', sub: 'All challans' },
+    { label: 'Pending Challans', value: String(m.pending_challans), accent: m.pending_challans > 0 ? '#b45309' : '#047857', sub: 'Qty not received' },
   ]
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        {cards.map(([l, v]) => (
-          <div key={l} className="bg-white rounded-lg border border-blue-100 p-3 shadow-sm">
-            <p className="text-[10px] uppercase text-gray-500 font-semibold">{l}</p>
-            <p className="text-xl font-bold text-[#2c5aa0] mt-1">{v}</p>
+    <div className="space-y-5">
+      {/* KPI grid */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        {kpiCards.map(({ label, value, accent, sub }) => (
+          <div key={label} className="bg-white rounded-lg border border-[#E2E8F0] p-4">
+            <p className="text-[10px] uppercase font-semibold tracking-wide text-[#64748B]">{label}</p>
+            <p className="text-2xl font-bold mt-1" style={{ color: accent }}>{value}</p>
+            <p className="text-[10px] text-[#94A3B8] mt-0.5">{sub}</p>
           </div>
         ))}
       </div>
+
       <div className="grid md:grid-cols-2 gap-4">
-        <Section title="Karigar status">
-          <DataTable
-            rows={data.karigar_status}
-            cols={['Karigar_ID', 'Name', 'Skill', 'Status']}
-          />
+        <Section title="Karigar Status">
+          <div className="overflow-x-auto rounded-lg border border-[#E2E8F0]">
+            <table className="w-full text-xs">
+              <thead className="bg-[#1A2B4B] text-white">
+                <tr>
+                  {['ID', 'Name', 'Skill', 'Status'].map(h => (
+                    <th key={h} className="text-left px-3 py-2.5 font-semibold uppercase text-[10px] tracking-wide whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(data.karigar_status ?? []).map((r: Record<string, unknown>, i: number) => (
+                  <tr key={i} className={`border-b border-[#E2E8F0] ${i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
+                    <td className="px-3 py-2 font-mono text-[#1A2B4B]">{String(r.Karigar_ID ?? '')}</td>
+                    <td className="px-3 py-2 font-medium">{String(r.Name ?? '')}</td>
+                    <td className="px-3 py-2 text-gray-500">{String(r.Skill ?? '')}</td>
+                    <td className="px-3 py-2">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                        String(r.Status).toLowerCase() === 'active'
+                          ? 'bg-green-100 text-green-800'
+                          : 'bg-gray-100 text-gray-600'
+                      }`}>
+                        {String(r.Status ?? '')}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Section>
-        <Section title="Challan register">
-          <DataTable rows={data.challan_register} cols={['Challan_No', 'Style', 'Party', 'Pending', 'Status']} />
+        <Section title="Challan Register">
+          <div className="overflow-x-auto rounded-lg border border-[#E2E8F0]">
+            <table className="w-full text-xs">
+              <thead className="bg-[#1A2B4B] text-white">
+                <tr>
+                  {['Challan No', 'Style', 'Party', 'Pending', 'Status'].map(h => (
+                    <th key={h} className="text-left px-3 py-2.5 font-semibold uppercase text-[10px] tracking-wide whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(data.challan_register ?? []).map((r: Record<string, unknown>, i: number) => (
+                  <tr key={i} className={`border-b border-[#E2E8F0] ${i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
+                    <td className="px-3 py-2 font-semibold text-[#1A2B4B]">{String(r.Challan_No ?? '')}</td>
+                    <td className="px-3 py-2">{String(r.Style ?? '')}</td>
+                    <td className="px-3 py-2 text-gray-500">{String(r.Party ?? '')}</td>
+                    <td className="px-3 py-2 text-right">{String(r.Pending ?? '')}</td>
+                    <td className="px-3 py-2">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                        Number(r.Pending ?? 0) === 0
+                          ? 'bg-green-100 text-green-800'
+                          : 'bg-amber-100 text-amber-900'
+                      }`}>
+                        {Number(r.Pending ?? 0) === 0 ? 'Complete' : 'Pending'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Section>
       </div>
-      {data.today_production.length > 0 && (
-        <Section title="Today's production">
+
+      {(data.today_production?.length ?? 0) > 0 && (
+        <Section title="Today's Production">
           <DataTable
             rows={data.today_production}
             cols={['Karigar_Name', 'Challan_No', 'Style', 'Operation', 'Total_Pieces', 'Efficiency_%', 'Piece_Value_Rs']}
@@ -2233,6 +2402,16 @@ function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose
   }
   const expenses = (data?.expenses ?? []) as Record<string, unknown>[]
 
+  const plVal = Number(costing.PL_Rs ?? 0)
+  const plPositive = plVal >= 0
+
+  const handleDownloadReport = () => {
+    window.open(
+      `/api/stitching/challans/${encodeURIComponent(challanNo)}/report`,
+      '_blank',
+    )
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 overflow-y-auto"
@@ -2247,15 +2426,25 @@ function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose
       >
         <div className="flex flex-wrap items-start justify-between gap-2 border-b pb-3">
           <div>
-            <p className="text-lg font-bold text-[#002B5B]">Challan {challanNo}</p>
+            <p className="text-lg font-bold text-[#1A2B4B]">Challan {challanNo}</p>
             <p className="text-xs text-gray-500 mt-0.5">
               {String(master.Style ?? '')}
               {master.Party ? ` · ${String(master.Party)}` : ''}
             </p>
           </div>
-          <button type="button" onClick={onClose} className="px-3 py-1.5 border rounded-lg text-sm">
-            Close
-          </button>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={handleDownloadReport}
+              className="px-3 py-1.5 bg-[#1A2B4B] text-white rounded-lg text-sm font-semibold hover:bg-[#243a63]"
+              title="Open print-ready report (Print → Save as PDF)"
+            >
+              Download Report
+            </button>
+            <button type="button" onClick={onClose} className="px-3 py-1.5 border rounded-lg text-sm">
+              Close
+            </button>
+          </div>
         </div>
         {isLoading && <p className="text-sm text-gray-500">Loading challan details…</p>}
         {isError && <p className="text-sm text-red-600">Could not load challan details.</p>}
@@ -2271,7 +2460,8 @@ function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose
                   ['Date', String(master.Date ?? '—')],
                   ['Delivery by', String(master.Delivery_By ?? '—')],
                   ['Party value', costing.Party_Value_Rs != null ? `₹${Number(costing.Party_Value_Rs).toLocaleString()}` : '—'],
-                  ['Net P&L', costing.PL_Rs != null ? `₹${Number(costing.PL_Rs).toLocaleString()}` : '—'],
+                  ['Target labour', costing.Target_Labour_Rs != null ? `₹${Number(costing.Target_Labour_Rs).toLocaleString()}` : '—'],
+                  ['Actual labour', costing.Actual_Labour_Rs != null ? `₹${Number(costing.Actual_Labour_Rs).toLocaleString()}` : '—'],
                   ['Actual cost/pc', costing.Actual_Cost != null ? `₹${Number(costing.Actual_Cost).toFixed(2)}` : '—'],
                   ['Target cost/pc', costing.Target_Cost != null ? `₹${Number(costing.Target_Cost).toFixed(2)}` : '—'],
                 ] as const
@@ -2281,6 +2471,14 @@ function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose
                   <p className="font-semibold text-[#2c5aa0]">{v}</p>
                 </div>
               ))}
+              {/* Net P&L card with colour coding */}
+              <div className={`border rounded-lg p-2.5 ${plPositive ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
+                <p className="text-[10px] text-gray-500">Net P&amp;L (Target − Actual labour)</p>
+                <p className={`font-semibold ${plPositive ? 'text-green-700' : 'text-red-700'}`}>
+                  ₹{plVal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  <span className="ml-1 text-[9px]">{plPositive ? '▲ Under budget' : '▼ Over budget'}</span>
+                </p>
+              </div>
             </div>
             {Object.keys(costing).length > 0 && (
               <Section title="Costing breakdown">
@@ -2293,11 +2491,9 @@ function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose
                     'Total_Qty',
                     'Received_Qty',
                     'Pending',
-                    'Party_Value_Ordered_Rs',
-                    'Party_Value_Received_Rs',
                     'Party_Value_Rs',
-                    'Actual_Labour_Rs',
                     'Target_Labour_Rs',
+                    'Actual_Labour_Rs',
                     'Actual_Cost',
                     'Target_Cost',
                     'Deposit_Rs',
@@ -2317,18 +2513,62 @@ function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose
             )}
             {(production.by_operation?.length ?? 0) > 0 && (
               <Section title="Production by operation">
-                <DataTable
-                  rows={production.by_operation ?? []}
-                  cols={['Operation', 'Pieces', 'Piece_Value_Rs', 'PL_Rs']}
-                />
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-[#1A2B4B] text-white">
+                      <tr>
+                        {['Operation', 'Pieces', 'Rate/pc', 'Piece Value', 'Calculation', 'P&L'].map(h => (
+                          <th key={h} className="text-left px-3 py-2 font-semibold whitespace-nowrap">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(production.by_operation ?? []).map((row, i) => (
+                        <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}>
+                          <td className="px-3 py-2 font-medium">{String(row.Operation ?? '')}</td>
+                          <td className="px-3 py-2">{String(row.Pieces ?? '')}</td>
+                          <td className="px-3 py-2">₹{Number(row.Rate_Rs ?? 0).toFixed(2)}</td>
+                          <td className="px-3 py-2 font-semibold">₹{Number(row.Piece_Value_Rs ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                          <td className="px-3 py-2 text-gray-500 italic">{String(row.Calc_Formula ?? `${row.Pieces} pcs × ₹${Number(row.Rate_Rs ?? 0).toFixed(2)}/pc`)}</td>
+                          <td className={`px-3 py-2 font-semibold ${Number(row.PL_Rs ?? 0) >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                            ₹{Number(row.PL_Rs ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </Section>
             )}
             {(production.by_karigar?.length ?? 0) > 0 && (
               <Section title="Production by karigar">
-                <DataTable
-                  rows={production.by_karigar ?? []}
-                  cols={['Karigar_ID', 'Karigar_Name', 'Pieces', 'Piece_Value_Rs', 'PL_Rs']}
-                />
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-[#1A2B4B] text-white">
+                      <tr>
+                        {['Karigar ID', 'Name', 'Pieces', 'Rate/pc', 'Daily Rate', 'Piece Value', 'Calculation', 'P&L'].map(h => (
+                          <th key={h} className="text-left px-3 py-2 font-semibold whitespace-nowrap">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(production.by_karigar ?? []).map((row, i) => (
+                        <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}>
+                          <td className="px-3 py-2 font-mono">{String(row.Karigar_ID ?? '')}</td>
+                          <td className="px-3 py-2 font-medium">{String(row.Karigar_Name ?? '')}</td>
+                          <td className="px-3 py-2">{String(row.Pieces ?? '')}</td>
+                          <td className="px-3 py-2">₹{Number(row.Rate_Rs ?? 0).toFixed(2)}</td>
+                          <td className="px-3 py-2">₹{Number(row.Daily_Rate_Rs ?? 0).toLocaleString()}/day</td>
+                          <td className="px-3 py-2 font-semibold">₹{Number(row.Piece_Value_Rs ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+                          <td className="px-3 py-2 text-gray-500 italic text-[10px]">{String(row.Calc_Formula ?? '')}</td>
+                          <td className={`px-3 py-2 font-semibold ${Number(row.PL_Rs ?? 0) >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                            ₹{Number(row.PL_Rs ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </Section>
             )}
             {(production.detail?.length ?? 0) > 0 && (
@@ -2341,6 +2581,8 @@ function ChallanDetailModal({ challanNo, onClose }: { challanNo: string; onClose
                     'Karigar_Name',
                     'Operation',
                     'Total_Pieces',
+                    'Rate_Rs',
+                    'Daily_Rate_Rs',
                     'Avg_Efficiency_%',
                     'Piece_Value_Rs',
                     'PL_Rs',
@@ -2376,15 +2618,16 @@ function ClickableChallanDataTable({
   const useCols = cols.length ? cols : Object.keys(rows[0] ?? {})
   return (
     <div className="overflow-x-auto max-h-[min(420px,50vh)]">
-      <p className="text-[10px] text-gray-500 mb-1">Click a row to open full challan details.</p>
+      <p className="text-[10px] text-gray-500 mb-1">Click a row to open full challan details. Use the report icon to download a printable report.</p>
       <table className="w-full text-xs">
-        <thead className="sticky top-0 bg-gray-50 border-b">
+        <thead className="sticky top-0 bg-[#1A2B4B] text-white">
           <tr>
             {useCols.map(c => (
-              <th key={c} className="text-left px-2 py-2 font-semibold text-gray-600 whitespace-nowrap">
+              <th key={c} className="text-left px-2 py-2 font-semibold whitespace-nowrap uppercase text-[10px] tracking-wide">
                 {c.replace(/_/g, ' ')}
               </th>
             ))}
+            <th className="px-2 py-2 text-center whitespace-nowrap uppercase text-[10px] tracking-wide">Report</th>
           </tr>
         </thead>
         <tbody>
@@ -2393,16 +2636,16 @@ function ClickableChallanDataTable({
             return (
               <tr
                 key={i}
-                className="border-b border-gray-50 hover:bg-sky-50/80 cursor-pointer"
+                className={`border-b border-gray-100 hover:bg-sky-50 cursor-pointer ${i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}`}
                 onClick={() => {
                   if (challanNo) onChallanClick(challanNo)
                 }}
                 title={challanNo ? `View challan ${challanNo}` : undefined}
               >
                 {useCols.map(c => (
-                  <td key={c} className="px-2 py-1.5 whitespace-nowrap">
+                  <td key={c} className="px-2 py-2 whitespace-nowrap">
                     {c === 'Challan_No' && challanNo ? (
-                      <span className="text-[#2c5aa0] font-semibold underline decoration-dotted">{String(r[c] ?? '')}</span>
+                      <span className="text-[#1A2B4B] font-semibold underline decoration-dotted">{String(r[c] ?? '')}</span>
                     ) : r[c] === 0 || r[c] === '0' ? (
                       '0'
                     ) : (
@@ -2410,6 +2653,19 @@ function ClickableChallanDataTable({
                     )}
                   </td>
                 ))}
+                <td className="px-2 py-2 text-center" onClick={e => e.stopPropagation()}>
+                  {challanNo && (
+                    <a
+                      href={`/api/stitching/challans/${encodeURIComponent(challanNo)}/report`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Download challan report (Print → Save PDF)"
+                      className="text-[#1A2B4B] hover:text-blue-600"
+                    >
+                      ↓
+                    </a>
+                  )}
+                </td>
               </tr>
             )
           })}
@@ -2451,8 +2707,8 @@ function CompletedStyleCostingTab() {
   return (
     <div className="space-y-4">
       <p className="text-sm text-gray-600">
-        Completed challan styles (all pieces received) sit here until outsider job-work is entered.
-        Actual overall cost = internal stitching + outsider cost.
+        Completed challan styles (all pieces received). Actual overall cost = internal stitching labour only.
+        Outsider cost is the party rate paid to the vendor — shown for reference only, not added to expenses.
       </p>
       {(isLoading) && (
         <div className="text-sm text-[#2c5aa0]">Loading completed style costing…</div>
@@ -2487,28 +2743,30 @@ function CompletedStyleCostingTab() {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
-              <thead className="bg-gray-50 border-b">
+              <thead className="bg-[#1A2B4B] text-white">
                 <tr>
                   {[
                     'Style',
+                    'Challan No(s)',
+                    'Vendor',
                     'Internal stitching',
-                    'Outsider vendor',
-                    'Outsider cost',
+                    'Outsider cost (info only)',
                     'Actual overall',
                     'Status',
                     'Action',
                   ].map(h => (
-                    <th key={h} className="text-left px-2 py-2 font-semibold text-gray-600 whitespace-nowrap">
+                    <th key={h} className="text-left px-2 py-2 font-semibold whitespace-nowrap">
                       {h}
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {rows.map(row => (
+                {rows.map((row, idx) => (
                   <CompletedStyleCostingRow
                     key={String(row.Style)}
                     row={row}
+                    idx={idx}
                     saving={patchMut.isPending}
                     finalizing={finalizeMut.isPending}
                     onSave={(outsiderCost, outsiderVendor) =>
@@ -2532,12 +2790,14 @@ function CompletedStyleCostingTab() {
 
 function CompletedStyleCostingRow({
   row,
+  idx,
   saving,
   finalizing,
   onSave,
   onFinalize,
 }: {
   row: Record<string, unknown>
+  idx: number
   saving: boolean
   finalizing: boolean
   onSave: (outsiderCost: number, outsiderVendor: string) => void
@@ -2547,44 +2807,28 @@ function CompletedStyleCostingRow({
   const [outsiderCost, setOutsiderCost] = useState(String(row.Outsider_Cost_Rs ?? ''))
   const [outsiderVendor, setOutsiderVendor] = useState(String(row.Outsider_Vendor ?? ''))
   const internal = Number(row.Internal_Stitching_Cost_Rs ?? 0)
-  const actual = internal + (Number(outsiderCost) || 0)
+  // Actual overall = internal stitching only (outsider is informational)
+  const actual = internal
 
   useEffect(() => {
     setOutsiderCost(String(row.Outsider_Cost_Rs ?? ''))
     setOutsiderVendor(String(row.Outsider_Vendor ?? ''))
   }, [row.Outsider_Cost_Rs, row.Outsider_Vendor])
 
+  const rowBg = idx % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'
+
   return (
-    <tr className="border-b border-gray-50 hover:bg-gray-50/80">
-      <td className="px-2 py-2 font-semibold text-[#002B5B]">{String(row.Style)}</td>
-      <td className="px-2 py-2">₹{internal.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
-      <td className="px-2 py-2">
-        <input
-          className="border rounded px-2 py-1 w-28"
-          value={outsiderVendor}
-          disabled={locked}
-          placeholder="Vendor"
-          onChange={e => setOutsiderVendor(e.target.value)}
-          onBlur={() => {
-            if (!locked) onSave(Number(outsiderCost) || 0, outsiderVendor)
-          }}
-        />
+    <tr className={`border-b border-gray-100 hover:bg-blue-50/40 ${rowBg}`}>
+      <td className="px-2 py-2 font-semibold text-[#1A2B4B]">{String(row.Style)}</td>
+      <td className="px-2 py-2 text-gray-600 font-mono text-[10px]">{String(row.Challan_Nos ?? '—')}</td>
+      <td className="px-2 py-2 text-gray-700">{String(row.Vendor_Name ?? row.Outsider_Vendor ?? '—')}</td>
+      <td className="px-2 py-2 font-semibold text-right">₹{internal.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td>
+      <td className="px-2 py-2 text-right">
+        <span className="text-gray-500" title="Party value from challan (rate × qty given to vendor) — informational only, not added to expenses">
+          ₹{Number(row.Party_Value_Rs ?? row.Outsider_Cost_Rs ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+        </span>
       </td>
-      <td className="px-2 py-2">
-        <input
-          type="number"
-          min={0}
-          step="0.01"
-          className="border rounded px-2 py-1 w-24"
-          value={outsiderCost}
-          disabled={locked}
-          onChange={e => setOutsiderCost(e.target.value)}
-          onBlur={() => {
-            if (!locked) onSave(Number(outsiderCost) || 0, outsiderVendor)
-          }}
-        />
-      </td>
-      <td className="px-2 py-2 font-semibold">
+      <td className="px-2 py-2 font-semibold text-right">
         ₹{actual.toLocaleString(undefined, { maximumFractionDigits: 2 })}
       </td>
       <td className="px-2 py-2">
@@ -2600,7 +2844,7 @@ function CompletedStyleCostingRow({
         {!locked ? (
           <button
             type="button"
-            className="px-2 py-1 rounded bg-[#002B5B] text-white text-[11px] font-semibold disabled:opacity-50"
+            className="px-2 py-1 rounded bg-[#1A2B4B] text-white text-[11px] font-semibold disabled:opacity-50 hover:bg-[#243a63]"
             disabled={saving || finalizing}
             onClick={onFinalize}
           >
@@ -5325,6 +5569,8 @@ function MasterTab({ admin, onFlash }: { admin: AdminApi; onFlash: (type: 'ok' |
     onSuccess: r => {
       onFlash('ok', r.data.message || 'Updated')
       invalidateSheet()
+      // Also refresh the archived list so resigned karigars appear immediately
+      void qc.invalidateQueries({ queryKey: ['stitching-archived-karigars'] })
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
       onFlash('err', String(e.response?.data?.detail || 'Update failed')),
@@ -5900,8 +6146,8 @@ function MasterDataTable({
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-      <div className="px-4 py-2 bg-[#2c5aa0] text-white text-sm font-semibold">{title}</div>
+    <section className="bg-white rounded-lg border border-[#E2E8F0] overflow-hidden">
+      <div className="px-4 py-2.5 bg-[#1A2B4B] text-white text-sm font-semibold tracking-wide">{title}</div>
       <div className="p-4">{children}</div>
     </section>
   )
@@ -6421,12 +6667,12 @@ function DataTable({ rows, cols }: { rows: Record<string, unknown>[]; cols: stri
     ? cols
     : Object.keys(rows[0] ?? {})
   return (
-    <div className="overflow-x-auto max-h-[min(420px,50vh)]">
+    <div className="overflow-x-auto max-h-[min(420px,50vh)] rounded-lg border border-[#E2E8F0]">
       <table className="w-full text-xs">
-        <thead className="sticky top-0 bg-gray-50 border-b">
+        <thead className="sticky top-0 bg-[#1A2B4B] text-white">
           <tr>
             {useCols.map(c => (
-              <th key={c} className="text-left px-2 py-2 font-semibold text-gray-600 whitespace-nowrap">
+              <th key={c} className="text-left px-3 py-2.5 font-semibold whitespace-nowrap uppercase text-[10px] tracking-wide">
                 {c.replace(/_/g, ' ')}
               </th>
             ))}
@@ -6434,9 +6680,9 @@ function DataTable({ rows, cols }: { rows: Record<string, unknown>[]; cols: stri
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={i} className="border-b border-gray-50 hover:bg-gray-50/80">
+            <tr key={i} className={`border-b border-[#E2E8F0] hover:bg-blue-50/50 ${i % 2 === 0 ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
               {useCols.map(c => (
-                <td key={c} className="px-2 py-1.5 whitespace-nowrap">
+                <td key={c} className="px-3 py-2 whitespace-nowrap">
                   {r[c] === 0 || r[c] === '0' ? '0' : String(r[c] ?? '')}
                 </td>
               ))}

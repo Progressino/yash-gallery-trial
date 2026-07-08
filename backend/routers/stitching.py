@@ -22,6 +22,7 @@ from ..db.stitching_db import (
 from ..services import stitching_costing as svc
 from ..services.permissions import may_access_erp_admin
 from ..services.stitching_gsheet import gsheet_status, sync_from_gsheet, sync_from_gsheet_merge, sync_to_gsheet
+from ..services.stitching_report_print import challan_detail_html
 
 router = APIRouter()
 
@@ -674,6 +675,21 @@ def get_challan_detail(challan_no: str):
     if not out.get("ok"):
         raise HTTPException(404, out.get("message", "Challan not found"))
     return out
+
+
+@router.get("/challans/{challan_no}/report")
+def download_challan_report(challan_no: str):
+    """Return a print-ready HTML report for a single challan (browser Print → Save PDF)."""
+    out = svc.challan_detail_report(challan_no)
+    if not out.get("ok"):
+        raise HTTPException(404, out.get("message", "Challan not found"))
+    html_content = challan_detail_html(out)
+    safe_no = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(challan_no))
+    return Response(
+        content=html_content,
+        media_type="text/html",
+        headers={"Content-Disposition": f'inline; filename="challan_{safe_no}_report.html"'},
+    )
 
 
 @router.patch("/challans/{challan_no}")

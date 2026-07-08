@@ -749,7 +749,7 @@ def test_sunday_production_report_uses_six_hour_salary_basis():
 
 
 def test_completed_style_costing_finalize_flow():
-    """Style 1008 example: internal stitching 60 + outsider 20 = actual 80."""
+    """Style 1008: internal stitching 60. Outsider cost is informational only — not added to Actual_Overall."""
     save_sheet_df(
         "style_master",
         pd.DataFrame([{"Style": "1008", "Operation": "Stitching", "Target": 80, "Rate_Rs": 3.0}]),
@@ -800,7 +800,8 @@ def test_completed_style_costing_finalize_flow():
     row2 = next(r for r in rep2["rows"] if r["Style"] == "1008")
     assert row2["Outsider_Cost_Rs"] == 20.0
     assert row2["Outsider_Vendor"] == "Manoh patwa"
-    assert row2["Actual_Overall_Cost_Rs"] == 80.0
+    # Actual_Overall_Cost_Rs = internal stitching only (outsider is informational, not added)
+    assert row2["Actual_Overall_Cost_Rs"] == 60.0
 
     fin = svc.finalize_completed_style_cost("1008", finalized_by="qa")
     assert fin["ok"] is True
