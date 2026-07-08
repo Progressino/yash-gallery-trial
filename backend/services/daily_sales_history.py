@@ -45,11 +45,10 @@ def sales_history_view_end_date(sales_df: pd.DataFrame | None, end_date: str | N
             return pd.Timestamp(end_date).normalize()
         except Exception:
             pass
-    tall = _normalize_sales_tall(sales_df)
-    if tall.empty:
-        return today_ist_timestamp().normalize()
-    mx = tall["Date"].max()
-    return pd.Timestamp(mx).normalize() if pd.notna(mx) else today_ist_timestamp().normalize()
+    # Always anchor the view to today so the 30-day window shows the most
+    # recent period. If recent uploads are missing, those dates will appear
+    # empty and flagged by the upload-coverage warnings.
+    return today_ist_timestamp().normalize()
 
 
 def filter_sales_history_window(
