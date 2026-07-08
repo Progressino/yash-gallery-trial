@@ -439,9 +439,9 @@ function DashboardTab() {
                 <YAxis tick={{ fontSize: 10, fill: '#64748B' }} width={40} />
                 <RechartsTooltip
                   contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #E2E8F0' }}
-                  formatter={(val: number, name: string) =>
-                    name === 'pieces' ? [val.toLocaleString(), 'Pieces'] : [`${val}%`, 'Avg Efficiency']
-                  }
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  formatter={((val: number, name: string) =>
+                    name === 'pieces' ? [val.toLocaleString(), 'Pieces'] : [`${val}%`, 'Avg Efficiency']) as any}
                 />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Line
@@ -492,7 +492,8 @@ function DashboardTab() {
                 />
                 <RechartsTooltip
                   contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #E2E8F0' }}
-                  formatter={(val: number) => [val.toLocaleString(), 'Pieces']}
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  formatter={((val: number) => [val.toLocaleString(), 'Pieces']) as any}
                 />
                 <Bar dataKey="pieces" fill="#1A2B4B" radius={[0, 3, 3, 0]} name="Pieces" />
               </BarChart>
@@ -6244,9 +6245,9 @@ function KarigarDirectoryCharts() {
                 />
                 <RechartsTooltip
                   contentStyle={{ fontSize: 11, borderRadius: 8 }}
-                  formatter={(v: number, n: string) =>
-                    n === 'avg_efficiency' ? [`${v}%`, 'Avg Efficiency'] : [v.toLocaleString(), 'Pieces']
-                  }
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  formatter={((v: number, n: string) =>
+                    n === 'avg_efficiency' ? [`${v}%`, 'Avg Efficiency'] : [v.toLocaleString(), 'Pieces']) as any}
                 />
                 <Legend wrapperStyle={{ fontSize: 10 }} />
                 <Line
@@ -6293,9 +6294,9 @@ function KarigarDirectoryCharts() {
                 <YAxis tick={{ fontSize: 9, fill: '#64748B' }} width={36} />
                 <RechartsTooltip
                   contentStyle={{ fontSize: 11, borderRadius: 8 }}
-                  formatter={(v: number, n: string) =>
-                    n === 'pieces' ? [v.toLocaleString(), 'Pieces'] : [v, n]
-                  }
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  formatter={((v: number, n: string) =>
+                    n === 'pieces' ? [v.toLocaleString(), 'Pieces'] : [v, n]) as any}
                 />
                 <Legend wrapperStyle={{ fontSize: 10 }} />
                 <Bar dataKey="pieces" fill="#1A2B4B" radius={[3, 3, 0, 0]} name="Pieces" />
