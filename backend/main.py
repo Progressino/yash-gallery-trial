@@ -244,12 +244,27 @@ def _deferred_load_mtr_df(disk_dir: "Path") -> None:
             # Re-apply MTR dedup in case the parquet was saved before the
             # unkeyed-shadow fix (which drops FBA rows that duplicate keyed
             # Order_Id rows — without this, gross Amazon units are inflated).
+            rows_before = len(mtr)
             if "Invoice_Number" in mtr.columns and "Order_Id" in mtr.columns:
                 from .services.mtr import dedup_amazon_mtr_dataframe
                 mtr = dedup_amazon_mtr_dataframe(mtr)
-            if _warm_cache is not None and "mtr_df" not in _warm_cache:
-                _warm_cache["mtr_df"] = mtr
-                log.info("Deferred mtr_df loaded: %d rows", len(mtr))
+            if _warm_cache is None:
+                return
+            existing_len = len(_warm_cache.get("mtr_df") or [])
+            _warm_cache["mtr_df"] = mtr
+            dedup_removed = rows_before - len(mtr)
+            log.info(
+                "Deferred mtr_df loaded: %d rows (dedup removed %d vs on-disk %d)",
+                len(mtr), dedup_removed, existing_len,
+            )
+            # If FBA dedup actually removed rows the warm-cache sales_df was built
+            # from old (inflated) mtr_df — rebuild it so deepdive/dashboard are correct.
+            if dedup_removed > 0 or existing_len > len(mtr):
+                try:
+                    _spawn_background_sales_rebuild()
+                    log.info("Triggered background sales_df rebuild after FBA dedup of mtr_df")
+                except Exception:
+                    log.warning("Could not spawn background sales_df rebuild after mtr_df dedup")
         except Exception as ex:
             log.warning("Deferred mtr_df load failed: %s", ex)
 
@@ -1710,13 +1725,22 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 if os.path.exists(path):
                     df = pd.read_parquet(path)
-                    if key == "mtr_df" and not df.empty and "TxnDate" in df.columns:
-                        cutoff = (datetime.now(IST) - timedelta(days=180)).strftime("%Y-%m-%d")
-                        try:
-                            df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
-                            df = df[df["TxnDate"] >= cutoff].reset_index(drop=True)
-                        except Exception:
-                            pass
+                    if key == "mtr_df" and not df.empty:
+                        if "TxnDate" in df.columns:
+                            cutoff = (datetime.now(IST) - timedelta(days=180)).strftime("%Y-%m-%d")
+                            try:
+                                df["TxnDate"] = pd.to_datetime(df["TxnDate"], errors="coerce")
+                                df = df[df["TxnDate"] >= cutoff].reset_index(drop=True)
+                            except Exception:
+                                pass
+                        # Apply FBA shadow-row dedup so Phase-0 mtr_df is clean
+                        # even if the parquet was saved before the fix was deployed.
+                        if "Invoice_Number" in df.columns and "Order_Id" in df.columns:
+                            try:
+                                from .services.mtr import dedup_amazon_mtr_dataframe
+                                df = dedup_amazon_mtr_dataframe(df)
+                            except Exception:
+                                pass
                     loaded[key] = df
 
         if not loaded:
