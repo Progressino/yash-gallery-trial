@@ -137,6 +137,26 @@ def test_calculate_quarterly_history_amazon_net_excludes_cancel():
     assert int(row["Jan-Mar 2025"]) == 10
 
 
+def test_calculate_quarterly_history_sales_df_amazon_cancel_is_zero():
+    """Amazon rows coming from unified sales_df must also treat Cancel as 0 in net."""
+    sales = pd.DataFrame(
+        {
+            "Sku": ["AMZ-SKU-1"] * 3,
+            "TxnDate": pd.to_datetime(["2025-01-05", "2025-01-06", "2025-01-07"]),
+            "Transaction Type": ["Shipment", "Cancel", "Refund"],
+            "Quantity": [16, 3, 6],
+            "Source": ["Amazon", "Amazon", "Amazon"],
+        }
+    )
+    pivot = calculate_quarterly_history(
+        sales_df=sales,
+        mtr_df=None,
+        n_quarters=12,
+    )
+    row = pivot.loc[pivot["OMS_SKU"] == "AMZ-SKU-1"].iloc[0]
+    assert int(row["Jan-Mar 2025"]) == 10
+
+
 def test_sheet_lead_on_parent_applies_to_variant_inventory_sku():
     """Style-level lead row should propagate to size variants (e.g. STYLE-M)."""
     days = pd.date_range("2025-11-01", periods=25, freq="D")

@@ -175,8 +175,15 @@ def _platform_shipment_history_part(
 def _sales_shipment_history_part(sales_df: pd.DataFrame) -> pd.DataFrame:
     if sales_df is None or sales_df.empty or "Sku" not in sales_df.columns:
         return pd.DataFrame()
-    tmp = sales_df[["Sku", "TxnDate", "Quantity", "Transaction Type"]].copy()
-    tmp.columns = ["SKU", "Date", "Qty", "TxnType"]
+    cols = ["Sku", "TxnDate", "Quantity", "Transaction Type"]
+    src_col = next((c for c in ("Source", "Platform", "Channel") if c in sales_df.columns), None)
+    if src_col:
+        cols.append(src_col)
+    tmp = sales_df[cols].copy()
+    if src_col:
+        tmp.columns = ["SKU", "Date", "Qty", "TxnType", "_Source"]
+    else:
+        tmp.columns = ["SKU", "Date", "Qty", "TxnType"]
     tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
     tmp["Qty"] = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
     return tmp.dropna(subset=["Date"])
@@ -309,7 +316,12 @@ def calculate_quarterly_history(
         if "_Platform" in hist.columns
         else pd.Series("", index=hist.index)
     )
-    _is_amazon = _plat == "amazon"
+    _src = (
+        hist["_Source"].astype(str).str.strip().str.lower()
+        if "_Source" in hist.columns
+        else pd.Series("", index=hist.index)
+    )
+    _is_amazon = (_plat == "amazon") | _src.eq("amazon")
     # Amazon MTR net = Shipment − Refund (cancels tracked but excluded from PO demand).
     _neg = _txn_lower.eq("refund") | (~_is_amazon & _txn_lower.eq("cancel"))
     _zero = _is_amazon & _txn_lower.eq("cancel")
@@ -318,7 +330,7 @@ def calculate_quarterly_history(
         0,
         np.where(_neg, -hist["Qty"].abs(), hist["Qty"].abs()),
     )
-    hist = hist.drop(columns=["_Platform"], errors="ignore")
+    hist = hist.drop(columns=["_Platform", "_Source"], errors="ignore")
     hist = hist[hist["Qty"] != 0]
     if hist.empty:
         return pd.DataFrame()

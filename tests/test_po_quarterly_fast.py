@@ -289,6 +289,44 @@ def test_amazon_mtr_net_excludes_cancel_from_quarterly():
     assert kwargs["quarter_sums"][("1197YKGREEN-M", "Jan-Mar 2025")] == 10
 
 
+def test_amazon_sales_df_net_excludes_cancel_from_quarterly():
+    """Amazon rows from unified sales_df must keep Cancel neutral (not negative)."""
+    from backend.services.po_quarterly_fast import _accumulate_sales_df_shipments
+    from backend.services.po_engine import get_indian_fy_quarter, quarter_col_name
+
+    fy, qn = get_indian_fy_quarter(pd.Timestamp("2025-01-15"))
+    q_label_map = {(fy, qn): quarter_col_name(fy, qn)}
+    today = pd.Timestamp.today()
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+    sales = pd.DataFrame({
+        "Sku": ["AMZ-SKU-FAST"] * 3,
+        "TxnDate": pd.to_datetime(["2025-01-10", "2025-01-11", "2025-01-12"]),
+        "Transaction Type": ["Shipment", "Cancel", "Refund"],
+        "Quantity": [16, 3, 6],
+        "Source": ["Amazon", "Amazon", "Amazon"],
+    })
+    n = _accumulate_sales_df_shipments(
+        sales,
+        None,
+        group_by_parent=False,
+        start_ts=pd.Timestamp("2024-04-01"),
+        end_ts=pd.Timestamp("2026-04-01"),
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+        platform_day_keys=set(),
+    )
+    assert n > 0
+    assert quarter_sums[("AMZ-SKU-FAST", quarter_col_name(fy, qn))] == 10
+
+
 def test_flipkart_cancel_subtracts_from_quarterly():
     """Cancellation (TxnType='Cancel') must subtract from net quarterly units."""
     q_label_map = {(2025, 4): "Jan-Mar 2025"}

@@ -49,7 +49,7 @@ _WARM_FRAME_ATTRS = (
     ("snapdeal", "snapdeal_df", False, True),
 )
 
-_SALES_READ_COLS = ["Sku", "TxnDate", "Quantity", "Transaction Type"]
+_SALES_READ_COLS = ["Sku", "TxnDate", "Quantity", "Transaction Type", "Source"]
 
 # Transaction types that contribute positively (net sold) vs negatively (returns/cancels).
 # "ReturnCancel" = customer cancelled their return → unit stays with customer → positive.
@@ -505,10 +505,22 @@ def _accumulate_sales_df_shipments(
     if work.empty:
         return 0
     _txn_lower2 = work["TxnType"].astype(str).str.strip().str.lower()
-    _neg = _txn_lower2.isin(_NEGATIVE_TXN_TYPES)
+    _src = (
+        work["_Source"].astype(str).str.strip().str.lower()
+        if "_Source" in work.columns
+        else pd.Series("", index=work.index)
+    )
+    _is_amazon = _src.eq("amazon")
+    _neg = _txn_lower2.eq("refund") | (~_is_amazon & _txn_lower2.eq("cancel"))
+    _zero = _is_amazon & _txn_lower2.eq("cancel")
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
     work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
-    work["Qty"] = np.where(_neg, -work["Qty"].abs(), work["Qty"].abs())
+    work["Qty"] = np.where(
+        _zero,
+        0,
+        np.where(_neg, -work["Qty"].abs(), work["Qty"].abs()),
+    )
+    work = work.drop(columns=["_Source"], errors="ignore")
     work = work.dropna(subset=["Date"])
     work = work[(work["Date"] >= start_ts) & (work["Date"] <= end_ts)]
     work = work[work["Qty"] != 0]
