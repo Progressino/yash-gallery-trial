@@ -317,6 +317,38 @@ def _is_amazon_pl_raw_sku(sku) -> bool:
     return bool(_PL_RE.match(t))
 
 
+def amazon_seller_net_units(
+    qty: pd.Series,
+    txn: pd.Series,
+) -> float:
+    """Amazon MTR net units: gross shipments − refunds (cancels excluded from net)."""
+    return amazon_mtr_gross_net_units(qty, txn)
+
+
+def amazon_mtr_gross_net_units(
+    qty: pd.Series,
+    txn: pd.Series,
+) -> float:
+    """Amazon MTR net for deepdive: gross shipments − refunds (cancels excluded from net)."""
+    t = txn.astype(str).str.strip()
+    ship = float(qty[t == "Shipment"].sum())
+    refund = float(qty[t == "Refund"].sum())
+    return ship - refund
+
+
+def amazon_mtr_reporting_date(mtr_df: pd.DataFrame) -> pd.Series:
+    """Invoice date when present, else shipment/event date (Amazon monthly bucketing)."""
+    if "Reporting_Date" in mtr_df.columns:
+        rep = pd.to_datetime(mtr_df["Reporting_Date"], errors="coerce")
+        if rep.notna().any():
+            return rep
+    if "Invoice_Date_Text" in mtr_df.columns:
+        inv = pd.to_datetime(mtr_df["Invoice_Date_Text"], errors="coerce")
+        if inv.notna().any():
+            return inv.where(inv.notna(), pd.to_datetime(mtr_df["Date"], errors="coerce"))
+    return pd.to_datetime(mtr_df["Date"], errors="coerce")
+
+
 def protect_distinct_asin_pl_skus(
     raw_skus: pd.Series,
     resolved_skus: pd.Series,
@@ -383,9 +415,9 @@ def _mtr_to_sales_df(
     if mtr_df.empty:
         return pd.DataFrame()
 
-    m = mtr_df[["Date", "SKU", "Transaction_Type", "Quantity"]].copy()
+    m = mtr_df[["SKU", "Transaction_Type", "Quantity"]].copy()
+    m["TxnDate"] = amazon_mtr_reporting_date(mtr_df)
     m = m.rename(columns={
-        "Date":             "TxnDate",
         "SKU":              "Sku",
         "Transaction_Type": "Transaction Type",
     })
@@ -396,11 +428,7 @@ def _mtr_to_sales_df(
     _raw_skus = m["Sku"]
     _uniq = pd.unique(_raw_skus.to_numpy())
     _resolved = {u: _resolve_mtr_sku(u, _map) for u in _uniq}
-    tentative = canonical_sales_sku_series(_raw_skus.map(_resolved))
-    asin_series = None
-    if "ASIN" in mtr_df.columns:
-        asin_series = mtr_df.loc[m.index, "ASIN"]
-    m["Sku"] = protect_distinct_asin_pl_skus(_raw_skus, tentative, asin_series)
+    m["Sku"] = canonical_sales_sku_series(_raw_skus.map(_resolved))
 
     # Line-level keys for build_sales_df dedup (Amazon MTR exposes Order_Id / Invoice_Number).
     idx = m.index
@@ -424,10 +452,11 @@ def _mtr_to_sales_df(
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
 
-    # Cancel rows pair with Shipment/Refund events — net must reflect seller/MACO final units.
-    m["Units_Effective"] = np.where(
-        m["Transaction Type"] == "Refund",  -m["Quantity"],
-        np.where(m["Transaction Type"] == "Cancel", -m["Quantity"], m["Quantity"])
+    # Amazon MTR net: Shipment − Refund (Cancel rows contribute 0 to demand).
+    m["Units_Effective"] = np.select(
+        [m["Transaction Type"] == "Refund", m["Transaction Type"] == "Cancel"],
+        [-m["Quantity"], 0],
+        default=m["Quantity"],
     )
     m["LineKey"] = ""
     cols = ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "OrderId", "LineKey"]

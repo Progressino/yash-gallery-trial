@@ -3322,13 +3322,21 @@ def _apply_light_coverage_hydrate(sess: AppSession) -> None:
     try:
         import backend.main as _main
 
+        # Hot path: bulk history already in RAM — attach pointers only (never re-read parquets).
+        if _main._warm_cache and _main.warm_cache_sales_rows(_main._warm_cache) >= 100_000:
+            _main.try_attach_shared_frames_fast(sess)
+            if _shared_frames_operational(sess):
+                _mark_tier3_sync_applied(sess)
+            return
+
         _main._repair_disk_manifest_from_loose_parquets()
         if not _main._warm_cache:
             _main.bootstrap_warm_cache_if_empty()
         elif _main.session_needs_warm_cache_topup(sess):
             # Do not re-read every parquet from disk on each 3–8s coverage poll — that
             # saturates I/O and blocks session hydrate workers (users stay at 0/8).
-            _main._top_up_warm_cache_from_disk()
+            if _main.warm_cache_sales_rows(_main._warm_cache) < 100_000:
+                _main._top_up_warm_cache_from_disk()
         if not _main._warm_cache:
             return
         _main.try_attach_shared_frames_fast(sess)
@@ -5119,11 +5127,12 @@ def sku_deepdive(
         }
 
     qty    = pd.to_numeric(sku_df["Quantity"],       errors="coerce").fillna(0)
-    eff    = pd.to_numeric(sku_df["Units_Effective"], errors="coerce").fillna(0)
     txn    = sku_df["Transaction Type"].astype(str).str.strip()
+
     shipped  = int(qty[txn == "Shipment"].sum())
     returns  = int(qty[txn == "Refund"].sum())
-    net_units = int(eff.sum())
+    cancelled = int(qty[txn == "Cancel"].sum())
+    net_units = int(shipped - returns)
     rr       = round(returns / shipped * 100, 1) if shipped > 0 else 0.0
     period_days = max((end_ts - start_ts).days, 1)
     # Active demand days (first→last shipment in filter window, inclusive), matching PO engine.
@@ -5137,28 +5146,28 @@ def sku_deepdive(
         eff_days = period_days
     ads      = round(shipped / eff_days, 2) if shipped > 0 else 0.0
 
-    # Monthly trend
+    # Monthly trend (gross shipments − refunds; cancels tracked separately).
     sku_df["_month"] = sku_df["TxnDate"].dt.to_period("M").astype(str)
-    monthly_raw = (
-        sku_df.assign(_qty=qty, _eff=eff)
-        .groupby(["_month", "Transaction Type"])
-        .agg(units=("_qty", "sum"))
-        .reset_index()
-        .pivot_table(index="_month", columns="Transaction Type", values="units", fill_value=0)
-        .reset_index()
+    month_rows: list[dict] = []
+    for month, grp in sku_df.groupby("_month", sort=True):
+        gq = qty.loc[grp.index]
+        gt = txn.loc[grp.index]
+        ship_m = int(gq[gt == "Shipment"].sum())
+        ret_m = int(gq[gt == "Refund"].sum())
+        can_m = int(gq[gt == "Cancel"].sum())
+        month_rows.append({
+            "month": str(month),
+            "shipped": ship_m,
+            "returns": ret_m,
+            "cancels": can_m,
+            "net": ship_m - ret_m,
+        })
+    monthly = month_rows
+
+    from ..services.sku_deepdive_data import amazon_mtr_b2b_b2c_monthly
+    amazon_b2b_b2c = amazon_mtr_b2b_b2c_monthly(
+        sess, sku, all_sizes=all_sizes, start_date=start_date, end_date=end_date,
     )
-    monthly_raw.columns.name = None
-    monthly_raw = monthly_raw.rename(columns={
-        "_month":   "month",
-        "Shipment": "shipped",
-        "Refund":   "returns",
-        "Cancel":   "cancels",
-    })
-    for col in ["shipped", "returns", "cancels"]:
-        if col not in monthly_raw.columns:
-            monthly_raw[col] = 0
-    monthly_raw["net"] = monthly_raw["shipped"] - monthly_raw.get("returns", 0)
-    monthly = monthly_raw.sort_values("month")[["month", "shipped", "returns", "cancels", "net"]].to_dict("records")
 
     # Platform breakdown
     plat_grp = (
@@ -5226,11 +5235,13 @@ def sku_deepdive(
         "summary": {
             "shipped":     shipped,
             "returns":     returns,
+            "cancelled":   cancelled,
             "net_units":   net_units,
             "return_rate": rr,
             "ads":         ads,
         },
-        "monthly":     monthly,
+        "monthly":         monthly,
+        "amazon_b2b_b2c":  amazon_b2b_b2c,
         "by_platform": by_platform,
         "by_size":     by_size,
         "daily":       daily,
@@ -5835,7 +5846,12 @@ def get_inventory(
         }
 
     _restore_inventory_from_warm(sess)
-    df = sess.inventory_df_variant
+    from ..services.inventory import inventory_variant_for_api
+
+    raw_df = sess.inventory_df_variant
+    df = inventory_variant_for_api(raw_df) if not raw_df.empty else raw_df
+    if df is not raw_df and not df.empty:
+        sess.inventory_df_variant = df
     if df.empty:
         return {
             "loaded": False,

@@ -2402,6 +2402,26 @@ def ensure_latest_daily_inventory_authoritative(sess) -> bool:
 
 def ensure_daily_inventory_coverage_light(sess) -> bool:
     """Attach daily inventory matrix from warm cache for coverage / staleness checks."""
+    from .shared_frames import frame_row_count, session_uses_shared_frames
+
+    if session_uses_shared_frames(sess) and frame_row_count("daily_inventory_history_df", sess) > 0:
+        return True
+    try:
+        import backend.main as _main
+
+        wc = (_main._warm_cache or {}).get("daily_inventory_history_df")
+        meta = (_main._warm_cache or {}).get(_main._DAILY_INV_META_WARM_KEY)
+        if wc is not None and not getattr(wc, "empty", True):
+            if getattr(sess, "daily_inventory_history_df", None) is not wc:
+                sess.daily_inventory_history_df = wc
+            if isinstance(meta, dict) and meta:
+                apply_daily_inventory_history_meta(sess, meta)
+            cap = inventory_history_matrix_cap_date(sess)
+            if cap is not None:
+                promote_daily_inventory_matrix_max_date(sess, str(cap.date()))
+            return True
+    except Exception:
+        pass
     ensure_latest_daily_inventory_authoritative(sess)
     df = getattr(sess, "daily_inventory_history_df", None)
     if df is not None and not getattr(df, "empty", True):

@@ -186,7 +186,7 @@ def _sales_through_token(sess) -> str:
         return ""
 
 
-def check_calculate_gate(sess, *, cov=None) -> dict[str, Any]:
+def check_calculate_gate(sess, *, cov=None, light: bool = False) -> dict[str, Any]:
     """Readiness gate — block calculate until inputs are stable and complete."""
     from .po_readiness import (
         PO_MIN_INVENTORY_ROWS,
@@ -277,13 +277,15 @@ def check_calculate_gate(sess, *, cov=None) -> dict[str, Any]:
     if strict and not ep_loaded:
         blockers.append("PO_PIPELINE_STRICT: Existing PO sheet is required.")
 
-    return {
+    out = {
         "calculate_allowed": len(blockers) == 0,
         "blockers": blockers,
         "warnings": warnings,
-        "dataset_versions": collect_dataset_versions(sess, {}).as_dict(),
         "pipeline_version": PO_PIPELINE_VERSION,
     }
+    if not light:
+        out["dataset_versions"] = collect_dataset_versions(sess, {}).as_dict()
+    return out
 
 
 def _validate_snapshot_completeness(
@@ -776,9 +778,16 @@ def prepare_po_snapshot(
     return snap
 
 
-def build_pipeline_readiness(sess, *, cov=None) -> dict[str, Any]:
+def build_pipeline_readiness(sess, *, cov=None, light: bool = False) -> dict[str, Any]:
     """Extended readiness payload for GET /api/po/readiness."""
-    gate = check_calculate_gate(sess, cov=cov)
+    gate = check_calculate_gate(sess, cov=cov, light=light)
+    if light:
+        return {
+            **gate,
+            "snapshot_id": str(getattr(sess, "po_pipeline_snapshot_id", "") or ""),
+            "pipeline_version": PO_PIPELINE_VERSION,
+            "dataset_versions": {},
+        }
     versions = collect_dataset_versions(sess, {})
     return {
         **gate,

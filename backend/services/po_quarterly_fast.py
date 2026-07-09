@@ -154,7 +154,13 @@ def _accumulate_shipment_frame(
         (c for c in cols if c in df.columns and c in ("SKU", "OMS_SKU")),
         None,
     )
-    date_col = "Date" if "Date" in df.columns else None
+    if platform == "amazon":
+        date_col = next(
+            (c for c in ("Reporting_Date", "Date") if c in df.columns),
+            None,
+        )
+    else:
+        date_col = "Date" if "Date" in df.columns else None
     qty_col = "Quantity" if "Quantity" in df.columns else None
     txn_col = next(
         (c for c in df.columns if c in ("Transaction_Type", "TxnType")),
@@ -182,9 +188,20 @@ def _accumulate_shipment_frame(
         if asin_col:
             rename[asin_col] = "ASIN"
         work = work.rename(columns=rename)
-        _neg = work["_Txn"].astype(str).str.strip().str.lower().isin(_NEGATIVE_TXN_TYPES)
+        _txn_lower = work["_Txn"].astype(str).str.strip().str.lower()
+        if platform == "amazon":
+            # Amazon MTR net: Shipment − Refund (cancels tracked but not added to PO demand).
+            _neg = _txn_lower == "refund"
+            _zero = _txn_lower == "cancel"
+        else:
+            _neg = _txn_lower.isin(_NEGATIVE_TXN_TYPES)
+            _zero = pd.Series(False, index=work.index)
         work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
-        work["Qty"] = np.where(_neg, -work["Qty"].abs(), work["Qty"].abs())
+        work["Qty"] = np.where(
+            _zero,
+            0,
+            np.where(_neg, -work["Qty"].abs(), work["Qty"].abs()),
+        )
         work = work.drop(columns=["_Txn"])
     else:
         rename = {sku_col: "SKU", date_col: "Date", qty_col: "Qty"}
@@ -214,13 +231,9 @@ def _accumulate_shipment_frame(
         if k:
             canon[s] = get_parent_sku(k) if group_by_parent else k
     tentative = raw_skus.map(canon)
-    if platform == "amazon" and "ASIN" in work.columns:
-        from .sales import protect_distinct_asin_pl_skus
-
-        work["SKU"] = protect_distinct_asin_pl_skus(raw_skus, tentative, work["ASIN"])
-        work = work.drop(columns=["ASIN"], errors="ignore")
-    else:
-        work["SKU"] = tentative
+    work["SKU"] = tentative
+    if asin_col and asin_col in work.columns:
+        work = work.drop(columns=[asin_col], errors="ignore")
     work = work[work["SKU"].astype(str).str.len() > 0]
     if work.empty:
         return 0

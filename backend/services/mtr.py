@@ -57,7 +57,7 @@ def _parse_date_flexible(series: pd.Series) -> pd.Series:
 def _downcast_mtr(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["Report_Type", "Transaction_Type", "Ship_To_State",
               "Warehouse_Id", "Fulfillment", "Payment_Method", "Seller_GSTIN", "Seller_Company",
-              "IRN_Status", "Month", "Month_Label"]:
+              "IRN_Status", "Month", "Month_Label", "Source_File"]:
         if c in df.columns:
             df[c] = df[c].astype("category")
     for c in ["Quantity", "Invoice_Amount", "Total_Tax", "CGST", "SGST", "IGST",
@@ -343,8 +343,11 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
     })
     del raw
 
-    out["Month"] = out["Date"].dt.to_period("M").astype(str)
-    out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
+    # Seller MTR pivots use invoice month for B2B/B2C sales — fall back to shipment date.
+    inv_dt = pd.to_datetime(out["Invoice_Date_Text"], errors="coerce")
+    out["Reporting_Date"] = inv_dt.where(inv_dt.notna(), out["Date"])
+    out["Month"] = out["Reporting_Date"].dt.to_period("M").astype(str)
+    out["Month_Label"] = out["Reporting_Date"].dt.strftime("%b %Y")
     out = _downcast_mtr(out)
 
     msgs: list[str] = []
@@ -359,6 +362,7 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
     from .helpers import apply_dsr_segment_from_upload_filename
 
     out = apply_dsr_segment_from_upload_filename(out, source_file, "Amazon")
+    out["Source_File"] = Path(source_file).name if source_file else ""
 
     return out, ("OK" if not msgs else " | ".join(msgs))
 
@@ -440,8 +444,10 @@ def _amazon_fba_aggregate_order_lines(df: pd.DataFrame, *, has_order_id: bool) -
         dsr_one = work.groupby(gcols, sort=False, observed=True)["DSR_Segment"].first().reset_index()
         out = out.merge(dsr_one, on=gcols, how="left")
     out = out.rename(columns={"_sk": "SKU"})
-    out["Month"] = out["Date"].dt.to_period("M").astype(str)
-    out["Month_Label"] = out["Date"].dt.strftime("%b %Y")
+    inv_dt = pd.to_datetime(out["Invoice_Date_Text"], errors="coerce")
+    out["Reporting_Date"] = inv_dt.where(inv_dt.notna(), out["Date"])
+    out["Month"] = out["Reporting_Date"].dt.to_period("M").astype(str)
+    out["Month_Label"] = out["Reporting_Date"].dt.strftime("%b %Y")
     if not has_order_id:
         out["Order_Id"] = ""
     return out

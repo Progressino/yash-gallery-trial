@@ -922,7 +922,15 @@ def merge_inventory_into_warm_cache(sess) -> None:
         if df is None or not hasattr(df, "empty") or df.empty:
             _warm_cache[key] = pd.DataFrame()
         else:
-            _warm_cache[key] = df.copy()
+            frame = df.copy()
+            if key == "inventory_df_variant":
+                try:
+                    from .services.inventory import inventory_variant_for_api
+
+                    frame = inventory_variant_for_api(frame)
+                except Exception:
+                    pass
+            _warm_cache[key] = frame
     try:
         from .services.inventory import inventory_session_meta_bundle, refresh_inventory_api_cache
 

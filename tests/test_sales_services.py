@@ -1551,7 +1551,8 @@ def test_flipkart_cancel_reduces_net_units_like_maco_final_sale():
     assert float(sales["Units_Effective"].sum()) == 0.0
 
 
-def test_amazon_mtr_cancel_reduces_net_units():
+def test_amazon_mtr_cancel_excluded_from_net_units():
+    """Amazon Cancel rows contribute 0 to Units_Effective (net = Shipment − Refund)."""
     from backend.services.sales import _mtr_to_sales_df
 
     mtr_df = pd.DataFrame(
@@ -1565,7 +1566,7 @@ def test_amazon_mtr_cancel_reduces_net_units():
         }
     )
     out = _mtr_to_sales_df(mtr_df, {})
-    assert float(out["Units_Effective"].sum()) == 0.0
+    assert float(out["Units_Effective"].sum()) == 1.0
 
 
 def test_myntra_cancel_reduces_net_units():

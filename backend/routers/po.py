@@ -162,15 +162,13 @@ def _sales_df_for_read(sess) -> pd.DataFrame:
 def po_readiness(request: Request):
     """Lightweight PO page gate — data ready for calculate, not all background jobs finished."""
     from ..models.schemas import PoReadinessResponse
-    from ..routers.data import _build_coverage_response
-    from ..services.po_readiness import build_po_readiness
+    from ..services.po_readiness import build_po_readiness_fast
 
     sess = request.state.session
     if sess is None:
         return PoReadinessResponse(po_ready=False, hydration="none")
     sid = getattr(request.state, "session_id", None) or ""
-    cov = _build_coverage_response(sess, light=True)
-    return PoReadinessResponse(**build_po_readiness(sess, cov, session_id=sid))
+    return PoReadinessResponse(**build_po_readiness_fast(sess, session_id=sid))
 
 
 def _return_overlay_for_po_calc(sess):

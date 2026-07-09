@@ -118,6 +118,25 @@ def test_calculate_quarterly_history_shipment_type_case_insensitive():
     assert (pivot["OMS_SKU"] == "CASE-SHIP").any()
 
 
+def test_calculate_quarterly_history_amazon_net_excludes_cancel():
+    """Amazon MTR quarterly net = Shipment − Refund (Cancel does not add to demand)."""
+    mtr = pd.DataFrame(
+        {
+            "Reporting_Date": pd.to_datetime(["2025-01-15"] * 3),
+            "SKU": ["1197YKGREEN-M"] * 3,
+            "Transaction_Type": ["Shipment", "Refund", "Cancel"],
+            "Quantity": [16, 6, 3],
+        }
+    )
+    pivot = calculate_quarterly_history(
+        sales_df=pd.DataFrame(),
+        mtr_df=mtr,
+        n_quarters=12,
+    )
+    row = pivot.loc[pivot["OMS_SKU"] == "1197YKGREEN-M"].iloc[0]
+    assert int(row["Jan-Mar 2025"]) == 10
+
+
 def test_sheet_lead_on_parent_applies_to_variant_inventory_sku():
     """Style-level lead row should propagate to size variants (e.g. STYLE-M)."""
     days = pd.date_range("2025-11-01", periods=25, freq="D")

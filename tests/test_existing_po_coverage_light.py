@@ -93,6 +93,10 @@ def test_inventory_staleness_ignores_placeholder_disk_meta(monkeypatch):
     sess.daily_inventory_history_matrix_max_date = "2026-06-27"
 
     monkeypatch.setattr(
+        "backend.services.inventory_staleness.today_ist_iso",
+        lambda: "2026-06-28",
+    )
+    monkeypatch.setattr(
         dih,
         "read_daily_inventory_history_disk_meta",
         lambda: {

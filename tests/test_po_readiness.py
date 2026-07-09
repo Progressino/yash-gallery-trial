@@ -8,6 +8,7 @@ from backend.services.po_readiness import (
     PO_MIN_INVENTORY_ROWS,
     PO_MIN_SALES_ROWS,
     augment_coverage,
+    build_po_readiness_fast,
     compute_data_ready,
     compute_po_ready,
     critical_restore_running,
@@ -64,8 +65,8 @@ def test_augment_coverage_light_dashboard_ready_partial_rows(monkeypatch):
 
     sess = _Sess()
     cov = _cov(
-        sales_rows=87_981,
-        inventory_rows=6_000,
+        sales_rows=500,
+        inventory_rows=50,
         mtr_rows=1000,
         myntra_rows=1000,
         meesho_rows=1000,
@@ -103,8 +104,6 @@ def test_augment_coverage_adds_po_ready():
 
 
 def test_po_readiness_endpoint(client, session_for_client, monkeypatch):
-    import pandas as pd
-
     _, sess = session_for_client
     days = pd.date_range("2025-12-01", periods=5, freq="D")
     sess.sales_df = pd.DataFrame(
@@ -137,3 +136,26 @@ def test_po_readiness_endpoint(client, session_for_client, monkeypatch):
     assert "background_jobs" in body
     assert "sales_rebuild" in body["background_jobs"]
     assert body["po_ready"] is True
+
+
+def test_build_po_readiness_fast_uses_warm_rows(monkeypatch):
+    import backend.main as main
+
+    days = pd.date_range("2025-12-01", periods=PO_MIN_SALES_ROWS + 5, freq="D")
+    main._warm_cache = {
+        "sales_df": pd.DataFrame(
+            {
+                "Sku": ["X"] * len(days),
+                "TxnDate": days,
+                "Units_Effective": [1] * len(days),
+            }
+        ),
+        "inventory_df_variant": pd.DataFrame(
+            {"OMS_SKU": [f"SKU-{i}" for i in range(PO_MIN_INVENTORY_ROWS + 1)]}
+        ),
+    }
+    sess = _Sess()
+    body = build_po_readiness_fast(sess, session_id="test")
+    assert body["po_ready"] is True
+    assert body["sales_rows"] >= PO_MIN_SALES_ROWS
+    assert body["inventory_rows"] >= PO_MIN_INVENTORY_ROWS

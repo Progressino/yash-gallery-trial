@@ -188,13 +188,6 @@ def _build_platform_sales_parts(
                     pass
             part = _build_mtr_sales_tagged(sub, mapping)
             if not part.empty:
-                # After ASIN-aware MTR conversion, PL twins with a different ASIN keep
-                # their PL seller SKU. Drop those here so a deepdive for the OMS form
-                # (1001YKBEIGE-XXL) does not also count 1001PLYKBEIGE-XXL units.
-                from .sales import _is_amazon_pl_raw_sku
-
-                part = part.loc[~part["Sku"].map(_is_amazon_pl_raw_sku)].copy()
-            if not part.empty:
                 parts.append(part)
 
     myntra = platform_frame_for_window("myntra_df", sess, start_date=start_date, end_date=end_date)
@@ -294,3 +287,73 @@ def build_deepdive_sales_frame(
         return pd.DataFrame()
     from .sales import _drop_amazon_unkeyed_shadows
     return _drop_amazon_unkeyed_shadows(out)
+
+
+def amazon_mtr_b2b_b2c_monthly(
+    sess,
+    sku: str,
+    *,
+    all_sizes: bool = False,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list[dict]:
+    """Amazon MTR units by invoice month and B2B/B2C (gross shipments − refunds)."""
+    from .sales import amazon_mtr_reporting_date, canonical_sales_sku_series
+
+    mtr = platform_frame_for_window("mtr_df", sess, start_date=start_date, end_date=end_date)
+    if mtr.empty:
+        return []
+
+    aliases = deepdive_sku_alias_tokens(sku)
+    exact_targets: Set[str] = set(aliases)
+    parent_targets: Set[str] = set()
+    if all_sizes:
+        for a in aliases:
+            parent_targets |= deepdive_parent_tokens(a)
+
+    raw = _platform_raw_sku_series(mtr)
+    mask = _sku_match_mask(
+        raw,
+        exact_targets=exact_targets,
+        parent_targets=parent_targets,
+        all_sizes=all_sizes,
+    )
+    sub = _filter_platform_df(mtr, mask)
+    if sub.empty:
+        return []
+
+    if len(sub) > 1 and {"Invoice_Number", "Order_Id"}.issubset(sub.columns):
+        try:
+            from .mtr import dedup_amazon_mtr_dataframe
+            sub = dedup_amazon_mtr_dataframe(sub)
+        except Exception:
+            pass
+
+    sub = sub.copy()
+    sub["_rep"] = amazon_mtr_reporting_date(sub)
+    sub = sub.dropna(subset=["_rep"])
+    if start_date:
+        sub = sub[sub["_rep"] >= pd.Timestamp(start_date)]
+    if end_date:
+        sub = sub[sub["_rep"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)]
+
+    if sub.empty or "Report_Type" not in sub.columns:
+        return []
+
+    sub["_month"] = sub["_rep"].dt.to_period("M").astype(str)
+    rows: list[dict] = []
+    for (month, rt), grp in sub.groupby(["_month", "Report_Type"], sort=True):
+        qty = pd.to_numeric(grp["Quantity"], errors="coerce").fillna(0)
+        txn = grp["Transaction_Type"].astype(str).str.strip()
+        ship = int(qty[txn == "Shipment"].sum())
+        ret = int(qty[txn == "Refund"].sum())
+        can = int(qty[txn == "Cancel"].sum())
+        rows.append({
+            "month": str(month),
+            "channel": str(rt),
+            "units": ship - ret,
+            "shipments": ship,
+            "returns": ret,
+            "cancelled": can,
+        })
+    return rows

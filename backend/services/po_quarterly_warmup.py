@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 19  # bumped: Amazon PL SKUs with distinct ASINs no longer merge into OMS
+QUARTERLY_CACHE_SCHEMA = 22  # Amazon MTR net in po_engine quarterly path (Ship − Refund)
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:

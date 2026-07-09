@@ -161,6 +161,49 @@ def _hydration_label(sess, session_id: str = "") -> str:
         return "unknown"
 
 
+def _row_floors_from_warm(sess) -> tuple[int, int]:
+    """Row counts for hot-path readiness — warm RAM + shared frames only."""
+    from .shared_frames import frame_row_count
+
+    warm_sales, warm_inv = _warm_row_floors()
+    if sess is None:
+        return warm_sales, warm_inv
+    return (
+        max(frame_row_count("sales_df", sess), warm_sales),
+        max(frame_row_count("inventory_df_variant", sess), warm_inv),
+    )
+
+
+def build_po_readiness_fast(sess, *, session_id: str = "") -> dict[str, Any]:
+    """Sub-second PO gate — skips full GET /coverage build and disk inventory reconciliation."""
+    from .po_pipeline import build_pipeline_readiness
+
+    sales_rows, inventory_rows = _row_floors_from_warm(sess)
+    crit = critical_restore_running(sess)
+    data_ready = (
+        sales_rows >= PO_MIN_SALES_ROWS and inventory_rows >= PO_MIN_INVENTORY_ROWS
+    )
+    po_ready = not crit and data_ready
+    pipeline = build_pipeline_readiness(sess, cov=None, light=True)
+    return {
+        "po_ready": po_ready,
+        "data_ready": data_ready,
+        "sales_rows": sales_rows,
+        "inventory_rows": inventory_rows,
+        "data_source": _resolve_data_source(sess),
+        "hydration": _hydration_label(sess, session_id=session_id),
+        "background_jobs": background_job_names(sess),
+        "background_tasks": background_tasks_running(sess),
+        "critical_restore_running": crit,
+        "calculate_allowed": pipeline.get("calculate_allowed", False),
+        "pipeline_blockers": pipeline.get("blockers") or [],
+        "pipeline_warnings": pipeline.get("warnings") or [],
+        "pipeline_version": pipeline.get("pipeline_version"),
+        "dataset_versions": pipeline.get("dataset_versions") or {},
+        "snapshot_id": pipeline.get("snapshot_id") or "",
+    }
+
+
 def build_po_readiness(sess, cov: CoverageResponse, *, session_id: str = "") -> dict[str, Any]:
     from .po_pipeline import build_pipeline_readiness
 
@@ -237,7 +280,7 @@ def _augment_coverage_light(sess, cov: CoverageResponse) -> CoverageResponse:
         data["po_ready"] = (
             sales_rows >= PO_MIN_SALES_ROWS and inv_rows >= PO_MIN_INVENTORY_ROWS
         )
-    _attach_inventory_staleness(sess, data)
+    _attach_inventory_staleness(sess, data, light=True)
     return CoverageResponse(**data)
 
 
@@ -268,7 +311,11 @@ def augment_coverage(sess, cov: CoverageResponse, *, light: bool = False) -> Cov
     return CoverageResponse(**data)
 
 
-def _attach_inventory_staleness(sess, data: dict) -> None:
+def _attach_inventory_staleness(sess, data: dict, *, light: bool = False) -> None:
+    if light:
+        _attach_inventory_staleness_light(sess, data)
+        return
+
     from .daily_inventory_history import (
         ensure_latest_daily_inventory_authoritative,
         inventory_history_matrix_cap_date,
@@ -307,6 +354,43 @@ def _attach_inventory_staleness(sess, data: dict) -> None:
             if max_d or int(disk_meta.get("daily_inventory_history_rows") or 0) > 0:
                 hist_loaded = True
                 data["daily_inventory_history"] = True
+    data["daily_inventory_history_min_date"] = min_d or None
+    data["daily_inventory_history_max_date"] = max_d or None
+    data["daily_inventory_history_uploaded_at"] = (
+        getattr(sess, "daily_inventory_history_uploaded_at", "") or None
+    )
+    data["daily_inventory_history_filename"] = (
+        getattr(sess, "daily_inventory_history_filename", "") or None
+    )
+    snap_date = data.get("inventory_snapshot_date")
+    if not snap_date and max_d and hist_loaded:
+        snap_date = max_d
+        data["inventory_snapshot_date"] = max_d
+    stale = build_inventory_staleness(
+        inventory_loaded=bool(data.get("inventory")),
+        inventory_snapshot_date=snap_date,
+        daily_inventory_history_loaded=hist_loaded,
+        daily_inventory_history_max_date=max_d or None,
+    )
+    data.update(stale)
+
+
+def _attach_inventory_staleness_light(sess, data: dict) -> None:
+    """Coverage poll staleness — metadata only, never load inventory matrix parquets."""
+    from .daily_inventory_history import read_daily_inventory_history_disk_meta
+    from .inventory_staleness import build_inventory_staleness, daily_inventory_history_bounds
+
+    hist_df = getattr(sess, "daily_inventory_history_df", None)
+    min_d, max_d = daily_inventory_history_bounds(hist_df)
+    hist_loaded = bool(data.get("daily_inventory_history")) or bool(max_d)
+    if not max_d:
+        disk_meta = read_daily_inventory_history_disk_meta() or {}
+        max_d = str(disk_meta.get("daily_inventory_history_max_date") or "").strip()[:10] or None
+        if not min_d:
+            min_d = str(disk_meta.get("daily_inventory_history_min_date") or "").strip()[:10] or None
+        if int(disk_meta.get("daily_inventory_history_rows") or 0) > 0:
+            hist_loaded = True
+            data["daily_inventory_history"] = True
     data["daily_inventory_history_min_date"] = min_d or None
     data["daily_inventory_history_max_date"] = max_d or None
     data["daily_inventory_history_uploaded_at"] = (

@@ -275,6 +275,20 @@ def test_flipkart_refund_subtracts_from_quarterly():
     assert kwargs["quarter_sums"][("SKU-X", "Jan-Mar 2025")] == 7
 
 
+def test_amazon_mtr_net_excludes_cancel_from_quarterly():
+    """Amazon PO quarterly: net = Shipment − Refund (Cancel does not add to demand)."""
+    q_label_map = {(2025, 4): "Jan-Mar 2025"}
+    kwargs = _make_quarterly_kwargs(q_label_map)
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2025-01-15"] * 3),
+        "SKU": ["1197YKGREEN-M"] * 3,
+        "Transaction_Type": ["Shipment", "Refund", "Cancel"],
+        "Quantity": [16, 6, 3],
+    })
+    _accumulate_shipment_frame(df, "amazon", None, **kwargs)
+    assert kwargs["quarter_sums"][("1197YKGREEN-M", "Jan-Mar 2025")] == 10
+
+
 def test_flipkart_cancel_subtracts_from_quarterly():
     """Cancellation (TxnType='Cancel') must subtract from net quarterly units."""
     q_label_map = {(2025, 4): "Jan-Mar 2025"}

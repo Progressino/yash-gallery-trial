@@ -191,15 +191,18 @@ def test_build_deepdive_dedups_fba_shadow_rows_in_mtr():
     assert amazon_units == 8, f"Expected 8 after shadow dedup, got {amazon_units}"
 
 
-def test_build_deepdive_excludes_pl_twin_with_different_asin():
-    """1001PLYKBEIGE-XXL with a different ASIN must not count toward 1001YKBEIGE-XXL."""
+def test_build_deepdive_merges_pl_twin_for_amazon():
+    """PL listing SKUs roll into OMS for Amazon MTR (seller replenishment view)."""
     sess = _FakeSess()
     sess.mtr_df = pd.DataFrame(
         {
             "SKU": ["1001YKBEIGE-XXL", "1001YKBEIGE-XXL", "1001PLYKBEIGE-XXL"],
             "Date": ["2025-01-15", "2025-02-10", "2025-01-20"],
+            "Invoice_Date_Text": ["2025-01-15", "2025-02-10", "2025-01-20"],
+            "Reporting_Date": ["2025-01-15", "2025-02-10", "2025-01-20"],
             "Quantity": [50, 30, 22],
             "Transaction_Type": ["Shipment", "Shipment", "Shipment"],
+            "Report_Type": ["B2C", "B2C", "B2C"],
             "Order_Id": ["A1", "A2", "A3"],
             "Invoice_Number": ["I1", "I2", "I3"],
             "ASIN": ["B07VM7DXDW", "B07VM7DXDW", "B08292BLQD"],
@@ -209,19 +212,7 @@ def test_build_deepdive_excludes_pl_twin_with_different_asin():
         "1001YKBEIGE-XXL": "1001YKBEIGE-XXL",
         "1001PLYKBEIGE-XXL": "1001YKBEIGE-XXL",
     }
-    # Stale sales_df that already merged PL onto OMS (inflated).
-    sess.sales_df = pd.DataFrame(
-        {
-            "Sku": ["1001YKBEIGE-XXL", "1001YKBEIGE-XXL"],
-            "TxnDate": ["2025-01-15", "2025-01-20"],
-            "Quantity": [50, 22],
-            "Transaction Type": ["Shipment", "Shipment"],
-            "Units_Effective": [50, 22],
-            "Source": ["Amazon", "Amazon"],
-            "OrderId": ["A1", "A3"],
-            "LineKey": ["", ""],
-        }
-    )
+    sess.sales_df = pd.DataFrame()
 
     out = build_deepdive_sales_frame(
         sess,
@@ -235,7 +226,23 @@ def test_build_deepdive_excludes_pl_twin_with_different_asin():
         & (out["Transaction Type"].astype(str) == "Shipment"),
         "Quantity",
     ].sum()
-    assert int(amazon) == 80, f"Expected 80 OMS units (not 102), got {amazon}"
+    assert int(amazon) == 102, f"Expected 102 merged shipment units, got {amazon}"
+
+
+def test_amazon_seller_net_units_formula():
+    from backend.services.sales import amazon_seller_net_units
+
+    qty = pd.Series([10, 2, 3])
+    txn = pd.Series(["Shipment", "Cancel", "Refund"])
+    assert amazon_seller_net_units(qty, txn) == 7.0  # 10 - 3
+
+
+def test_amazon_mtr_gross_net_units_formula():
+    from backend.services.sales import amazon_mtr_gross_net_units
+
+    qty = pd.Series([16, 3, 6])
+    txn = pd.Series(["Shipment", "Cancel", "Refund"])
+    assert amazon_mtr_gross_net_units(qty, txn) == 10.0  # 16 - 6
 
 
 def test_protect_distinct_asin_pl_skus():

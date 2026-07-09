@@ -78,7 +78,7 @@ export default function PoHydrationGate() {
 
   const { data: readiness } = useQuery({
     queryKey: ['po-readiness-gate'],
-    queryFn: () => getPoReadiness({ timeout: 20_000 }),
+    queryFn: () => getPoReadiness({ timeout: 45_000 }),
     refetchInterval: q => (q.state.data?.po_ready || coveragePoReady ? false : 2_000),
     staleTime: 0,
   })

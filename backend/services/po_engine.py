@@ -129,12 +129,19 @@ def _platform_shipment_history_part(
     *,
     strip_pl: bool = False,
     canonical_oms: bool = False,
+    platform: Optional[str] = None,
 ) -> pd.DataFrame:
     """Normalize one platform frame to [SKU, Date, Qty, TxnType] shipment rows."""
     if df is None or df.empty:
         return pd.DataFrame()
     sku_col = next((c for c in df.columns if c in ["OMS_SKU", "SKU", "Sku"]), None)
-    date_col = next((c for c in df.columns if c in ["Date", "TxnDate"]), None)
+    if platform == "amazon":
+        date_col = next(
+            (c for c in ("Reporting_Date", "Date", "TxnDate") if c in df.columns),
+            None,
+        )
+    else:
+        date_col = next((c for c in df.columns if c in ["Date", "TxnDate"]), None)
     qty_col = next((c for c in df.columns if c in ["Quantity", "Qty"]), None)
     txn_col = next(
         (c for c in df.columns if c in ["Transaction_Type", "Transaction Type", "TxnType"]),
@@ -184,17 +191,23 @@ def _collect_platform_shipment_history_parts(
     sku_mapping: Optional[Dict[str, str]],
 ) -> list[pd.DataFrame]:
     parts: list[pd.DataFrame] = []
-    for raw, strip_pl, canon in (
-        (mtr_df, True, False),
-        (myntra_df, False, True),
-        (meesho_df, False, True),
-        (flipkart_df, False, True),
-        (snapdeal_df, False, True),
+    for raw, strip_pl, canon, plat in (
+        (mtr_df, True, False, "amazon"),
+        (myntra_df, False, True, "myntra"),
+        (meesho_df, False, True, "meesho"),
+        (flipkart_df, False, True, "flipkart"),
+        (snapdeal_df, False, True, "snapdeal"),
     ):
         chunk = _platform_shipment_history_part(
-            raw, sku_mapping, strip_pl=strip_pl, canonical_oms=canon
+            raw,
+            sku_mapping,
+            strip_pl=strip_pl,
+            canonical_oms=canon,
+            platform=plat,
         )
         if not chunk.empty:
+            chunk = chunk.copy()
+            chunk["_Platform"] = plat
             parts.append(chunk)
     return parts
 
@@ -251,9 +264,10 @@ def _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent=False):
     m["Sku"] = m["Sku"].apply(lambda x: _strip_pl(x, sku_mapping))
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
-    m["Units_Effective"] = np.where(
-        m["Transaction Type"] == "Refund", -m["Quantity"],
-        np.where(m["Transaction Type"] == "Cancel", -m["Quantity"], m["Quantity"])
+    m["Units_Effective"] = np.select(
+        [m["Transaction Type"] == "Refund", m["Transaction Type"] == "Cancel"],
+        [-m["Quantity"], 0],
+        default=m["Quantity"],
     )
     return m[["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective"]]
 
@@ -289,8 +303,22 @@ def calculate_quarterly_history(
     hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
     hist = hist.dropna(subset=["Date"])
     hist["Qty"] = pd.to_numeric(hist["Qty"], errors="coerce").fillna(0)
-    _neg = hist["TxnType"].astype(str).str.strip().str.lower().isin(_NEGATIVE_TXN)
-    hist["Qty"] = np.where(_neg, -hist["Qty"].abs(), hist["Qty"].abs())
+    _txn_lower = hist["TxnType"].astype(str).str.strip().str.lower()
+    _plat = (
+        hist["_Platform"].astype(str).str.strip().str.lower()
+        if "_Platform" in hist.columns
+        else pd.Series("", index=hist.index)
+    )
+    _is_amazon = _plat == "amazon"
+    # Amazon MTR net = Shipment − Refund (cancels tracked but excluded from PO demand).
+    _neg = _txn_lower.eq("refund") | (~_is_amazon & _txn_lower.eq("cancel"))
+    _zero = _is_amazon & _txn_lower.eq("cancel")
+    hist["Qty"] = np.where(
+        _zero,
+        0,
+        np.where(_neg, -hist["Qty"].abs(), hist["Qty"].abs()),
+    )
+    hist = hist.drop(columns=["_Platform"], errors="ignore")
     hist = hist[hist["Qty"] != 0]
     if hist.empty:
         return pd.DataFrame()

@@ -204,6 +204,11 @@ def strip_fba_intransit_unless_enabled(df: pd.DataFrame) -> pd.DataFrame:
     return recompute_inventory_totals(out)
 
 
+def inventory_variant_for_api(df: pd.DataFrame) -> pd.DataFrame:
+    """Inventory frame for GET /inventory — FBA policy applied consistently."""
+    return strip_fba_intransit_unless_enabled(df)
+
+
 def inventory_marketplace_breakdown(df: pd.DataFrame, debug: dict | None = None) -> list[dict[str, Any]]:
     """Per-channel totals for UI; ``included`` means column present with stock > 0."""
     dbg = debug or {}
@@ -314,6 +319,7 @@ def refresh_inventory_api_cache(sess: Any) -> None:
         sess.inventory_api_totals = {}
         sess.inventory_api_marketplaces = []
         return
+    df = inventory_variant_for_api(df)
     dbg = getattr(sess, "inventory_debug", None) or {}
     sess.inventory_api_totals = inventory_column_totals(df)
     sess.inventory_api_marketplaces = inventory_marketplace_breakdown(df, dbg)
@@ -1590,6 +1596,7 @@ def load_inventory_consolidated(
         )
 
     result = consolidated[consolidated["Total_Inventory"] > 0].reset_index(drop=True)
+    result = strip_fba_intransit_unless_enabled(result)
     if return_debug:
         return result, debug
     return result
