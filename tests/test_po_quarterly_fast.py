@@ -419,3 +419,95 @@ def test_flipkart_sales_df_returncancel_adds():
     assert n > 0
     # Net = 15 + 2 - 3 - 1 = 13
     assert quarter_sums[("FK-SKU", quarter_col_name(fy, qn))] == 13
+
+
+def test_meesho_quarterly_backfills_sku_from_suborder_sibling():
+    """Refund rows without listing SKU must inherit OMS from shipment twin."""
+    from collections import defaultdict
+
+    start_ts = pd.Timestamp("2024-06-01")
+    end_ts = pd.Timestamp("2026-06-04")
+    today = pd.Timestamp.today()
+    q_label_map = {(2026, 3): "Oct-Dec 2025"}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+
+    df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-11-15", "2025-11-20"]),
+            "OMS_SKU": ["1055YKGREEN-XS", ""],
+            "SKU": ["1055YKCGREEN-XS", ""],
+            "TxnType": ["Shipment", "Refund"],
+            "Quantity": [2, 1],
+            "OrderId": ["258980610239862016_1", "258980610239862016_1"],
+            "LineKey": ["258980610239862016_1", "258980610239862016_1"],
+            "MeeshoSubOrder": ["258980610239862016_1", "258980610239862016_1"],
+        }
+    )
+    n = _accumulate_shipment_frame(
+        df,
+        "meesho",
+        None,
+        strip_pl=False,
+        canonical_oms=True,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+    )
+    assert n == 2
+    assert quarter_sums[("1055YKGREEN-XS", "Oct-Dec 2025")] == 1
+    assert ("NAN", "Oct-Dec 2025") not in quarter_sums
+
+
+def test_meesho_quarterly_drops_nan_oms_tokens():
+    from collections import defaultdict
+
+    start_ts = pd.Timestamp("2024-06-01")
+    end_ts = pd.Timestamp("2026-06-04")
+    today = pd.Timestamp.today()
+    q_label_map = {(2026, 3): "Oct-Dec 2025"}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+
+    df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-11-15"]),
+            "OMS_SKU": [float("nan")],
+            "SKU": [""],
+            "TxnType": ["Shipment"],
+            "Quantity": [5],
+            "OrderId": ["lonely-order"],
+            "LineKey": ["lonely-order"],
+            "MeeshoSubOrder": ["lonely-order"],
+        }
+    )
+    n = _accumulate_shipment_frame(
+        df,
+        "meesho",
+        None,
+        strip_pl=False,
+        canonical_oms=True,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+    )
+    assert n == 0
+    assert not quarter_sums

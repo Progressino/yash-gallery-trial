@@ -828,6 +828,9 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str, *, is_merge: bool = Fals
                 out = _dedup_meesho_suborder_cross_source(out)
                 if is_merge:
                     out = _dedup_shipment_superseded_by_same_day_refund(out)
+                from .meesho import backfill_meesho_sku_from_suborder_inplace
+
+                backfill_meesho_sku_from_suborder_inplace(out)
             elif platform == "flipkart":
                 out = _dedup_flipkart_cross_source_overlay(out)
             if platform in ("myntra", "meesho", "flipkart"):

@@ -342,17 +342,99 @@ def _meesho_line_dedup_series(df: pd.DataFrame) -> pd.Series:
     return keys
 
 
+def _meesho_sku_token_valid(value: object) -> bool:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return False
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "none", "nat", "meesho_total"):
+        return False
+    if is_likely_non_sku_notes_value(s):
+        return False
+    return True
+
+
+def _meesho_pick_sku_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series("", index=df.index, dtype=str)
+    s = _clean_meesho_str_series(df[col]).astype(str).str.strip()
+    ok = s.map(_meesho_sku_token_valid)
+    return s.where(ok, "")
+
+
+def _meesho_unambiguous_key_map(keys: pd.Series, values: pd.Series) -> Dict[str, str]:
+    tmp = pd.DataFrame(
+        {
+            "k": keys.astype(str).str.strip(),
+            "v": values.astype(str).str.strip(),
+        }
+    )
+    tmp = tmp[
+        tmp["k"].ne("")
+        & tmp["v"].ne("")
+        & ~tmp["k"].str.lower().isin(["nan", "none", "nat"])
+    ]
+    out: Dict[str, str] = {}
+    for key, grp in tmp.groupby("k", sort=False):
+        uniq = list(dict.fromkeys(grp["v"].tolist()))
+        if len(uniq) == 1:
+            out[str(key)] = uniq[0]
+    return out
+
+
+def backfill_meesho_sku_from_suborder_inplace(df: pd.DataFrame) -> None:
+    """
+    Fill empty SKU / OMS_SKU on Meesho rows from siblings sharing the same sub-order,
+    line key, or order id (e.g. refund row missing listing SKU while shipment has it).
+    """
+    if df.empty or "SKU" not in df.columns:
+        return
+
+    df["SKU"] = _clean_meesho_str_series(df["SKU"]).astype(str)
+    if "OMS_SKU" not in df.columns:
+        df["OMS_SKU"] = df["SKU"]
+    else:
+        df["OMS_SKU"] = _clean_meesho_str_series(df["OMS_SKU"]).astype(str)
+
+    sku = _meesho_pick_sku_series(df, "SKU")
+    oms = _meesho_pick_sku_series(df, "OMS_SKU")
+    pick = oms.where(oms.ne(""), sku)
+    need = oms.eq("") | sku.eq("")
+    if not need.any():
+        df["SKU"] = sku
+        df["OMS_SKU"] = oms.where(oms.ne(""), sku)
+        return
+
+    filled_sku = sku.copy()
+    filled_oms = oms.copy()
+    for key_col in ("MeeshoSubOrder", "LineKey", "OrderId"):
+        if key_col not in df.columns:
+            continue
+        lookup = _meesho_unambiguous_key_map(df[key_col], pick)
+        if not lookup:
+            continue
+        rec = df[key_col].astype(str).str.strip().map(lookup).fillna("")
+        filled_sku = filled_sku.where(filled_sku.ne("") | rec.eq(""), rec)
+        filled_oms = filled_oms.where(filled_oms.ne("") | rec.eq(""), rec)
+
+    df.loc[need, "SKU"] = filled_sku.loc[need]
+    df.loc[need, "OMS_SKU"] = filled_oms.loc[need]
+    still = need & df["OMS_SKU"].astype(str).str.strip().eq("")
+    df.loc[still, "OMS_SKU"] = df.loc[still, "SKU"]
+
+
 def refresh_meesho_dataframe_oms_inplace(df: pd.DataFrame, mapping: Optional[dict]) -> None:
     """Normalize SKU cells; set OMS_SKU via Replace-SKU / Meesho sheet mapping (mutates df)."""
     if df.empty or "SKU" not in df.columns:
         return
     from .helpers import map_to_oms_sku
 
+    backfill_meesho_sku_from_suborder_inplace(df)
     df["SKU"] = _clean_meesho_str_series(df["SKU"])
     if mapping:
         df["OMS_SKU"] = df["SKU"].map(lambda s: map_to_oms_sku(s, mapping) if s else "")
     else:
         df["OMS_SKU"] = df["SKU"]
+    backfill_meesho_sku_from_suborder_inplace(df)
 
 
 def _read_excel_zip_member(inner_zf, member_path: str) -> pd.DataFrame:
@@ -880,7 +962,9 @@ def meesho_export_sku_recovery_maps(
         return {}, {}
     m = meesho_df.copy()
     m["_oid"] = m["OrderId"].astype(str).str.strip()
-    m["_sku"] = _clean_meesho_str_series(m["SKU"])
+    sku_src = _meesho_pick_sku_series(m, "OMS_SKU")
+    sku_src = sku_src.where(sku_src.ne(""), _meesho_pick_sku_series(m, "SKU"))
+    m["_sku"] = sku_src
     dt = pd.to_datetime(m["Date"], errors="coerce")
     m["_day"] = dt.dt.strftime("%Y-%m-%d")
     m.loc[dt.isna(), "_day"] = ""
@@ -979,11 +1063,13 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
 
     from .helpers import map_to_oms_sku
 
+    backfill_meesho_sku_from_suborder_inplace(meesho_df)
+
     # Resolve OMS SKU: use the SKU column from the parsed data if available
     if "SKU" in meesho_df.columns:
-        raw_sku = _clean_meesho_str_series(meesho_df["SKU"])
-        has_sku = raw_sku.str.len() > 0
-        has_sku &= ~raw_sku.str.lower().isin(["nan", "none"])
+        raw_sku = _meesho_pick_sku_series(meesho_df, "OMS_SKU")
+        raw_sku = raw_sku.where(raw_sku.ne(""), _meesho_pick_sku_series(meesho_df, "SKU"))
+        has_sku = raw_sku.map(_meesho_sku_token_valid)
         if sku_mapping:
             mapped = raw_sku.map(lambda s: map_to_oms_sku(s, sku_mapping) if s else "")
         else:

@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 24  # Amazon reporting-date + sales_df cancel=0 everywhere
+QUARTERLY_CACHE_SCHEMA = 25  # Meesho sub-order SKU backfill + drop nan OMS keys
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:

@@ -1394,6 +1394,34 @@ def test_meesho_to_sales_maps_and_oms_refresh_on_build():
     assert mdf2["OMS_SKU"].iloc[0] == "1001OMS-XL"
 
 
+def test_meesho_backfill_sku_from_suborder_sibling():
+    from backend.services.meesho import backfill_meesho_sku_from_suborder_inplace
+
+    mdf = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-11-15", "2025-11-20"]),
+            "TxnType": ["Shipment", "Refund"],
+            "Quantity": [1.0, 1.0],
+            "SKU": ["AK-180BLACK-XL", ""],
+            "OMS_SKU": ["AK-180BLACK-XL", ""],
+            "OrderId": ["237653394323428672_1", "237653394323428672_1"],
+            "LineKey": ["237653394323428672_1", "237653394323428672_1"],
+            "MeeshoSubOrder": ["237653394323428672_1", "237653394323428672_1"],
+        }
+    )
+    backfill_meesho_sku_from_suborder_inplace(mdf)
+    assert mdf.loc[1, "OMS_SKU"] == "AK-180BLACK-XL"
+    assert mdf.loc[1, "SKU"] == "AK-180BLACK-XL"
+
+
+def test_canonical_oms_key_rejects_nan_tokens():
+    from backend.services.po_engine import canonical_oms_key
+
+    assert canonical_oms_key("nan") == ""
+    assert canonical_oms_key("NaN") == ""
+    assert canonical_oms_key(None) == ""
+
+
 def test_get_platform_summary_amazon_refunds():
     mtr = pd.DataFrame(
         {

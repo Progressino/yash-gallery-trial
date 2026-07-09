@@ -150,6 +150,18 @@ def _accumulate_shipment_frame(
     if df is None or df.empty:
         return 0
 
+    if platform == "meesho":
+        from .meesho import backfill_meesho_sku_from_suborder_inplace
+
+        df = df.copy()
+        backfill_meesho_sku_from_suborder_inplace(df)
+        if "SKU" in df.columns and "OMS_SKU" in df.columns:
+            from .meesho import _meesho_pick_sku_series
+
+            oms_pick = _meesho_pick_sku_series(df, "OMS_SKU")
+            sku_pick = _meesho_pick_sku_series(df, "SKU")
+            df["OMS_SKU"] = oms_pick.where(oms_pick.ne(""), sku_pick)
+
     sku_col = next(
         (c for c in cols if c in df.columns and c in ("SKU", "OMS_SKU")),
         None,
@@ -230,11 +242,14 @@ def _accumulate_shipment_frame(
             k = canonical_oms_key(s, sku_mapping) if sku_mapping else str(s).strip().upper()
         if k:
             canon[s] = get_parent_sku(k) if group_by_parent else k
-    tentative = raw_skus.map(canon)
+    tentative = raw_skus.map(canon).fillna("").astype(str).str.strip()
     work["SKU"] = tentative
     if asin_col and asin_col in work.columns:
         work = work.drop(columns=[asin_col], errors="ignore")
-    work = work[work["SKU"].astype(str).str.len() > 0]
+    work = work[
+        work["SKU"].ne("")
+        & ~work["SKU"].str.lower().isin(["nan", "none", "nat"])
+    ]
     if work.empty:
         return 0
 

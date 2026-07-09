@@ -71,10 +71,15 @@ def canonical_oms_key(raw, sku_mapping: Optional[Dict[str, str]] = None) -> str:
     """
     if raw is None or (isinstance(raw, float) and pd.isna(raw)):
         return ""
-    t = normalize_id_token_for_mapping(str(raw).strip())
+    stripped = str(raw).strip()
+    if stripped.lower() in ("nan", "none", "nat"):
+        return ""
+    t = normalize_id_token_for_mapping(stripped)
     t = clean_sku(t or raw)
-    if not t:
-        t = str(raw).strip().upper()
+    if not t or str(t).strip().lower() in ("nan", "none", "nat"):
+        t = stripped.upper() if stripped else ""
+    if str(t).strip().lower() in ("nan", "none", "nat"):
+        return ""
     return collapse_duplicate_trailing_size_suffix(
         _strip_pl(str(t).strip(), sku_mapping or {})
     )
