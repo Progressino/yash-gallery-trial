@@ -1579,6 +1579,25 @@ def test_flipkart_cancel_reduces_net_units_like_maco_final_sale():
     assert float(sales["Units_Effective"].sum()) == 0.0
 
 
+def test_mtr_to_sales_df_protects_distinct_asin_pl_listing():
+    from backend.services.sales import _mtr_to_sales_df
+
+    mtr_df = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2025-01-15"), pd.Timestamp("2025-01-20")],
+            "Reporting_Date": [pd.Timestamp("2025-01-15"), pd.Timestamp("2025-01-20")],
+            "SKU": ["1001YKBEIGE-XXL", "1001PLYKBEIGE-XXL"],
+            "Transaction_Type": ["Shipment", "Shipment"],
+            "Quantity": [60.0, 22.0],
+            "Order_Id": ["A1", "A2"],
+            "Invoice_Number": ["I1", "I2"],
+            "ASIN": ["B07VM7DXDW", "B08292BLQD"],
+        }
+    )
+    out = _mtr_to_sales_df(mtr_df, {})
+    assert list(out["Sku"].astype(str)) == ["1001YKBEIGE-XXL", "1001PLYKBEIGE-XXL"]
+
+
 def test_amazon_mtr_cancel_excluded_from_net_units():
     """Amazon Cancel rows contribute 0 to Units_Effective (net = Shipment − Refund)."""
     from backend.services.sales import _mtr_to_sales_df

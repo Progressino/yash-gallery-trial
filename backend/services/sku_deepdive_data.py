@@ -118,6 +118,24 @@ def _merge_platform_and_sales(plat: pd.DataFrame, sales: pd.DataFrame) -> pd.Dat
     plat["_skukey"] = canonical_sales_sku_series(plat["Sku"])
     sales["_skukey"] = canonical_sales_sku_series(sales["Sku"])
 
+    # When Amazon MTR platform history exists for a SKU, unified sales_df must not
+    # supplement it — stale sales_df rows often include PL-twin shipments that were
+    # wrongly folded onto the OMS token (inflates deepdive, e.g. 82 vs 60 for XXL).
+    if (
+        not plat.empty
+        and not sales.empty
+        and "Source" in plat.columns
+        and "Source" in sales.columns
+    ):
+        amz_skus = set(
+            plat.loc[plat["Source"].astype(str) == "Amazon", "_skukey"].astype(str)
+        )
+        if amz_skus:
+            drop = (sales["Source"].astype(str) == "Amazon") & sales["_skukey"].isin(
+                amz_skus
+            )
+            sales = sales.loc[~drop]
+
     plat_keys = plat[["_skukey", "_day"]].drop_duplicates()
     plat_keys["_in_plat"] = True
     merged = sales.merge(plat_keys, on=["_skukey", "_day"], how="left")
@@ -265,6 +283,12 @@ def build_deepdive_sales_frame(
         start_date=start_date,
         end_date=end_date,
     )
+
+    # Exact-SKU mode: keep only rows whose resolved Sku equals the searched token.
+    # Distinct-ASIN PL listings stay on their PL seller Sku and must not inflate OMS.
+    if not all_sizes and plat is not None and not plat.empty and "Sku" in plat.columns:
+        plat_skus = plat["Sku"].astype(str).str.strip().str.upper()
+        plat = plat.loc[plat_skus.isin(exact_targets)].copy()
 
     sales = session_sales_df(sess)
     if sales is None or sales.empty:

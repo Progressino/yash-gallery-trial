@@ -454,7 +454,14 @@ def _mtr_to_sales_df(
     _raw_skus = m["Sku"]
     _uniq = pd.unique(_raw_skus.to_numpy())
     _resolved = {u: _resolve_mtr_sku(u, _map) for u in _uniq}
-    m["Sku"] = canonical_sales_sku_series(_raw_skus.map(_resolved))
+    resolved = canonical_sales_sku_series(_raw_skus.map(_resolved))
+    if "ASIN" in mtr_df.columns:
+        resolved = protect_distinct_asin_pl_skus(
+            _raw_skus,
+            resolved,
+            mtr_df.loc[m.index, "ASIN"],
+        )
+    m["Sku"] = resolved
 
     # Line-level keys for build_sales_df dedup (Amazon MTR exposes Order_Id / Invoice_Number).
     idx = m.index

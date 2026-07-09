@@ -192,7 +192,7 @@ def test_build_deepdive_dedups_fba_shadow_rows_in_mtr():
 
 
 def test_build_deepdive_merges_pl_twin_for_amazon():
-    """PL listing SKUs roll into OMS for Amazon MTR (seller replenishment view)."""
+    """Same-ASIN PL twins roll into OMS; distinct-ASIN PL listings stay separate."""
     sess = _FakeSess()
     sess.mtr_df = pd.DataFrame(
         {
@@ -226,7 +226,55 @@ def test_build_deepdive_merges_pl_twin_for_amazon():
         & (out["Transaction Type"].astype(str) == "Shipment"),
         "Quantity",
     ].sum()
-    assert int(amazon) == 102, f"Expected 102 merged shipment units, got {amazon}"
+    # PL listing with a different ASIN must not roll into the OMS deepdive token.
+    assert int(amazon) == 80, f"Expected 80 OMS shipment units, got {amazon}"
+
+
+def test_build_deepdive_amazon_uses_mtr_not_stale_sales_pl_merge():
+    """sales_df with blind PL-merge must not inflate Amazon when mtr_df has ASIN-safe rows."""
+    sess = _FakeSess()
+    sess.mtr_df = pd.DataFrame(
+        {
+            "SKU": ["1001YKBEIGE-XXL"] * 3,
+            "Date": ["2025-01-15", "2025-02-10", "2025-03-05"],
+            "Reporting_Date": ["2025-01-15", "2025-02-10", "2025-03-05"],
+            "Quantity": [25, 20, 15],
+            "Transaction_Type": ["Shipment", "Shipment", "Shipment"],
+            "Report_Type": ["B2C", "B2C", "B2C"],
+            "Order_Id": ["A1", "A2", "A3"],
+            "Invoice_Number": ["I1", "I2", "I3"],
+            "ASIN": ["B07VM7DXDW", "B07VM7DXDW", "B07VM7DXDW"],
+        }
+    )
+    # Stale unified sales includes PL-twin units folded onto OMS (82 instead of 60).
+    sess.sales_df = pd.DataFrame(
+        {
+            "Sku": ["1001YKBEIGE-XXL"] * 4,
+            "TxnDate": ["2025-01-15", "2025-02-10", "2025-03-05", "2025-01-20"],
+            "Quantity": [25, 20, 15, 22],
+            "Transaction Type": ["Shipment"] * 4,
+            "Units_Effective": [25, 20, 15, 22],
+            "Source": ["Amazon"] * 4,
+            "OrderId": ["A1", "A2", "A3", "PL1"],
+            "LineKey": ["A1", "A2", "A3", "PL1"],
+        }
+    )
+
+    out = build_deepdive_sales_frame(
+        sess,
+        "1001YKBEIGE-XXL",
+        all_sizes=False,
+        start_date="2025-01-01",
+        end_date="2025-03-31",
+    )
+    amazon = int(
+        out.loc[
+            (out["Source"].astype(str) == "Amazon")
+            & (out["Transaction Type"].astype(str) == "Shipment"),
+            "Quantity",
+        ].sum()
+    )
+    assert amazon == 60, f"Expected 60 MTR units, got {amazon}"
 
 
 def test_amazon_seller_net_units_formula():
