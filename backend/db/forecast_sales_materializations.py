@@ -102,10 +102,11 @@ def sales_df_to_daily(sales_df: pd.DataFrame) -> tuple[pd.DataFrame, date | None
     qty_c = _first_col(sales_df, ("Quantity", "quantity"))
     tt_c = _first_col(sales_df, ("Transaction Type", "Transaction_Type", "transaction_type"))
     ue_c = _first_col(sales_df, ("Units_Effective", "units_effective"))
+    src_c = _first_col(sales_df, ("Source", "source", "Platform", "platform"))
     if not sku_c or not date_c:
         return pd.DataFrame(), None
 
-    df = sales_df[[sku_c, date_c] + [c for c in (qty_c, tt_c, ue_c) if c]].copy()
+    df = sales_df[[sku_c, date_c] + [c for c in (qty_c, tt_c, ue_c, src_c) if c]].copy()
     df = df.rename(columns={sku_c: "oms_sku", date_c: "txn_date"})
     df["oms_sku"] = df["oms_sku"].astype(str).str.strip().str.upper()
     df["txn_date"] = pd.to_datetime(df["txn_date"], errors="coerce").dt.normalize()
@@ -115,14 +116,19 @@ def sales_df_to_daily(sales_df: pd.DataFrame) -> tuple[pd.DataFrame, date | None
 
     qty = pd.to_numeric(df[qty_c], errors="coerce").fillna(0) if qty_c else pd.Series(0.0, index=df.index)
     tt = df[tt_c].astype(str).str.strip().str.lower() if tt_c else pd.Series("shipment", index=df.index)
-    is_refund = tt.isin(("refund", "cancel"))
+    is_amazon = (
+        df[src_c].astype(str).str.strip().str.lower().eq("amazon")
+        if src_c
+        else pd.Series(False, index=df.index)
+    )
+    is_return_row = tt.eq("refund") | (~is_amazon & tt.eq("cancel"))
     if ue_c:
         net = pd.to_numeric(df[ue_c], errors="coerce").fillna(0.0)
     else:
-        net = np.where(is_refund, -qty.abs(), qty)
+        net = np.where(is_return_row, -qty.abs(), np.where(tt.eq("shipment"), qty.abs(), 0.0))
 
-    df["_sold"] = np.where(~is_refund, qty, 0.0)
-    df["_ret"] = np.where(is_refund, qty.abs(), 0.0)
+    df["_sold"] = np.where(tt.eq("shipment"), qty.abs(), 0.0)
+    df["_ret"] = np.where(is_return_row, qty.abs(), 0.0)
     df["_net"] = net
 
     daily = (

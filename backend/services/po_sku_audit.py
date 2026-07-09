@@ -96,11 +96,17 @@ def _tier3_sku_totals(sess, sku: str, start_date: str, end_date: str) -> dict[st
             continue
         qty = pd.to_numeric(sub.get("Quantity"), errors="coerce").fillna(0)
         if txn_col in sub.columns:
-            txn = sub[txn_col].astype(str).str.strip().str.lower()
-            ship = txn.str.contains("ship", na=False) & ~txn.str.contains("refund|return", na=False)
-            rtn = txn.str.contains("refund|return", na=False)
-            p_sold = int(qty[ship].sum())
-            p_ret = int(qty[rtn].abs().sum())
+            txn = sub[txn_col].astype(str).str.strip()
+            if plat == "amazon":
+                txn_norm = txn.str.lower()
+                p_sold = int(qty[txn_norm == "shipment"].sum())
+                p_ret = int(qty[txn_norm == "refund"].sum())
+            else:
+                txn_lower = txn.str.lower()
+                ship = txn_lower.str.contains("ship", na=False) & ~txn_lower.str.contains("refund|return", na=False)
+                rtn = txn_lower.str.contains("refund|return", na=False)
+                p_sold = int(qty[ship].sum())
+                p_ret = int(qty[rtn].abs().sum())
         else:
             p_sold = int(qty.clip(lower=0).sum())
             p_ret = 0

@@ -5589,13 +5589,14 @@ def mtr_analytics(request: Request):
 
     import pandas as pd
     import numpy as np
+    from ..services.sales import amazon_mtr_attach_reporting_date
 
-    df = df.copy()
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"])
+    df = amazon_mtr_attach_reporting_date(df)
+    if df.empty:
+        return {"loaded": False}
 
-    # Monthly shipments vs refunds
-    df["Month"] = df["Date"].dt.to_period("M").astype(str)
+    # Monthly shipments vs refunds (invoice/reporting month; cancels tracked separately).
+    df["Month"] = df["_Date"].dt.to_period("M").astype(str)
     monthly = (
         df.groupby(["Month", "Transaction_Type"])["Quantity"]
         .sum().reset_index()
@@ -5645,7 +5646,7 @@ def mtr_analytics(request: Request):
     return {
         "loaded":       True,
         "rows":         len(df),
-        "date_range":   [str(df["Date"].min().date()), str(df["Date"].max().date())],
+        "date_range":   [str(df["_Date"].min().date()), str(df["_Date"].max().date())],
         "shipped":      shipped,
         "returned":     returned,
         "net_units":    net_units,

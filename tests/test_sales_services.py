@@ -1569,6 +1569,62 @@ def test_amazon_mtr_cancel_excluded_from_net_units():
     assert float(out["Units_Effective"].sum()) == 1.0
 
 
+def test_amazon_mtr_uses_reporting_date_for_metrics():
+    from backend.services.sales import amazon_mtr_attach_reporting_date
+
+    mtr = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2025-01-20")],
+            "Reporting_Date": [pd.Timestamp("2025-01-05")],
+            "SKU": ["SKU-A"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [1],
+        }
+    )
+    out = amazon_mtr_attach_reporting_date(mtr)
+    assert out["_Date"].iloc[0] == pd.Timestamp("2025-01-05")
+
+
+def test_build_sales_df_amazon_cancel_shipment_refund_net():
+    """Unified sales must keep Amazon Cancel neutral across all SKUs."""
+    mtr = pd.DataFrame(
+        {
+            "Reporting_Date": pd.to_datetime(["2025-01-15"] * 3),
+            "SKU": ["1197YKGREEN-M"] * 3,
+            "Transaction_Type": ["Shipment", "Refund", "Cancel"],
+            "Quantity": [16, 6, 3],
+            "Order_Id": ["O1", "O2", "O3"],
+            "Invoice_Number": ["", "", ""],
+        }
+    )
+    sales = build_sales_df(
+        mtr_df=mtr,
+        myntra_df=pd.DataFrame(),
+        meesho_df=pd.DataFrame(),
+        flipkart_df=pd.DataFrame(),
+        snapdeal_df=pd.DataFrame(),
+        sku_mapping={},
+    )
+    amz = sales[sales["Source"] == "Amazon"]
+    assert float(amz["Units_Effective"].sum()) == 10.0
+
+
+def test_sales_df_to_daily_amazon_cancel_neutral():
+    from backend.db.forecast_sales_materializations import sales_df_to_daily
+
+    sales = pd.DataFrame(
+        {
+            "Sku": ["AMZ-SKU"] * 3,
+            "TxnDate": pd.to_datetime(["2025-01-05", "2025-01-06", "2025-01-07"]),
+            "Transaction Type": ["Shipment", "Cancel", "Refund"],
+            "Quantity": [16, 3, 6],
+            "Source": ["Amazon", "Amazon", "Amazon"],
+        }
+    )
+    daily, _ = sales_df_to_daily(sales)
+    assert int(daily["net_units"].sum()) == 10
+
+
 def test_myntra_cancel_reduces_net_units():
     from backend.services.myntra import myntra_to_sales_rows
 

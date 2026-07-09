@@ -261,20 +261,21 @@ def _merge_sales_and_platform_history_parts(
 
 
 def _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent=False):
+    from .sales import amazon_mtr_reporting_date, amazon_mtr_units_effective_series
+
     if mtr_df.empty:
         return pd.DataFrame()
-    m = mtr_df[["Date", "SKU", "Transaction_Type", "Quantity"]].copy()
-    m = m.rename(columns={"Date": "TxnDate", "SKU": "Sku", "Transaction_Type": "Transaction Type"})
+    m = mtr_df[["SKU", "Transaction_Type", "Quantity"]].copy()
+    m["TxnDate"] = amazon_mtr_reporting_date(mtr_df)
+    m = m.rename(columns={"SKU": "Sku", "Transaction_Type": "Transaction Type"})
     m["TxnDate"]  = pd.to_datetime(m["TxnDate"], errors="coerce")
     m["Quantity"] = pd.to_numeric(m["Quantity"], errors="coerce").fillna(0)
     m = m.dropna(subset=["TxnDate"])
     m["Sku"] = m["Sku"].apply(lambda x: _strip_pl(x, sku_mapping))
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
-    m["Units_Effective"] = np.select(
-        [m["Transaction Type"] == "Refund", m["Transaction Type"] == "Cancel"],
-        [-m["Quantity"], 0],
-        default=m["Quantity"],
+    m["Units_Effective"] = amazon_mtr_units_effective_series(
+        m["Quantity"], m["Transaction Type"]
     )
     return m[["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective"]]
 

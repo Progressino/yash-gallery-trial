@@ -336,6 +336,32 @@ def amazon_mtr_gross_net_units(
     return ship - refund
 
 
+def amazon_mtr_units_effective_series(
+    qty: pd.Series,
+    txn: pd.Series,
+) -> pd.Series:
+    """Per-row Amazon demand units: Shipment +, Refund −, Cancel 0."""
+    t = txn.astype(str).str.strip()
+    q = pd.to_numeric(qty, errors="coerce").fillna(0)
+    return pd.Series(
+        np.select(
+            [t.eq("Refund"), t.eq("Cancel")],
+            [-q.abs(), 0],
+            default=q.abs(),
+        ),
+        index=qty.index,
+    )
+
+
+def amazon_mtr_attach_reporting_date(mtr_df: pd.DataFrame) -> pd.DataFrame:
+    """Copy MTR frame with ``_Date`` set from invoice/reporting date when present."""
+    if mtr_df is None or mtr_df.empty:
+        return pd.DataFrame()
+    out = mtr_df.copy()
+    out["_Date"] = amazon_mtr_reporting_date(out)
+    return out.dropna(subset=["_Date"])
+
+
 def amazon_mtr_reporting_date(mtr_df: pd.DataFrame) -> pd.Series:
     """Invoice date when present, else shipment/event date (Amazon monthly bucketing)."""
     if "Reporting_Date" in mtr_df.columns:
@@ -453,10 +479,8 @@ def _mtr_to_sales_df(
         m["Sku"] = m["Sku"].apply(get_parent_sku)
 
     # Amazon MTR net: Shipment − Refund (Cancel rows contribute 0 to demand).
-    m["Units_Effective"] = np.select(
-        [m["Transaction Type"] == "Refund", m["Transaction Type"] == "Cancel"],
-        [-m["Quantity"], 0],
-        default=m["Quantity"],
+    m["Units_Effective"] = amazon_mtr_units_effective_series(
+        m["Quantity"], m["Transaction Type"]
     )
     m["LineKey"] = ""
     cols = ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "OrderId", "LineKey"]
@@ -1717,9 +1741,7 @@ def _platform_summary_from_raw_frame(
     """Platform card from session/Tier-3 frame (used when unified sales lag uploads)."""
     kwargs = dict(start_date=start_date, end_date=end_date, refund_scope=refund_scope)
     if platform_name == "Amazon":
-        mtr = raw_df.copy()
-        if not mtr.empty and "Date" in mtr.columns:
-            mtr["_Date"] = mtr["Date"]
+        mtr = amazon_mtr_attach_reporting_date(raw_df)
         return _compute_platform_metrics(
             mtr, platform_name, "SKU", "Transaction_Type", **kwargs
         )
@@ -1747,9 +1769,7 @@ def _unified_platform_summary_one(
             # Unified sales_df can lag Tier-3 session frames (warm cache + daily_restored).
             # Show saved upload totals from raw platform data for the requested window.
             if platform_name == "Amazon":
-                mtr = raw_df.copy()
-                if not mtr.empty and "Date" in mtr.columns:
-                    mtr["_Date"] = mtr["Date"]
+                mtr = amazon_mtr_attach_reporting_date(raw_df)
                 return _compute_platform_metrics(
                     mtr, platform_name, "SKU", "Transaction_Type",
                     start_date=start_date, end_date=end_date,
