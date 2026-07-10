@@ -1650,6 +1650,56 @@ def test_amazon_free_replacement_zero_invoice_excluded_from_sales():
     assert float(out["Units_Effective"].sum()) == 10.0
 
 
+def test_amazon_invoice_offset_pair_not_counted_as_refund():
+    """Same-invoice ship+refund offsets are free replacements, not customer returns."""
+    from backend.services.sales import (
+        _mtr_to_sales_df,
+        amazon_mtr_invoice_offset_pair_mask,
+        apply_amazon_free_replacement_txn,
+    )
+
+    mtr_df = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2026-03-11"), pd.Timestamp("2026-03-11")],
+            "Reporting_Date": [pd.Timestamp("2026-03-11"), pd.Timestamp("2026-03-11")],
+            "SKU": ["1379YKGREEN-XXL", "1379YKGREEN-XXL"],
+            "Transaction_Type": ["Shipment", "Refund"],
+            "Quantity": [1.0, 1.0],
+            "Invoice_Amount": [769.0, -769.0],
+            "Order_Id": ["405-6046243-9940337", "405-6046243-9940337"],
+            "Invoice_Number": ["CJB1-14914", "CJB1-14914"],
+        }
+    )
+    assert int(amazon_mtr_invoice_offset_pair_mask(mtr_df).sum()) == 2
+    labeled = apply_amazon_free_replacement_txn(mtr_df)
+    assert list(labeled["Transaction_Type"]) == ["FreeReplacement", "FreeReplacement"]
+
+    out = _mtr_to_sales_df(mtr_df, {})
+    assert out["Transaction Type"].eq("Refund").sum() == 0
+    assert float(out["Units_Effective"].sum()) == 0.0
+
+
+def test_amazon_unpaired_refund_stays_refund():
+    from backend.services.sales import _mtr_to_sales_df, apply_amazon_free_replacement_txn
+
+    mtr_df = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2026-03-01"), pd.Timestamp("2026-03-15")],
+            "Reporting_Date": [pd.Timestamp("2026-03-01"), pd.Timestamp("2026-03-15")],
+            "SKU": ["SKU-A", "SKU-A"],
+            "Transaction_Type": ["Shipment", "Refund"],
+            "Quantity": [1.0, 1.0],
+            "Invoice_Amount": [500.0, -500.0],
+            "Order_Id": ["O1", "O1"],
+            "Invoice_Number": ["INV1", "CN1"],
+        }
+    )
+    labeled = apply_amazon_free_replacement_txn(mtr_df)
+    assert list(labeled["Transaction_Type"]) == ["Shipment", "Refund"]
+    out = _mtr_to_sales_df(mtr_df, {})
+    assert float(out["Units_Effective"].sum()) == 0.0
+
+
 def test_amazon_gift_card_paid_order_not_treated_as_free_replacement():
     """Gift-card payment with non-zero invoice is a real sale."""
     from backend.services.sales import _mtr_to_sales_df

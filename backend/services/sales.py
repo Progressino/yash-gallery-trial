@@ -344,12 +344,94 @@ def amazon_mtr_free_replacement_mask(df: pd.DataFrame) -> pd.Series:
     return amt.abs() <= 0.01
 
 
+def amazon_mtr_invoice_offset_pair_mask(df: pd.DataFrame) -> pd.Series:
+    """
+    Same-order, same-invoice Shipment + Refund pairs whose invoice amounts net to ~zero.
+
+    Amazon records invoice reversals and replacement offsets this way — not customer
+    returns. For many SKUs (e.g. 1379YKGREEN-XXL) every Refund row is paired.
+    """
+    if df is None or getattr(df, "empty", True):
+        return pd.Series(dtype=bool)
+    txn_col = next(
+        (c for c in ("Transaction_Type", "Transaction Type", "TxnType") if c in df.columns),
+        None,
+    )
+    oid_col = next((c for c in ("Order_Id", "OrderId", "order_id") if c in df.columns), None)
+    inv_col = next(
+        (c for c in ("Invoice_Number", "Invoice Number", "invoice_number") if c in df.columns),
+        None,
+    )
+    sku_col = next((c for c in ("SKU", "Sku", "OMS_SKU") if c in df.columns), None)
+    amt_col = next(
+        (c for c in ("Invoice_Amount", "invoice_amount", "Invoice Amount") if c in df.columns),
+        None,
+    )
+    if not all([txn_col, oid_col, inv_col, sku_col, amt_col]):
+        return pd.Series(False, index=df.index)
+
+    txn = df[txn_col].astype(str).str.strip()
+    oid = df[oid_col].astype(str).str.strip()
+    inv = df[inv_col].astype(str).str.strip()
+    sku = df[sku_col].astype(str).str.strip()
+    amt = pd.to_numeric(df[amt_col], errors="coerce").fillna(0.0)
+    valid = (
+        oid.str.len().gt(0)
+        & ~oid.str.lower().isin(["nan", "none"])
+        & inv.str.len().gt(0)
+        & ~inv.str.lower().isin(["nan", "none"])
+        & sku.str.len().gt(0)
+        & ~sku.str.lower().isin(["nan", "none"])
+    )
+    if not valid.any():
+        return pd.Series(False, index=df.index)
+
+    touch = pd.Series(False, index=df.index)
+    work = pd.DataFrame(
+        {
+            "_txn": txn[valid],
+            "_amt": amt[valid],
+        },
+        index=df.index[valid],
+    )
+    keys = pd.DataFrame(
+        {
+            "_oid": oid[valid],
+            "_inv": inv[valid],
+            "_sku": sku[valid],
+        },
+        index=df.index[valid],
+    )
+    for key, idx in keys.groupby(["_oid", "_inv", "_sku"], sort=False).groups.items():
+        g = work.loc[idx]
+        if set(g["_txn"].unique()) != {"Shipment", "Refund"}:
+            continue
+        ship = g[g["_txn"] == "Shipment"]
+        ref = g[g["_txn"] == "Refund"]
+        if len(ship) != 1 or len(ref) != 1:
+            continue
+        sa = float(ship["_amt"].iloc[0])
+        ra = float(ref["_amt"].iloc[0])
+        if abs(sa) > 0.01 and abs(sa + ra) <= 0.01:
+            touch.loc[idx] = True
+    return touch
+
+
+def amazon_mtr_free_replacement_row_mask(df: pd.DataFrame) -> pd.Series:
+    """Rows that are free replacements: zero-invoice lines or offset invoice pairs."""
+    zero = amazon_mtr_free_replacement_mask(df)
+    if zero.any():
+        return zero | amazon_mtr_invoice_offset_pair_mask(df)
+    offset = amazon_mtr_invoice_offset_pair_mask(df)
+    return zero | offset
+
+
 def apply_amazon_free_replacement_txn(
     df: pd.DataFrame,
     *,
     txn_col: str | None = None,
 ) -> pd.DataFrame:
-    """Relabel zero-invoice Amazon Shipment/Refund rows as FreeReplacement (mutates copy)."""
+    """Relabel free-replacement Amazon rows (zero invoice or offset pairs) as FreeReplacement."""
     if df is None or getattr(df, "empty", True):
         return df
     col = txn_col or next(
@@ -358,7 +440,7 @@ def apply_amazon_free_replacement_txn(
     )
     if not col:
         return df
-    free = amazon_mtr_free_replacement_mask(df)
+    free = amazon_mtr_free_replacement_row_mask(df)
     if not free.any():
         return df
     out = df.copy()
