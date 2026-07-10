@@ -58,13 +58,31 @@ def deepdive_mapping_seller_aliases(oms: str, mapping: dict | None) -> Set[str]:
     targets = {t for t in deepdive_sku_alias_tokens(oms) if t}
     if not targets:
         return set()
+    # Build reverse index once per mapping object (118k keys — avoid per-request full scan cost).
+    cache = getattr(deepdive_mapping_seller_aliases, "_rev_cache", None)
+    if cache is None:
+        cache = {}
+        deepdive_mapping_seller_aliases._rev_cache = cache  # type: ignore[attr-defined]
+    mid = id(mapping)
+    rev = cache.get(mid)
+    if rev is None:
+        rev = {}
+        for k, v in mapping.items():
+            vv = str(v or "").strip().upper()
+            if not vv:
+                continue
+            rev.setdefault(vv, set()).add(str(k).strip().upper())
+            canon_v = canonical_sales_sku(vv)
+            if canon_v and canon_v != vv:
+                rev.setdefault(canon_v, set()).add(str(k).strip().upper())
+        cache[mid] = rev
+        if len(cache) > 8:
+            cache.clear()
+            cache[mid] = rev
     out: Set[str] = set()
-    for k, v in mapping.items():
-        vv = str(v or "").strip().upper()
-        if not vv:
-            continue
-        if vv in targets or canonical_sales_sku(vv) in targets:
-            out |= deepdive_sku_alias_tokens(str(k))
+    for t in targets:
+        for k in rev.get(t, ()):
+            out |= deepdive_sku_alias_tokens(k)
     return out
 
 
@@ -206,6 +224,7 @@ def _build_platform_sales_parts(
     *,
     start_date: str | None = None,
     end_date: str | None = None,
+    source: str | None = None,
 ) -> pd.DataFrame:
     """Convert matching rows from each platform frame to unified sales schema."""
     from .sales import (
@@ -218,60 +237,72 @@ def _build_platform_sales_parts(
 
     mapping = getattr(sess, "sku_mapping", None) or {}
     parts: list[pd.DataFrame] = []
+    src = (source or "").strip().lower()
+    want = {
+        "amazon": {"amazon"},
+        "meesho": {"meesho"},
+        "myntra": {"myntra"},
+        "flipkart": {"flipkart"},
+        "snapdeal": {"snapdeal"},
+    }.get(src)
 
-    mtr = platform_frame_for_window("mtr_df", sess, start_date=start_date, end_date=end_date)
-    if not mtr.empty:
-        sub = _filter_platform_df(mtr, _platform_sku_match_mask(mtr, sku_mask_fn))
-        if not sub.empty:
-            # Re-apply FBA shadow-row dedup on the small per-SKU slice to guarantee
-            # correctness regardless of whether the session-level mtr_df was already
-            # cleaned (the full-DataFrame dedup may have missed rows due to
-            # session-merge ordering or warm-cache generation timing).
-            if (
-                "Invoice_Number" in sub.columns
-                and "Order_Id" in sub.columns
-                and len(sub) > 1
-            ):
-                try:
-                    from .mtr import dedup_amazon_mtr_dataframe
-                    sub = dedup_amazon_mtr_dataframe(sub)
-                except Exception:
-                    pass
-            part = _build_mtr_sales_tagged(sub, mapping)
-            if not part.empty:
-                parts.append(part)
+    def _need(plat: str) -> bool:
+        return want is None or plat in want
 
-    myntra = platform_frame_for_window("myntra_df", sess, start_date=start_date, end_date=end_date)
-    if not myntra.empty:
-        sub = _filter_platform_df(myntra, _platform_sku_match_mask(myntra, sku_mask_fn))
-        if not sub.empty:
-            part = _build_myntra_sales_part(sub)
-            if not part.empty:
-                parts.append(part)
+    if _need("amazon"):
+        mtr = platform_frame_for_window("mtr_df", sess, start_date=start_date, end_date=end_date)
+        if not mtr.empty:
+            sub = _filter_platform_df(mtr, _platform_sku_match_mask(mtr, sku_mask_fn))
+            if not sub.empty:
+                if (
+                    "Invoice_Number" in sub.columns
+                    and "Order_Id" in sub.columns
+                    and len(sub) > 1
+                ):
+                    try:
+                        from .mtr import dedup_amazon_mtr_dataframe
+                        sub = dedup_amazon_mtr_dataframe(sub)
+                    except Exception:
+                        pass
+                part = _build_mtr_sales_tagged(sub, mapping)
+                if not part.empty:
+                    parts.append(part)
 
-    meesho = platform_frame_for_window("meesho_df", sess, start_date=start_date, end_date=end_date)
-    if not meesho.empty:
-        sub = _filter_platform_df(meesho, _platform_sku_match_mask(meesho, sku_mask_fn))
-        if not sub.empty:
-            part = meesho_to_sales_rows(sub, sku_mapping=mapping or None)
-            if not part.empty:
-                parts.append(part)
+    if _need("myntra"):
+        myntra = platform_frame_for_window("myntra_df", sess, start_date=start_date, end_date=end_date)
+        if not myntra.empty:
+            sub = _filter_platform_df(myntra, _platform_sku_match_mask(myntra, sku_mask_fn))
+            if not sub.empty:
+                part = _build_myntra_sales_part(sub)
+                if not part.empty:
+                    parts.append(part)
 
-    flipkart = platform_frame_for_window("flipkart_df", sess, start_date=start_date, end_date=end_date)
-    if not flipkart.empty:
-        sub = _filter_platform_df(flipkart, _platform_sku_match_mask(flipkart, sku_mask_fn))
-        if not sub.empty:
-            part = _build_flipkart_sales_part(sub)
-            if not part.empty:
-                parts.append(part)
+    if _need("meesho"):
+        meesho = platform_frame_for_window("meesho_df", sess, start_date=start_date, end_date=end_date)
+        if not meesho.empty:
+            sub = _filter_platform_df(meesho, _platform_sku_match_mask(meesho, sku_mask_fn))
+            if not sub.empty:
+                part = meesho_to_sales_rows(sub, sku_mapping=mapping or None)
+                if not part.empty:
+                    parts.append(part)
 
-    snapdeal = platform_frame_for_window("snapdeal_df", sess, start_date=start_date, end_date=end_date)
-    if not snapdeal.empty:
-        sub = _filter_platform_df(snapdeal, _platform_sku_match_mask(snapdeal, sku_mask_fn))
-        if not sub.empty:
-            part = _build_snapdeal_sales_part(sub)
-            if not part.empty:
-                parts.append(part)
+    if _need("flipkart"):
+        flipkart = platform_frame_for_window("flipkart_df", sess, start_date=start_date, end_date=end_date)
+        if not flipkart.empty:
+            sub = _filter_platform_df(flipkart, _platform_sku_match_mask(flipkart, sku_mask_fn))
+            if not sub.empty:
+                part = _build_flipkart_sales_part(sub)
+                if not part.empty:
+                    parts.append(part)
+
+    if _need("snapdeal"):
+        snapdeal = platform_frame_for_window("snapdeal_df", sess, start_date=start_date, end_date=end_date)
+        if not snapdeal.empty:
+            sub = _filter_platform_df(snapdeal, _platform_sku_match_mask(snapdeal, sku_mask_fn))
+            if not sub.empty:
+                part = _build_snapdeal_sales_part(sub)
+                if not part.empty:
+                    parts.append(part)
 
     if not parts:
         return pd.DataFrame()
@@ -285,6 +316,7 @@ def build_deepdive_sales_frame(
     all_sizes: bool,
     start_date: str | None = None,
     end_date: str | None = None,
+    source: str | None = None,
 ) -> pd.DataFrame:
     """
     Rows for one deep-dive query: platform upload history plus unified sales gaps.
@@ -315,6 +347,7 @@ def build_deepdive_sales_frame(
         sku_mask_fn,
         start_date=start_date,
         end_date=end_date,
+        source=source,
     )
 
     # Exact-SKU mode: keep only rows whose resolved Sku equals the searched OMS token.
@@ -351,6 +384,11 @@ def build_deepdive_sales_frame(
                 )
             else:
                 sales_mask = canon.isin(exact_targets)
+            if source and str(source).strip():
+                src_l = str(source).strip().lower()
+                sales_mask = sales_mask & (
+                    sales_work["Source"].astype(str).str.strip().str.lower() == src_l
+                )
 
             sales_part = sales_work.loc[sales_mask].copy()
             out = _merge_platform_and_sales(plat, sales_part)

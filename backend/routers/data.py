@@ -5014,6 +5014,7 @@ def sku_deepdive(
         all_sizes=all_sizes,
         start_date=start_date,
         end_date=end_date,
+        source=source,
     )
     df0 = apply_upload_report_day_gate(sales) if sales is not None and not sales.empty else pd.DataFrame()
 
