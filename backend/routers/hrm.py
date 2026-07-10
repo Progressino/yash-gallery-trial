@@ -47,6 +47,8 @@ from ..services.rbac import (
     assert_employee_in_scope,
     assert_hrm_write_org,
     assert_hrm_hod_or_admin,
+    assert_hrm_delete_allowed,
+    assert_can_view_employee_list,
     assert_responsibility_in_scope,
     HrmScope,
 )
@@ -60,6 +62,11 @@ def _scope_from_request(request: Request) -> HrmScope:
     profile = get_user_auth_profile(username) if username else None
     role = (profile or {}).get("role_name") or payload.get("role")
     return build_hrm_scope(profile, role=role)
+
+
+def _enforce_list_employee_scope(scope: HrmScope, employee_id: int | None) -> None:
+    if employee_id is not None and int(employee_id) > 0:
+        assert_employee_in_scope(scope, employee_id)
 
 
 class DepartmentIn(BaseModel):
@@ -175,6 +182,8 @@ def get_hrm_scope(request: Request):
         "department_id": scope.department_id,
         "can_manage_org": scope.can_manage_org,
         "can_edit_assignments": scope.can_edit_assignments,
+        "can_view_employee_list": scope.can_view_employee_list,
+        "can_delete_hrm_records": scope.can_delete_hrm_records,
     }
 
 
@@ -209,6 +218,16 @@ def get_employees(
 ):
     scope = _scope_from_request(request)
     dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id)
+    if emp_f == -1 or dept_f == -1:
+        return []
+    # Full org roster is Admin / Super Admin only; others get scoped rows for dropdowns.
+    if not scope.can_view_employee_list and dept_f is None and emp_f is None:
+        if scope.level == "department" and scope.department_id is not None:
+            dept_f = scope.department_id
+        elif scope.level == "self" and scope.employee_id is not None:
+            emp_f = scope.employee_id
+        else:
+            raise HTTPException(403, "Only Admin can view the employees list")
     if emp_f is not None:
         return list_employees(dept_f, status, employee_id=emp_f)
     return list_employees(dept_f, status)
@@ -245,7 +264,7 @@ def patch_employee(eid: int, body: EmployeeUpdate, request: Request):
 @router.delete("/employees/{eid}")
 def del_employee(eid: int, request: Request):
     scope = _scope_from_request(request)
-    if not scope.can_manage_org:
+    if not scope.can_view_employee_list:
         raise HTTPException(403, "Only Admin can delete employees")
     assert_employee_in_scope(scope, eid)
     if not delete_employee(eid):
@@ -298,6 +317,7 @@ def get_responsibilities(
     dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
     if emp_f == -1 or dept_f == -1:
         return []
+    _enforce_list_employee_scope(scope, emp_f)
     return list_responsibilities(emp_f, dept_f)
 
 
@@ -330,7 +350,7 @@ def patch_responsibility(rid: int, body: ResponsibilityUpdate, request: Request)
 @router.delete("/responsibilities/{rid}")
 def del_responsibility(rid: int, request: Request):
     scope = _scope_from_request(request)
-    assert_hrm_hod_or_admin(scope)
+    assert_hrm_delete_allowed(scope)
     from ..db.hrm_db import get_responsibility_owner
 
     owner = get_responsibility_owner(rid)
@@ -355,6 +375,7 @@ def post_mark_task(body: TaskMarkIn, request: Request):
         body.remarks or "",
         body.blocker_employee_id,
         body.blocker_reason or "",
+        allow_override=scope.can_edit_assignments,
     )
     if ok is True:
         return {"ok": True}
@@ -392,6 +413,7 @@ def get_issues(
     dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
     if emp_f == -1 or dept_f == -1:
         return []
+    _enforce_list_employee_scope(scope, emp_f)
     return list_issues(emp_f, dept_f, from_date, to_date)
 
 
@@ -408,6 +430,7 @@ def post_issue(body: IssueIn, request: Request):
 @router.patch("/issues/{issue_id}/resolve")
 def patch_resolve_issue(issue_id: int, body: IssueResolveIn, request: Request):
     scope = _scope_from_request(request)
+    assert_hrm_hod_or_admin(scope)
     from ..db.hrm_db import get_issue_employee_id
 
     eid = get_issue_employee_id(issue_id)
@@ -452,13 +475,15 @@ def appraisal(
 def performance(
     request: Request,
     department_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
 ):
     scope = _scope_from_request(request)
-    dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id)
-    if dept_f == -1:
+    dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
+    if dept_f == -1 or emp_f == -1:
         return []
+    _enforce_list_employee_scope(scope, emp_f)
     rows = get_performance(dept_f, from_date, to_date)
     if emp_f is not None and emp_f > 0:
         rows = [r for r in rows if int(r.get("employee_id") or 0) == int(emp_f)]
@@ -476,6 +501,7 @@ def get_one_time_tasks(
     dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
     if emp_f == -1 or dept_f == -1:
         return []
+    _enforce_list_employee_scope(scope, emp_f)
     return list_one_time_tasks(emp_f, dept_f, status=status)
 
 
@@ -511,8 +537,7 @@ def del_one_time_task(task_id: int, request: Request):
     if owner is None:
         raise HTTPException(404, "Task not found")
     assert_employee_in_scope(scope, owner)
-    if scope.is_employee:
-        raise HTTPException(403, "Employees cannot cancel assigned tasks")
+    assert_hrm_delete_allowed(scope)
     cancel_one_time_task(task_id)
     return {"ok": True}
 

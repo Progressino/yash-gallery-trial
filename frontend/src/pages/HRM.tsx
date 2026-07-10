@@ -76,11 +76,14 @@ export default function HRM() {
     queryFn: () => api.get('/hrm/scope').then(r => r.data),
   })
   const scope = scopeApi || authUser?.hrm_scope
-  const canManageOrg = scope?.can_manage_org ?? (authUser?.role === 'Super Admin' || authUser?.role === 'Admin' || authUser?.role === 'Sir')
+  const userRole = scope?.role || authUser?.role || ''
+  const canManageOrg = scope?.can_manage_org ?? (userRole === 'Super Admin' || userRole === 'Admin' || userRole === 'Sir')
+  const canViewEmployeeList = scope?.can_view_employee_list ?? (userRole === 'Super Admin' || userRole === 'Admin')
   const scopeLevel = scope?.level || 'all'
   const isEmployeeScope = scopeLevel === 'self'
   const canAssignTasks = !isEmployeeScope
-  const canEditAssignments = scope?.can_edit_assignments ?? (canManageOrg || scope?.role === 'HOD')
+  const canEditAssignments = scope?.can_edit_assignments ?? (canManageOrg || userRole === 'HOD')
+  const canDeleteHrm = scope?.can_delete_hrm_records ?? canEditAssignments
 
   const [tab, setTab] = useState<Tab>('dashboard')
   const [selDept, setSelDept] = useState<number | ''>('')
@@ -224,8 +227,8 @@ export default function HRM() {
     enabled: !!appraisalEmp,
   })
   const { data: perfData = [] } = useQuery({
-    queryKey: ['hrm-perf', selDept, fromDate, toDate],
-    queryFn: () => api.get(`/hrm/performance?from_date=${fromDate}&to_date=${toDate}${selDept ? `&department_id=${selDept}` : ''}`).then(r => r.data),
+    queryKey: ['hrm-perf', selDept, selEmp, fromDate, toDate],
+    queryFn: () => api.get(`/hrm/performance?from_date=${fromDate}&to_date=${toDate}${selDept ? `&department_id=${selDept}` : ''}${selEmp ? `&employee_id=${selEmp}` : ''}`).then(r => r.data),
     enabled: tab === 'performance',
   })
   const myTaskEmpId = isEmployeeScope ? scope?.employee_id : null
@@ -406,14 +409,15 @@ export default function HRM() {
   ]
 
   const TABS = useMemo(() => {
+    let tabs = ALL_TABS
+    if (!canViewEmployeeList) {
+      tabs = tabs.filter(([k]) => k !== 'employees')
+    }
     if (scopeLevel === 'self') {
-      return ALL_TABS.filter(([k]) => ['dashboard', 'responsibilities', 'issues', 'appraisal'].includes(k))
+      tabs = tabs.filter(([k]) => ['dashboard', 'responsibilities', 'issues', 'appraisal'].includes(k))
     }
-    if (scopeLevel === 'department') {
-      return ALL_TABS
-    }
-    return ALL_TABS
-  }, [scopeLevel])
+    return tabs
+  }, [scopeLevel, canViewEmployeeList])
 
   useEffect(() => {
     if (!TABS.some(([k]) => k === tab)) setTab(TABS[0]?.[0] || 'dashboard')
@@ -421,10 +425,18 @@ export default function HRM() {
 
   const scopeHint =
     scopeLevel === 'self'
-      ? 'You see only your own responsibilities, one-time tasks, and appraisal.'
+      ? 'You see only your own responsibilities, tasks, issues, and appraisal.'
       : scopeLevel === 'department'
-        ? 'You see your department team only.'
+        ? 'You see your department team only (not the org-wide employees list).'
         : null
+
+  const pickerEmps = useMemo(() => {
+    const rows = allEmps as any[]
+    if (isEmployeeScope && scope?.employee_id) {
+      return rows.filter((e: any) => e.id === scope.employee_id)
+    }
+    return rows
+  }, [allEmps, isEmployeeScope, scope?.employee_id])
 
   return (
     <div className="space-y-4">
@@ -734,7 +746,7 @@ export default function HRM() {
                         <td className="px-4 py-2">
                           <div className="flex gap-2">
                             <button onClick={() => setEditEmp({ id: e.id, name: e.name, department_id: e.department_id, designation: e.designation || '', email: e.email || '' })} className="text-xs text-blue-600">✏️</button>
-                            {canManageOrg && (
+                            {canViewEmployeeList && (
                               <button onClick={() => { if (window.confirm(`Delete employee ${e.name} (${e.emp_code})?`)) deleteEmpMut.mutate(e.id) }} className="text-xs text-red-600">🗑️</button>
                             )}
                             <button onClick={() => { setAppraisalEmp(e.id); setTab('appraisal') }} className="text-xs text-purple-600">📁 Appraisal</button>
@@ -756,17 +768,25 @@ export default function HRM() {
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex gap-2">
-              <select value={selDept} onChange={e => setSelDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
-                <option value="">All Departments</option>
-                {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
-              <select value={selEmp} onChange={e => setSelEmp(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
-                <option value="">All Employees</option>
-                {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
-              </select>
+              {!isEmployeeScope && (
+                <>
+                  <select value={selDept} onChange={e => setSelDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                    <option value="">All Departments</option>
+                    {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                  </select>
+                  <select value={selEmp} onChange={e => setSelEmp(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                    <option value="">All Employees</option>
+                    {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                  </select>
+                </>
+              )}
             </div>
             <div className="flex gap-2 flex-wrap">
-            <button onClick={() => setShowRespForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">+ Assign Item</button>
+            {(canEditAssignments || isEmployeeScope) && (
+            <button onClick={() => setShowRespForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">
+              {isEmployeeScope ? '+ Add My Item' : '+ Assign Item'}
+            </button>
+            )}
             {canEditAssignments && (
               <>
                 <input ref={respImportRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
@@ -792,7 +812,7 @@ export default function HRM() {
                 <div><label className="text-xs text-gray-500">Employee *</label>
                   <select value={respForm.employee_id} onChange={e => setRespForm(f => ({ ...f, employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
-                    {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
+                    {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
                   </select>
                 </div>
                 <div className="col-span-2"><label className="text-xs text-gray-500">Title *</label>
@@ -853,7 +873,7 @@ export default function HRM() {
                                 {CATEGORIES.map(c => <option key={c}>{c}</option>)}
                               </select>
                               <select value={editResp.employee_id} onChange={e => setEditResp((x: any) => ({ ...x, employee_id: +e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2">
-                                {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                                {(canEditAssignments ? pickerEmps : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                               </select>
                               <div className="flex gap-2 col-span-2">
                                 <button onClick={() => updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id } })} disabled={!editResp.title || updateRespMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
@@ -872,7 +892,9 @@ export default function HRM() {
                               {canEditAssignments && (
                                 <div className="flex gap-2">
                                   <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id })} className="text-xs text-blue-600">✏️</button>
-                                  <button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button>
+                                  {canDeleteHrm && (
+                                    <button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button>
+                                  )}
                                 </div>
                               )}
                             </td>
@@ -940,7 +962,7 @@ export default function HRM() {
                 <div><label className="text-xs text-gray-500">Employee *</label>
                   <select value={taskForm.employee_id} onChange={e => setTaskForm(f => ({ ...f, employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
-                    {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
+                    {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
                   </select>
                 </div>
                 <div className="col-span-2"><label className="text-xs text-gray-500">Title *</label>
@@ -1057,7 +1079,7 @@ export default function HRM() {
                                   className="text-xs px-2 py-1 bg-red-500 text-white rounded">Reject</button>
                               </>
                             )}
-                            {canAssignTasks && t.status !== 'Approved' && (
+                            {canDeleteHrm && t.status !== 'Approved' && (
                               <button onClick={() => { if (window.confirm('Cancel this task?')) cancelOneTimeTaskMut.mutate(t.id) }}
                                 className="text-xs px-2 py-1 border rounded text-red-600">Cancel</button>
                             )}
@@ -1187,9 +1209,18 @@ export default function HRM() {
                           const dayData = r.dates?.[d] || { status: 'Pending', marked: false }
                           const s = dayData.status
                           const locked = !!dayData.marked
+                          const hodCanEdit = canEditAssignments && locked
                           return (
                             <td key={d} className="px-1 py-2 text-center">
-                              {locked ? (
+                              {hodCanEdit ? (
+                                <select
+                                  value={s}
+                                  onChange={e => handleStatusSelect(r.id, d, e.target.value)}
+                                  className={`text-[10px] border rounded px-0.5 py-0.5 max-w-[4.5rem] font-bold ${statusBg(s)}`}
+                                  title="HOD/Admin can change saved status">
+                                  {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
+                                </select>
+                              ) : locked ? (
                                 <span
                                   title={`${s} (locked)${dayData.blocker_name ? ` — Blocked by ${dayData.blocker_name}` : ''}`}
                                   className={`inline-flex w-7 h-7 items-center justify-center rounded-full text-xs font-bold ${statusBg(s)}`}>
@@ -1200,7 +1231,7 @@ export default function HRM() {
                                   defaultValue=""
                                   onChange={e => { const val = e.target.value; handleStatusSelect(r.id, d, val); e.target.value = '' }}
                                   className="text-[10px] border rounded px-0.5 py-0.5 max-w-[4.5rem] bg-white"
-                                  title="Select status (cannot change after saving)">
+                                  title="Select status">
                                   <option value="">Set</option>
                                   {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
                                 </select>
@@ -1215,7 +1246,7 @@ export default function HRM() {
                 </table>
               </div>
               <div className="px-4 py-2 border-t bg-gray-50 text-xs text-gray-500">
-                Select a status from the dropdown for each day. Once saved, the status is locked and cannot be changed. Use Leave or N/A for absent employees.
+                Select a status for each day. Employees cannot change after save; HOD/Admin can update a saved status if needed. Use Leave or N/A for absent employees.
               </div>
             </div>
           )}
@@ -1227,10 +1258,12 @@ export default function HRM() {
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex gap-2 flex-wrap">
-              <select value={selDept} onChange={e => setSelDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
-                <option value="">All Departments</option>
-                {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
+              {!isEmployeeScope && (
+                <select value={selDept} onChange={e => setSelDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                  <option value="">All Departments</option>
+                  {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+              )}
               <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
               <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
             </div>
@@ -1244,7 +1277,7 @@ export default function HRM() {
                 <div><label className="text-xs text-gray-500">Employee *</label>
                   <select value={issueForm.employee_id} onChange={e => setIssueForm(f => ({ ...f, employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
-                    {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
+                    {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
                   </select>
                 </div>
                 <div><label className="text-xs text-gray-500">Issue Type</label>
@@ -1299,7 +1332,7 @@ export default function HRM() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={`text-xs px-2 py-0.5 rounded-full ${issue.status === 'Resolved' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{issue.status}</span>
-                    {issue.status === 'Open' && (
+                    {issue.status === 'Open' && canEditAssignments && (
                       <button onClick={() => { const res = prompt('Resolution:'); if (res) resolveIssueMut.mutate({ id: issue.id, res }) }}
                         className="text-xs px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700">Resolve</button>
                     )}
@@ -1316,10 +1349,14 @@ export default function HRM() {
       {tab === 'appraisal' && (
         <div className="space-y-4">
           <div className="flex items-center gap-3 flex-wrap">
-            <select value={appraisalEmp} onChange={e => setAppraisalEmp(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
-              <option value="">Select Employee</option>
-              {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name} — {e.department_name || '—'}</option>)}
-            </select>
+            {!isEmployeeScope ? (
+              <select value={appraisalEmp} onChange={e => setAppraisalEmp(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                <option value="">Select Employee</option>
+                {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name} — {e.department_name || '—'}</option>)}
+              </select>
+            ) : (
+              <span className="text-sm font-medium text-gray-700">Your appraisal</span>
+            )}
             <input type="date" value={appraisalFrom} onChange={e => setAppraisalFrom(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
             <span className="text-gray-400 text-xs">to</span>
             <input type="date" value={appraisalTo} onChange={e => setAppraisalTo(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
@@ -1413,6 +1450,10 @@ export default function HRM() {
             <select value={selDept} onChange={e => setSelDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
               <option value="">All Departments</option>
               {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </select>
+            <select value={selEmp} onChange={e => setSelEmp(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+              <option value="">All Employees</option>
+              {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
             </select>
             <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
             <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />

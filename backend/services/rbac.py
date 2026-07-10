@@ -18,6 +18,10 @@ LEGACY_FULL_ERP_ROLES = frozenset({"Manager", "Executive", "Clerk", "Viewer"})
 
 FULL_ERP_ROLES = frozenset({ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_SIR}) | LEGACY_FULL_ERP_ROLES
 HRM_ONLY_ROLES = frozenset({ROLE_HOD, ROLE_EMPLOYEE})
+# Org-wide HRM data (all employees / departments).
+HRM_ORG_WIDE_ROLES = frozenset({ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_SIR})
+# Employees directory tab / full roster API.
+HRM_EMPLOYEE_LIST_ROLES = frozenset({ROLE_SUPER_ADMIN, ROLE_ADMIN})
 
 # Sidebar / route module keys (must match frontend).
 ALL_MODULES = (
@@ -100,8 +104,18 @@ class HrmScope:
 
     @property
     def can_edit_assignments(self) -> bool:
-        """HOD or Admin (incl. Super Admin / Sir) may edit responsibilities and one-time tasks."""
+        """HOD or Admin (incl. Super Admin / Sir) may edit/delete assignments — not employees."""
         return self.can_manage_org or self.is_hod
+
+    @property
+    def can_view_employee_list(self) -> bool:
+        """Full employees roster — Super Admin and Admin only."""
+        return self.role in HRM_EMPLOYEE_LIST_ROLES
+
+    @property
+    def can_delete_hrm_records(self) -> bool:
+        """Delete/cancel responsibilities, tasks, etc. — HOD or Admin, never Employee."""
+        return self.can_edit_assignments
 
 
 def _parse_module_access(raw: str | None) -> list[str] | None:
@@ -170,14 +184,25 @@ def build_hrm_scope(profile: dict[str, Any] | None, *, role: str | None = None) 
     except (TypeError, ValueError):
         hod_uid = None
 
-    if role_name in (ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_SIR) or role_name in LEGACY_FULL_ERP_ROLES:
+    if role_name in HRM_ORG_WIDE_ROLES:
         return HrmScope(level="all", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)
     if role_name == ROLE_HOD:
         return HrmScope(level="department", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)
     if role_name == ROLE_EMPLOYEE:
         return HrmScope(level="self", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)
-    # Unknown roles: treat as full access (backward compatible).
-    return HrmScope(level="all", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)
+    if role_name in LEGACY_FULL_ERP_ROLES:
+        # Legacy ERP roles without an HRM profile link must not see everyone's HRM data.
+        if emp_id is not None:
+            return HrmScope(level="self", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)
+        if dept_id is not None:
+            return HrmScope(level="department", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)
+        return HrmScope(level="all", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)
+    # Unknown roles: no org-wide HRM access.
+    if emp_id is not None:
+        return HrmScope(level="self", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)
+    if dept_id is not None:
+        return HrmScope(level="department", role=role_name, user_id=user_id, employee_id=emp_id, department_id=dept_id, reporting_hod_user_id=hod_uid)
+    return HrmScope(level="self", role=role_name, user_id=user_id, employee_id=None, department_id=dept_id, reporting_hod_user_id=hod_uid)
 
 
 def hrm_scope_filters(
@@ -198,10 +223,10 @@ def hrm_scope_filters(
         if employee_id is not None:
             return dept, employee_id
         return dept, None
-    # self
+    # self — always own employee row only; ignore client dept/employee filters.
     if scope.employee_id is None:
-        return scope.department_id, -1
-    return scope.department_id, scope.employee_id
+        return None, -1
+    return None, scope.employee_id
 
 
 def assert_department_in_scope(scope: HrmScope, department_id: int) -> None:
@@ -251,6 +276,22 @@ def assert_hrm_hod_or_admin(scope: HrmScope) -> None:
 
     if not scope.can_edit_assignments:
         raise HTTPException(403, "Only HOD or Admin can edit tasks and responsibilities")
+
+
+def assert_can_view_employee_list(scope: HrmScope) -> None:
+    from fastapi import HTTPException
+
+    if not scope.can_view_employee_list:
+        raise HTTPException(403, "Only Admin can view the employees list")
+
+
+def assert_hrm_delete_allowed(scope: HrmScope) -> None:
+    from fastapi import HTTPException
+
+    if scope.is_employee:
+        raise HTTPException(403, "Employees cannot delete HRM records")
+    if not scope.can_delete_hrm_records:
+        raise HTTPException(403, "Only HOD or Admin can delete HRM records")
 
 
 def assert_responsibility_in_scope(scope: HrmScope, responsibility_id: int) -> int:

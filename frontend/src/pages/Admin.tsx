@@ -181,6 +181,22 @@ export default function Admin() {
   const editRoleId = editData.role_id !== undefined ? Number(editData.role_id) : editUser?.role_id
   const editUserRole = roles.find(r => r.id === editRoleId)?.role_name
 
+  const hrmDeptLabel = (id: number | null | undefined) => {
+    if (id == null || id === '') return '—'
+    const d = (hrmDepts as { id: number; name: string }[]).find(x => x.id === id)
+    return d ? `${d.name} (#${id})` : `#${id}`
+  }
+  const hrmEmpLabel = (id: number | null | undefined) => {
+    if (id == null || id === '') return '—'
+    const e = (hrmEmployees as { id: number; name: string; emp_code: string }[]).find(x => x.id === id)
+    return e ? `${e.name} (${e.emp_code}) #${id}` : `#${id}`
+  }
+  const hodUserLabel = (id: number | null | undefined) => {
+    if (id == null || id === '') return '—'
+    const u = users.find(x => x.id === id)
+    return u ? `${u.full_name || u.username} (#${id})` : `#${id}`
+  }
+
   const openNewUserForm = () => {
     const karigarRole = roles.find(r => r.role_name === 'Karigar')
     setUserForm({ ...EMPTY_USER_FORM, role_id: karigarRole?.id ?? 1 })
@@ -395,14 +411,14 @@ export default function Admin() {
                       <select value={userForm.hrm_department_id} onChange={e => setUserForm(f => ({ ...f, hrm_department_id: e.target.value ? +e.target.value : '' }))}
                         className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
                         <option value="">—</option>
-                        {(hrmDepts as { id: number; name: string }[]).map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                        {(hrmDepts as { id: number; name: string }[]).map(d => <option key={d.id} value={d.id}>{d.name} (ID {d.id})</option>)}
                       </select></div>
                     <div><label className="text-xs text-gray-500">Linked HRM employee</label>
                       <select value={userForm.employee_id} onChange={e => setUserForm(f => ({ ...f, employee_id: e.target.value ? +e.target.value : '' }))}
                         className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
                         <option value="">—</option>
-                        {(hrmEmployees as { id: number; name: string; emp_code: string }[]).map(e => (
-                          <option key={e.id} value={e.id}>{e.name} ({e.emp_code})</option>
+                        {(hrmEmployees as { id: number; name: string; emp_code: string; department_name?: string }[]).map(e => (
+                          <option key={e.id} value={e.id}>{e.name} ({e.emp_code}) — ID {e.id}</option>
                         ))}
                       </select></div>
                     <div><label className="text-xs text-gray-500">Reporting HOD (user)</label>
@@ -410,7 +426,7 @@ export default function Admin() {
                         className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
                         <option value="">—</option>
                         {users.filter(u => u.role_name === 'HOD' && u.active).map(u => (
-                          <option key={u.id} value={u.id}>{u.full_name || u.username}</option>
+                          <option key={u.id} value={u.id}>{u.full_name || u.username} (ID {u.id})</option>
                         ))}
                       </select></div>
                   </>
@@ -486,22 +502,41 @@ export default function Admin() {
                       className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 font-mono" />
                   </div>
                 )}
-                {editUserRole && HRM_ROLES.has(editUserRole) && (
-                  <>
-                    <div><label className="text-xs text-gray-500">HRM department ID</label>
-                      <input type="number" value={(editData.hrm_department_id as number) ?? editUser.hrm_department_id ?? ''}
-                        onChange={e => setEditData(d => ({ ...d, hrm_department_id: e.target.value ? +e.target.value : null }))}
-                        className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                    <div><label className="text-xs text-gray-500">HRM employee ID</label>
-                      <input type="number" value={(editData.employee_id as number) ?? editUser.employee_id ?? ''}
-                        onChange={e => setEditData(d => ({ ...d, employee_id: e.target.value ? +e.target.value : null }))}
-                        className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                    <div><label className="text-xs text-gray-500">Reporting HOD user ID</label>
-                      <input type="number" value={(editData.reporting_hod_user_id as number) ?? editUser.reporting_hod_user_id ?? ''}
-                        onChange={e => setEditData(d => ({ ...d, reporting_hod_user_id: e.target.value ? +e.target.value : null }))}
-                        className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                  </>
-                )}
+                <div><label className="text-xs text-gray-500">HRM department</label>
+                  <select
+                    value={(editData.hrm_department_id as number) ?? editUser.hrm_department_id ?? ''}
+                    onChange={e => setEditData(d => ({ ...d, hrm_department_id: e.target.value ? +e.target.value : null }))}
+                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">— None —</option>
+                    {(hrmDepts as { id: number; name: string }[]).map(d => (
+                      <option key={d.id} value={d.id}>{d.name} (ID {d.id})</option>
+                    ))}
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">Linked HRM employee</label>
+                  <select
+                    value={(editData.employee_id as number) ?? editUser.employee_id ?? ''}
+                    onChange={e => setEditData(d => ({ ...d, employee_id: e.target.value ? +e.target.value : null }))}
+                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">— None —</option>
+                    {(hrmEmployees as { id: number; name: string; emp_code: string; department_name?: string }[]).map(e => (
+                      <option key={e.id} value={e.id}>
+                        {e.name} ({e.emp_code}) — ID {e.id}{e.department_name ? ` · ${e.department_name}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">Reporting HOD (user)</label>
+                  <select
+                    value={(editData.reporting_hod_user_id as number) ?? editUser.reporting_hod_user_id ?? ''}
+                    onChange={e => setEditData(d => ({ ...d, reporting_hod_user_id: e.target.value ? +e.target.value : null }))}
+                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">— None —</option>
+                    {users.filter(u => u.role_name === 'HOD' && u.active).map(u => (
+                      <option key={u.id} value={u.id}>{u.full_name || u.username} (ID {u.id})</option>
+                    ))}
+                  </select>
+                </div>
               </div>
               <div className="flex gap-2">
                 <button onClick={() => updateUserMut.mutate({ id: editUser.id, data: editData })} disabled={updateUserMut.isPending}
@@ -526,8 +561,8 @@ export default function Admin() {
                     <td className="px-4 py-2">
                       <span className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">{u.role_name}</span>
                     </td>
-                    <td className="px-4 py-2 font-mono text-xs text-gray-600">{u.employee_id ?? '—'}</td>
-                    <td className="px-4 py-2 text-gray-500">{u.hrm_department_id ?? '—'}</td>
+                    <td className="px-4 py-2 text-xs text-gray-600">{hrmEmpLabel(u.employee_id)}</td>
+                    <td className="px-4 py-2 text-xs text-gray-500">{hrmDeptLabel(u.hrm_department_id)}</td>
                     <td className="px-4 py-2 text-gray-500">{u.department}</td>
                     <td className="px-4 py-2 text-gray-400">{u.email || '—'}</td>
                     <td className="px-4 py-2">

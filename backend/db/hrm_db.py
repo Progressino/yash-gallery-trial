@@ -464,6 +464,8 @@ def mark_task(
     remarks: str = "",
     blocker_employee_id: int = None,
     blocker_reason: str = "",
+    *,
+    allow_override: bool = False,
 ):
     if status not in TASK_LOG_STATUSES:
         return "invalid_status"
@@ -482,30 +484,47 @@ def mark_task(
         (responsibility_id, log_date),
     ).fetchone()
     if existing:
-        conn.close()
-        return "locked"
+        if not allow_override:
+            conn.close()
+            return "locked"
+        conn.execute(
+            """UPDATE task_logs
+               SET status=?, remarks=?, marked_by=?, marked_at=datetime('now'),
+                   blocker_employee_id=?, blocker_reason=?
+               WHERE responsibility_id=? AND log_date=?""",
+            (
+                status,
+                remarks,
+                marked_by,
+                blocker_employee_id,
+                blocker_reason,
+                responsibility_id,
+                log_date,
+            ),
+        )
+        task_log_id = existing
+    else:
+        conn.execute(
+            """INSERT INTO task_logs(responsibility_id,employee_id,log_date,status,remarks,marked_by,marked_at,blocker_employee_id,blocker_reason)
+            VALUES(?,?,?,?,?,?,datetime('now'),?,?)
+            ON CONFLICT(responsibility_id,log_date) DO NOTHING
+        """,
+            (
+                responsibility_id,
+                resp["employee_id"],
+                log_date,
+                status,
+                remarks,
+                marked_by,
+                blocker_employee_id,
+                blocker_reason,
+            ),
+        )
 
-    conn.execute(
-        """INSERT INTO task_logs(responsibility_id,employee_id,log_date,status,remarks,marked_by,marked_at,blocker_employee_id,blocker_reason)
-        VALUES(?,?,?,?,?,?,datetime('now'),?,?)
-        ON CONFLICT(responsibility_id,log_date) DO NOTHING
-    """,
-        (
-            responsibility_id,
-            resp["employee_id"],
-            log_date,
-            status,
-            remarks,
-            marked_by,
-            blocker_employee_id,
-            blocker_reason,
-        ),
-    )
-
-    task_log_id = conn.execute(
-        "SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?",
-        (responsibility_id, log_date),
-    ).fetchone()
+        task_log_id = conn.execute(
+            "SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?",
+            (responsibility_id, log_date),
+        ).fetchone()
 
     if status == "Blocked" and blocker_employee_id:
         blocker = conn.execute(
@@ -520,8 +539,13 @@ def mark_task(
             (responsibility_id,),
         ).fetchone()
 
-        if blocker and resp_row:
-            conn.execute(
+        if blocker and resp_row and task_log_id:
+            dup = conn.execute(
+                "SELECT id FROM issue_logs WHERE task_log_id=? LIMIT 1",
+                (task_log_id["id"],),
+            ).fetchone()
+            if not dup:
+                conn.execute(
                 """INSERT INTO issue_logs(
                 employee_id, department_id, issue_date, issue_type, severity,
                 title, description, recorded_by,

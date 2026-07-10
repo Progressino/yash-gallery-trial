@@ -4,9 +4,13 @@ const AUTH_STORAGE_KEY = 'erp_auth_profile_v1'
 
 export interface HrmScopeInfo {
   level: 'all' | 'department' | 'self'
+  role?: string
   department_id?: number | null
   employee_id?: number | null
   can_manage_org?: boolean
+  can_edit_assignments?: boolean
+  can_view_employee_list?: boolean
+  can_delete_hrm_records?: boolean
 }
 
 export interface AuthUser {

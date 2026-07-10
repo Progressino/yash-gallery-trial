@@ -46,17 +46,18 @@ def test_hrm_department_employee_task_flow(hrm_db):
     today = date.today().isoformat()
     assert hrm_db.mark_task(rid, today, "Done", marked_by="HOD") is True
     assert hrm_db.mark_task(rid, today, "Partial") == "locked"
+    assert hrm_db.mark_task(rid, today, "Partial", allow_override=True) is True
 
     dash = hrm_db.get_hod_dashboard(dept_id, today, today)
     assert len(dash["responsibilities"]) == 1
-    assert dash["responsibilities"][0]["dates"][today]["status"] == "Done"
+    assert dash["responsibilities"][0]["dates"][today]["status"] == "Partial"
 
     appraisal = hrm_db.get_appraisal(emp_id, today, today)
-    assert appraisal["task_summary"]["done"] == 1
+    assert appraisal["task_summary"]["partial"] == 1
 
     perf = hrm_db.get_performance(dept_id, today, today)
     assert len(perf) == 1
-    assert perf[0]["done_tasks"] >= 1
+    assert perf[0]["employee_id"] == emp_id
 
 
 def test_hrm_leave_status_excluded_from_performance(hrm_db):
