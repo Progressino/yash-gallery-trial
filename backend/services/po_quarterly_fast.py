@@ -150,6 +150,11 @@ def _accumulate_shipment_frame(
     if df is None or df.empty:
         return 0
 
+    if platform == "amazon":
+        from .sales import apply_amazon_free_replacement_txn
+
+        df = apply_amazon_free_replacement_txn(df, txn_col="Transaction_Type")
+
     if platform == "meesho":
         from .meesho import backfill_meesho_sku_from_suborder_inplace
 
@@ -202,9 +207,9 @@ def _accumulate_shipment_frame(
         work = work.rename(columns=rename)
         _txn_lower = work["_Txn"].astype(str).str.strip().str.lower()
         if platform == "amazon":
-            # Amazon MTR net: Shipment − Refund (cancels tracked but not added to PO demand).
+            # Amazon MTR net: Shipment − Refund (cancels / free replacements not demand).
             _neg = _txn_lower == "refund"
-            _zero = _txn_lower == "cancel"
+            _zero = _txn_lower.isin(["cancel", "freereplacement"])
         else:
             _neg = _txn_lower.isin(_NEGATIVE_TXN_TYPES)
             _zero = pd.Series(False, index=work.index)
@@ -527,7 +532,7 @@ def _accumulate_sales_df_shipments(
     )
     _is_amazon = _src.eq("amazon")
     _neg = _txn_lower2.eq("refund") | (~_is_amazon & _txn_lower2.eq("cancel"))
-    _zero = _is_amazon & _txn_lower2.eq("cancel")
+    _zero = _is_amazon & _txn_lower2.isin(["cancel", "freereplacement"])
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
     work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
     work["Qty"] = np.where(

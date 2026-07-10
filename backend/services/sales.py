@@ -325,11 +325,58 @@ def amazon_seller_net_units(
     return amazon_mtr_gross_net_units(qty, txn)
 
 
+def amazon_mtr_free_replacement_mask(df: pd.DataFrame) -> pd.Series:
+    """
+    Amazon India free-replacement rows: invoice amount is zero (Seller Central MTR).
+
+    These are not paid sales — counting them as Shipment inflates units (e.g. 1379YKGREEN).
+    Real gift-card orders still carry a non-zero invoice amount.
+    """
+    if df is None or getattr(df, "empty", True):
+        return pd.Series(dtype=bool)
+    amt_col = next(
+        (c for c in ("Invoice_Amount", "invoice_amount", "Invoice Amount") if c in df.columns),
+        None,
+    )
+    if not amt_col:
+        return pd.Series(False, index=df.index)
+    amt = pd.to_numeric(df[amt_col], errors="coerce").fillna(0.0)
+    return amt.abs() <= 0.01
+
+
+def apply_amazon_free_replacement_txn(
+    df: pd.DataFrame,
+    *,
+    txn_col: str | None = None,
+) -> pd.DataFrame:
+    """Relabel zero-invoice Amazon Shipment/Refund rows as FreeReplacement (mutates copy)."""
+    if df is None or getattr(df, "empty", True):
+        return df
+    col = txn_col or next(
+        (c for c in ("Transaction_Type", "Transaction Type", "TxnType") if c in df.columns),
+        None,
+    )
+    if not col:
+        return df
+    free = amazon_mtr_free_replacement_mask(df)
+    if not free.any():
+        return df
+    out = df.copy()
+    # Warm-cache MTR often stores Transaction_Type as category — allow FreeReplacement.
+    if isinstance(out[col].dtype, pd.CategoricalDtype) or str(out[col].dtype) == "category":
+        out[col] = out[col].astype(str)
+    txn = out[col].astype(str).str.strip()
+    touch = free & txn.str.lower().isin({"shipment", "refund"})
+    if touch.any():
+        out.loc[touch, col] = "FreeReplacement"
+    return out
+
+
 def amazon_mtr_gross_net_units(
     qty: pd.Series,
     txn: pd.Series,
 ) -> float:
-    """Amazon MTR net for deepdive: gross shipments − refunds (cancels excluded from net)."""
+    """Amazon MTR net for deepdive: gross shipments − refunds (cancels / free replacements excluded)."""
     t = txn.astype(str).str.strip()
     ship = float(qty[t == "Shipment"].sum())
     refund = float(qty[t == "Refund"].sum())
@@ -340,12 +387,12 @@ def amazon_mtr_units_effective_series(
     qty: pd.Series,
     txn: pd.Series,
 ) -> pd.Series:
-    """Per-row Amazon demand units: Shipment +, Refund −, Cancel 0."""
+    """Per-row Amazon demand units: Shipment +, Refund −, Cancel/FreeReplacement 0."""
     t = txn.astype(str).str.strip()
     q = pd.to_numeric(qty, errors="coerce").fillna(0)
     return pd.Series(
         np.select(
-            [t.eq("Refund"), t.eq("Cancel")],
+            [t.eq("Refund"), t.isin(["Cancel", "FreeReplacement"])],
             [-q.abs(), 0],
             default=q.abs(),
         ),
@@ -441,8 +488,9 @@ def _mtr_to_sales_df(
     if mtr_df.empty:
         return pd.DataFrame()
 
-    m = mtr_df[["SKU", "Transaction_Type", "Quantity"]].copy()
-    m["TxnDate"] = amazon_mtr_reporting_date(mtr_df)
+    mtr_work = apply_amazon_free_replacement_txn(mtr_df)
+    m = mtr_work[["SKU", "Transaction_Type", "Quantity"]].copy()
+    m["TxnDate"] = amazon_mtr_reporting_date(mtr_work)
     m = m.rename(columns={
         "SKU":              "Sku",
         "Transaction_Type": "Transaction Type",
@@ -455,23 +503,23 @@ def _mtr_to_sales_df(
     _uniq = pd.unique(_raw_skus.to_numpy())
     _resolved = {u: _resolve_mtr_sku(u, _map) for u in _uniq}
     resolved = canonical_sales_sku_series(_raw_skus.map(_resolved))
-    if "ASIN" in mtr_df.columns:
+    if "ASIN" in mtr_work.columns:
         resolved = protect_distinct_asin_pl_skus(
             _raw_skus,
             resolved,
-            mtr_df.loc[m.index, "ASIN"],
+            mtr_work.loc[m.index, "ASIN"],
         )
     m["Sku"] = resolved
 
     # Line-level keys for build_sales_df dedup (Amazon MTR exposes Order_Id / Invoice_Number).
     idx = m.index
-    if "Order_Id" in mtr_df.columns:
-        oid = mtr_df.loc[idx, "Order_Id"].astype(str).str.strip()
+    if "Order_Id" in mtr_work.columns:
+        oid = mtr_work.loc[idx, "Order_Id"].astype(str).str.strip()
         oid = oid.mask(oid.str.lower().isin(["", "nan", "none"]), np.nan)
     else:
         oid = pd.Series(np.nan, index=idx)
-    if "Invoice_Number" in mtr_df.columns:
-        inv = mtr_df.loc[idx, "Invoice_Number"].astype(str).str.strip()
+    if "Invoice_Number" in mtr_work.columns:
+        inv = mtr_work.loc[idx, "Invoice_Number"].astype(str).str.strip()
         inv = inv.mask(inv.str.lower().isin(["", "nan", "none"]), np.nan)
     else:
         inv = pd.Series(np.nan, index=idx)
@@ -485,15 +533,15 @@ def _mtr_to_sales_df(
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
 
-    # Amazon MTR net: Shipment − Refund (Cancel rows contribute 0 to demand).
+    # Amazon MTR net: Shipment − Refund (Cancel / FreeReplacement contribute 0).
     m["Units_Effective"] = amazon_mtr_units_effective_series(
         m["Quantity"], m["Transaction Type"]
     )
     m["LineKey"] = ""
     cols = ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "OrderId", "LineKey"]
-    if "DSR_Segment" in mtr_df.columns:
+    if "DSR_Segment" in mtr_work.columns:
         m["DSR_Segment"] = (
-            mtr_df.loc[m.index, "DSR_Segment"].fillna("").astype(str).str.strip().values
+            mtr_work.loc[m.index, "DSR_Segment"].fillna("").astype(str).str.strip().values
         )
         cols.append("DSR_Segment")
     return m[cols]

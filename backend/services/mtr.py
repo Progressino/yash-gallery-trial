@@ -350,6 +350,14 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
     out["Month_Label"] = out["Reporting_Date"].dt.strftime("%b %Y")
     out = _downcast_mtr(out)
 
+    # Free replacements: zero invoice amount — not paid sales (keep for audit as FreeReplacement).
+    try:
+        from .sales import apply_amazon_free_replacement_txn
+
+        out = apply_amazon_free_replacement_txn(out, txn_col="Transaction_Type")
+    except Exception:
+        pass
+
     msgs: list[str] = []
     if filled_dates:
         label = fallback_ts.strftime("%b %Y") if fallback_ts is not pd.NaT else "?"

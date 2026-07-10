@@ -511,3 +511,49 @@ def test_meesho_quarterly_drops_nan_oms_tokens():
     )
     assert n == 0
     assert not quarter_sums
+
+
+def test_amazon_quarterly_excludes_free_replacement_zero_invoice():
+    from collections import defaultdict
+
+    start_ts = pd.Timestamp("2024-06-01")
+    end_ts = pd.Timestamp("2026-06-04")
+    today = pd.Timestamp.today()
+    q_label_map = {(2026, 1): "Apr-Jun 2025"}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+
+    df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-05-15", "2025-05-16"]),
+            "Reporting_Date": pd.to_datetime(["2025-05-15", "2025-05-16"]),
+            "SKU": ["1379YKGREEN-XXL", "1379YKGREEN-XXL"],
+            "Transaction_Type": ["Shipment", "Shipment"],
+            "Quantity": [20, 3],
+            "Invoice_Amount": [800.0, 0.0],
+            "Order_Id": ["A1", "A2"],
+            "Invoice_Number": ["I1", "I2"],
+            "ASIN": ["B09XX", "B09XX"],
+        }
+    )
+    n = _accumulate_shipment_frame(
+        df,
+        "amazon",
+        None,
+        strip_pl=True,
+        canonical_oms=False,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+    )
+    assert n == 1
+    assert quarter_sums[("1379YKGREEN-XXL", "Apr-Jun 2025")] == 20

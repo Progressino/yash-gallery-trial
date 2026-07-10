@@ -1608,11 +1608,67 @@ def test_amazon_mtr_cancel_excluded_from_net_units():
             "SKU": ["AMZ1", "AMZ1"],
             "Transaction_Type": ["Shipment", "Cancel"],
             "Quantity": [1.0, 1.0],
+            "Invoice_Amount": [500.0, 0.0],
             "Order_Id": ["O1", "O1"],
             "Invoice_Number": ["", ""],
         }
     )
     out = _mtr_to_sales_df(mtr_df, {})
+    assert float(out["Units_Effective"].sum()) == 1.0
+
+
+def test_amazon_free_replacement_zero_invoice_excluded_from_sales():
+    """Zero-invoice Amazon shipments are free replacements — not paid sales."""
+    from backend.services.sales import (
+        _mtr_to_sales_df,
+        amazon_mtr_free_replacement_mask,
+        apply_amazon_free_replacement_txn,
+    )
+
+    mtr_df = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2025-06-01"), pd.Timestamp("2025-06-02"), pd.Timestamp("2025-06-03")],
+            "Reporting_Date": [pd.Timestamp("2025-06-01"), pd.Timestamp("2025-06-02"), pd.Timestamp("2025-06-03")],
+            "SKU": ["1379YKGREEN-5XL"] * 3,
+            "Transaction_Type": ["Shipment", "Shipment", "Refund"],
+            "Quantity": [10.0, 2.0, 1.0],
+            "Invoice_Amount": [769.0, 0.0, 0.0],
+            "Order_Id": ["O1", "O2", "O3"],
+            "Invoice_Number": ["I1", "I2", "I3"],
+        }
+    )
+    assert int(amazon_mtr_free_replacement_mask(mtr_df).sum()) == 2
+    labeled = apply_amazon_free_replacement_txn(mtr_df)
+    assert list(labeled["Transaction_Type"]) == ["Shipment", "FreeReplacement", "FreeReplacement"]
+
+    out = _mtr_to_sales_df(mtr_df, {})
+    ship = out[out["Transaction Type"] == "Shipment"]
+    free = out[out["Transaction Type"] == "FreeReplacement"]
+    assert float(ship["Quantity"].sum()) == 10.0
+    assert float(free["Quantity"].sum()) == 3.0
+    assert float(free["Units_Effective"].sum()) == 0.0
+    assert float(out["Units_Effective"].sum()) == 10.0
+
+
+def test_amazon_gift_card_paid_order_not_treated_as_free_replacement():
+    """Gift-card payment with non-zero invoice is a real sale."""
+    from backend.services.sales import _mtr_to_sales_df
+
+    mtr_df = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2025-06-01")],
+            "Reporting_Date": [pd.Timestamp("2025-06-01")],
+            "SKU": ["1379YKGREEN-XXL"],
+            "Transaction_Type": ["Shipment"],
+            "Quantity": [1.0],
+            "Invoice_Amount": [789.0],
+            "Payment_Method": ["GC"],
+            "Order_Id": ["O1"],
+            "Invoice_Number": ["I1"],
+        }
+    )
+    out = _mtr_to_sales_df(mtr_df, {})
+    assert out["Transaction Type"].iloc[0] == "Shipment"
     assert float(out["Units_Effective"].sum()) == 1.0
 
 

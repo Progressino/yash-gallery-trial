@@ -322,7 +322,11 @@ def amazon_mtr_b2b_b2c_monthly(
     end_date: str | None = None,
 ) -> list[dict]:
     """Amazon MTR units by invoice month and B2B/B2C (gross shipments − refunds)."""
-    from .sales import amazon_mtr_reporting_date, canonical_sales_sku_series
+    from .sales import (
+        amazon_mtr_reporting_date,
+        apply_amazon_free_replacement_txn,
+        canonical_sales_sku_series,
+    )
 
     mtr = platform_frame_for_window("mtr_df", sess, start_date=start_date, end_date=end_date)
     if mtr.empty:
@@ -353,6 +357,7 @@ def amazon_mtr_b2b_b2c_monthly(
         except Exception:
             pass
 
+    sub = apply_amazon_free_replacement_txn(sub)
     sub = sub.copy()
     sub["_rep"] = amazon_mtr_reporting_date(sub)
     sub = sub.dropna(subset=["_rep"])
@@ -372,6 +377,7 @@ def amazon_mtr_b2b_b2c_monthly(
         ship = int(qty[txn == "Shipment"].sum())
         ret = int(qty[txn == "Refund"].sum())
         can = int(qty[txn == "Cancel"].sum())
+        free = int(qty[txn == "FreeReplacement"].sum())
         rows.append({
             "month": str(month),
             "channel": str(rt),
@@ -379,5 +385,6 @@ def amazon_mtr_b2b_b2c_monthly(
             "shipments": ship,
             "returns": ret,
             "cancelled": can,
+            "free_replacements": free,
         })
     return rows

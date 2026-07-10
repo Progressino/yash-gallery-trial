@@ -154,11 +154,16 @@ def _platform_shipment_history_part(
     )
     if not sku_col or not date_col or not qty_col:
         return pd.DataFrame()
-    tmp = df[[sku_col, date_col, qty_col]].copy()
+    work_df = df
+    if platform == "amazon":
+        from .sales import apply_amazon_free_replacement_txn
+
+        work_df = apply_amazon_free_replacement_txn(df, txn_col=txn_col or "Transaction_Type")
+    tmp = work_df[[sku_col, date_col, qty_col]].copy()
     tmp.columns = ["SKU", "Date", "Qty"]
     tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
     tmp["Qty"] = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
-    tmp["TxnType"] = df[txn_col].values if txn_col else "Shipment"
+    tmp["TxnType"] = work_df[txn_col].values if txn_col else "Shipment"
     if strip_pl:
         if sku_mapping:
             tmp["SKU"] = tmp["SKU"].apply(lambda x: _strip_pl(x, sku_mapping))
@@ -266,12 +271,17 @@ def _merge_sales_and_platform_history_parts(
 
 
 def _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent=False):
-    from .sales import amazon_mtr_reporting_date, amazon_mtr_units_effective_series
+    from .sales import (
+        amazon_mtr_reporting_date,
+        amazon_mtr_units_effective_series,
+        apply_amazon_free_replacement_txn,
+    )
 
     if mtr_df.empty:
         return pd.DataFrame()
-    m = mtr_df[["SKU", "Transaction_Type", "Quantity"]].copy()
-    m["TxnDate"] = amazon_mtr_reporting_date(mtr_df)
+    mtr_work = apply_amazon_free_replacement_txn(mtr_df)
+    m = mtr_work[["SKU", "Transaction_Type", "Quantity"]].copy()
+    m["TxnDate"] = amazon_mtr_reporting_date(mtr_work)
     m = m.rename(columns={"SKU": "Sku", "Transaction_Type": "Transaction Type"})
     m["TxnDate"]  = pd.to_datetime(m["TxnDate"], errors="coerce")
     m["Quantity"] = pd.to_numeric(m["Quantity"], errors="coerce").fillna(0)

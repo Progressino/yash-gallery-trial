@@ -277,6 +277,47 @@ def test_build_deepdive_amazon_uses_mtr_not_stale_sales_pl_merge():
     assert amazon == 60, f"Expected 60 MTR units, got {amazon}"
 
 
+def test_build_deepdive_excludes_amazon_free_replacements():
+    sess = _FakeSess()
+    sess.mtr_df = pd.DataFrame(
+        {
+            "SKU": ["1379YKGREEN-5XL", "1379YKGREEN-5XL", "1379YKGREEN-5XL"],
+            "Date": ["2025-06-01", "2025-06-02", "2025-06-03"],
+            "Reporting_Date": ["2025-06-01", "2025-06-02", "2025-06-03"],
+            "Quantity": [10, 2, 1],
+            "Transaction_Type": ["Shipment", "Shipment", "Refund"],
+            "Invoice_Amount": [769.0, 0.0, 500.0],
+            "Report_Type": ["B2C", "B2C", "B2C"],
+            "Order_Id": ["A1", "A2", "A3"],
+            "Invoice_Number": ["I1", "I2", "I3"],
+            "ASIN": ["B09XXMBL91"] * 3,
+        }
+    )
+    sess.sales_df = pd.DataFrame()
+
+    out = build_deepdive_sales_frame(
+        sess,
+        "1379YKGREEN-5XL",
+        all_sizes=False,
+        start_date="2025-01-01",
+        end_date="2025-12-31",
+    )
+    amazon = out[out["Source"].astype(str) == "Amazon"]
+    ship = int(
+        amazon.loc[amazon["Transaction Type"].astype(str) == "Shipment", "Quantity"].sum()
+    )
+    ret = int(
+        amazon.loc[amazon["Transaction Type"].astype(str) == "Refund", "Quantity"].sum()
+    )
+    free = int(
+        amazon.loc[amazon["Transaction Type"].astype(str) == "FreeReplacement", "Quantity"].sum()
+    )
+    assert ship == 10
+    assert ret == 1
+    assert free == 2
+    assert float(amazon["Units_Effective"].sum()) == 9.0
+
+
 def test_amazon_seller_net_units_formula():
     from backend.services.sales import amazon_seller_net_units
 
