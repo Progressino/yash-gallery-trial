@@ -250,7 +250,8 @@ def _deferred_load_mtr_df(disk_dir: "Path") -> None:
                 mtr = dedup_amazon_mtr_dataframe(mtr)
             if _warm_cache is None:
                 return
-            existing_len = len(_warm_cache.get("mtr_df") or [])
+            existing = _warm_cache.get("mtr_df")
+            existing_len = len(existing) if existing is not None else 0
             _warm_cache["mtr_df"] = mtr
             dedup_removed = rows_before - len(mtr)
             log.info(
