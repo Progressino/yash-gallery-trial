@@ -182,19 +182,14 @@ export default function Admin() {
   const editUserRole = roles.find(r => r.id === editRoleId)?.role_name
 
   const hrmDeptLabel = (id: number | null | undefined) => {
-    if (id == null || id === '') return '—'
+    if (id == null) return '—'
     const d = (hrmDepts as { id: number; name: string }[]).find(x => x.id === id)
     return d ? `${d.name} (#${id})` : `#${id}`
   }
   const hrmEmpLabel = (id: number | null | undefined) => {
-    if (id == null || id === '') return '—'
+    if (id == null) return '—'
     const e = (hrmEmployees as { id: number; name: string; emp_code: string }[]).find(x => x.id === id)
     return e ? `${e.name} (${e.emp_code}) #${id}` : `#${id}`
-  }
-  const hodUserLabel = (id: number | null | undefined) => {
-    if (id == null || id === '') return '—'
-    const u = users.find(x => x.id === id)
-    return u ? `${u.full_name || u.username} (#${id})` : `#${id}`
   }
 
   const openNewUserForm = () => {
