@@ -1650,12 +1650,11 @@ def test_amazon_free_replacement_zero_invoice_excluded_from_sales():
     assert float(out["Units_Effective"].sum()) == 10.0
 
 
-def test_amazon_invoice_offset_pair_not_counted_as_refund():
-    """Offset refund leg is free replacement; shipment stays gross. Net = ship − return."""
+def test_amazon_invoice_offset_pair_stays_shipment_and_refund_for_returns():
+    """Offset pairs are real MTR ship+refund rows — returns stay in Returns, net demand = 0."""
     from backend.services.sales import (
         _mtr_to_sales_df,
         amazon_mtr_invoice_offset_pair_mask,
-        amazon_mtr_invoice_offset_refund_mask,
         apply_amazon_free_replacement_txn,
     )
 
@@ -1672,14 +1671,64 @@ def test_amazon_invoice_offset_pair_not_counted_as_refund():
         }
     )
     assert int(amazon_mtr_invoice_offset_pair_mask(mtr_df).sum()) == 2
-    assert int(amazon_mtr_invoice_offset_refund_mask(mtr_df).sum()) == 1
     labeled = apply_amazon_free_replacement_txn(mtr_df)
-    assert list(labeled["Transaction_Type"]) == ["Shipment", "FreeReplacement"]
+    assert list(labeled["Transaction_Type"]) == ["Shipment", "Refund"]
 
     out = _mtr_to_sales_df(mtr_df, {})
-    assert out["Transaction Type"].tolist() == ["Shipment", "FreeReplacement"]
-    assert out["Transaction Type"].eq("Refund").sum() == 0
+    assert out["Transaction Type"].tolist() == ["Shipment", "Refund"]
+    assert int(out.loc[out["Transaction Type"] == "Refund", "Quantity"].sum()) == 1
     assert float(out["Units_Effective"].sum()) == 0.0
+
+
+def test_1379ykgreen_xxl_q1_2025_monthly_returns_from_mtr():
+    """Q1 2025 Amazon MTR: ~6–7 returns/month; zero-invoice lines → free replacement only."""
+    from backend.services.sales import _mtr_to_sales_df
+
+    rows = []
+    # Jan: 31 ship, 6 refund
+    for i in range(31):
+        rows.append(("2025-01-15", "Shipment", 769.0, f"J-S{i}"))
+    for i in range(6):
+        rows.append(("2025-01-20", "Refund", -769.0, f"J-R{i}"))
+  # Feb: 34 paid ship + 3 zero ship + 7 refund
+    for i in range(34):
+        rows.append(("2025-02-10", "Shipment", 769.0, f"F-S{i}"))
+    for i in range(3):
+        rows.append(("2025-02-11", "Shipment", 0.0, f"F-Z{i}"))
+    for i in range(7):
+        rows.append(("2025-02-12", "Refund", -769.0, f"F-R{i}"))
+    # Mar: 28 paid ship + 1 zero ship + 7 refund
+    for i in range(28):
+        rows.append(("2025-03-05", "Shipment", 769.0, f"M-S{i}"))
+    rows.append(("2025-03-19", "Shipment", 0.0, "M-Z0"))
+    for i in range(7):
+        rows.append(("2025-03-20", "Refund", -769.0, f"M-R{i}"))
+
+    mtr_df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime([r[0] for r in rows]),
+            "Reporting_Date": pd.to_datetime([r[0] for r in rows]),
+            "SKU": ["1379YKGREEN-XXL"] * len(rows),
+            "Transaction_Type": [r[1] for r in rows],
+            "Quantity": [1.0] * len(rows),
+            "Invoice_Amount": [r[2] for r in rows],
+            "Order_Id": [r[3] for r in rows],
+            "Invoice_Number": [r[3] for r in rows],
+        }
+    )
+    out = _mtr_to_sales_df(mtr_df, {})
+    out["_month"] = out["TxnDate"].dt.to_period("M").astype(str)
+
+    def month_stats(month: str) -> dict:
+        g = out[out["_month"] == month]
+        ship = int(g.loc[g["Transaction Type"] == "Shipment", "Quantity"].sum())
+        ret = int(g.loc[g["Transaction Type"] == "Refund", "Quantity"].sum())
+        free = int(g.loc[g["Transaction Type"] == "FreeReplacement", "Quantity"].sum())
+        return {"shipped": ship, "returns": ret, "free_replacements": free, "net": ship - ret}
+
+    assert month_stats("2025-01") == {"shipped": 31, "returns": 6, "free_replacements": 0, "net": 25}
+    assert month_stats("2025-02") == {"shipped": 34, "returns": 7, "free_replacements": 3, "net": 27}
+    assert month_stats("2025-03") == {"shipped": 28, "returns": 7, "free_replacements": 1, "net": 21}
 
 
 def test_amazon_unpaired_refund_stays_refund():

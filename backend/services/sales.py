@@ -417,24 +417,9 @@ def amazon_mtr_invoice_offset_pair_mask(df: pd.DataFrame) -> pd.Series:
     return touch
 
 
-def amazon_mtr_invoice_offset_refund_mask(df: pd.DataFrame) -> pd.Series:
-    """Refund leg of same-invoice offset pairs — show as free replacement, not returns."""
-    pair = amazon_mtr_invoice_offset_pair_mask(df)
-    if not pair.any():
-        return pair
-    txn_col = next(
-        (c for c in ("Transaction_Type", "Transaction Type", "TxnType") if c in df.columns),
-        None,
-    )
-    if not txn_col:
-        return pd.Series(False, index=df.index)
-    txn = df[txn_col].astype(str).str.strip()
-    return pair & txn.eq("Refund")
-
-
 def amazon_mtr_free_replacement_row_mask(df: pd.DataFrame) -> pd.Series:
-    """Rows shown in the free-replacement column only (zero-invoice + offset refund legs)."""
-    return amazon_mtr_free_replacement_mask(df) | amazon_mtr_invoice_offset_refund_mask(df)
+    """Rows shown in the free-replacement column only (zero-invoice MTR lines)."""
+    return amazon_mtr_free_replacement_mask(df)
 
 
 def apply_amazon_free_replacement_txn(
@@ -442,7 +427,7 @@ def apply_amazon_free_replacement_txn(
     *,
     txn_col: str | None = None,
 ) -> pd.DataFrame:
-    """Relabel free-replacement rows (zero invoice or offset refund leg) as FreeReplacement."""
+    """Relabel zero-invoice Amazon rows as FreeReplacement (not paid returns/shipments)."""
     if df is None or getattr(df, "empty", True):
         return df
     col = txn_col or next(
