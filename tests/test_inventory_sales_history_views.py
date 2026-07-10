@@ -86,6 +86,23 @@ def test_sales_history_wide_matrix_aggregates_net_units():
     assert plat["rows"][0]["units"] == [2.0, 0.0]
 
 
+def test_sales_history_summary_default_end_date_handles_tz_aware_today():
+    """Regression: IST-aware 'today' must not crash vs naive TxnDate columns."""
+    today = pd.Timestamp.now(tz="Asia/Kolkata").normalize().tz_localize(None)
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A"],
+            "TxnDate": [today],
+            "Units_Effective": [2.0],
+            "Source": ["Amazon"],
+            "Transaction Type": ["Shipment"],
+        }
+    )
+    summary = sales_history_summary(sales, days=7)  # no end_date → uses today IST
+    assert summary["loaded"] is True
+    assert summary["total_units"] == 2.0
+
+
 def test_sales_history_upload_coverage_lists_missing_platforms(monkeypatch):
     def _fake_coverage():
         return {

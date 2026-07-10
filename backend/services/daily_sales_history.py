@@ -15,6 +15,14 @@ def today_ist_timestamp() -> pd.Timestamp:
     return pd.Timestamp.now(tz=_IST)
 
 
+def _as_naive_day(ts: pd.Timestamp | str) -> pd.Timestamp:
+    """Calendar day as tz-naive midnight — safe to compare with datetime64[ns] columns."""
+    t = pd.Timestamp(ts)
+    if getattr(t, "tzinfo", None) is not None:
+        t = t.tz_convert(_IST)
+    return pd.Timestamp(t.date())
+
+
 def _normalize_sales_tall(sales_df: pd.DataFrame | None) -> pd.DataFrame:
     if sales_df is None or getattr(sales_df, "empty", True):
         return pd.DataFrame(columns=["OMS_SKU", "Date", "Units", "Source", "TxnType"])
@@ -25,10 +33,17 @@ def _normalize_sales_tall(sales_df: pd.DataFrame | None) -> pd.DataFrame:
     txn_col = "Transaction Type" if "Transaction Type" in s.columns else "TxnType"
     if sku_col not in s.columns or date_col not in s.columns or eff_col not in s.columns:
         return pd.DataFrame(columns=["OMS_SKU", "Date", "Units", "Source", "TxnType"])
+    dates = pd.to_datetime(s[date_col], errors="coerce")
+    # Drop timezone so window filters never mix aware Timestamp with naive columns.
+    try:
+        if getattr(dates.dt, "tz", None) is not None:
+            dates = dates.dt.tz_convert(_IST).dt.tz_localize(None)
+    except (TypeError, AttributeError, ValueError):
+        pass
     out = pd.DataFrame(
         {
             "OMS_SKU": s[sku_col].astype(str).str.strip().str.upper(),
-            "Date": pd.to_datetime(s[date_col], errors="coerce").dt.normalize(),
+            "Date": dates.dt.normalize(),
             "Units": pd.to_numeric(s[eff_col], errors="coerce").fillna(0.0),
             "Source": s["Source"].astype(str) if "Source" in s.columns else "",
             "TxnType": s[txn_col].astype(str) if txn_col in s.columns else "",
@@ -42,13 +57,13 @@ def _normalize_sales_tall(sales_df: pd.DataFrame | None) -> pd.DataFrame:
 def sales_history_view_end_date(sales_df: pd.DataFrame | None, end_date: str | None = None) -> pd.Timestamp:
     if end_date:
         try:
-            return pd.Timestamp(end_date).normalize()
+            return _as_naive_day(end_date)
         except Exception:
             pass
     # Always anchor the view to today so the 30-day window shows the most
     # recent period. If recent uploads are missing, those dates will appear
     # empty and flagged by the upload-coverage warnings.
-    return today_ist_timestamp().normalize()
+    return _as_naive_day(today_ist_timestamp())
 
 
 def filter_sales_history_window(
@@ -62,7 +77,7 @@ def filter_sales_history_window(
     if tall.empty:
         return tall
     span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
-    end = sales_history_view_end_date(sales_df, end_date)
+    end = _as_naive_day(sales_history_view_end_date(sales_df, end_date))
     start = end - pd.Timedelta(days=max(0, span - 1))
     mask = (tall["Date"] >= start) & (tall["Date"] <= end)
     sub = tall.loc[mask].copy()
