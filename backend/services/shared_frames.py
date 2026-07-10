@@ -132,8 +132,9 @@ def platform_frame_for_window(
         if date_col:
             d = pd.to_datetime(mem[date_col], errors="coerce")
             in_w = mem[(d >= pd.Timestamp(s)) & (d <= pd.Timestamp(e))]
-            if not in_w.empty:
-                return mem
+            # Always return the window slice — returning full mem forced deepdive
+            # to scan entire platform history (~10s+) even when dates were set.
+            return in_w
 
     disk_dir = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
     path = disk_dir / f"{attr}.parquet"
@@ -142,15 +143,23 @@ def platform_frame_for_window(
     try:
         if has_window:
             try:
-                return pd.read_parquet(
+                df = pd.read_parquet(
                     path,
                     filters=[
                         ("Date", ">=", pd.Timestamp(s)),
                         ("Date", "<=", pd.Timestamp(e) + pd.Timedelta(days=1)),
                     ],
                 )
+                if df is not None and not getattr(df, "empty", True):
+                    return df
             except Exception:
                 pass
+            # Fallback: read full parquet then slice (filters unsupported / schema drift).
+            full = pd.read_parquet(path)
+            if full is None or getattr(full, "empty", True) or "Date" not in full.columns:
+                return full if full is not None else pd.DataFrame()
+            d = pd.to_datetime(full["Date"], errors="coerce")
+            return full[(d >= pd.Timestamp(s)) & (d <= pd.Timestamp(e))]
         return pd.read_parquet(path)
     except Exception:
         return mem if mem is not None else pd.DataFrame()

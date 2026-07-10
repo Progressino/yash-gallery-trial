@@ -275,13 +275,17 @@ export default function SKUDeepDive() {
   const allSizesParam = searchParams.get('all_sizes') === '1'
   const sourceParam   = searchParams.get('source') ?? ''
 
+  const defaultStart = dateNDaysAgo(90)
+  const defaultEnd = today()
   const [activeSku,  setActiveSku]  = useState(skuParam)
-  const [start,      setStart]      = useState(startParam)
-  const [end,        setEnd]        = useState(endParam)
+  const [start,      setStart]      = useState(startParam || (skuParam ? defaultStart : ''))
+  const [end,        setEnd]        = useState(endParam || (skuParam ? defaultEnd : ''))
   const [allSizes,   setAllSizes]   = useState(allSizesParam)
   const [channel,    setChannel]    = useState(sourceParam)
-  /** 0 = full loaded range (no date filter); matches total-sales exports */
-  const [activePreset, setPreset]   = useState<number | null>(0)
+  /** 90 = default window (fast); 0 = full loaded range */
+  const [activePreset, setPreset]   = useState<number | null>(
+    () => (startParam || endParam ? null : 90),
+  )
   const [pinSavedFlash, setPinSavedFlash] = useState(false)
   const [storedPinExists, setStoredPinExists] = useState(
     () => typeof sessionStorage !== 'undefined' && !!readDeepDivePin()?.sku,
@@ -398,7 +402,7 @@ export default function SKUDeepDive() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">SKU Deep Dive</h1>
           <p className="text-sm text-gray-400 mt-0.5">
-            Full sales breakdown for any product SKU · Default period is <strong>all loaded history</strong> (use presets to narrow)
+            Full sales breakdown for any product SKU · Default period is <strong>last 90 days</strong> (use All for full history)
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

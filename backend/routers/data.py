@@ -5017,28 +5017,24 @@ def sku_deepdive(
     )
     df0 = apply_upload_report_day_gate(sales) if sales is not None and not sales.empty else pd.DataFrame()
 
-    # Detect whether Meesho is loaded but has no per-SKU data (TCS ZIP format)
+    # Detect whether Meesho is loaded but has no per-SKU data (TCS ZIP format).
+    # Cheap check on meesho_df — avoid scanning the full unified sales table.
     meesho_note: str | None = None
-    if not sess.meesho_df.empty:
-        unified_gated = apply_upload_report_day_gate(unified)
-        meesho_skus_in_sales = (
-            unified_gated[unified_gated["Source"].astype(str) == "Meesho"]["Sku"]
-            .dropna().unique().tolist()
-            if not unified_gated.empty and "Source" in unified_gated.columns else []
-        )
-        if meesho_skus_in_sales == ["MEESHO_TOTAL"] or set(meesho_skus_in_sales) == {"MEESHO_TOTAL"}:
-            meesho_total_units = int(
-                unified_gated[
-                    (unified_gated["Source"].astype(str) == "Meesho") &
-                    (unified_gated["Transaction Type"].astype(str) == "Shipment")
-                ]["Quantity"].sum()
-            ) if not unified_gated.empty else 0
-            meesho_note = (
-                f"Meesho data loaded ({meesho_total_units:,} total units) but your uploaded "
-                f"Meesho TCS ZIP reports don't include per-SKU data. "
-                f"To see Meesho in SKU breakdown, upload the Meesho Order Report CSV "
-                f"(Supplier Panel → Reports → Order Reports)."
-            )
+    meesho_df = getattr(sess, "meesho_df", None)
+    if meesho_df is not None and not getattr(meesho_df, "empty", True):
+        sku_col = next((c for c in ("OMS_SKU", "SKU", "Sku") if c in meesho_df.columns), None)
+        if sku_col:
+            sk = meesho_df[sku_col].fillna("").astype(str).str.strip().str.upper()
+            blank = sk.eq("") | sk.isin(["NAN", "NONE", "NAT", "MEESHO_TOTAL"])
+            blank_n = int(blank.sum())
+            total_n = int(len(meesho_df))
+            if total_n > 0 and blank_n / total_n >= 0.25:
+                meesho_note = (
+                    f"Meesho has {blank_n:,}/{total_n:,} rows with no seller SKU "
+                    f"(typical of TCS/GST ZIPs). Those units cannot appear in SKU Deepdive. "
+                    f"Re-upload Meesho Order Report CSV "
+                    f"(Supplier Panel → Reports → Order Reports) for the missing months."
+                )
 
     if df0.empty:
         return {
@@ -5168,9 +5164,14 @@ def sku_deepdive(
     monthly = month_rows
 
     from ..services.sku_deepdive_data import amazon_mtr_b2b_b2c_monthly
-    amazon_b2b_b2c = amazon_mtr_b2b_b2c_monthly(
-        sess, sku, all_sizes=all_sizes, start_date=start_date, end_date=end_date,
-    )
+    # Skip expensive second MTR pass when the UI is filtered to a non-Amazon channel.
+    src_norm = (source_filter or "").strip().lower()
+    if src_norm and src_norm != "amazon":
+        amazon_b2b_b2c = []
+    else:
+        amazon_b2b_b2c = amazon_mtr_b2b_b2c_monthly(
+            sess, sku, all_sizes=all_sizes, start_date=start_date, end_date=end_date,
+        )
 
     # Platform breakdown
     plat_grp = (

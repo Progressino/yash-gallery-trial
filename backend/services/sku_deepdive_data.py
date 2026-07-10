@@ -51,6 +51,23 @@ def deepdive_sku_alias_tokens(raw: str) -> Set[str]:
     return {x for x in out if x and x != "NAN"}
 
 
+def deepdive_mapping_seller_aliases(oms: str, mapping: dict | None) -> Set[str]:
+    """Seller / Meesho keys that map to the searched OMS (e.g. 1057YKNBLUE-5XL → 1057YKBLUE-5XL)."""
+    if not mapping:
+        return set()
+    targets = {t for t in deepdive_sku_alias_tokens(oms) if t}
+    if not targets:
+        return set()
+    out: Set[str] = set()
+    for k, v in mapping.items():
+        vv = str(v or "").strip().upper()
+        if not vv:
+            continue
+        if vv in targets or canonical_sales_sku(vv) in targets:
+            out |= deepdive_sku_alias_tokens(str(k))
+    return out
+
+
 def deepdive_parent_tokens(raw: str) -> Set[str]:
     """Parent/base SKU tokens including hyphen-normalised forms (165YK-251… ↔ 165YK251…)."""
     out: Set[str] = set()
@@ -64,10 +81,27 @@ def deepdive_parent_tokens(raw: str) -> Set[str]:
 
 
 def _platform_raw_sku_series(df: pd.DataFrame) -> pd.Series:
-    col = next((c for c in df.columns if c in ("OMS_SKU", "SKU", "Sku")), None)
-    if not col:
-        return pd.Series("", index=df.index, dtype=str)
-    return df[col].fillna("").astype(str).str.strip()
+    """Prefer OMS_SKU (post-map) over raw seller SKU — Meesho often stores YKN… in SKU."""
+    for col in ("OMS_SKU", "SKU", "Sku"):
+        if col in df.columns:
+            return df[col].fillna("").astype(str).str.strip()
+    return pd.Series("", index=df.index, dtype=str)
+
+
+def _platform_sku_match_mask(df: pd.DataFrame, sku_mask_fn) -> pd.Series:
+    """Match if ANY of OMS_SKU / SKU / Sku hits — covers Meesho YKN→YK mapping gaps."""
+    masks: list[pd.Series] = []
+    for col in ("OMS_SKU", "SKU", "Sku"):
+        if col not in df.columns:
+            continue
+        raw = df[col].fillna("").astype(str).str.strip()
+        masks.append(sku_mask_fn(raw))
+    if not masks:
+        return pd.Series(False, index=df.index)
+    out = masks[0].copy()
+    for m in masks[1:]:
+        out = out | m
+    return out
 
 
 def _sku_match_mask(
@@ -187,8 +221,7 @@ def _build_platform_sales_parts(
 
     mtr = platform_frame_for_window("mtr_df", sess, start_date=start_date, end_date=end_date)
     if not mtr.empty:
-        raw = _platform_raw_sku_series(mtr)
-        sub = _filter_platform_df(mtr, sku_mask_fn(raw))
+        sub = _filter_platform_df(mtr, _platform_sku_match_mask(mtr, sku_mask_fn))
         if not sub.empty:
             # Re-apply FBA shadow-row dedup on the small per-SKU slice to guarantee
             # correctness regardless of whether the session-level mtr_df was already
@@ -210,8 +243,7 @@ def _build_platform_sales_parts(
 
     myntra = platform_frame_for_window("myntra_df", sess, start_date=start_date, end_date=end_date)
     if not myntra.empty:
-        raw = _platform_raw_sku_series(myntra)
-        sub = _filter_platform_df(myntra, sku_mask_fn(raw))
+        sub = _filter_platform_df(myntra, _platform_sku_match_mask(myntra, sku_mask_fn))
         if not sub.empty:
             part = _build_myntra_sales_part(sub)
             if not part.empty:
@@ -219,8 +251,7 @@ def _build_platform_sales_parts(
 
     meesho = platform_frame_for_window("meesho_df", sess, start_date=start_date, end_date=end_date)
     if not meesho.empty:
-        raw = _platform_raw_sku_series(meesho)
-        sub = _filter_platform_df(meesho, sku_mask_fn(raw))
+        sub = _filter_platform_df(meesho, _platform_sku_match_mask(meesho, sku_mask_fn))
         if not sub.empty:
             part = meesho_to_sales_rows(sub, sku_mapping=mapping or None)
             if not part.empty:
@@ -228,8 +259,7 @@ def _build_platform_sales_parts(
 
     flipkart = platform_frame_for_window("flipkart_df", sess, start_date=start_date, end_date=end_date)
     if not flipkart.empty:
-        raw = _platform_raw_sku_series(flipkart)
-        sub = _filter_platform_df(flipkart, sku_mask_fn(raw))
+        sub = _filter_platform_df(flipkart, _platform_sku_match_mask(flipkart, sku_mask_fn))
         if not sub.empty:
             part = _build_flipkart_sales_part(sub)
             if not part.empty:
@@ -237,8 +267,7 @@ def _build_platform_sales_parts(
 
     snapdeal = platform_frame_for_window("snapdeal_df", sess, start_date=start_date, end_date=end_date)
     if not snapdeal.empty:
-        raw = _platform_raw_sku_series(snapdeal)
-        sub = _filter_platform_df(snapdeal, sku_mask_fn(raw))
+        sub = _filter_platform_df(snapdeal, _platform_sku_match_mask(snapdeal, sku_mask_fn))
         if not sub.empty:
             part = _build_snapdeal_sales_part(sub)
             if not part.empty:
@@ -261,10 +290,14 @@ def build_deepdive_sales_frame(
     Rows for one deep-dive query: platform upload history plus unified sales gaps.
   """
     aliases = deepdive_sku_alias_tokens(sku)
+    mapping = getattr(sess, "sku_mapping", None) or {}
+    # Seller keys (Meesho YKN…) for finding rows — do NOT use for post-filter, or
+    # Amazon distinct-ASIN PL listings (PLYK…) would inflate the OMS deepdive.
+    match_targets: Set[str] = set(aliases) | deepdive_mapping_seller_aliases(sku, mapping)
     exact_targets: Set[str] = set(aliases)
     parent_targets: Set[str] = set()
     if all_sizes:
-        for a in aliases:
+        for a in list(aliases)[:50]:
             parent_targets |= deepdive_parent_tokens(a)
     else:
         parent_targets = set()
@@ -272,7 +305,7 @@ def build_deepdive_sales_frame(
     def sku_mask_fn(raw: pd.Series) -> pd.Series:
         return _sku_match_mask(
             raw,
-            exact_targets=exact_targets,
+            exact_targets=match_targets,
             parent_targets=parent_targets,
             all_sizes=all_sizes,
         )
@@ -284,8 +317,10 @@ def build_deepdive_sales_frame(
         end_date=end_date,
     )
 
-    # Exact-SKU mode: keep only rows whose resolved Sku equals the searched token.
-    # Distinct-ASIN PL listings stay on their PL seller Sku and must not inflate OMS.
+    # Exact-SKU mode: keep only rows whose resolved Sku equals the searched OMS token.
+    # Distinct-ASIN PL listings stay on their PL seller Sku (protect_distinct_asin_pl_skus)
+    # and must not inflate OMS — do not PL-strip here.
+    # Meesho YKN rows resolve to OMS in meesho_to_sales_rows, so they pass this filter.
     if not all_sizes and plat is not None and not plat.empty and "Sku" in plat.columns:
         plat_skus = plat["Sku"].astype(str).str.strip().str.upper()
         plat = plat.loc[plat_skus.isin(exact_targets)].copy()
@@ -294,18 +329,31 @@ def build_deepdive_sales_frame(
     if sales is None or sales.empty:
         out = plat
     else:
-        canon = canonical_sales_sku_series(sales["Sku"])
-        if all_sizes:
-            uniq = sales["Sku"].astype(str).unique()
-            parent_map = {u: deepdive_parent_tokens(str(u).strip()) for u in uniq}
-            sales_mask = canon.isin(exact_targets) | sales["Sku"].astype(str).map(
-                lambda v: bool(parent_map.get(v, set()) & parent_targets)
-            )
+        # Narrow sales early when a date window is set — avoids scanning full history.
+        sales_work = sales
+        if start_date or end_date:
+            td = txn_reporting_naive_ist(sales["TxnDate"])
+            mask = td.notna()
+            if start_date:
+                mask &= td >= pd.Timestamp(str(start_date)[:10])
+            if end_date:
+                mask &= td <= pd.Timestamp(str(end_date)[:10]) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            sales_work = sales.loc[mask]
+        if sales_work.empty:
+            out = plat
         else:
-            sales_mask = canon.isin(exact_targets)
+            canon = canonical_sales_sku_series(sales_work["Sku"])
+            if all_sizes:
+                uniq = sales_work["Sku"].astype(str).unique()
+                parent_map = {u: deepdive_parent_tokens(str(u).strip()) for u in uniq}
+                sales_mask = canon.isin(exact_targets) | sales_work["Sku"].astype(str).map(
+                    lambda v: bool(parent_map.get(v, set()) & parent_targets)
+                )
+            else:
+                sales_mask = canon.isin(exact_targets)
 
-        sales_part = sales.loc[sales_mask].copy()
-        out = _merge_platform_and_sales(plat, sales_part)
+            sales_part = sales_work.loc[sales_mask].copy()
+            out = _merge_platform_and_sales(plat, sales_part)
 
     if out is None or out.empty:
         return pd.DataFrame()

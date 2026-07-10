@@ -20,6 +20,40 @@ class _FakeSess:
         self.sales_df = pd.DataFrame()
 
 
+def test_deepdive_mapping_seller_aliases_include_ykn():
+    from backend.services.sku_deepdive_data import deepdive_mapping_seller_aliases
+
+    aliases = deepdive_mapping_seller_aliases(
+        "1057YKBLUE-5XL",
+        {"1057YKNBLUE-5XL": "1057YKBLUE-5XL", "1057PLYKNBLUE-5XL": "1057YKBLUE-5XL"},
+    )
+    assert "1057YKNBLUE-5XL" in aliases
+    assert "1057PLYKNBLUE-5XL" in aliases
+
+
+def test_build_deepdive_meesho_matches_via_oms_when_seller_sku_is_ykn(monkeypatch):
+    """Meesho seller SKU may be 1057YKNBLUE while OMS is 1057YKBLUE — both must match."""
+    sess = _FakeSess()
+    sess.sku_mapping = {"1057YKNBLUE-5XL": "1057YKBLUE-5XL"}
+    sess.meesho_df = pd.DataFrame(
+        {
+            "SKU": ["1057YKNBLUE-5XL", "1057YKNBLUE-5XL"],
+            "OMS_SKU": ["1057YKBLUE-5XL", "1057YKBLUE-5XL"],
+            "Date": ["2026-02-01", "2026-02-15"],
+            "Quantity": [5, 3],
+            "TxnType": ["Shipment", "Shipment"],
+            "OrderId": ["M1", "M2"],
+            "LineKey": ["M1", "M2"],
+        }
+    )
+    out = build_deepdive_sales_frame(
+        sess, "1057YKBLUE-5XL", all_sizes=False, start_date="2026-02-01", end_date="2026-02-28"
+    )
+    assert not out.empty
+    assert int(out["Quantity"].sum()) == 8
+    assert set(out["Source"].astype(str)) == {"Meesho"}
+
+
 def test_deepdive_aliases_bridge_hyphen_style_id():
     forms = deepdive_sku_alias_tokens("165YK-251MUSTRAD")
     assert "165YK251MUSTRAD" in forms
