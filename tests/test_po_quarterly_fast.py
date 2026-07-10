@@ -557,3 +557,115 @@ def test_amazon_quarterly_excludes_free_replacement_zero_invoice():
     )
     assert n == 1
     assert quarter_sums[("1379YKGREEN-XXL", "Apr-Jun 2025")] == 20
+
+
+def test_amazon_quarterly_offset_pair_nets_zero_not_inflated():
+    """Paired ship+refund must net to 0 in PO — not double-counted as gross demand."""
+    kwargs = _make_quarterly_kwargs({(2025, 4): "Jan-Mar 2025"})
+    df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-03-11", "2025-03-11"]),
+            "Reporting_Date": pd.to_datetime(["2025-03-11", "2025-03-11"]),
+            "SKU": ["1379YKGREEN-XXL", "1379YKGREEN-XXL"],
+            "Transaction_Type": ["Shipment", "Refund"],
+            "Quantity": [1.0, 1.0],
+            "Invoice_Amount": [769.0, -769.0],
+            "Order_Id": ["405-6046243-9940337", "405-6046243-9940337"],
+            "Invoice_Number": ["CJB1-14914", "CJB1-14914"],
+        }
+    )
+    _accumulate_shipment_frame(df, "amazon", None, **kwargs)
+    assert kwargs["quarter_sums"][("1379YKGREEN-XXL", "Jan-Mar 2025")] == 0
+
+
+def test_amazon_quarterly_1379_xxl_q1_2025_matches_deepdive_net():
+    """PO quarterly Amazon net must match sales_df net for 1379YKGREEN-XXL Q1 2025."""
+    from collections import defaultdict
+
+    from backend.services.sales import _mtr_to_sales_df
+
+    rows = []
+    for i in range(31):
+        rows.append(("2025-01-15", "Shipment", 769.0, f"J-S{i}", f"J-S{i}"))
+    for i in range(6):
+        rows.append(("2025-01-20", "Refund", -769.0, f"J-R{i}", f"J-R{i}"))
+    for i in range(34):
+        rows.append(("2025-02-10", "Shipment", 769.0, f"F-S{i}", f"F-S{i}"))
+    for i in range(3):
+        rows.append(("2025-02-11", "Shipment", 0.0, f"F-Z{i}", f"F-Z{i}"))
+    for i in range(7):
+        rows.append(("2025-02-12", "Refund", -769.0, f"F-R{i}", f"F-R{i}"))
+    for i in range(28):
+        rows.append(("2025-03-05", "Shipment", 769.0, f"M-S{i}", f"M-S{i}"))
+    rows.append(("2025-03-19", "Shipment", 0.0, "M-Z0", "M-Z0"))
+    for i in range(7):
+        rows.append(("2025-03-20", "Refund", -769.0, f"M-R{i}", f"M-R{i}"))
+
+    mtr_df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime([r[0] for r in rows]),
+            "Reporting_Date": pd.to_datetime([r[0] for r in rows]),
+            "SKU": ["1379YKGREEN-XXL"] * len(rows),
+            "Transaction_Type": [r[1] for r in rows],
+            "Quantity": [1.0] * len(rows),
+            "Invoice_Amount": [r[2] for r in rows],
+            "Order_Id": [r[3] for r in rows],
+            "Invoice_Number": [r[4] for r in rows],
+        }
+    )
+    sales = _mtr_to_sales_df(mtr_df, {})
+    sales["_month"] = sales["TxnDate"].dt.to_period("M").astype(str)
+    sales_net = {
+        m: int(sales.loc[sales["_month"] == m, "Units_Effective"].sum())
+        for m in ["2025-01", "2025-02", "2025-03"]
+    }
+
+    start_ts = pd.Timestamp("2024-06-01")
+    end_ts = pd.Timestamp("2026-06-04")
+    today = pd.Timestamp.today()
+    q_label_map = {(2025, 4): "Jan-Mar 2025"}
+    quarter_sums: dict = defaultdict(int)
+    n = _accumulate_shipment_frame(
+        mtr_df,
+        "amazon",
+        None,
+        strip_pl=True,
+        canonical_oms=False,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=defaultdict(int),
+        units_30=defaultdict(int),
+        days_30=defaultdict(set),
+    )
+    assert n > 0
+    po_q1 = quarter_sums[("1379YKGREEN-XXL", "Jan-Mar 2025")]
+    assert po_q1 == sum(sales_net.values()) == 25 + 27 + 21 == 73
+
+
+def test_amazon_mtr_dedup_prevents_duplicate_quarterly_inflation():
+    """Duplicate FBA shadow row must not inflate PO quarterly after dedup."""
+    from backend.services.mtr import dedup_amazon_mtr_dataframe
+
+    kwargs = _make_quarterly_kwargs({(2025, 4): "Jan-Mar 2025"})
+    base = {
+        "Date": pd.Timestamp("2025-01-15"),
+        "Reporting_Date": pd.Timestamp("2025-01-15"),
+        "SKU": "SKU-DUP",
+        "Transaction_Type": "Shipment",
+        "Quantity": 5.0,
+        "Invoice_Amount": 500.0,
+        "Order_Id": "O-DUP-1",
+        "Invoice_Number": "INV-DUP",
+    }
+    keyed = pd.DataFrame([base])
+    shadow = pd.DataFrame([{**base, "Order_Id": "", "Quantity": 5.0}])
+    combined = pd.concat([keyed, shadow], ignore_index=True)
+    deduped = dedup_amazon_mtr_dataframe(combined)
+    assert len(deduped) == 1
+    _accumulate_shipment_frame(deduped, "amazon", None, **kwargs)
+    assert kwargs["quarter_sums"][("SKU-DUP", "Jan-Mar 2025")] == 5

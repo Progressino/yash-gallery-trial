@@ -272,6 +272,7 @@ def _merge_sales_and_platform_history_parts(
 
 def _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent=False):
     from .sales import (
+        amazon_mtr_free_replacement_mask,
         amazon_mtr_reporting_date,
         amazon_mtr_units_effective_series,
         apply_amazon_free_replacement_txn,
@@ -279,6 +280,8 @@ def _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent=False):
 
     if mtr_df.empty:
         return pd.DataFrame()
+    orig_txn = mtr_df["Transaction_Type"].astype(str).str.strip()
+    zero_invoice = amazon_mtr_free_replacement_mask(mtr_df)
     mtr_work = apply_amazon_free_replacement_txn(mtr_df)
     m = mtr_work[["SKU", "Transaction_Type", "Quantity"]].copy()
     m["TxnDate"] = amazon_mtr_reporting_date(mtr_work)
@@ -290,8 +293,10 @@ def _mtr_to_sales_df_local(mtr_df, sku_mapping, group_by_parent=False):
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
     m["Units_Effective"] = amazon_mtr_units_effective_series(
-        m["Quantity"], m["Transaction Type"]
+        m["Quantity"], orig_txn.loc[m.index]
     )
+    if zero_invoice.any():
+        m.loc[zero_invoice.loc[m.index].fillna(False), "Units_Effective"] = 0.0
     return m[["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective"]]
 
 
@@ -338,9 +343,9 @@ def calculate_quarterly_history(
         else pd.Series("", index=hist.index)
     )
     _is_amazon = (_plat == "amazon") | _src.eq("amazon")
-    # Amazon MTR net = Shipment − Refund (cancels tracked but excluded from PO demand).
+    # Amazon MTR net = Shipment − Refund (cancels / free replacements excluded from demand).
     _neg = _txn_lower.eq("refund") | (~_is_amazon & _txn_lower.eq("cancel"))
-    _zero = _is_amazon & _txn_lower.eq("cancel")
+    _zero = _is_amazon & _txn_lower.isin(["cancel", "freereplacement"])
     hist["Qty"] = np.where(
         _zero,
         0,
