@@ -17,7 +17,14 @@ interface Summary {
   ads:         number
 }
 
-interface MonthRow  { month: string; shipped: number; returns: number; cancels: number; net: number }
+interface MonthRow  {
+  month: string
+  shipped: number
+  returns: number
+  cancels: number
+  free_replacements: number
+  net: number
+}
 interface PlatRow   { platform: string; shipped: number; returns: number; return_rate: number }
 interface SizeRow   { sku: string; shipped: number }
 interface DailyRow  { date: string; units: number }
@@ -775,7 +782,7 @@ export default function SKUDeepDive() {
                 <table className="w-full text-sm">
                   <thead className="bg-gray-50 text-xs text-gray-400 uppercase">
                     <tr>
-                      {['Month', 'Shipped', 'Returns', 'Cancels', 'Net Units', 'Return %'].map(h => (
+                      {['Month', 'Shipped', 'Returns', 'Cancels', 'Free Repl.', 'Net Units', 'Return %'].map(h => (
                         <th key={h} className="px-5 py-3 text-left font-medium">{h}</th>
                       ))}
                     </tr>
@@ -789,6 +796,7 @@ export default function SKUDeepDive() {
                           <td className="px-5 py-3 text-gray-600">{fmt(row.shipped)}</td>
                           <td className="px-5 py-3 text-red-500">{fmt(row.returns)}</td>
                           <td className="px-5 py-3 text-gray-400">{fmt(row.cancels)}</td>
+                          <td className="px-5 py-3 text-violet-600">{fmt(row.free_replacements ?? 0)}</td>
                           <td className={`px-5 py-3 font-semibold ${row.net >= 0 ? 'text-green-600' : 'text-red-600'}`}>{fmt(row.net)}</td>
                           <td className="px-5 py-3">
                             <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${

@@ -417,13 +417,24 @@ def amazon_mtr_invoice_offset_pair_mask(df: pd.DataFrame) -> pd.Series:
     return touch
 
 
+def amazon_mtr_invoice_offset_refund_mask(df: pd.DataFrame) -> pd.Series:
+    """Refund leg of same-invoice offset pairs — show as free replacement, not returns."""
+    pair = amazon_mtr_invoice_offset_pair_mask(df)
+    if not pair.any():
+        return pair
+    txn_col = next(
+        (c for c in ("Transaction_Type", "Transaction Type", "TxnType") if c in df.columns),
+        None,
+    )
+    if not txn_col:
+        return pd.Series(False, index=df.index)
+    txn = df[txn_col].astype(str).str.strip()
+    return pair & txn.eq("Refund")
+
+
 def amazon_mtr_free_replacement_row_mask(df: pd.DataFrame) -> pd.Series:
-    """Rows that are free replacements: zero-invoice lines or offset invoice pairs."""
-    zero = amazon_mtr_free_replacement_mask(df)
-    if zero.any():
-        return zero | amazon_mtr_invoice_offset_pair_mask(df)
-    offset = amazon_mtr_invoice_offset_pair_mask(df)
-    return zero | offset
+    """Rows shown in the free-replacement column only (zero-invoice + offset refund legs)."""
+    return amazon_mtr_free_replacement_mask(df) | amazon_mtr_invoice_offset_refund_mask(df)
 
 
 def apply_amazon_free_replacement_txn(
@@ -431,7 +442,7 @@ def apply_amazon_free_replacement_txn(
     *,
     txn_col: str | None = None,
 ) -> pd.DataFrame:
-    """Relabel free-replacement Amazon rows (zero invoice or offset pairs) as FreeReplacement."""
+    """Relabel free-replacement rows (zero invoice or offset refund leg) as FreeReplacement."""
     if df is None or getattr(df, "empty", True):
         return df
     col = txn_col or next(
@@ -570,6 +581,8 @@ def _mtr_to_sales_df(
     if mtr_df.empty:
         return pd.DataFrame()
 
+    orig_txn = mtr_df["Transaction_Type"].astype(str).str.strip()
+    zero_invoice = amazon_mtr_free_replacement_mask(mtr_df)
     mtr_work = apply_amazon_free_replacement_txn(mtr_df)
     m = mtr_work[["SKU", "Transaction_Type", "Quantity"]].copy()
     m["TxnDate"] = amazon_mtr_reporting_date(mtr_work)
@@ -615,10 +628,10 @@ def _mtr_to_sales_df(
     if group_by_parent:
         m["Sku"] = m["Sku"].apply(get_parent_sku)
 
-    # Amazon MTR net: Shipment − Refund (Cancel / FreeReplacement contribute 0).
-    m["Units_Effective"] = amazon_mtr_units_effective_series(
-        m["Quantity"], m["Transaction Type"]
-    )
+    # Demand units use original MTR txn types (offset pairs net to 0); display labels may differ.
+    m["Units_Effective"] = amazon_mtr_units_effective_series(m["Quantity"], orig_txn.loc[m.index])
+    if zero_invoice.any():
+        m.loc[zero_invoice.loc[m.index].fillna(False), "Units_Effective"] = 0.0
     m["LineKey"] = ""
     cols = ["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "OrderId", "LineKey"]
     if "DSR_Segment" in mtr_work.columns:

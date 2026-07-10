@@ -1651,10 +1651,11 @@ def test_amazon_free_replacement_zero_invoice_excluded_from_sales():
 
 
 def test_amazon_invoice_offset_pair_not_counted_as_refund():
-    """Same-invoice ship+refund offsets are free replacements, not customer returns."""
+    """Offset refund leg is free replacement; shipment stays gross. Net = ship − return."""
     from backend.services.sales import (
         _mtr_to_sales_df,
         amazon_mtr_invoice_offset_pair_mask,
+        amazon_mtr_invoice_offset_refund_mask,
         apply_amazon_free_replacement_txn,
     )
 
@@ -1671,10 +1672,12 @@ def test_amazon_invoice_offset_pair_not_counted_as_refund():
         }
     )
     assert int(amazon_mtr_invoice_offset_pair_mask(mtr_df).sum()) == 2
+    assert int(amazon_mtr_invoice_offset_refund_mask(mtr_df).sum()) == 1
     labeled = apply_amazon_free_replacement_txn(mtr_df)
-    assert list(labeled["Transaction_Type"]) == ["FreeReplacement", "FreeReplacement"]
+    assert list(labeled["Transaction_Type"]) == ["Shipment", "FreeReplacement"]
 
     out = _mtr_to_sales_df(mtr_df, {})
+    assert out["Transaction Type"].tolist() == ["Shipment", "FreeReplacement"]
     assert out["Transaction Type"].eq("Refund").sum() == 0
     assert float(out["Units_Effective"].sum()) == 0.0
 

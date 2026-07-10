@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 27  # Amazon offset invoice pairs → FreeReplacement (not refunds)
+QUARTERLY_CACHE_SCHEMA = 28  # Deepdive: gross ship, returns, separate free-replacement column
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:

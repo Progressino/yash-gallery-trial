@@ -5132,6 +5132,7 @@ def sku_deepdive(
     shipped  = int(qty[txn == "Shipment"].sum())
     returns  = int(qty[txn == "Refund"].sum())
     cancelled = int(qty[txn == "Cancel"].sum())
+    free_replacements = int(qty[txn == "FreeReplacement"].sum())
     net_units = int(shipped - returns)
     rr       = round(returns / shipped * 100, 1) if shipped > 0 else 0.0
     period_days = max((end_ts - start_ts).days, 1)
@@ -5155,11 +5156,13 @@ def sku_deepdive(
         ship_m = int(gq[gt == "Shipment"].sum())
         ret_m = int(gq[gt == "Refund"].sum())
         can_m = int(gq[gt == "Cancel"].sum())
+        free_m = int(gq[gt == "FreeReplacement"].sum())
         month_rows.append({
             "month": str(month),
             "shipped": ship_m,
             "returns": ret_m,
             "cancels": can_m,
+            "free_replacements": free_m,
             "net": ship_m - ret_m,
         })
     monthly = month_rows
