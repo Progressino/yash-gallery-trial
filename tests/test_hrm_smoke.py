@@ -167,4 +167,39 @@ def test_one_time_task_lifecycle(hrm_db):
 
     appraisal = hrm_db.get_appraisal(emp_id, period_start, period_end)
     assert appraisal["one_time_summary"]["approved_on_time"] >= 1
+
+
+def test_employee_day_check_worked_vs_not(hrm_db):
+    import uuid
+
+    hrm_db.create_department({"name": f"IT-{uuid.uuid4().hex[:6]}", "hod_name": "Admin"})
+    dept_id = hrm_db.list_departments()[0]["id"]
+    hrm_db.create_employee({"name": "Harsh", "department_id": dept_id, "designation": "IT Admin"})
+    emp_id = hrm_db.list_employees()[0]["id"]
+    day = date.today().isoformat()
+
+    hrm_db.create_responsibility(
+        {"employee_id": emp_id, "title": "Morning check", "frequency": "Daily"}
+    )
+    hrm_db.create_responsibility(
+        {"employee_id": emp_id, "title": "EOD report", "frequency": "Daily"}
+    )
+    resps = hrm_db.list_responsibilities(employee_id=emp_id)
+    morning_id = next(r["id"] for r in resps if r["title"] == "Morning check")
+
+    hrm_db.mark_task(morning_id, day, "Done", marked_by="Harsh")
+    snap = hrm_db.get_employee_day_check(emp_id, day)
+    assert snap is not None
+    assert len(snap["worked_on"]) == 1
+    assert snap["worked_on"][0]["title"] == "Morning check"
+    assert len(snap["not_worked"]) == 1
+    assert snap["not_worked"][0]["title"] == "EOD report"
+    assert snap["not_worked"][0]["status"] == "Pending"
+    assert snap["summary"]["unmarked_daily"] == 1
+
+    result = hrm_db.mark_unmarked_daily_as_missed(emp_id, day, marked_by="admin")
+    assert result["marked"] == 1
+    snap2 = hrm_db.get_employee_day_check(emp_id, day)
+    assert snap2["summary"]["unmarked_daily"] == 0
+    assert any(i["status"] == "Missed" for i in snap2["not_worked"])
     assert appraisal["task_summary"]["performance_pct"] is not None

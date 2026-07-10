@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useAuth } from '../store/auth'
 
-type Tab = 'dashboard' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance'
+type Tab = 'dashboard' | 'check' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance'
 
 const FREQUENCIES = ['Daily', 'Weekly', 'Monthly']
 const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected'] as const
@@ -95,6 +95,9 @@ export default function HRM() {
   const [toDate, setToDate] = useState(today())
   const [appraisalFrom, setAppraisalFrom] = useState(fmtMonth())
   const [appraisalTo, setAppraisalTo] = useState(today())
+  const [checkDate, setCheckDate] = useState(today())
+  const [checkEmp, setCheckEmp] = useState<number | ''>('')
+  const [showDailyGuide, setShowDailyGuide] = useState(false)
 
   const [showDeptForm, setShowDeptForm] = useState(false)
   const [showEmpForm, setShowEmpForm] = useState(false)
@@ -195,6 +198,7 @@ export default function HRM() {
     if (scope.level === 'self' && scope.employee_id) {
       setSelEmp(scope.employee_id)
       setAppraisalEmp(scope.employee_id)
+      setCheckEmp(scope.employee_id)
       if (scope.department_id) setSelDept(scope.department_id)
     }
     if (scope.level === 'department' && scope.department_id) {
@@ -225,6 +229,22 @@ export default function HRM() {
     queryKey: ['hrm-appraisal', appraisalEmp, appraisalFrom, appraisalTo],
     queryFn: () => api.get(`/hrm/appraisal/${appraisalEmp}?from_date=${appraisalFrom}&to_date=${appraisalTo}`).then(r => r.data),
     enabled: !!appraisalEmp,
+  })
+  const { data: dayCheck, isFetching: dayCheckLoading } = useQuery({
+    queryKey: ['hrm-employee-check', checkEmp, checkDate],
+    queryFn: () => api.get(`/hrm/employee-check/${checkEmp}?check_date=${checkDate}`).then(r => r.data),
+    enabled: !!checkEmp && (tab === 'check' || (tab === 'dashboard' && isEmployeeScope)),
+    refetchInterval: tab === 'check' ? 60_000 : false,
+  })
+  const markMissedMut = useMutation({
+    mutationFn: () => api.post(`/hrm/employee-check/${checkEmp}/mark-unmarked-missed?check_date=${checkDate}`).then(r => r.data),
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
+      qc.invalidateQueries({ queryKey: ['hrm-hod'] })
+      qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
+      qc.invalidateQueries({ queryKey: ['hrm-performance'] })
+      window.alert(`Marked ${data?.marked ?? 0} unmarked daily item(s) as Missed.`)
+    },
   })
   const { data: perfData = [] } = useQuery({
     queryKey: ['hrm-perf', selDept, selEmp, fromDate, toDate],
@@ -269,7 +289,12 @@ export default function HRM() {
   const deleteRespMut = useMutation({ mutationFn: (id: number) => api.delete(`/hrm/responsibilities/${id}`), onSuccess: () => qc.invalidateQueries({ queryKey: ['hrm-resps'] }) })
   const markTaskMut = useMutation({
     mutationFn: (b: object) => api.post('/hrm/tasks/mark', b),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-hod'] }); qc.invalidateQueries({ queryKey: ['hrm-perf'] }); setBlockedModal(null) },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['hrm-hod'] })
+      qc.invalidateQueries({ queryKey: ['hrm-perf'] })
+      qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
+      setBlockedModal(null)
+    },
     onError: (err: any) => {
       const msg = err?.response?.data?.detail
       if (msg) alert(msg)
@@ -399,6 +424,7 @@ export default function HRM() {
 
   const ALL_TABS: [Tab, string][] = [
     ['dashboard', '📊 Dashboard'],
+    ['check', '🔎 Employee Check'],
     ['employees', '👥 Employees'],
     ['responsibilities', '📋 Responsibilities'],
     ['tasks', '✅ Tasks'],
@@ -414,7 +440,7 @@ export default function HRM() {
       tabs = tabs.filter(([k]) => k !== 'employees')
     }
     if (scopeLevel === 'self') {
-      tabs = tabs.filter(([k]) => ['dashboard', 'responsibilities', 'issues', 'appraisal'].includes(k))
+      tabs = tabs.filter(([k]) => ['dashboard', 'check', 'responsibilities', 'issues', 'appraisal'].includes(k))
     }
     return tabs
   }, [scopeLevel, canViewEmployeeList])
@@ -473,6 +499,33 @@ export default function HRM() {
               </div>
             ))}
           </div>
+
+          {isEmployeeScope && dayCheck && (
+            <div className="bg-white rounded-xl border overflow-hidden">
+              <div className="px-4 py-3 bg-teal-700 text-white flex justify-between items-center">
+                <h3 className="font-semibold">Today — worked vs not worked</h3>
+                <button onClick={() => setTab('check')} className="text-xs bg-white/20 px-2 py-1 rounded">Open full check</button>
+              </div>
+              <div className="grid md:grid-cols-2 divide-y md:divide-y-0 md:divide-x">
+                <div className="p-4">
+                  <p className="text-xs font-semibold text-green-700 mb-2">Worked on ({dayCheck.worked_on?.length || 0})</p>
+                  {(dayCheck.worked_on || []).length === 0 ? <p className="text-xs text-gray-400">Nothing marked Done/Partial yet.</p> : (
+                    <ul className="space-y-1.5">{(dayCheck.worked_on || []).map((i: any) => (
+                      <li key={i.responsibility_id} className="text-sm flex gap-2"><span>{statusLabel(i.status)}</span><span>{i.title}</span></li>
+                    ))}</ul>
+                  )}
+                </div>
+                <div className="p-4">
+                  <p className="text-xs font-semibold text-red-700 mb-2">Not worked / pending ({dayCheck.not_worked?.length || 0})</p>
+                  {(dayCheck.not_worked || []).length === 0 ? <p className="text-xs text-gray-400">All clear.</p> : (
+                    <ul className="space-y-1.5">{(dayCheck.not_worked || []).map((i: any) => (
+                      <li key={i.responsibility_id} className="text-sm flex gap-2"><span>{statusLabel(i.status)}</span><span>{i.title}</span></li>
+                    ))}</ul>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* My Tasks — employee dashboard */}
           {isEmployeeScope && (
@@ -670,6 +723,174 @@ export default function HRM() {
         </div>
       )}
 
+      {/* ── EMPLOYEE CHECK ── */}
+      {tab === 'check' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-3 flex-wrap">
+            {!isEmployeeScope ? (
+              <select
+                value={checkEmp}
+                onChange={e => setCheckEmp(e.target.value ? +e.target.value : '')}
+                className="border rounded-lg px-3 py-1.5 text-sm min-w-[14rem]"
+              >
+                <option value="">Select Employee</option>
+                {pickerEmps.map((e: any) => (
+                  <option key={e.id} value={e.id}>{e.name} — {e.department_name || '—'}{e.designation ? ` · ${e.designation}` : ''}</option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-sm font-medium text-gray-700">Your daily check</span>
+            )}
+            <input type="date" value={checkDate} onChange={e => setCheckDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+            <button onClick={() => setCheckDate(today())} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600">Today</button>
+            {canEditAssignments && checkEmp && (dayCheck?.summary?.unmarked_daily || 0) > 0 && (
+              <button
+                onClick={() => {
+                  if (window.confirm(`Mark ${dayCheck.summary.unmarked_daily} unmarked Daily item(s) as Missed for ${checkDate}?`)) {
+                    markMissedMut.mutate()
+                  }
+                }}
+                disabled={markMissedMut.isPending}
+                className="text-xs px-3 py-1.5 bg-red-600 text-white rounded-lg disabled:opacity-50"
+              >
+                {markMissedMut.isPending ? 'Closing…' : `Auto-close unmarked as Missed (${dayCheck.summary.unmarked_daily})`}
+              </button>
+            )}
+            <button onClick={() => setShowDailyGuide(v => !v)} className="text-xs px-3 py-1.5 border border-teal-700 text-teal-800 rounded-lg ml-auto">
+              {showDailyGuide ? 'Hide daily guide' : 'Daily guide (Harsh / Sanjay)'}
+            </button>
+          </div>
+
+          {showDailyGuide && (
+            <div className="bg-slate-50 border rounded-xl p-4 text-sm space-y-4">
+              <div>
+                <h4 className="font-semibold text-[#002B5B]">Harsh (IT Admin) — daily</h4>
+                <ol className="list-decimal ml-5 mt-1 space-y-1 text-gray-700 text-xs">
+                  <li>Open HRM → Employee Check (auto-loads you if logged in as Harsh).</li>
+                  <li>Morning: complete systems check → mark <b>Done</b> on HOD View / ask Admin to open your dept grid.</li>
+                  <li>Through the day: update IT tickets + HRM task statuses; mark SLA + preventive maintenance.</li>
+                  <li>Before leaving: EOD report Done; confirm nothing left Pending on Check tab.</li>
+                  <li>Weekly: documentation. Monthly: one improvement initiative.</li>
+                </ol>
+              </div>
+              <div>
+                <h4 className="font-semibold text-[#002B5B]">Sanjay (Sales Head) — daily</h4>
+                <ol className="list-decimal ml-5 mt-1 space-y-1 text-gray-700 text-xs">
+                  <li>Open HRM → Employee Check for Sanjay Sodani.</li>
+                  <li>10:00–10:30: sales vs target → mark Sales performance monitoring Done.</li>
+                  <li>10:30: team meeting → mark Team management Done.</li>
+                  <li>Marketplace + growth blocks → mark those Done/Partial with notes if needed.</li>
+                  <li>Escalation-only coordination: mark Done only if you stayed out of ops work (or Partial/Blocked with reason).</li>
+                  <li>Before leaving: submit outcome DSR → mark DSR Done. Weekly: promotional initiative.</li>
+                </ol>
+              </div>
+              <p className="text-xs text-gray-500">Manager: select employee + date here to see Worked on vs Not worked. Use Auto-close at day end for leftover Pending Dailies.</p>
+            </div>
+          )}
+
+          {!checkEmp && <p className="text-center text-gray-400 py-8 text-sm">Select an employee to see what they worked on and what they did not.</p>}
+          {checkEmp && dayCheckLoading && !dayCheck && <p className="text-center text-gray-400 py-8 text-sm">Loading…</p>}
+          {dayCheck && (
+            <div className="space-y-4">
+              <div className="bg-teal-800 text-white rounded-xl p-4 flex flex-wrap justify-between gap-3">
+                <div>
+                  <h3 className="font-bold text-lg">{dayCheck.employee?.name}</h3>
+                  <p className="text-teal-100 text-sm">{dayCheck.employee?.department_name} · {dayCheck.employee?.designation || '—'}</p>
+                  <p className="text-teal-200 text-xs mt-1">Check date: {dayCheck.check_date}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-3xl font-bold">{dayCheck.summary?.completion_pct ?? 0}%</p>
+                  <p className="text-teal-200 text-xs">Daily completion</p>
+                  <p className="text-teal-100 text-xs mt-1">
+                    Done {dayCheck.summary?.daily_done ?? 0} · Partial {dayCheck.summary?.daily_partial ?? 0} · Pending {dayCheck.summary?.daily_pending ?? 0} · Missed {dayCheck.summary?.daily_missed ?? 0}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-4">
+                <div className="bg-white rounded-xl border overflow-hidden">
+                  <div className="px-4 py-2.5 bg-green-600 text-white font-semibold text-sm">Worked on ({dayCheck.worked_on?.length || 0})</div>
+                  {(dayCheck.worked_on || []).length === 0 ? (
+                    <p className="p-4 text-sm text-gray-400">No Done/Partial marks for this date yet.</p>
+                  ) : (
+                    <ul className="divide-y">
+                      {(dayCheck.worked_on || []).map((i: any) => (
+                        <li key={i.responsibility_id} className="px-4 py-3">
+                          <div className="flex items-start gap-2">
+                            <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
+                            <div>
+                              <p className="font-medium text-sm text-gray-800">{i.title}</p>
+                              <p className="text-xs text-gray-400">{i.frequency} · {i.status}{i.marked_by ? ` · ${i.marked_by}` : ''}</p>
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div className="bg-white rounded-xl border overflow-hidden">
+                  <div className="px-4 py-2.5 bg-red-600 text-white font-semibold text-sm">Not worked / pending ({dayCheck.not_worked?.length || 0})</div>
+                  {(dayCheck.not_worked || []).length === 0 ? (
+                    <p className="p-4 text-sm text-gray-400">Nothing pending or missed — good.</p>
+                  ) : (
+                    <ul className="divide-y">
+                      {(dayCheck.not_worked || []).map((i: any) => (
+                        <li key={i.responsibility_id} className="px-4 py-3">
+                          <div className="flex items-start gap-2">
+                            <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium text-sm text-gray-800">{i.title}</p>
+                              <p className="text-xs text-gray-400">{i.frequency} · {i.status}{i.blocker_reason ? ` — ${i.blocker_reason}` : ''}</p>
+                              {(!i.marked || canEditAssignments) && (
+                                <select
+                                  defaultValue=""
+                                  onChange={e => {
+                                    const val = e.target.value
+                                    if (!val) return
+                                    handleStatusSelect(i.responsibility_id, checkDate, val)
+                                    e.target.value = ''
+                                  }}
+                                  className="mt-1.5 text-xs border rounded px-1.5 py-1 bg-white"
+                                >
+                                  <option value="">Mark status…</option>
+                                  {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
+                                </select>
+                              )}
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+
+              {((dayCheck.one_time_working || []).length > 0 || (dayCheck.one_time_pending || []).length > 0 || (dayCheck.one_time_awaiting_approval || []).length > 0) && (
+                <div className="bg-white rounded-xl border p-4 space-y-3">
+                  <h4 className="font-semibold text-[#002B5B] text-sm">One-time tasks</h4>
+                  {(dayCheck.one_time_working || []).map((t: any) => (
+                    <p key={t.id} className="text-sm"><span className="text-blue-700 font-medium">In progress:</span> {t.title}</p>
+                  ))}
+                  {(dayCheck.one_time_pending || []).map((t: any) => (
+                    <p key={t.id} className="text-sm"><span className="text-gray-600 font-medium">{t.status}:</span> {t.title}{t.due_date ? ` (due ${t.due_date})` : ''}</p>
+                  ))}
+                  {(dayCheck.one_time_awaiting_approval || []).map((t: any) => (
+                    <p key={t.id} className="text-sm"><span className="text-amber-700 font-medium">Awaiting HOD:</span> {t.title}</p>
+                  ))}
+                </div>
+              )}
+
+              <p className="text-xs text-gray-500">
+                To mark statuses: open <button type="button" className="underline text-teal-800" onClick={() => {
+                  const emp = (allEmps as any[]).find((e: any) => e.id === checkEmp)
+                  if (emp?.department_id) { setHodDept(emp.department_id); setHodEmp(checkEmp as number); setFromDate(checkDate); setToDate(checkDate); setTab('hod') }
+                }}>HOD View</button> for this employee&apos;s department, or use Appraisal for the period score.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── EMPLOYEES ── */}
       {tab === 'employees' && (
         <div className="space-y-4">
@@ -749,6 +970,7 @@ export default function HRM() {
                             {canViewEmployeeList && (
                               <button onClick={() => { if (window.confirm(`Delete employee ${e.name} (${e.emp_code})?`)) deleteEmpMut.mutate(e.id) }} className="text-xs text-red-600">🗑️</button>
                             )}
+                            <button onClick={() => { setCheckEmp(e.id); setCheckDate(today()); setTab('check') }} className="text-xs text-teal-700">🔎 Check</button>
                             <button onClick={() => { setAppraisalEmp(e.id); setTab('appraisal') }} className="text-xs text-purple-600">📁 Appraisal</button>
                           </div>
                         </td>

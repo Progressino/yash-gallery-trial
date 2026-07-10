@@ -873,6 +873,164 @@ def get_appraisal(employee_id: int, from_date: str = None, to_date: str = None):
     }
 
 
+def get_employee_day_check(employee_id: int, check_date: str | None = None) -> dict | None:
+    """
+    Snapshot of what an employee worked on vs did not for a given day.
+    Unmarked daily responsibilities appear under not_worked as Pending.
+    """
+    day = check_date or date.today().isoformat()
+    conn = _connect()
+    emp = conn.execute(
+        """
+        SELECT e.*, d.name as department_name
+        FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+        WHERE e.id=?
+        """,
+        (employee_id,),
+    ).fetchone()
+    if not emp:
+        conn.close()
+        return None
+
+    resps = conn.execute(
+        """
+        SELECT r.id, r.title, r.description, r.frequency, r.category
+        FROM responsibilities r
+        WHERE r.employee_id=? AND r.active=1
+        ORDER BY
+          CASE r.frequency WHEN 'Daily' THEN 0 WHEN 'Weekly' THEN 1 ELSE 2 END,
+          r.title
+        """,
+        (employee_id,),
+    ).fetchall()
+
+    logs = conn.execute(
+        """
+        SELECT responsibility_id, status, remarks, marked_by, marked_at,
+               blocker_employee_id, blocker_reason
+        FROM task_logs
+        WHERE employee_id=? AND log_date=?
+        """,
+        (employee_id, day),
+    ).fetchall()
+    log_map = {int(l["responsibility_id"]): dict(l) for l in logs}
+
+    ot_rows = conn.execute(
+        """
+        SELECT id, title, description, due_date, status, started_at, completed_at
+        FROM one_time_tasks
+        WHERE employee_id=? AND active=1
+          AND status IN ('Pending', 'In Progress', 'Done', 'Rejected')
+        ORDER BY
+          CASE status
+            WHEN 'In Progress' THEN 0
+            WHEN 'Pending' THEN 1
+            WHEN 'Done' THEN 2
+            ELSE 3
+          END,
+          due_date
+        """,
+        (employee_id,),
+    ).fetchall()
+    conn.close()
+
+    worked_on: list[dict] = []
+    not_worked: list[dict] = []
+    other: list[dict] = []
+
+    for r in resps:
+        rid = int(r["id"])
+        log = log_map.get(rid)
+        status = (log or {}).get("status") or "Pending"
+        item = {
+            "responsibility_id": rid,
+            "title": r["title"],
+            "description": r["description"] or "",
+            "frequency": r["frequency"],
+            "category": r["category"],
+            "status": status,
+            "marked": bool(log),
+            "remarks": (log or {}).get("remarks") or "",
+            "marked_by": (log or {}).get("marked_by") or "",
+            "blocker_reason": (log or {}).get("blocker_reason") or "",
+        }
+        if status in ("Done", "Partial"):
+            worked_on.append(item)
+        elif status in ("Leave", "N/A"):
+            other.append(item)
+        else:
+            # Pending, Missed, Blocked — not completed work for the day
+            not_worked.append(item)
+
+    one_time = [_one_time_task_row(r) for r in ot_rows]
+    working_tasks = [t for t in one_time if t.get("status") == "In Progress"]
+    pending_tasks = [t for t in one_time if t.get("status") in ("Pending", "Rejected")]
+    awaiting_approval = [t for t in one_time if t.get("status") == "Done"]
+
+    expected_daily = [i for i in worked_on + not_worked + other if i["frequency"] == "Daily"]
+    done_daily = sum(1 for i in expected_daily if i["status"] == "Done")
+    partial_daily = sum(1 for i in expected_daily if i["status"] == "Partial")
+    pending_daily = sum(1 for i in expected_daily if i["status"] == "Pending")
+    missed_daily = sum(1 for i in expected_daily if i["status"] == "Missed")
+
+    return {
+        "employee": dict(emp),
+        "check_date": day,
+        "worked_on": worked_on,
+        "not_worked": not_worked,
+        "other": other,
+        "one_time_working": working_tasks,
+        "one_time_pending": pending_tasks,
+        "one_time_awaiting_approval": awaiting_approval,
+        "summary": {
+            "responsibilities_total": len(resps),
+            "worked_on": len(worked_on),
+            "not_worked": len(not_worked),
+            "other": len(other),
+            "daily_expected": len(expected_daily),
+            "daily_done": done_daily,
+            "daily_partial": partial_daily,
+            "daily_pending": pending_daily,
+            "daily_missed": missed_daily,
+            "completion_pct": round(
+                (done_daily + partial_daily * 0.5) / len(expected_daily) * 100, 1
+            )
+            if expected_daily
+            else 0,
+            "unmarked_daily": pending_daily,
+        },
+    }
+
+
+def mark_unmarked_daily_as_missed(
+    employee_id: int,
+    check_date: str | None = None,
+    *,
+    marked_by: str = "system",
+) -> dict:
+    """Auto-close unmarked Daily responsibilities for a day as Missed."""
+    day = check_date or date.today().isoformat()
+    snap = get_employee_day_check(employee_id, day)
+    if not snap:
+        return {"ok": False, "marked": 0, "error": "Employee not found"}
+
+    marked = 0
+    for item in snap["not_worked"]:
+        if item["frequency"] != "Daily":
+            continue
+        if item["status"] != "Pending" or item["marked"]:
+            continue
+        mark_task(
+            item["responsibility_id"],
+            day,
+            "Missed",
+            marked_by=marked_by,
+            remarks="Auto-marked: not updated by end of day",
+        )
+        marked += 1
+    return {"ok": True, "marked": marked, "check_date": day, "employee_id": employee_id}
+
+
 def get_performance(department_id=None, from_date=None, to_date=None):
     today = date.today().isoformat()
     fd = from_date or date.today().replace(day=1).isoformat()

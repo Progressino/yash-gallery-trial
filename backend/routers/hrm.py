@@ -27,6 +27,8 @@ from ..db.hrm_db import (
     resolve_issue,
     get_hod_dashboard,
     get_appraisal,
+    get_employee_day_check,
+    mark_unmarked_daily_as_missed,
     get_performance,
     employee_department_id,
     list_one_time_tasks,
@@ -469,6 +471,36 @@ def appraisal(
     if not data:
         raise HTTPException(404, "Employee not found")
     return data
+
+
+@router.get("/employee-check/{employee_id}")
+def employee_day_check(
+    employee_id: int,
+    request: Request,
+    check_date: Optional[str] = None,
+):
+    """What the employee worked on vs did not for a given day (default today)."""
+    scope = _scope_from_request(request)
+    assert_employee_in_scope(scope, employee_id)
+    data = get_employee_day_check(employee_id, check_date)
+    if not data:
+        raise HTTPException(404, "Employee not found")
+    return data
+
+
+@router.post("/employee-check/{employee_id}/mark-unmarked-missed")
+def employee_mark_unmarked_missed(
+    employee_id: int,
+    request: Request,
+    check_date: Optional[str] = None,
+):
+    """HOD/Admin: auto-mark unmarked Daily responsibilities as Missed for the day."""
+    scope = _scope_from_request(request)
+    assert_hrm_hod_or_admin(scope)
+    assert_employee_in_scope(scope, employee_id)
+    user = getattr(request.state, "user", None) or {}
+    marked_by = str(user.get("full_name") or user.get("sub") or user.get("username") or "admin")
+    return mark_unmarked_daily_as_missed(employee_id, check_date, marked_by=marked_by)
 
 
 @router.get("/performance")
