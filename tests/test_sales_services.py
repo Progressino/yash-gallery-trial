@@ -1414,6 +1414,26 @@ def test_meesho_backfill_sku_from_suborder_sibling():
     assert mdf.loc[1, "SKU"] == "AK-180BLACK-XL"
 
 
+def test_meesho_backfill_sku_from_order_base():
+    from backend.services.meesho import backfill_meesho_sku_from_suborder_inplace
+
+    mdf = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-11-15", "2025-11-20"]),
+            "TxnType": ["Shipment", "Refund"],
+            "Quantity": [1.0, 1.0],
+            "SKU": ["AK-180BLACK-XL", ""],
+            "OMS_SKU": ["AK-180BLACK-XL", ""],
+            "OrderId": ["237653394323428672_1", "237653394323428672_2"],
+            "LineKey": ["237653394323428672_1", "237653394323428672_2"],
+            "MeeshoSubOrder": ["237653394323428672_1", "237653394323428672_2"],
+        }
+    )
+    backfill_meesho_sku_from_suborder_inplace(mdf)
+    assert mdf.loc[1, "OMS_SKU"] == "AK-180BLACK-XL"
+    assert mdf.loc[1, "SKU"] == "AK-180BLACK-XL"
+
+
 def test_canonical_oms_key_rejects_nan_tokens():
     from backend.services.po_engine import canonical_oms_key
 

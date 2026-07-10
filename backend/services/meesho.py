@@ -416,6 +416,17 @@ def backfill_meesho_sku_from_suborder_inplace(df: pd.DataFrame) -> None:
         filled_sku = filled_sku.where(filled_sku.ne("") | rec.eq(""), rec)
         filled_oms = filled_oms.where(filled_oms.ne("") | rec.eq(""), rec)
 
+    # Order-base: Meesho often suffixes line index (_1, _2). When the base order id
+    # maps to exactly one listing SKU elsewhere, recover blank TCS/GST rows.
+    if "OrderId" in df.columns:
+        oid = df["OrderId"].astype(str).str.strip()
+        order_base = oid.str.replace(r"_\d+$", "", regex=True)
+        base_lookup = _meesho_unambiguous_key_map(order_base, pick)
+        if base_lookup:
+            rec = order_base.map(base_lookup).fillna("")
+            filled_sku = filled_sku.where(filled_sku.ne("") | rec.eq(""), rec)
+            filled_oms = filled_oms.where(filled_oms.ne("") | rec.eq(""), rec)
+
     df.loc[need, "SKU"] = filled_sku.loc[need]
     df.loc[need, "OMS_SKU"] = filled_oms.loc[need]
     still = need & df["OMS_SKU"].astype(str).str.strip().eq("")
