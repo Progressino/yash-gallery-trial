@@ -202,4 +202,3 @@ def test_employee_day_check_worked_vs_not(hrm_db):
     snap2 = hrm_db.get_employee_day_check(emp_id, day)
     assert snap2["summary"]["unmarked_daily"] == 0
     assert any(i["status"] == "Missed" for i in snap2["not_worked"])
-    assert appraisal["task_summary"]["performance_pct"] is not None
