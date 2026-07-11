@@ -87,6 +87,27 @@ def test_explode_scales_qty_per_component():
     assert float(out.loc[out["SKU"] == "PLAIN-L", "Qty"].iloc[0]) == 4.0
 
 
+def test_explode_retain_combo_listings_keeps_listing_and_components():
+    bom = {
+        "COMBO-L": [("A-L", 1.0), ("DPT-X", 2.0)],
+    }
+    df = pd.DataFrame({"SKU": ["COMBO-L"], "Qty": [3], "Units_Effective": [3]})
+    out = explode_sku_qty_dataframe(
+        df,
+        sku_col="SKU",
+        qty_col="Qty",
+        sku_mapping={},
+        combo_map=bom,
+        retain_combo_listings=True,
+    )
+    assert set(out["SKU"]) == {"COMBO-L", "A-L", "DPT-X"}
+    assert float(out.loc[out["SKU"] == "COMBO-L", "Qty"].iloc[0]) == 3.0
+    assert float(out.loc[out["SKU"] == "A-L", "Qty"].iloc[0]) == 3.0
+    assert float(out.loc[out["SKU"] == "DPT-X", "Qty"].iloc[0]) == 6.0
+    assert float(out.loc[out["SKU"] == "COMBO-L", "Units_Effective"].iloc[0]) == 3.0
+    assert float(out.loc[out["SKU"] == "DPT-X", "Units_Effective"].iloc[0]) == 6.0
+
+
 def test_calculate_po_base_attributes_combo_demand_to_components():
     today = pd.Timestamp.today().normalize()
     sales = pd.DataFrame(
@@ -125,8 +146,12 @@ def test_calculate_po_base_attributes_combo_demand_to_components():
     dpt = po.loc[po["OMS_SKU"] == "DPT21MULTI"].iloc[0]
     assert int(mustard["Sold_Units"]) == 5
     assert int(dpt["Sold_Units"]) == 5
-    # Combo listing itself must not remain as the demand key.
-    assert "1003DPT21MULTI-3XL" not in set(po["OMS_SKU"].astype(str))
+    # Listing retained for visibility; PO_Qty stays on components only.
+    assert "1003DPT21MULTI-3XL" in set(po["OMS_SKU"].astype(str))
+    listing = po.loc[po["OMS_SKU"] == "1003DPT21MULTI-3XL"].iloc[0]
+    assert int(listing["Sold_Units"]) == 5
+    assert int(listing["PO_Qty"]) == 0
+    assert "1003YKMUSTARD-3XL" in str(listing.get("Bundle_Size") or "")
 
 
 def test_quarterly_history_explodes_combo_platform_rows():
@@ -154,9 +179,11 @@ def test_quarterly_history_explodes_combo_platform_rows():
     skus = set(pivot["OMS_SKU"].astype(str))
     assert "1003YKMUSTARD-L" in skus
     assert "DPT21MULTI" in skus
-    assert "1003DPT21MULTI-L" not in skus
+    assert "1003DPT21MULTI-L" in skus
     m = pivot.loc[pivot["OMS_SKU"] == "1003YKMUSTARD-L"].iloc[0]
     assert int(m["Units_90d"]) == 2
+    listing = pivot.loc[pivot["OMS_SKU"] == "1003DPT21MULTI-L"].iloc[0]
+    assert int(listing["Units_90d"]) == 2
 
 
 def test_merge_combo_sku_map_overlay():

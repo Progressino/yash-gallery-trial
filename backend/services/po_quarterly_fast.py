@@ -267,6 +267,7 @@ def _accumulate_shipment_frame(
         sku_mapping=sku_mapping,
         combo_map=resolve_active_combo_sku_map(),
         strip_pl=bool(strip_pl),
+        retain_combo_listings=True,
     )
     if work.empty:
         return 0
@@ -596,6 +597,7 @@ def _accumulate_sales_df_shipments(
         sku_mapping=sku_mapping,
         combo_map=resolve_active_combo_sku_map(),
         strip_pl=False,
+        retain_combo_listings=True,
     )
     work = work[work["SKU"].astype(str).str.len() > 0]
     if group_by_parent:

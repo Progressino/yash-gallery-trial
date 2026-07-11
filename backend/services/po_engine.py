@@ -176,6 +176,7 @@ def _platform_shipment_history_part(
         sku_mapping=sku_mapping,
         combo_map=resolve_active_combo_sku_map(),
         strip_pl=bool(strip_pl),
+        retain_combo_listings=True,
     )
     return tmp.dropna(subset=["Date"])
 
@@ -399,6 +400,7 @@ def calculate_quarterly_history(
         sku_mapping=sku_mapping,
         combo_map=_combo,
         strip_pl=False,
+        retain_combo_listings=True,
     )
     if hist.empty:
         return pd.DataFrame()
@@ -1009,8 +1011,12 @@ def _catalog_sku_allowlist(
     return allow
 
 
-def _sales_sku_in_catalog(sku: object, allow: set[str]) -> bool:
-    """Keep sales for catalog SKUs, parents, and bundled listings that fan out to them."""
+def _sales_sku_in_catalog(
+    sku: object,
+    allow: set[str],
+    combo_map: Optional[dict] = None,
+) -> bool:
+    """Keep sales for catalog SKUs, parents, bundled listings, and combo listings."""
     from .existing_po import _split_bundled_po_sku, is_bundled_size_range_sku
 
     s = str(sku or "").strip()
@@ -1028,15 +1034,33 @@ def _sales_sku_in_catalog(sku: object, allow: set[str]) -> bool:
         for kid in _split_bundled_po_sku(s):
             if str(kid).strip() in allow:
                 return True
+    if combo_map:
+        from .combo_sku_map import lookup_combo_components
+
+        comps = lookup_combo_components(s, combo_map)
+        if comps:
+            for c, _ in comps:
+                c = str(c or "").strip()
+                if not c:
+                    continue
+                if c in allow:
+                    return True
+                cpar = str(get_parent_sku(c) or "").strip()
+                if cpar and cpar in allow:
+                    return True
     return False
 
 
-def _filter_sales_df_to_catalog(df: pd.DataFrame, allow: set[str]) -> pd.DataFrame:
+def _filter_sales_df_to_catalog(
+    df: pd.DataFrame,
+    allow: set[str],
+    combo_map: Optional[dict] = None,
+) -> pd.DataFrame:
     """Drop historical sales for SKUs outside the active catalog — largest PO calc win."""
     if df.empty or not allow:
         return df
     uniq = df["Sku"].unique()
-    keep = {u: _sales_sku_in_catalog(u, allow) for u in uniq}
+    keep = {u: _sales_sku_in_catalog(u, allow, combo_map=combo_map) for u in uniq}
     mask = df["Sku"].map(keep).fillna(False)
     n_before = len(df)
     out = df.loc[mask]
@@ -1430,6 +1454,7 @@ def calculate_po_base(
         sku_mapping=_map,
         combo_map=_combo,
         strip_pl=False,
+        retain_combo_listings=True,
     )
     df = df[df["Sku"].astype(str).str.len() > 0]
     df["_is_ship"] = df["Transaction Type"].astype(str).str.strip().str.lower().eq("shipment")
@@ -1516,7 +1541,30 @@ def calculate_po_base(
         set(inv_work["OMS_SKU"].astype(str)),
         _ep_prepared if not _ep_prepared.empty else None,
     )
-    df = _filter_sales_df_to_catalog(df, _catalog_allow)
+    df = _filter_sales_df_to_catalog(df, _catalog_allow, combo_map=_combo)
+
+    # Combo listing rows (retained for sales visibility) are rarely on inventory —
+    # seed zero-stock ghosts so they appear on the PO grid alongside components.
+    if _combo and not df.empty and "Sku" in df.columns:
+        from .combo_sku_map import lookup_combo_components
+        from .helpers import clean_sku as _clean_sku_combo
+
+        _have_inv = set(inv_work["OMS_SKU"].astype(str).str.strip())
+        _need_listings: list[str] = []
+        for raw in pd.unique(df["Sku"].astype(str)):
+            s = str(raw or "").strip()
+            if not s or s in _have_inv:
+                continue
+            if lookup_combo_components(s, _combo):
+                nk = _clean_sku_combo(s) or s
+                if nk and nk not in _have_inv and nk not in _need_listings:
+                    _need_listings.append(nk)
+        if _need_listings:
+            _pad = pd.DataFrame({"OMS_SKU": _need_listings})
+            for _c in inv_work.columns:
+                if _c != "OMS_SKU":
+                    _pad[_c] = 0
+            inv_work = pd.concat([inv_work, _pad[inv_work.columns]], ignore_index=True)
 
     _plan = None
     if planning_date:
@@ -3197,6 +3245,33 @@ def calculate_po_base(
         )
     else:
         po_df["Bundle_Size"] = ""
+
+    # Combo listing rows: show sales, stock via components — no fresh PO on the listing key.
+    if _combo and "OMS_SKU" in po_df.columns:
+        from .combo_sku_map import lookup_combo_components
+
+        def _combo_bundle_label(sku: object) -> str:
+            comps = lookup_combo_components(str(sku or ""), _combo)
+            if not comps:
+                return ""
+            return "+".join(c for c, _ in comps if c)
+
+        _is_combo_listing = po_df["OMS_SKU"].map(
+            lambda s: bool(lookup_combo_components(str(s or ""), _combo))
+        )
+        if _is_combo_listing.any():
+            for _pc in ("PO_Qty", "Gross_PO_Qty"):
+                if _pc in po_df.columns:
+                    po_df.loc[_is_combo_listing, _pc] = 0
+            if "PO_Block_Reason" in po_df.columns:
+                _empty_br = po_df.loc[_is_combo_listing, "PO_Block_Reason"].astype(str).str.strip().eq("")
+                po_df.loc[_is_combo_listing & _empty_br, "PO_Block_Reason"] = (
+                    "Combo listing — stock components (see Bundle_Size)"
+                )
+            _empty_b = po_df.loc[_is_combo_listing, "Bundle_Size"].astype(str).str.strip().eq("")
+            po_df.loc[_is_combo_listing & _empty_b, "Bundle_Size"] = po_df.loc[
+                _is_combo_listing & _empty_b, "OMS_SKU"
+            ].map(_combo_bundle_label)
 
     # Final lead-time gate (belt-and-suspenders after pack-round / ghost rows).
     if enforce_lead_time_release_gate and "Projected_Running_Days" in po_df.columns:

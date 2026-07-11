@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 31  # Meesho: disk OMS-fill + TxnDate + Tier-3 SKU backfill + source-aware sales gap-fill
+QUARTERLY_CACHE_SCHEMA = 32  # Combo listings retained in quarterly + component explode
 
 
 def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:

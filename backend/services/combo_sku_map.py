@@ -386,14 +386,30 @@ def build_sku_explode_map(
     combo_map: Optional[ComboBom],
     *,
     strip_pl: bool = False,
+    retain_combo_listings: bool = False,
 ) -> Dict[str, List[Tuple[str, float]]]:
     out: Dict[str, List[Tuple[str, float]]] = {}
+    bom = combo_map or {}
     for s in unique_skus:
         key = s if s is None or isinstance(s, str) else str(s)
         comps = resolve_demand_components(
-            key, sku_mapping, combo_map, strip_pl=strip_pl
+            key, sku_mapping, bom, strip_pl=strip_pl
         )
-        out[key] = comps if comps else []
+        if not comps:
+            out[key] = []
+            continue
+        if retain_combo_listings and lookup_combo_components(key, bom):
+            # Keep the listing row (sales visibility) and still fan demand to components.
+            listing = _norm_key(key) or str(key).strip()
+            retained: List[Tuple[str, float]] = []
+            if listing:
+                retained.append((listing, 1.0))
+            for c, q in comps:
+                if c and c != listing:
+                    retained.append((c, float(q)))
+            out[key] = retained if retained else comps
+        else:
+            out[key] = comps if comps else []
     return out
 
 
@@ -405,9 +421,14 @@ def explode_sku_qty_dataframe(
     sku_mapping: Optional[Dict[str, str]] = None,
     combo_map: Optional[ComboBom] = None,
     strip_pl: bool = False,
+    retain_combo_listings: bool = False,
 ) -> pd.DataFrame:
     """
     Fan listing SKUs out to combo components (qty × component multiplier).
+
+    When ``retain_combo_listings`` is True, combo keys also keep a listing row at
+    the original qty (for PO/quarterly visibility) while components still receive
+    exploded demand for stocking.
 
     When combo_map is empty, still applies 1:1 canonical / strip_pl resolution
     so callers can use this as a single canonicalize+explode step.
@@ -418,7 +439,11 @@ def explode_sku_qty_dataframe(
     raw = work[sku_col]
     uniq = pd.unique(raw.to_numpy())
     explode_map = build_sku_explode_map(
-        uniq, sku_mapping, combo_map or {}, strip_pl=strip_pl
+        uniq,
+        sku_mapping,
+        combo_map or {},
+        strip_pl=strip_pl,
+        retain_combo_listings=retain_combo_listings,
     )
 
     # Drop rows that resolve to nothing.
@@ -437,6 +462,11 @@ def explode_sku_qty_dataframe(
         if qty_col in out.columns and not (mults == 1.0).all():
             out[qty_col] = pd.to_numeric(out[qty_col], errors="coerce").fillna(0) * mults
             scaled = True
+        if "Units_Effective" in out.columns and not (mults == 1.0).all():
+            out["Units_Effective"] = (
+                pd.to_numeric(out["Units_Effective"], errors="coerce").fillna(0) * mults
+            )
+            scaled = True
         _ = scaled
         return out
 
@@ -453,9 +483,12 @@ def explode_sku_qty_dataframe(
             new_skus.append(c)
             new_mults.append(float(q))
     out[sku_col] = new_skus
+    mult_arr = np.asarray(new_mults, dtype=float)
     if qty_col in out.columns:
-        out[qty_col] = pd.to_numeric(out[qty_col], errors="coerce").fillna(0) * np.asarray(
-            new_mults, dtype=float
+        out[qty_col] = pd.to_numeric(out[qty_col], errors="coerce").fillna(0) * mult_arr
+    if "Units_Effective" in out.columns:
+        out["Units_Effective"] = (
+            pd.to_numeric(out["Units_Effective"], errors="coerce").fillna(0) * mult_arr
         )
     return out
 
