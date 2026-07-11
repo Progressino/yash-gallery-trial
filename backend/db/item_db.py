@@ -590,6 +590,59 @@ def get_item_by_code(item_code: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def apply_document_stock_delta(
+    item_id: int,
+    qty: float,
+    direction: str,
+) -> float:
+    """
+    Update items.stock for GRN/MIN document posts without writing an
+    item_stock_adjustments row (documents already appear in Stock Tracking).
+    """
+    if qty <= 0:
+        raise ValueError("Quantity must be greater than zero.")
+    dir_u = str(direction or "").strip().upper()
+    if dir_u not in ("IN", "OUT"):
+        raise ValueError("Direction must be IN or OUT.")
+
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT id, stock FROM items WHERE id = ?",
+            (item_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Item not found")
+        current = float(row["stock"] or 0)
+        delta = float(qty) if dir_u == "IN" else -float(qty)
+        new_stock = round(current + delta, 3)
+        if new_stock < -1e-9:
+            raise ValueError(
+                f"Insufficient stock — current {current:.3f}, cannot remove {qty:.3f}."
+            )
+        conn.execute("UPDATE items SET stock = ? WHERE id = ?", (new_stock, item_id))
+        conn.commit()
+        return new_stock
+    finally:
+        conn.close()
+
+
+def is_document_auto_adjustment(reason: str, reference_no: str = "") -> bool:
+    """True for ADJ rows auto-created from GRN/MIN (should not appear beside doc rows)."""
+    r = str(reason or "").strip().lower()
+    ref = str(reference_no or "").strip().upper()
+    if ref.startswith("MIN-") or ref.startswith("GRN-"):
+        return True
+    auto_reasons = (
+        "material issue note",
+        "reverse: min cancelled",
+        "grn receipt",
+        "reverse: grn",
+        "grn reverse",
+    )
+    return any(r.startswith(a) or a in r for a in auto_reasons)
+
+
 def adjust_item_stock(
     item_id: int,
     qty: float,

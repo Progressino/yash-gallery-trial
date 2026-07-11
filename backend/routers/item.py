@@ -678,6 +678,14 @@ def get_item_tracking(
             pass
 
     for adj in list_stock_adjustments(item_code_str, frm, to):
+        from ..db.item_db import is_document_auto_adjustment
+
+        if is_document_auto_adjustment(
+            str(adj.get("reason") or ""),
+            str(adj.get("reference_no") or ""),
+        ):
+            # Document posts already appear as MIN/GRN rows — skip duplicate ADJs.
+            continue
         label = (adj.get("reason") or "Stock Adjustment").strip() or "Stock Adjustment"
         if adj.get("reference_no"):
             label = f"{label} ({adj['reference_no']})"

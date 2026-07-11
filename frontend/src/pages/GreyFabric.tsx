@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 
@@ -147,6 +147,9 @@ export default function GreyFabric() {
   const [pfQCTarget, setPFQCTarget] = useState<any>(null)
   const [showPFReserveForm, setShowPFReserveForm] = useState(false)
   const [pfReserveForm, setPFReserveForm] = useState({ fabric_code: '', fabric_name: '', so_number: '', sku: '', qty: 0, remarks: '' })
+  const [pfSkuSearch, setPFSkuSearch] = useState('')
+  const [pfSelectedSkus, setPFSelectedSkus] = useState<string[]>([])
+  const [pfSkuQtyMap, setPFSkuQtyMap] = useState<Record<string, number>>({})
 
   // ── Queries ──────────────────────────────────────────────────────────────────
   const { data: stats } = useQuery<GreyStats>({
@@ -343,44 +346,91 @@ export default function GreyFabric() {
   const pfSelectedFabric = pfCheckedAvailable.find(f => f.fabric_code === pfReserveForm.fabric_code)
   const pfSelectedSO = pfSalesOrders.find(o => o.so_number === pfReserveForm.so_number)
   const pfSkuLines = pfSelectedSO?.lines ?? []
+  const pfSkuLinesFiltered = useMemo(() => {
+    const q = pfSkuSearch.trim().toLowerCase()
+    if (!q) return pfSkuLines
+    return pfSkuLines.filter(ln =>
+      (ln.sku || '').toLowerCase().includes(q)
+      || (ln.sku_name || '').toLowerCase().includes(q),
+    )
+  }, [pfSkuLines, pfSkuSearch])
 
   useEffect(() => {
-    const sku = pfReserveForm.sku
     const fabricCode = pfReserveForm.fabric_code
-    if (!sku || !fabricCode || !pfReserveForm.so_number) return
-    const line = pfSkuLines.find(l => l.sku === sku)
-    const orderQty = Number(line?.qty) || 0
-    if (orderQty <= 0) return
+    if (!fabricCode || !pfReserveForm.so_number || pfSelectedSkus.length === 0) return
     let cancelled = false
-    api
-      .get(`/production/bom-inputs/${encodeURIComponent(sku)}`, { params: { qty: orderQty } })
-      .then(res => {
-        if (cancelled) return
-        const inputs = (res.data?.inputs ?? []) as { material_code?: string; adj_qty?: number }[]
-        const match = inputs.find(
-          i => (i.material_code || '').toUpperCase() === fabricCode.toUpperCase(),
-        )
-        const bomMtr = Number(match?.adj_qty) || 0
-        if (bomMtr <= 0) return
-        const maxAvail = pfSelectedFabric?.available_qty ?? bomMtr
-        const qty = Math.min(bomMtr, maxAvail)
-        setPFReserveForm(prev => ({ ...prev, qty: Math.round(qty * 1000) / 1000 }))
+    const maxAvail = pfSelectedFabric?.available_qty ?? 0
+    Promise.all(
+      pfSelectedSkus.map(async (sku) => {
+        const line = pfSkuLines.find(l => l.sku === sku)
+        const orderQty = Number(line?.qty) || 0
+        if (orderQty <= 0) return [sku, 0] as const
+        try {
+          const res = await api.get(`/production/bom-inputs/${encodeURIComponent(sku)}`, { params: { qty: orderQty } })
+          const inputs = (res.data?.inputs ?? []) as { material_code?: string; adj_qty?: number }[]
+          const match = inputs.find(i => (i.material_code || '').toUpperCase() === fabricCode.toUpperCase())
+          const bomMtr = Number(match?.adj_qty) || 0
+          return [sku, Math.round(Math.min(bomMtr, maxAvail || bomMtr) * 1000) / 1000] as const
+        } catch {
+          return [sku, pfSkuQtyMap[sku] || 0] as const
+        }
+      }),
+    ).then((pairs) => {
+      if (cancelled) return
+      setPFSkuQtyMap((prev) => {
+        const next = { ...prev }
+        for (const [sku, qty] of pairs) next[sku] = qty
+        return next
       })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
-  }, [pfReserveForm.sku, pfReserveForm.fabric_code, pfReserveForm.so_number, pfSkuLines, pfSelectedFabric?.available_qty])
+    })
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- refresh when selection / fabric / SO changes
+  }, [pfSelectedSkus.join('|'), pfReserveForm.fabric_code, pfReserveForm.so_number, pfSkuLines, pfSelectedFabric?.available_qty])
 
   const pfReserveMut = useMutation({
-    mutationFn: (b: object) => api.post('/grey/printed-fabric/reserve', b),
-    onSuccess: () => {
+    mutationFn: async () => {
+      const fabric_code = pfReserveForm.fabric_code
+      const so_number = pfReserveForm.so_number
+      if (!fabric_code || !so_number || pfSelectedSkus.length === 0) {
+        throw new Error('Select fabric, SO, and at least one SKU')
+      }
+      const errors: string[] = []
+      let ok = 0
+      for (const sku of pfSelectedSkus) {
+        const qty = Number(pfSkuQtyMap[sku] || 0)
+        if (qty <= 0) {
+          errors.push(`${sku}: qty required`)
+          continue
+        }
+        try {
+          await api.post('/grey/printed-fabric/reserve', {
+            fabric_code,
+            fabric_name: pfReserveForm.fabric_name,
+            so_number,
+            sku,
+            qty,
+            remarks: pfReserveForm.remarks,
+          })
+          ok += 1
+        } catch (e: unknown) {
+          const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+          errors.push(`${sku}: ${detail || 'failed'}`)
+        }
+      }
+      if (ok === 0) throw new Error(errors.join('\n') || 'Reserve failed')
+      return { ok, errors }
+    },
+    onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['printed-fabric-checked'] })
       qc.invalidateQueries({ queryKey: ['printed-ready-to-cut'] })
       qc.invalidateQueries({ queryKey: ['printed-fabric-reserve-options'] })
       setShowPFReserveForm(false)
       setPFReserveForm({ fabric_code: '', fabric_name: '', so_number: '', sku: '', qty: 0, remarks: '' })
-    }
+      setPFSelectedSkus([])
+      setPFSkuQtyMap({})
+      setPFSkuSearch('')
+      if (res.errors.length) alert(`Reserved ${res.ok} SKU(s).\nSome failed:\n${res.errors.join('\n')}`)
+    },
   })
 
   const openEdit = (entry: GreyEntry) => {
@@ -1146,16 +1196,35 @@ export default function GreyFabric() {
                   <p className="text-sm font-semibold text-gray-700">✂️ Ready to Cut</p>
                   <p className="text-xs text-gray-500">Checked printed fabric — reserve against SO and send for cutting</p>
                 </div>
-                <button
-                  onClick={() => {
-                    setPFReserveForm({ fabric_code: '', fabric_name: '', so_number: '', sku: '', qty: 0, remarks: '' })
-                    setShowPFReserveForm(true)
-                  }}
-                  disabled={pfCheckedAvailable.length === 0}
-                  className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800 disabled:opacity-50"
-                >
-                  + Reserve for SO
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const a = document.createElement('a')
+                      a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(
+                        'fabric_code,so_number,sku,qty,remarks\nP500Border Cotton,SO-0001,1046YKBLUE-L,6,sample\n',
+                      )
+                      a.download = 'printed_fabric_reserve_import_template.csv'
+                      a.click()
+                    }}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-600"
+                  >
+                    📥 Template
+                  </button>
+                  <button
+                    onClick={() => {
+                      setPFReserveForm({ fabric_code: '', fabric_name: '', so_number: '', sku: '', qty: 0, remarks: '' })
+                      setPFSelectedSkus([])
+                      setPFSkuQtyMap({})
+                      setPFSkuSearch('')
+                      setShowPFReserveForm(true)
+                    }}
+                    disabled={pfCheckedAvailable.length === 0}
+                    className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800 disabled:opacity-50"
+                  >
+                    + Reserve for SO
+                  </button>
+                </div>
               </div>
               {pfCheckedAvailable.length === 0 && !showPFReserveForm && (
                 <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -1202,7 +1271,12 @@ export default function GreyFabric() {
                       <label className="text-xs text-gray-500">Sales order *</label>
                       <select
                         value={pfReserveForm.so_number}
-                        onChange={e => setPFReserveForm(prev => ({ ...prev, so_number: e.target.value, sku: '' }))}
+                        onChange={e => {
+                          setPFReserveForm(prev => ({ ...prev, so_number: e.target.value, sku: '' }))
+                          setPFSelectedSkus([])
+                          setPFSkuQtyMap({})
+                          setPFSkuSearch('')
+                        }}
                         className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
                       >
                         <option value="">Select SO…</option>
@@ -1216,45 +1290,72 @@ export default function GreyFabric() {
                         <p className="text-[10px] text-amber-600 mt-1">No open sales orders. Create one under Sales Orders first.</p>
                       )}
                     </div>
-                    <div>
-                      <label className="text-xs text-gray-500">Style / SKU *</label>
-                      <select
-                        value={pfReserveForm.sku}
-                        onChange={e => setPFReserveForm(prev => ({ ...prev, sku: e.target.value, qty: 0 }))}
-                        disabled={!pfReserveForm.so_number}
-                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 disabled:bg-gray-100"
-                      >
-                        <option value="">Select SKU from SO…</option>
-                        {pfSkuLines.map(ln => (
-                          <option key={ln.sku} value={ln.sku}>
-                            {ln.sku}{ln.sku_name ? ` — ${ln.sku_name}` : ''} (order {ln.qty} {ln.unit || 'PCS'})
-                          </option>
-                        ))}
-                      </select>
-                      {pfReserveForm.so_number && pfSkuLines.length === 0 && (
-                        <p className="text-[10px] text-amber-600 mt-1">
-                          No SKUs left to reserve on this order (already reserved or a cutting job order exists).
-                        </p>
-                      )}
-                    </div>
-                    <div>
-                      <label className="text-xs text-gray-500">Qty to reserve (MTR) *</label>
+                    <div className="md:col-span-2">
+                      <label className="text-xs text-gray-500">Style / SKU * (search & multi-select)</label>
                       <input
-                        type="number"
-                        min={0}
-                        step={0.1}
-                        max={pfSelectedFabric?.available_qty ?? undefined}
-                        value={pfReserveForm.qty || ''}
-                        onChange={e => setPFReserveForm(prev => ({ ...prev, qty: +e.target.value }))}
-                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+                        type="search"
+                        value={pfSkuSearch}
+                        onChange={e => setPFSkuSearch(e.target.value)}
+                        disabled={!pfReserveForm.so_number}
+                        placeholder="Search SKU or style…"
+                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 disabled:bg-gray-100"
                       />
-                      {pfSelectedFabric && (
-                        <p className="text-[10px] text-gray-500 mt-0.5">
-                          From BOM for order qty · max {(pfSelectedFabric.available_qty ?? 0).toFixed(1)} m available
+                      <div className="mt-2 max-h-48 overflow-y-auto border border-gray-200 rounded-lg divide-y bg-white">
+                        {!pfReserveForm.so_number ? (
+                          <p className="text-xs text-gray-400 px-3 py-2">Select a sales order first.</p>
+                        ) : pfSkuLinesFiltered.length === 0 ? (
+                          <p className="text-xs text-amber-600 px-3 py-2">
+                            {pfSkuLines.length === 0
+                              ? 'No SKUs left to reserve on this order (already reserved or a cutting JO exists).'
+                              : 'No SKUs match your search.'}
+                          </p>
+                        ) : (
+                          pfSkuLinesFiltered.map(ln => {
+                            const checked = pfSelectedSkus.includes(ln.sku)
+                            return (
+                              <label key={ln.sku} className="flex items-start gap-2 px-3 py-2 text-sm hover:bg-gray-50 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  className="mt-1"
+                                  checked={checked}
+                                  onChange={() => {
+                                    setPFSelectedSkus(prev =>
+                                      checked ? prev.filter(s => s !== ln.sku) : [...prev, ln.sku],
+                                    )
+                                  }}
+                                />
+                                <span className="min-w-0 flex-1">
+                                  <span className="font-mono font-semibold text-[#002B5B]">{ln.sku}</span>
+                                  {ln.sku_name ? <span className="text-gray-500"> — {ln.sku_name}</span> : null}
+                                  <span className="text-gray-400 text-xs block">order {ln.qty} {ln.unit || 'PCS'}</span>
+                                </span>
+                                {checked && (
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    step={0.1}
+                                    value={pfSkuQtyMap[ln.sku] ?? ''}
+                                    onClick={e => e.stopPropagation()}
+                                    onChange={e => setPFSkuQtyMap(prev => ({ ...prev, [ln.sku]: +e.target.value }))}
+                                    className="w-24 border rounded px-1.5 py-0.5 text-xs"
+                                    placeholder="MTR"
+                                    title="Qty to reserve (MTR)"
+                                  />
+                                )}
+                              </label>
+                            )
+                          })
+                        )}
+                      </div>
+                      {pfSelectedSkus.length > 0 && (
+                        <p className="text-[10px] text-gray-500 mt-1">
+                          {pfSelectedSkus.length} SKU(s) selected
+                          {pfSelectedFabric ? ` · max ${(pfSelectedFabric.available_qty ?? 0).toFixed(1)} m fabric available` : ''}
+                          {' '}· qty auto-fills from BOM when possible
                         </p>
                       )}
                     </div>
-                    <div>
+                    <div className="md:col-span-2">
                       <label className="text-xs text-gray-500">Remarks</label>
                       <input
                         value={pfReserveForm.remarks}
@@ -1265,25 +1366,26 @@ export default function GreyFabric() {
                   </div>
                   <div className="flex gap-2">
                     <button
-                      onClick={() => pfReserveMut.mutate(pfReserveForm)}
+                      onClick={() => pfReserveMut.mutate()}
                       disabled={
                         pfReserveMut.isPending
                         || !pfReserveForm.fabric_code
                         || !pfReserveForm.so_number
-                        || !pfReserveForm.sku
-                        || pfReserveForm.qty <= 0
+                        || pfSelectedSkus.length === 0
+                        || pfSelectedSkus.every(s => !(pfSkuQtyMap[s] > 0))
                       }
                       className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50"
                     >
-                      {pfReserveMut.isPending ? 'Saving…' : '🔒 Reserve'}
+                      {pfReserveMut.isPending ? 'Saving…' : `🔒 Reserve ${pfSelectedSkus.length || ''} SKU(s)`.trim()}
                     </button>
                     <button onClick={() => setShowPFReserveForm(false)} className="px-4 py-2 border rounded-lg text-sm text-gray-600">Cancel</button>
                   </div>
                   {pfReserveMut.isError && (
-                    <p className="text-xs text-red-600">
+                    <p className="text-xs text-red-600 whitespace-pre-wrap">
                       {String(
-                        (pfReserveMut.error as { response?: { data?: { detail?: unknown } } })?.response?.data
-                          ?.detail ?? 'Reserve failed',
+                        (pfReserveMut.error as { message?: string; response?: { data?: { detail?: unknown } } })?.message
+                        || (pfReserveMut.error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+                        || 'Reserve failed',
                       )}
                     </p>
                   )}

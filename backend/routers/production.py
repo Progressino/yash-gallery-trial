@@ -1,9 +1,11 @@
 """Production Module — Dynamic Routing, Multi-process JO"""
 import os, sqlite3
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from typing import Optional, List
+import io
+import pandas as pd
 from ..db.production_db import (
     list_jos, get_jo, create_jo, update_jo,
     issue_fabric, return_fabric, issue_pieces, receive_pieces, add_cost,
@@ -440,6 +442,84 @@ def post_jo(body: JOIn):
     jo_row = next((j for j in list_jos() if j.get("jo_number") == num), None)
     issue_note = jo_issue_notes.get_issue_note_by_jo_id(jo_row["id"]) if jo_row else None
     return {"jo_number": num, "ok": True, "issue_note": issue_note}
+
+
+@router.post("/orders/import")
+async def import_jos(
+    file: UploadFile = File(...),
+    process: str = Form("Cutting"),
+):
+    """
+    Import job orders from CSV/XLSX.
+    Columns: so_number, sku, planned_qty, expected_completion (or delivery_date),
+    vendor_rate, remarks, fabric_code, fabric_qty, exec_type, vendor_name.
+    """
+    raw = await file.read()
+    name = (file.filename or "").lower()
+    try:
+        if name.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(io.BytesIO(raw))
+        else:
+            df = pd.read_csv(io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(400, f"Could not read file: {e}") from e
+    if df.empty:
+        raise HTTPException(400, "Import file is empty")
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+    created: list[str] = []
+    errors: list[str] = []
+    for i, row in df.iterrows():
+        so_number = str(row.get("so_number") or "").strip()
+        sku = str(row.get("sku") or "").strip()
+        if not so_number or not sku:
+            errors.append(f"Row {int(i) + 2}: so_number and sku required")
+            continue
+        planned = float(row.get("planned_qty") or row.get("qty") or 0)
+        delivery = str(
+            row.get("expected_completion")
+            or row.get("delivery_date")
+            or row.get("delivery")
+            or ""
+        ).strip()
+        data = {
+            "so_number": so_number,
+            "sku": sku,
+            "sku_name": str(row.get("sku_name") or "").strip(),
+            "process": str(row.get("process") or process or "Cutting").strip(),
+            "exec_type": str(row.get("exec_type") or "Inhouse").strip(),
+            "vendor_name": str(row.get("vendor_name") or "").strip(),
+            "vendor_rate": float(row.get("vendor_rate") or row.get("rate") or 0),
+            "planned_qty": planned,
+            "expected_completion": delivery[:10] if delivery else "",
+            "remarks": str(row.get("remarks") or "").strip(),
+            "fabric_code": str(row.get("fabric_code") or "").strip(),
+            "fabric_qty": float(row.get("fabric_qty") or 0),
+            "fabric_unit": str(row.get("fabric_unit") or "MTR").strip(),
+            "lines": [
+                {
+                    "so_number": so_number,
+                    "sku": sku,
+                    "sku_name": str(row.get("sku_name") or "").strip(),
+                    "planned_qty": planned,
+                    "vendor_rate": float(row.get("vendor_rate") or row.get("rate") or 0),
+                    "remarks": str(row.get("remarks") or "").strip(),
+                }
+            ],
+        }
+        try:
+            num = create_jo(data)
+            created.append(num)
+        except Exception as e:
+            errors.append(f"Row {int(i) + 2} ({sku}): {e}")
+    return {
+        "ok": True,
+        "created": len(created),
+        "jo_numbers": created,
+        "errors": errors,
+        "message": f"Imported {len(created)} job order(s)"
+        + (f"; {len(errors)} failed" if errors else ""),
+    }
+
 
 @router.patch("/orders/{joid}")
 def patch_jo(joid: int, body: JOUpdate):

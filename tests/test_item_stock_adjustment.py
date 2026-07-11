@@ -102,3 +102,20 @@ def test_non_admin_cannot_adjust_stock(client, item_db, monkeypatch):
         json={"qty": 5, "direction": "IN", "reason": "Should fail"},
     )
     assert r.status_code == 403, r.text
+
+
+def test_apply_document_stock_delta_no_adj_row(item_db):
+    item_id = _create_rm(item_db, code="RAYON-63", stock=100.0)
+    new = item_db.apply_document_stock_delta(item_id, 10, "OUT")
+    assert new == 90.0
+    assert item_db.list_stock_adjustments("RAYON-63") == []
+    assert float(item_db.get_item(item_id)["stock"]) == 90.0
+
+
+def test_is_document_auto_adjustment():
+    from backend.db.item_db import is_document_auto_adjustment
+
+    assert is_document_auto_adjustment("Material Issue Note", "MIN-0005") is True
+    assert is_document_auto_adjustment("GRN Receipt", "GRN-001") is True
+    assert is_document_auto_adjustment("Physical count", "") is False
+    assert is_document_auto_adjustment("Opening stock", "OPEN-1") is False

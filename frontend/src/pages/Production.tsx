@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
@@ -681,6 +681,8 @@ export default function Production() {
     fabric_unit: 'MTR', expected_completion: '', remarks: '',
   })
   const [newLines, setNewLines] = useState<{ so_number: string; sku: string; sku_name: string; style: string; planned_qty: number; vendor_rate: number; remarks: string }[]>([])
+  const [soLineSearch, setSOLineSearch] = useState('')
+  const joImportRef = useRef<HTMLInputElement>(null)
 
   // Modal forms
   const [fabricIssueForm, setFabricIssueForm] = useState({ fabric_code: '', fabric_name: '', issued_qty: 0, unit: 'MTR', issued_by: '', remarks: '' })
@@ -746,7 +748,17 @@ export default function Production() {
       return so?.lines || []
     }),
     enabled: !!newForm.so_number,
+    staleTime: 0,
   })
+  const soLinesFiltered = useMemo(() => {
+    const q = soLineSearch.trim().toLowerCase()
+    const rows = soLines as any[]
+    if (!q) return rows
+    return rows.filter(l =>
+      String(l.sku || '').toLowerCase().includes(q)
+      || String(l.sku_name || l.item_name || '').toLowerCase().includes(q),
+    )
+  }, [soLines, soLineSearch])
   const { data: itemRouting } = useQuery({
     queryKey: ['item-routing', newForm.sku],
     queryFn: () => api.get(`/production/item-routing/${encodeURIComponent(newForm.sku)}`).then(r => r.data),
@@ -827,11 +839,32 @@ export default function Production() {
     onError: (e: unknown) => alert(apiErrorMessage(e, 'Error')),
   })
 
-  const openModal = (type: ModalType, jo: JO, lineId?: number) => {
+  const openModal = async (type: ModalType, jo: JO, lineId?: number) => {
     setActiveJO(jo)
     setActiveLineId(lineId || null)
     setModal(type)
-    if (type === 'issue-fabric') setFabricIssueForm(f => ({ ...f, fabric_code: jo.fabric_code || '', issued_qty: jo.fabric_qty || 0 }))
+    if (type === 'issue-fabric') {
+      setFabricIssueForm(f => ({ ...f, fabric_code: jo.fabric_code || '', issued_qty: jo.fabric_qty || 0, fabric_name: '' }))
+      // Prefer BOM fabric for the JO SKU (or first line)
+      const sku = jo.sku || jo.lines?.[0]?.sku
+      const qty = jo.planned_qty || jo.lines?.[0]?.planned_qty || 1
+      if (sku) {
+        try {
+          const res = await api.get(`/production/bom-inputs/${encodeURIComponent(sku)}`, { params: { qty } })
+          const inputs = (res.data?.inputs ?? []) as { material_code?: string; material_name?: string; adj_qty?: number; unit?: string }[]
+          const fabric = inputs.find(i => String(i.unit || '').toUpperCase().includes('MTR')) || inputs[0]
+          if (fabric?.material_code) {
+            setFabricIssueForm(f => ({
+              ...f,
+              fabric_code: fabric.material_code || f.fabric_code,
+              fabric_name: fabric.material_name || '',
+              issued_qty: Number(fabric.adj_qty) || f.issued_qty,
+              unit: fabric.unit || f.unit || 'MTR',
+            }))
+          }
+        } catch { /* keep JO fabric defaults */ }
+      }
+    }
     if (type === 'return-fabric') setFabricReturnForm(f => ({ ...f, fabric_code: jo.fabric_code || '' }))
     if (type === 'receive') {
       const line = jo.lines.find(l => l.id === lineId)
@@ -845,7 +878,7 @@ export default function Production() {
   }
 
   // ── Add SO lines to new JO ─────────────────────────────────────────────────
-  const addSOLineToJO = (line: any) => {
+  const addSOLineToJO = async (line: any) => {
     if (newLines.find(l => l.sku === line.sku)) return
     setNewLines(ls => [...ls, {
       so_number: newForm.so_number,
@@ -853,9 +886,37 @@ export default function Production() {
       sku_name: line.sku_name || line.item_name || '',
       style: '',
       planned_qty: line.qty || 0,
-      vendor_rate: 0,
+      vendor_rate: newForm.vendor_rate || 0,
       remarks: '',
     }])
+    // Cutting: auto-fill fabric from BOM (live — includes fabric QC'd after SO was created)
+    if (newForm.process === 'Cutting' && line.sku) {
+      try {
+        const orderQty = Number(line.qty) || 1
+        const res = await api.get(`/production/bom-inputs/${encodeURIComponent(line.sku)}`, { params: { qty: orderQty } })
+        const inputs = (res.data?.inputs ?? []) as { material_code?: string; material_name?: string; adj_qty?: number; unit?: string }[]
+        const fabric = inputs.find(i => {
+          const u = String(i.unit || '').toUpperCase()
+          const code = String(i.material_code || '').toUpperCase()
+          return u.includes('MTR') || u.includes('M') || code.includes('FABRIC') || code.includes('RAYON') || code.includes('COTTON')
+        }) || inputs[0]
+        if (fabric?.material_code) {
+          setNewForm(f => ({
+            ...f,
+            fabric_code: f.fabric_code || fabric.material_code || '',
+            fabric_qty: f.fabric_qty > 0 ? f.fabric_qty : Number(fabric.adj_qty) || 0,
+            fabric_unit: fabric.unit || f.fabric_unit || 'MTR',
+          }))
+          setFabricIssueForm(ff => ({
+            ...ff,
+            fabric_code: fabric.material_code || ff.fabric_code,
+            fabric_name: fabric.material_name || ff.fabric_name,
+            issued_qty: Number(fabric.adj_qty) || ff.issued_qty,
+            unit: fabric.unit || ff.unit || 'MTR',
+          }))
+        }
+      } catch { /* BOM optional */ }
+    }
   }
 
   const allProcesses = processes.length > 0 ? processes : ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Finishing', 'Packing']
@@ -1146,29 +1207,69 @@ export default function Production() {
               <option value="">All Statuses</option>
               {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
             </select>
-            <button onClick={() => { setNewForm(f => ({ ...f, process: activeProcess })); setModal('new-jo') }}
-              className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">
-              + New {activeProcess} JO
-            </button>
+            <div className="flex items-center gap-2">
+              <input
+                ref={joImportRef}
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0]
+                  e.target.value = ''
+                  if (!file) return
+                  const fd = new FormData()
+                  fd.append('file', file)
+                  fd.append('process', activeProcess)
+                  try {
+                    const res = await api.post('/production/orders/import', fd, {
+                      headers: { 'Content-Type': 'multipart/form-data' },
+                    })
+                    qc.invalidateQueries({ queryKey: ['jos-process'] })
+                    qc.invalidateQueries({ queryKey: ['ready-to-process'] })
+                    alert(res.data?.message || `Imported ${res.data?.created ?? 0} job order(s).`)
+                  } catch (err) {
+                    alert(apiErrorMessage(err, 'Import failed'))
+                  }
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => joImportRef.current?.click()}
+                className="px-4 py-2 border border-[#002B5B] text-[#002B5B] rounded-lg text-sm font-medium hover:bg-blue-50"
+              >
+                📥 Import
+              </button>
+              <button onClick={() => { setNewForm(f => ({ ...f, process: activeProcess })); setNewLines([]); setSOLineSearch(''); setModal('new-jo') }}
+                className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">
+                + New {activeProcess} JO
+              </button>
+            </div>
           </div>
 
-          {/* Ready to process */}
-          {readyLines.length > 0 && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
-              <p className="text-sm font-semibold text-amber-800 mb-2">
-                ⚡ Ready for {activeProcess} — {readyLines.length} line(s)
+          {/* Ready to process — always visible for stage context */}
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+            <p className="text-sm font-semibold text-amber-800 mb-2">
+              ⚡ {activeProcess === 'Cutting' ? 'Ready to Cut' : activeProcess === 'Stitching' ? 'Ready to Stitch' : activeProcess === 'Embroidery' ? 'Ready for Embroidery' : `Ready for ${activeProcess}`}
+              {readyLines.length > 0 ? ` — ${readyLines.length} line(s)` : ''}
+            </p>
+            {readyLines.length === 0 ? (
+              <p className="text-xs text-amber-700">
+                {activeProcess === 'Cutting'
+                  ? 'No printed-fabric reservations yet. Reserve fabric under Grey Fabric → Ready to Cut.'
+                  : `No pieces waiting from the previous process for ${activeProcess}.`}
               </p>
-              <div className="space-y-2">
+            ) : (
+              <div className="space-y-2 max-h-56 overflow-y-auto">
                 {(readyLines as any[]).map((r: any, i: number) => (
-                  <div key={i} className="bg-white rounded-lg border border-amber-200 px-3 py-2 flex items-center justify-between">
-                    <div className="text-xs">
+                  <div key={i} className="bg-white rounded-lg border border-amber-200 px-3 py-2 flex items-center justify-between gap-2">
+                    <div className="text-xs min-w-0">
                       <span className="font-semibold text-[#002B5B]">SO: {r.so_number}</span>
                       <span className="mx-2 text-gray-400">·</span>
-                      <span className="font-mono">{r.sku}</span>
+                      <span className="font-mono break-all">{r.sku}</span>
                       {r.fabric_code && <span className="mx-2 text-gray-400">· Fabric: <b>{r.fabric_code}</b></span>}
                       <span className="mx-2 text-gray-400">·</span>
                       <span className="text-green-700 font-semibold">
-                        {r.available_qty || r.reserved_qty} pcs available
+                        {r.available_qty || r.reserved_qty} {activeProcess === 'Cutting' ? 'm/pcs' : 'pcs'} available
                       </span>
                       {r.already_planned > 0 && (
                         <span className="ml-2 text-gray-400 italic">(Total: {r.reserved_qty}, JO mein: {r.already_planned})</span>
@@ -1180,6 +1281,8 @@ export default function Production() {
                         fabric_qty: r.reserved_qty || 0, process: activeProcess,
                         planned_qty: r.available_qty || r.reserved_qty || 0,
                       }))
+                      setNewLines([])
+                      setSOLineSearch('')
                       setModal('new-jo')
                     }} className="text-xs px-2 py-1 bg-[#002B5B] text-white rounded hover:bg-blue-800 shrink-0">
                       Create JO →
@@ -1187,8 +1290,8 @@ export default function Production() {
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* JO list */}
           <div className="space-y-3">
@@ -1379,7 +1482,11 @@ export default function Production() {
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               {/* SO */}
               <div><label className="text-xs text-gray-500">SO Number *</label>
-                <select value={newForm.so_number} onChange={e => setNewForm(f => ({ ...f, so_number: e.target.value, sku: '', sku_name: '' }))}
+                <select value={newForm.so_number} onChange={e => {
+                  setNewForm(f => ({ ...f, so_number: e.target.value, sku: '', sku_name: '' }))
+                  setNewLines([])
+                  setSOLineSearch('')
+                }}
                   className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
                   <option value="">Select SO</option>
                   {(soList as any[]).map((s: any) => <option key={s.so_number} value={s.so_number}>{s.so_number} — {s.buyer || ''}</option>)}
@@ -1428,14 +1535,35 @@ export default function Production() {
                   </datalist>
                 </div>
               )}
-              {[['expected_completion','Expected Date'],['remarks','Remarks']].map(([k,l]) => (
-                <div key={k}><label className="text-xs text-gray-500">{l}</label>
-                  <input value={(newForm as any)[k]} onChange={e => setNewForm(f => ({ ...f, [k]: e.target.value }))}
-                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" /></div>
-              ))}
+              <div>
+                <label className="text-xs text-gray-500">Delivery Date</label>
+                <input
+                  type="date"
+                  value={newForm.expected_completion}
+                  onChange={e => setNewForm(f => ({ ...f, expected_completion: e.target.value }))}
+                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">Rate (₹)</label>
+                <input
+                  type="number"
+                  value={newForm.vendor_rate || ''}
+                  onChange={e => setNewForm(f => ({ ...f, vendor_rate: +e.target.value }))}
+                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500">Remarks</label>
+                <input
+                  value={newForm.remarks}
+                  onChange={e => setNewForm(f => ({ ...f, remarks: e.target.value }))}
+                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+                />
+              </div>
               {newForm.process === 'Cutting' && (
                 <>
-                  <div><label className="text-xs text-gray-500">Fabric Code</label>
+                  <div><label className="text-xs text-gray-500">Fabric Code (from BOM)</label>
                     <input value={newForm.fabric_code} onChange={e => setNewForm(f => ({ ...f, fabric_code: e.target.value }))}
                       className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 font-mono" /></div>
                   <div><label className="text-xs text-gray-500">Fabric Qty (MTR)</label>
@@ -1455,34 +1583,48 @@ export default function Production() {
             {/* SO Lines — add to JO */}
             {newForm.so_number && soLines.length > 0 && (
               <div className="border rounded-xl overflow-hidden">
-                <div className="px-3 py-2 bg-blue-50 text-xs font-semibold text-blue-700 flex justify-between">
-                  <span>SO Lines — Click to add to JO</span>
-                  <button onClick={() => (soLines as any[]).forEach(addSOLineToJO)} className="text-blue-600 hover:underline">Add all</button>
+                <div className="px-3 py-2 bg-blue-50 text-xs font-semibold text-blue-700 flex flex-wrap justify-between gap-2 items-center">
+                  <span>SO Lines — all styles (live list). Search & scroll to find SKUs.</span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="search"
+                      value={soLineSearch}
+                      onChange={e => setSOLineSearch(e.target.value)}
+                      placeholder="Search SKU…"
+                      className="border rounded px-2 py-1 text-xs font-normal w-40"
+                    />
+                    <button onClick={() => soLinesFiltered.forEach(addSOLineToJO)} className="text-blue-600 hover:underline">Add all shown</button>
+                  </div>
                 </div>
-                <table className="w-full text-xs">
-                  <thead><tr className="text-gray-400 border-b bg-gray-50">
-                    <th className="text-left px-3 py-1.5">SKU</th><th className="text-left px-3 py-1.5">Name</th>
-                    <th className="text-right px-3 py-1.5">SO Qty</th><th className="px-3 py-1.5"></th>
-                  </tr></thead>
-                  <tbody>
-                    {(soLines as any[]).map((l: any) => {
-                      const added = newLines.some(nl => nl.sku === l.sku)
-                      return (
-                        <tr key={l.sku} className="border-t hover:bg-gray-50">
-                          <td className="px-3 py-1.5 font-mono font-semibold">{l.sku}</td>
-                          <td className="px-3 py-1.5 text-gray-600">{l.sku_name || l.item_name || '—'}</td>
-                          <td className="px-3 py-1.5 text-right">{l.qty}</td>
-                          <td className="px-3 py-1.5">
-                            <button onClick={() => added ? setNewLines(ls => ls.filter(nl => nl.sku !== l.sku)) : addSOLineToJO(l)}
-                              className={`px-2 py-0.5 rounded text-xs font-medium ${added ? 'bg-green-100 text-green-700' : 'bg-[#002B5B] text-white hover:bg-blue-800'}`}>
-                              {added ? '✓ Added' : '+ Add'}
-                            </button>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                <div className="max-h-56 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-gray-50 z-10"><tr className="text-gray-400 border-b">
+                      <th className="text-left px-3 py-1.5">SKU</th><th className="text-left px-3 py-1.5">Name</th>
+                      <th className="text-right px-3 py-1.5">SO Qty</th><th className="px-3 py-1.5"></th>
+                    </tr></thead>
+                    <tbody>
+                      {soLinesFiltered.map((l: any) => {
+                        const added = newLines.some(nl => nl.sku === l.sku)
+                        return (
+                          <tr key={l.sku} className="border-t hover:bg-gray-50">
+                            <td className="px-3 py-1.5 font-mono font-semibold break-all">{l.sku}</td>
+                            <td className="px-3 py-1.5 text-gray-600 break-words">{l.sku_name || l.item_name || '—'}</td>
+                            <td className="px-3 py-1.5 text-right">{l.qty}</td>
+                            <td className="px-3 py-1.5">
+                              <button onClick={() => added ? setNewLines(ls => ls.filter(nl => nl.sku !== l.sku)) : addSOLineToJO(l)}
+                                className={`px-2 py-0.5 rounded text-xs font-medium ${added ? 'bg-green-100 text-green-700' : 'bg-[#002B5B] text-white hover:bg-blue-800'}`}>
+                                {added ? '✓ Added' : '+ Add'}
+                              </button>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {soLinesFiltered.length === 0 && (
+                  <p className="text-xs text-amber-600 px-3 py-2">No SKUs match “{soLineSearch}”.</p>
+                )}
               </div>
             )}
 
@@ -1490,35 +1632,40 @@ export default function Production() {
             {newLines.length > 0 && (
               <div className="border rounded-xl overflow-hidden">
                 <div className="px-3 py-2 bg-gray-50 text-xs font-semibold text-gray-600">JO Lines ({newLines.length})</div>
+                <div className="max-h-52 overflow-y-auto">
                 <table className="w-full text-xs">
-                  <thead><tr className="text-gray-400 border-b">
+                  <thead className="sticky top-0 bg-white"><tr className="text-gray-400 border-b">
                     <th className="text-left px-3 py-1.5">SKU</th><th className="text-left px-3 py-1.5">Style</th>
                     <th className="text-right px-3 py-1.5">Planned Qty</th>
                     <th className="text-right px-3 py-1.5">Rate (₹)</th>
+                    <th className="text-left px-3 py-1.5">Remarks</th>
                     <th className="text-right px-3 py-1.5">Amount</th>
                     <th className="px-3 py-1.5"></th>
                   </tr></thead>
                   <tbody>
                     {newLines.map((ln, i) => (
                       <tr key={i} className="border-t">
-                        <td className="px-3 py-1 font-mono font-semibold text-[#002B5B]">{ln.sku}</td>
+                        <td className="px-3 py-1 font-mono font-semibold text-[#002B5B] break-all">{ln.sku}</td>
                         <td className="px-3 py-1"><input value={ln.style} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, style: e.target.value} : x))}
                           placeholder="Style/desc" className="border rounded px-1.5 py-0.5 text-xs w-full" /></td>
                         <td className="px-3 py-1"><input type="number" value={ln.planned_qty} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, planned_qty: +e.target.value} : x))}
                           className="border rounded px-1.5 py-0.5 text-xs w-20 text-right" /></td>
                         <td className="px-3 py-1"><input type="number" value={ln.vendor_rate} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, vendor_rate: +e.target.value} : x))}
                           className="border rounded px-1.5 py-0.5 text-xs w-20 text-right" /></td>
+                        <td className="px-3 py-1"><input value={ln.remarks} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, remarks: e.target.value} : x))}
+                          placeholder="Remarks" className="border rounded px-1.5 py-0.5 text-xs w-full" /></td>
                         <td className="px-3 py-1 text-right font-semibold">{fmtR(ln.planned_qty * ln.vendor_rate)}</td>
                         <td className="px-3 py-1"><button onClick={() => setNewLines(ls => ls.filter((_,j) => j!==i))} className="text-red-400 hover:text-red-600">✕</button></td>
                       </tr>
                     ))}
                     <tr className="border-t bg-gray-50 font-semibold">
-                      <td colSpan={4} className="px-3 py-1.5 text-right text-xs text-gray-600">Total:</td>
+                      <td colSpan={5} className="px-3 py-1.5 text-right text-xs text-gray-600">Total:</td>
                       <td className="px-3 py-1.5 text-right text-xs">{fmtR(newLines.reduce((s,l) => s + l.planned_qty * l.vendor_rate, 0))}</td>
                       <td></td>
                     </tr>
                   </tbody>
                 </table>
+                </div>
               </div>
             )}
 

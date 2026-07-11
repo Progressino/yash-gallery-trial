@@ -39,8 +39,8 @@ def _sync_item_master_stock(
     qty_field: str,
     reason: str,
 ) -> None:
-    """Apply IN/OUT to Item Master stock for material lines."""
-    from ..db.item_db import adjust_item_stock, get_item_by_code
+    """Apply IN/OUT to Item Master stock for material lines (no ADJ ledger row)."""
+    from ..db.item_db import apply_document_stock_delta, get_item_by_code
 
     dir_u = str(direction or "").strip().upper()
     if dir_u not in ("IN", "OUT"):
@@ -55,15 +55,7 @@ def _sync_item_master_stock(
             _log.warning("Item Master stock skip — unknown code %s (%s)", code, grn_or_min_number)
             continue
         try:
-            adjust_item_stock(
-                int(item["id"]),
-                qty,
-                dir_u,
-                entry_date=entry_date or datetime.now().strftime("%Y-%m-%d"),
-                reason=reason,
-                reference_no=grn_or_min_number,
-                unit=str(ln.get("unit") or item.get("uom") or "PCS"),
-            )
+            apply_document_stock_delta(int(item["id"]), qty, dir_u)
         except Exception as exc:
             _log.warning("Item Master stock %s failed for %s: %s", dir_u, code, exc)
 
