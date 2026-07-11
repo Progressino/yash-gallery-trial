@@ -71,6 +71,7 @@ def _build_platform_sales_df(sess, *, frame_overrides: dict[str, pd.DataFrame] |
     from .meesho import meesho_to_sales_rows
     from .myntra import myntra_to_sales_rows
     from .po_engine import _mtr_to_sales_df_local
+    from .shared_frames import resolve_meesho_frame, warm_frame
     from .snapdeal import snapdeal_to_sales_rows
 
     overrides = frame_overrides or {}
@@ -78,6 +79,8 @@ def _build_platform_sales_df(sess, *, frame_overrides: dict[str, pd.DataFrame] |
     parts: list[pd.DataFrame] = []
 
     mtr = overrides.get("mtr_df", getattr(sess, "mtr_df", None))
+    if mtr is None or (hasattr(mtr, "empty") and mtr.empty):
+        mtr = warm_frame("mtr_df", sess)
     if mtr is not None and not mtr.empty:
         try:
             parts.append(_mtr_to_sales_df_local(mtr, sku_map))
@@ -86,11 +89,25 @@ def _build_platform_sales_df(sess, *, frame_overrides: dict[str, pd.DataFrame] |
 
     for key, attr, converter in [
         ("myntra_df", "myntra_df", lambda df: myntra_to_sales_rows(df)),
-        ("meesho_df", "meesho_df", lambda df: meesho_to_sales_rows(df, sku_map)),
+        (
+            "meesho_df",
+            "meesho_df",
+            lambda df: meesho_to_sales_rows(df, sku_map),
+        ),
         ("flipkart_df", "flipkart_df", lambda df: flipkart_to_sales_rows(df)),
         ("snapdeal_df", "snapdeal_df", lambda df: snapdeal_to_sales_rows(df)),
     ]:
-        raw = overrides.get(key, getattr(sess, attr, None))
+        if key == "meesho_df":
+            # Prefer OMS-filled disk Meesho when session/RAM is blank-heavy (Deepdive parity).
+            raw = overrides.get(key)
+            if raw is None:
+                raw = resolve_meesho_frame(getattr(sess, attr, None))
+            else:
+                raw = resolve_meesho_frame(raw)
+        else:
+            raw = overrides.get(key, getattr(sess, attr, None))
+            if raw is None or (hasattr(raw, "empty") and raw.empty):
+                raw = warm_frame(attr, sess)
         if raw is not None and not raw.empty:
             try:
                 parts.append(converter(raw))

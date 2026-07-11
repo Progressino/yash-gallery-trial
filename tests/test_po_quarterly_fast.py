@@ -669,3 +669,155 @@ def test_amazon_mtr_dedup_prevents_duplicate_quarterly_inflation():
     assert len(deduped) == 1
     _accumulate_shipment_frame(deduped, "amazon", None, **kwargs)
     assert kwargs["quarter_sums"][("SKU-DUP", "Jan-Mar 2025")] == 5
+
+
+def test_meesho_txndate_only_frame_accumulates():
+    """Warm Meesho frames that only have TxnDate must still count (Deepdive parity)."""
+    start_ts = pd.Timestamp("2024-06-01")
+    end_ts = pd.Timestamp("2026-06-04")
+    today = pd.Timestamp.today()
+    q_label_map = {(2025, 4): "Jan-Mar 2025"}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+
+    df = pd.DataFrame(
+        {
+            "TxnDate": pd.to_datetime(["2025-02-10"]),
+            "OMS_SKU": ["1379YKGREEN-3XL"],
+            "TxnType": ["Shipment"],
+            "Quantity": [24],
+        }
+    )
+    n = _accumulate_shipment_frame(
+        df,
+        "meesho",
+        None,
+        strip_pl=False,
+        canonical_oms=True,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+    )
+    assert n == 1
+    assert quarter_sums[("1379YKGREEN-3XL", "Jan-Mar 2025")] == 24
+
+
+def test_meesho_sales_not_suppressed_by_amazon_same_sku_day():
+    """Meesho sales_df rows must fill when only Amazon claimed that SKU-day."""
+    from backend.services.po_engine import get_indian_fy_quarter, quarter_col_name
+    from backend.services.po_quarterly_fast import _accumulate_sales_df_shipments
+
+    start_ts = pd.Timestamp("2024-06-01")
+    end_ts = pd.Timestamp("2026-06-04")
+    today = pd.Timestamp.today()
+    day = pd.Timestamp("2025-02-10").normalize()
+    fy, qn = get_indian_fy_quarter(day)
+    q_label_map = {(fy, qn): quarter_col_name(fy, qn)}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+    platform_day_keys = {("amazon", "1379YKGREEN-3XL", day)}
+
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1379YKGREEN-3XL"],
+            "TxnDate": [day],
+            "Transaction Type": ["Shipment"],
+            "Quantity": [24],
+            "Source": ["Meesho"],
+        }
+    )
+    n = _accumulate_sales_df_shipments(
+        sales,
+        None,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+        platform_day_keys=platform_day_keys,
+    )
+    assert n == 1
+    assert quarter_sums[("1379YKGREEN-3XL", quarter_col_name(fy, qn))] == 24
+
+
+def test_resolve_meesho_frame_prefers_filled_disk(tmp_path, monkeypatch):
+    from backend.services import shared_frames as sf
+
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+    blank = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-02-01"] * 4),
+            "SKU": ["", "", "", ""],
+            "OMS_SKU": ["", "", "", ""],
+            "Quantity": [1, 1, 1, 1],
+        }
+    )
+    filled = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-02-01"] * 4),
+            "SKU": ["1379YKGREEN-3XL"] * 4,
+            "OMS_SKU": ["1379YKGREEN-3XL"] * 4,
+            "Quantity": [1, 1, 1, 1],
+        }
+    )
+    filled.to_parquet(tmp_path / "meesho_df.parquet", index=False)
+    out = sf.resolve_meesho_frame(blank)
+    assert not out.empty
+    assert (out["OMS_SKU"].astype(str) == "1379YKGREEN-3XL").all()
+
+
+def test_meesho_blank_oms_backfilled_from_sku_column():
+    """Tier-3-style Meesho rows with blank OMS + filled SKU must count."""
+    start_ts = pd.Timestamp("2024-06-01")
+    end_ts = pd.Timestamp("2026-06-04")
+    today = pd.Timestamp.today()
+    q_label_map = {(2025, 4): "Jan-Mar 2025"}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+
+    df = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-02-10"]),
+            "OMS_SKU": [""],
+            "SKU": ["1379YKGREEN-3XL"],
+            "TxnType": ["Shipment"],
+            "Quantity": [31],
+        }
+    )
+    n = _accumulate_shipment_frame(
+        df,
+        "meesho",
+        None,
+        strip_pl=False,
+        canonical_oms=True,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+    )
+    assert n == 1
+    assert quarter_sums[("1379YKGREEN-3XL", "Jan-Mar 2025")] == 31

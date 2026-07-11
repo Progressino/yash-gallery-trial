@@ -1038,13 +1038,29 @@ def _run_daily_auto_ingest_pipeline(session_id: str, file_parts: list[tuple[str,
 def _auto_save_sku_mapping_cache(sess) -> None:
     """Persist SKU map to disk, GitHub, and PostgreSQL without requiring platform uploads."""
     mapping = getattr(sess, "sku_mapping", None) or {}
-    if not mapping:
+    if mapping:
+        persist_sku_mapping_globally(mapping)
+    combo = getattr(sess, "combo_sku_map", None) or {}
+    if combo:
+        try:
+            from ..services.combo_sku_map import persist_combo_sku_map_globally
+
+            persist_combo_sku_map_globally(combo)
+        except Exception:
+            _log.exception("Combo SKU map disk persist failed")
+    if not mapping and not combo:
         return
-    persist_sku_mapping_globally(mapping)
     try:
         from ..services.github_cache import save_cache_to_drive
 
-        ok, msg = save_cache_to_drive({"sku_mapping": mapping})
+        payload = {}
+        if mapping:
+            payload["sku_mapping"] = mapping
+        if combo:
+            from ..services.combo_sku_map import combo_bom_to_jsonable
+
+            payload["combo_sku_map"] = combo_bom_to_jsonable(combo)
+        ok, msg = save_cache_to_drive(payload)
         if ok:
             _log.info("SKU mapping GitHub save: %s", msg)
         else:
@@ -1763,11 +1779,30 @@ async def upload_sku_mapping(
         file_bytes = await file.read()
 
         def work():
+            from ..services.combo_sku_map import (
+                combo_keys_as_identity_sku_mapping,
+                merge_combo_sku_map,
+                parse_combo_sku_map,
+                resolve_active_combo_sku_map,
+            )
+
+            parsed_combo = parse_combo_sku_map(file_bytes)
             parsed = parse_sku_mapping(file_bytes)
             base = resolve_sku_mapping_base(sess)
-            mapping = merge_sku_mapping_upload(base, parsed)
-            updated = sum(1 for k, v in parsed.items() if base.get(k) != v)
+            # Recognition stubs so combo listing keys appear in the master map;
+            # demand explode still uses combo_sku_map component lists.
+            if parsed_combo:
+                parsed = {**combo_keys_as_identity_sku_mapping(parsed_combo), **(parsed or {})}
+            mapping = merge_sku_mapping_upload(base, parsed) if parsed else dict(base)
+            if parsed:
+                updated = sum(1 for k, v in parsed.items() if base.get(k) != v)
+            else:
+                updated = 0
             sess.sku_mapping = mapping
+
+            if parsed_combo:
+                prior = resolve_active_combo_sku_map(sess=sess)
+                sess.combo_sku_map = merge_combo_sku_map(prior, parsed_combo)
 
             had_platform = (
                 not sess.mtr_df.empty
@@ -1776,7 +1811,7 @@ async def upload_sku_mapping(
                 or not sess.flipkart_df.empty
                 or not sess.snapdeal_df.empty
             )
-            if had_platform:
+            if had_platform and (parsed or parsed_combo):
                 sess.sales_df = build_sales_df(
                     mtr_df=sess.mtr_df,
                     myntra_df=sess.myntra_df,
@@ -1788,15 +1823,22 @@ async def upload_sku_mapping(
                 )
 
             gaps = list_sku_mapping_gaps(sess.sales_df, mapping)
-            msg = f"SKU mapping loaded: {len(parsed):,} rows from file"
-            if base:
+            if parsed_combo and not parsed:
+                msg = f"Combo SKU map loaded: {len(parsed_combo):,} combo listings"
+            else:
+                msg = f"SKU mapping loaded: {len(parsed):,} rows from file"
+            if parsed_combo and parsed:
+                msg += f" + {len(parsed_combo):,} combo listings"
+            if base and parsed:
                 msg += f" merged into master ({len(mapping):,} total"
                 if updated:
                     msg += f", {updated:,} updated"
                 msg += ")"
-            else:
+            elif parsed and not base:
                 msg += f" ({len(mapping):,} total entries)"
-            if had_platform:
+            if getattr(sess, "combo_sku_map", None):
+                msg += f"; combo BOM {len(sess.combo_sku_map):,} keys"
+            if had_platform and (parsed or parsed_combo):
                 msg += f"; sales rebuilt ({len(sess.sales_df):,} rows)"
             if gaps:
                 msg += (
@@ -1818,7 +1860,7 @@ async def upload_sku_mapping(
                 message=msg,
                 sku_count=len(mapping),
                 unmapped_skus=gaps or None,
-            ), had_platform
+            ), had_platform and bool(parsed or parsed_combo)
 
         resp, had_platform = await _session_lock_apply(sess, work)
         background_tasks.add_task(_auto_save_sku_mapping_cache, sess)

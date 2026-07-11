@@ -164,21 +164,19 @@ def _platform_shipment_history_part(
     tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
     tmp["Qty"] = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
     tmp["TxnType"] = work_df[txn_col].values if txn_col else "Shipment"
-    if strip_pl:
-        if sku_mapping:
-            tmp["SKU"] = tmp["SKU"].apply(lambda x: _strip_pl(x, sku_mapping))
-        else:
-            tmp["SKU"] = tmp["SKU"].apply(
-                lambda x: _PL_RE.sub(r"\1\2", str(x).strip().upper())
-            )
-        if sku_mapping:
-            _u = tmp["SKU"].unique()
-            _c = {s: canonical_oms_key(s, sku_mapping) for s in _u}
-            tmp["SKU"] = tmp["SKU"].map(_c)
-    elif canonical_oms and sku_mapping:
-        _u = tmp["SKU"].unique()
-        _c = {s: canonical_oms_key(s, sku_mapping) for s in _u}
-        tmp["SKU"] = tmp["SKU"].map(_c)
+    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+
+    # Combo explode + 1:1 canonical / PL strip in one pass (combo listing keys
+    # must be resolved before last-wins 1:1 mapping drops sibling components).
+    _ = canonical_oms  # kept for call-site compatibility; explode uses strip_pl flag
+    tmp = explode_sku_qty_dataframe(
+        tmp,
+        sku_col="SKU",
+        qty_col="Qty",
+        sku_mapping=sku_mapping,
+        combo_map=resolve_active_combo_sku_map(),
+        strip_pl=bool(strip_pl),
+    )
     return tmp.dropna(subset=["Date"])
 
 
@@ -235,8 +233,11 @@ def _merge_sales_and_platform_history_parts(
 ) -> list[pd.DataFrame]:
     """
     Platform bulk/Tier-3 frames are the source of truth for deep history.
-    Unified ``sales_df`` often spans the same calendar range but omits SKU-days;
-    only append sales rows whose (SKU, day) keys are not already on the platform side.
+    Unified ``sales_df`` often spans the same calendar range; append sales rows
+    whose (platform/source, SKU, day) keys are not already on that platform side.
+
+    Source-aware gap-fill is required so Meesho units in sales_df are not dropped
+    merely because Amazon already recorded the same SKU-day (Deepdive vs PO bug).
     """
     if not plat_parts:
         return [sales_part] if sales_part is not None and not sales_part.empty else []
@@ -245,26 +246,56 @@ def _merge_sales_and_platform_history_parts(
         return [plat_hist]
     plat_hist = plat_hist.copy()
     plat_hist["_day"] = pd.to_datetime(plat_hist["Date"], errors="coerce").dt.normalize()
+    plat_hist["_skukey"] = plat_hist["SKU"].astype(str).str.strip()
+    if "_Platform" in plat_hist.columns:
+        plat_hist["_plat"] = plat_hist["_Platform"].astype(str).str.strip().str.lower()
+    else:
+        plat_hist["_plat"] = ""
 
     sales_part = sales_part.copy()
     sales_part["_day"] = pd.to_datetime(sales_part["Date"], errors="coerce").dt.normalize()
     sales_part["_skukey"] = sales_part["SKU"].astype(str).str.strip()
+    if "_Source" in sales_part.columns:
+        def _src_plat(src) -> str:
+            s = str(src or "").strip().lower()
+            if not s or s in ("nan", "none", "nat"):
+                return ""
+            for needle in ("amazon", "myntra", "meesho", "flipkart", "snapdeal"):
+                if needle in s:
+                    return needle
+            return s
 
+        sales_part["_plat"] = sales_part["_Source"].map(_src_plat)
+    else:
+        sales_part["_plat"] = ""
+
+    # Source-aware: same platform already has the SKU-day → skip sales row.
     plat_keys = (
-        plat_hist[["SKU", "_day"]]
-        .assign(_skukey=lambda d: d["SKU"].astype(str).str.strip())
-        [["_skukey", "_day"]]
+        plat_hist[["_plat", "_skukey", "_day"]]
         .drop_duplicates()
+        .assign(_in_plat=True)
     )
-    plat_keys["_in_plat"] = True
+    merged = sales_part.merge(
+        plat_keys, on=["_plat", "_skukey", "_day"], how="left"
+    )
+    source_aware_keep = merged["_in_plat"].isna().to_numpy()
 
-    # Vectorized hash-join membership check (replaces a per-row .apply, which was
-    # the dominant cost for large multi-year sales frames).
-    merged = sales_part.merge(plat_keys, on=["_skukey", "_day"], how="left")
-    extra_sales = sales_part[merged["_in_plat"].isna().to_numpy()]
+    # Unknown source: also skip when ANY platform already has (SKU, day).
+    unknown = sales_part["_plat"].eq("") | sales_part["_plat"].isna()
+    if unknown.any():
+        any_keys = (
+            plat_hist[["_skukey", "_day"]]
+            .drop_duplicates()
+            .assign(_in_any=True)
+        )
+        any_merged = sales_part.merge(any_keys, on=["_skukey", "_day"], how="left")
+        any_hit = any_merged["_in_any"].notna().to_numpy()
+        source_aware_keep = np.where(unknown.to_numpy(), ~any_hit, source_aware_keep)
 
-    drop_cols = ["_day", "_skukey"]
-    plat_out = plat_hist.drop(columns=["_day"], errors="ignore")
+    extra_sales = sales_part[source_aware_keep]
+
+    drop_cols = ["_day", "_skukey", "_plat"]
+    plat_out = plat_hist.drop(columns=["_day", "_skukey", "_plat"], errors="ignore")
     if extra_sales.empty:
         return [plat_out]
     return [plat_out, extra_sales.drop(columns=drop_cols, errors="ignore")]
@@ -311,6 +342,7 @@ def calculate_quarterly_history(
     group_by_parent: bool = False,
     n_quarters: int = 8,
     retain_bundled_listing_skus: Optional[set[str]] = None,
+    combo_sku_map: Optional[dict] = None,
 ) -> pd.DataFrame:
     sales_part = _sales_shipment_history_part(sales_df)
     plat_parts = _collect_platform_shipment_history_parts(
@@ -356,11 +388,18 @@ def calculate_quarterly_history(
     if hist.empty:
         return pd.DataFrame()
 
-    # Same canonical OMS keys as calculate_po_base (mapping + PL strip + clean_sku).
-    _uniq_hist = hist["SKU"].unique()
-    _canon_cache = {s: canonical_oms_key(s, sku_mapping) for s in _uniq_hist}
-    hist["SKU"] = hist["SKU"].map(_canon_cache).fillna("")
-    hist = hist[hist["SKU"].str.len() > 0]
+    # Combo / DPT listings → component OMS SKUs (exact PO nets), then canonical keys.
+    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+
+    _combo = resolve_active_combo_sku_map(combo_sku_map)
+    hist = explode_sku_qty_dataframe(
+        hist,
+        sku_col="SKU",
+        qty_col="Qty",
+        sku_mapping=sku_mapping,
+        combo_map=_combo,
+        strip_pl=False,
+    )
     if hist.empty:
         return pd.DataFrame()
 
@@ -1231,6 +1270,7 @@ def calculate_po_base(
     # derived from ADS), not as a post-hoc patch — otherwise those fields go stale
     # relative to the displayed ADS. See quarterly_ly_floor_dict().
     quarterly_ly_floor: Optional[Dict[str, float]] = None,
+    combo_sku_map: Optional[dict] = None,
 ) -> pd.DataFrame:
     import time as _time
 
@@ -1378,10 +1418,20 @@ def calculate_po_base(
 
     # ── Unique-SKU cache: normalize once per unique raw value, not per row ──────
     # With 225k rows but only ~7-8k unique SKUs, this is ~28x faster than row-by-row.
-    _unique_sales_skus = df["Sku"].unique()
-    _sku_canon_cache = {s: _canonical_oms_key(s) for s in _unique_sales_skus}
-    df["Sku"] = df["Sku"].map(_sku_canon_cache).fillna("")
-    df = df[df["Sku"].str.len() > 0]
+    # Combo / DPT listings fan out to component OMS SKUs (qty × multiplier) so
+    # ADS/Sold land on inventory keys (e.g. 1003YKMUSTARD-3XL + DPT21MULTI).
+    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+
+    _combo = resolve_active_combo_sku_map(combo_sku_map)
+    df = explode_sku_qty_dataframe(
+        df,
+        sku_col="Sku",
+        qty_col="Quantity",
+        sku_mapping=_map,
+        combo_map=_combo,
+        strip_pl=False,
+    )
+    df = df[df["Sku"].astype(str).str.len() > 0]
     df["_is_ship"] = df["Transaction Type"].astype(str).str.strip().str.lower().eq("shipment")
 
     # Parent-level PO: ``inventory_df_parent`` uses style parents (e.g. ``1057YKBLUE``) while

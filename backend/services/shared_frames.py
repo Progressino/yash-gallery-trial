@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -202,6 +203,65 @@ def _meesho_window_mostly_blank(df: pd.DataFrame) -> bool:
     blank = sku.isin(bad) & oms.isin(bad)
     n = int(len(df))
     return n > 0 and int(blank.sum()) / n >= 0.25
+
+
+def resolve_meesho_frame(
+    preferred: "pd.DataFrame | None" = None,
+) -> pd.DataFrame:
+    """
+    Best Meesho frame for PO / quarterly / Deepdive parity.
+
+    Prefer ``preferred`` (session/warm) unless it is empty or mostly blank OMS —
+    then fall back to filled ``meesho_df.parquet`` on disk (post OMS-fill cache).
+    """
+    mem = preferred
+    if mem is None:
+        mem = warm_frame("meesho_df")
+    disk_dir = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
+    path = disk_dir / "meesho_df.parquet"
+
+    def _read_disk() -> pd.DataFrame:
+        if not path.is_file():
+            return pd.DataFrame()
+        try:
+            return pd.read_parquet(path)
+        except Exception:
+            return pd.DataFrame()
+
+    if mem is None or getattr(mem, "empty", True):
+        disk = _read_disk()
+        return disk if disk is not None else pd.DataFrame()
+
+    if not _meesho_window_mostly_blank(mem):
+        return mem
+
+    disk = _read_disk()
+    if disk is None or getattr(disk, "empty", True):
+        return mem
+    # Disk wins when it is materially less blank (or mem was ≥25% blank).
+    if not _meesho_window_mostly_blank(disk):
+        return disk
+    try:
+        bad = {"", "NAN", "NONE", "NAT", "MEESHO_TOTAL"}
+
+        def _blank_n(df: pd.DataFrame) -> int:
+            sku = (
+                df["SKU"].astype(str).str.strip().str.upper()
+                if "SKU" in df.columns
+                else pd.Series("", index=df.index, dtype=str)
+            )
+            oms = (
+                df["OMS_SKU"].astype(str).str.strip().str.upper()
+                if "OMS_SKU" in df.columns
+                else pd.Series("", index=df.index, dtype=str)
+            )
+            return int((sku.isin(bad) & oms.isin(bad)).sum())
+
+        if _blank_n(disk) + 500 < _blank_n(mem):
+            return disk
+    except Exception:
+        pass
+    return mem
 
 
 def frame_row_count(key: str, sess) -> int:

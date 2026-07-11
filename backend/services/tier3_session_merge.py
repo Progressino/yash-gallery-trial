@@ -420,11 +420,15 @@ def build_parity_report(sess, *, planning_date: str | None = None) -> dict[str, 
 
 def _session_platform_frames(sess) -> dict[str, pd.DataFrame]:
     """Tier-1 bulk platform history from session or process warm cache."""
-    from .shared_frames import warm_frame
+    from .shared_frames import resolve_meesho_frame, warm_frame
 
     out: dict[str, pd.DataFrame] = {}
     for _plat, attr in _PLATFORM_ATTRS:
-        df = warm_frame(attr, sess)
+        if attr == "meesho_df":
+            # Prefer OMS-filled disk when session/RAM Meesho is blank-heavy.
+            df = resolve_meesho_frame(warm_frame(attr, sess))
+        else:
+            df = warm_frame(attr, sess)
         if df is not None and not getattr(df, "empty", True):
             out[attr] = df
     return out

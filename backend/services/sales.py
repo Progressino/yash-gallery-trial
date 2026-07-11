@@ -896,6 +896,26 @@ def build_sales_df(
 
     combined_sales = pd.concat([d for d in sales_parts if not d.empty], ignore_index=True)
 
+    # Fan combo / DPT listings → component OMS SKUs BEFORE 1:1 master mapping
+    # (otherwise a last-wins 1:1 key would drop sibling components like DPT21MULTI).
+    try:
+        from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+
+        _combo = resolve_active_combo_sku_map()
+        if _combo and not combined_sales.empty and "Sku" in combined_sales.columns:
+            _qty = "Quantity" if "Quantity" in combined_sales.columns else None
+            if _qty:
+                combined_sales = explode_sku_qty_dataframe(
+                    combined_sales,
+                    sku_col="Sku",
+                    qty_col=_qty,
+                    sku_mapping=None,  # keep raw listing keys for BOM lookup
+                    combo_map=_combo,
+                    strip_pl=False,
+                )
+    except Exception:
+        pass
+
     # Single canonical resolution for all channels (same rules as SKU master).
     combined_sales = _apply_unified_oms_skus(combined_sales, sku_mapping or {})
     combined_sales = _dedup_sales_linekey_rows(combined_sales)

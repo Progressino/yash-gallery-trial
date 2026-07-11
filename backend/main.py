@@ -99,6 +99,7 @@ _WARM_CACHE_KEYS = (
     "flipkart_df",
     "snapdeal_df",
     "sku_mapping",
+    "combo_sku_map",
     "inventory_df_variant",
     "inventory_df_parent",
     "existing_po_df",
@@ -329,6 +330,11 @@ def try_attach_shared_frames_fast(sess) -> bool:
         sm = (_warm_cache or {}).get("sku_mapping")
         if isinstance(sm, dict) and sm and not getattr(sess, "sku_mapping", None):
             sess.sku_mapping = sm
+        cm = (_warm_cache or {}).get("combo_sku_map")
+        if isinstance(cm, dict) and cm and not getattr(sess, "combo_sku_map", None):
+            from .services.combo_sku_map import combo_bom_from_jsonable
+
+            sess.combo_sku_map = combo_bom_from_jsonable(cm)
         return bool((_warm_cache or {}).get("sales_df") is not None)
     except Exception:
         return False
@@ -1051,6 +1057,8 @@ def _repair_disk_manifest_from_loose_parquets() -> None:
                 keys.add(name[: -len(".parquet")])
             elif name == "sku_mapping.json":
                 keys.add("sku_mapping")
+            elif name == "combo_sku_map.json":
+                keys.add("combo_sku_map")
         if not keys:
             return
         manifest["keys"] = sorted(keys)
@@ -1373,6 +1381,16 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
                 path = os.path.join(_DISK_CACHE_DIR, "sku_mapping.json")
                 with open(path, "w") as f:
                     json.dump(val if isinstance(val, dict) else {}, f)
+                saved.append(key)
+            elif key == "combo_sku_map":
+                from .services.combo_sku_map import combo_bom_to_jsonable
+
+                path = os.path.join(_DISK_CACHE_DIR, "combo_sku_map.json")
+                with open(path, "w") as f:
+                    json.dump(
+                        combo_bom_to_jsonable(val) if isinstance(val, dict) else {},
+                        f,
+                    )
                 saved.append(key)
             elif key == _INVENTORY_META_WARM_KEY and isinstance(val, dict):
                 path = os.path.join(_DISK_CACHE_DIR, "inventory_session_meta.json")
@@ -1758,6 +1776,13 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
                 if os.path.exists(path):
                     with open(path) as f:
                         loaded["sku_mapping"] = json.load(f)
+            elif key == "combo_sku_map":
+                path = os.path.join(_DISK_CACHE_DIR, "combo_sku_map.json")
+                if os.path.exists(path):
+                    from .services.combo_sku_map import combo_bom_from_jsonable
+
+                    with open(path) as f:
+                        loaded["combo_sku_map"] = combo_bom_from_jsonable(json.load(f))
             elif key == _INVENTORY_META_WARM_KEY:
                 path = os.path.join(_DISK_CACHE_DIR, "inventory_session_meta.json")
                 if os.path.exists(path):
@@ -1882,6 +1907,15 @@ def _warm_cache_loose_parquets_from_dir(disk_dir: "Path") -> dict:
                 out["sku_mapping"] = json.load(f)
         except Exception as ex:
             log.warning("warm-cache sku_mapping read %s: %s", sm, ex)
+    cm = disk_dir / "combo_sku_map.json"
+    if cm.is_file():
+        try:
+            from .services.combo_sku_map import combo_bom_from_jsonable
+
+            with open(cm) as f:
+                out["combo_sku_map"] = combo_bom_from_jsonable(json.load(f))
+        except Exception as ex:
+            log.warning("warm-cache combo_sku_map read %s: %s", cm, ex)
     return out
 
 
@@ -2792,6 +2826,13 @@ def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
             from .services.sku_mapping import restore_sku_mapping_to_session
 
             restore_sku_mapping_to_session(sess)
+        except Exception:
+            pass
+    if not getattr(sess, "combo_sku_map", None):
+        try:
+            from .services.combo_sku_map import restore_combo_sku_map_to_session
+
+            restore_combo_sku_map_to_session(sess)
         except Exception:
             pass
 

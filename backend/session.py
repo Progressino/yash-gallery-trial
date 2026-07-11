@@ -25,6 +25,8 @@ class AppSession:
 
     # ── Data mirrors ─────────────────────────────────────────
     sku_mapping: dict = field(default_factory=dict)
+    # Combo / DPT listing → [(component OMS SKU, qty), ...] for PO demand explode
+    combo_sku_map: dict = field(default_factory=dict)
     sales_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     mtr_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     myntra_df: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -165,6 +167,7 @@ class AppSession:
 def wipe_app_session(sess: AppSession) -> None:
     """Clear every loaded dataset in this browser session (fresh upload from scratch)."""
     sess.sku_mapping = {}
+    sess.combo_sku_map = {}
     sess.sales_df = pd.DataFrame()
     sess.mtr_df = pd.DataFrame()
     sess.myntra_df = pd.DataFrame()

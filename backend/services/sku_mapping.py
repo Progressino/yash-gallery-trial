@@ -383,6 +383,23 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
         if df.empty or len(df.columns) < 2:
             continue
 
+        # Combo / DPT BOM sheets (one listing → many OMS components) must not be
+        # collapsed into last-wins 1:1 mapping — handled by combo_sku_map.
+        try:
+            from .combo_sku_map import sheet_looks_like_combo_bom
+
+            _norms = [str(c).strip().lower() for c in df.columns]
+            _combo_named = any(
+                n in ("dpt sku", "combo sku", "dpt_sku", "combo_sku")
+                or n.startswith("dpt ")
+                or (n.startswith("combo") and "sku" in n and "stock" not in n)
+                for n in _norms
+            )
+            if _combo_named or sheet_looks_like_combo_bom(df):
+                continue
+        except Exception:
+            pass
+
         # Excel merged cells often leave OMS blank on continuation rows — forward-fill OMS columns only.
         _oms_like = [c for c in df.columns if _is_oms_column(str(c))]
         if _oms_like:

@@ -49,6 +49,25 @@ _WARM_FRAME_ATTRS = (
     ("snapdeal", "snapdeal_df", False, True),
 )
 
+# Unified sales_df Source labels → platform keys used in platform_day_keys.
+_SALES_SOURCE_PLATFORM = (
+    ("amazon", "amazon"),
+    ("myntra", "myntra"),
+    ("meesho", "meesho"),
+    ("flipkart", "flipkart"),
+    ("snapdeal", "snapdeal"),
+)
+
+
+def _sales_source_to_platform(src) -> str:
+    s = str(src or "").strip().lower()
+    if not s or s in ("nan", "none", "nat"):
+        return ""
+    for needle, plat in _SALES_SOURCE_PLATFORM:
+        if needle in s:
+            return plat
+    return s
+
 _SALES_READ_COLS = ["Sku", "TxnDate", "Quantity", "Transaction Type", "Source"]
 
 # Transaction types that contribute positively (net sold) vs negatively (returns/cancels).
@@ -124,7 +143,6 @@ def _accumulate_shipment_frame(
 ) -> int:
     """Add one blob's shipment rows into aggregate dicts. Returns rows processed."""
     from .daily_store import _PLATFORM_METRICS_COLUMNS
-    from .po_engine import _PL_RE, _strip_pl
 
     if df is None or df.empty:
         return 0
@@ -173,11 +191,15 @@ def _accumulate_shipment_frame(
     )
     if platform == "amazon":
         date_col = next(
-            (c for c in ("Reporting_Date", "Date") if c in df.columns),
+            (c for c in ("Reporting_Date", "Date", "TxnDate") if c in df.columns),
             None,
         )
     else:
-        date_col = "Date" if "Date" in df.columns else None
+        # Meesho / Myntra / Flipkart warm frames may use TxnDate after metrics rebuild.
+        date_col = next(
+            (c for c in ("Date", "TxnDate") if c in df.columns),
+            None,
+        )
     qty_col = "Quantity" if "Quantity" in df.columns else None
     txn_col = next(
         (c for c in df.columns if c in ("Transaction_Type", "TxnType")),
@@ -233,21 +255,27 @@ def _accumulate_shipment_frame(
     if work.empty:
         return 0
 
-    raw_skus = work["SKU"].astype(str)
-    canon: dict[str, str] = {}
-    for s in raw_skus.unique():
-        if strip_pl:
-            if sku_mapping:
-                k = _strip_pl(s, sku_mapping)
-            else:
-                k = _PL_RE.sub(r"\1\2", str(s).strip().upper())
-        elif canonical_oms:
-            k = canonical_oms_key(s, sku_mapping)
-        else:
-            k = canonical_oms_key(s, sku_mapping) if sku_mapping else str(s).strip().upper()
-        if k:
-            canon[s] = get_parent_sku(k) if group_by_parent else k
-    tentative = raw_skus.map(canon).fillna("").astype(str).str.strip()
+    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+
+    # Combo / DPT listings → component OMS SKUs; non-combo rows canonicalize 1:1.
+    # Must run on raw listing keys (before last-wins 1:1 map drops siblings).
+    _ = canonical_oms  # call-site flag retained; explode uses strip_pl + mapping
+    work = explode_sku_qty_dataframe(
+        work,
+        sku_col="SKU",
+        qty_col="Qty",
+        sku_mapping=sku_mapping,
+        combo_map=resolve_active_combo_sku_map(),
+        strip_pl=bool(strip_pl),
+    )
+    if work.empty:
+        return 0
+    if group_by_parent:
+        _u = work["SKU"].astype(str).unique()
+        _p = {s: get_parent_sku(s) for s in _u}
+        work = work.copy()
+        work["SKU"] = work["SKU"].map(_p)
+    tentative = work["SKU"].fillna("").astype(str).str.strip()
     work["SKU"] = tentative
     if asin_col and asin_col in work.columns:
         work = work.drop(columns=[asin_col], errors="ignore")
@@ -390,9 +418,15 @@ def _warm_cache_platform_frames() -> dict[str, pd.DataFrame]:
 
     out: dict[str, pd.DataFrame] = {}
     for _plat, attr, _sp, _ca in _WARM_FRAME_ATTRS:
-        df = warm_frame(attr)
-        if df is None or getattr(df, "empty", True):
-            df = _load_platform_frame_from_disk(attr)
+        if attr == "meesho_df":
+            # Deepdive prefers OMS-filled disk when RAM is blank-heavy — quarterly must too.
+            from .shared_frames import resolve_meesho_frame
+
+            df = resolve_meesho_frame(warm_frame(attr))
+        else:
+            df = warm_frame(attr)
+            if df is None or getattr(df, "empty", True):
+                df = _load_platform_frame_from_disk(attr)
         if df is not None and not getattr(df, "empty", True):
             out[attr] = df
     if out:
@@ -429,7 +463,11 @@ def _tier1_platform_frame(
 
     frames = warm_frames if warm_frames is not None else _warm_cache_platform_frames()
     df = frames.get(attr, pd.DataFrame())
-    if df is None or getattr(df, "empty", True):
+    if attr == "meesho_df":
+        from .shared_frames import resolve_meesho_frame
+
+        df = resolve_meesho_frame(df if df is not None and not getattr(df, "empty", True) else None)
+    elif df is None or getattr(df, "empty", True):
         df = _load_platform_frame_from_disk(attr)
     s0 = str(start_date)[:10]
     s1 = str(end_date)[:10]
@@ -471,8 +509,9 @@ def _accumulate_tier1_platform_history(
         )
         if df is None or df.empty:
             continue
-        if "Date" in df.columns:
-            d = pd.to_datetime(df["Date"], errors="coerce")
+        date_col = next((c for c in ("Date", "TxnDate") if c in df.columns), None)
+        if date_col:
+            d = pd.to_datetime(df[date_col], errors="coerce")
             df = df[(d >= start_ts) & (d <= end_ts)]
         if df.empty:
             continue
@@ -540,29 +579,62 @@ def _accumulate_sales_df_shipments(
         0,
         np.where(_neg, -work["Qty"].abs(), work["Qty"].abs()),
     )
-    work = work.drop(columns=["_Source"], errors="ignore")
+    # Keep _Source through explode + gap-fill so Meesho sales are not suppressed
+    # merely because Amazon already recorded the same (SKU, day).
     work = work.dropna(subset=["Date"])
     work = work[(work["Date"] >= start_ts) & (work["Date"] <= end_ts)]
     work = work[work["Qty"] != 0]
     if work.empty:
         return 0
 
-    raw_skus = work["SKU"].astype(str).unique()
-    canon = {s: canonical_oms_key(s, sku_mapping) for s in raw_skus}
-    work["SKU"] = work["SKU"].map(canon).fillna("")
-    work = work[work["SKU"].str.len() > 0]
+    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+
+    work = explode_sku_qty_dataframe(
+        work,
+        sku_col="SKU",
+        qty_col="Qty",
+        sku_mapping=sku_mapping,
+        combo_map=resolve_active_combo_sku_map(),
+        strip_pl=False,
+    )
+    work = work[work["SKU"].astype(str).str.len() > 0]
     if group_by_parent:
         work["SKU"] = work["SKU"].map(lambda s: get_parent_sku(s))
 
-    sku_days_on_platform = {(sku, day) for _p, sku, day in platform_day_keys}
     work = work.copy()
     work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work["_sku"] = work["SKU"].astype(str)
-    if sku_days_on_platform:
-        keys = list(zip(work["_sku"], work["_day"]))
-        keep = np.array([k not in sku_days_on_platform for k in keys], dtype=bool)
-        work = work.loc[keep]
-    work = work.drop(columns=["_day", "_sku"], errors="ignore")
+    if platform_day_keys:
+        if "_Source" in work.columns:
+            work["_plat"] = work["_Source"].map(_sales_source_to_platform)
+            keys = list(zip(work["_plat"], work["_sku"], work["_day"]))
+            keep = np.array(
+                [
+                    (not p) or ((p, s, d) not in platform_day_keys)
+                    for p, s, d in keys
+                ],
+                dtype=bool,
+            )
+            # Rows with unknown source: fall back to any-platform (SKU, day) claim
+            # so unified rows without Source still avoid double-count.
+            unknown = work["_plat"].eq("") | work["_plat"].isna()
+            if unknown.any():
+                sku_days_any = {(sku, day) for _p, sku, day in platform_day_keys}
+                any_hit = np.array(
+                    [
+                        (s, d) in sku_days_any
+                        for s, d in zip(work["_sku"], work["_day"])
+                    ],
+                    dtype=bool,
+                )
+                keep = np.where(unknown, ~any_hit, keep)
+            work = work.loc[keep]
+        else:
+            sku_days_on_platform = {(sku, day) for _p, sku, day in platform_day_keys}
+            keys = list(zip(work["_sku"], work["_day"]))
+            keep = np.array([k not in sku_days_on_platform for k in keys], dtype=bool)
+            work = work.loc[keep]
+    work = work.drop(columns=["_day", "_sku", "_plat", "_Source"], errors="ignore")
     if work.empty:
         return 0
 
