@@ -1014,6 +1014,46 @@ export default function Upload() {
             }}
             uploading={loading['sku']}
           />
+          <button
+            type="button"
+            className="mt-2 px-3 py-1.5 border border-amber-400 text-amber-900 bg-amber-50 rounded-lg text-xs font-medium hover:bg-amber-100"
+            onClick={async () => {
+              try {
+                const res = await fetch('/api/data/meesho-unmapped-skus-export?format=xlsx', {
+                  credentials: 'include',
+                })
+                if (!res.ok) {
+                  let msg = `Download failed (${res.status})`
+                  try {
+                    const j = (await res.json()) as { detail?: string }
+                    if (typeof j.detail === 'string') msg = j.detail
+                  } catch { /* ignore */ }
+                  showToast('error', msg)
+                  return
+                }
+                const blob = await res.blob()
+                const cd = res.headers.get('Content-Disposition')
+                const m = cd?.match(/filename="([^"]+)"/i)
+                const filename = m?.[1] ?? 'meesho_unmapped_skus.xlsx'
+                const url = URL.createObjectURL(blob)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = filename
+                document.body.appendChild(a)
+                a.click()
+                a.remove()
+                URL.revokeObjectURL(url)
+                showToast('success', 'Downloaded unmapped Meesho SKUs')
+              } catch (e: unknown) {
+                showToast('error', e instanceof Error ? e.message : 'Download failed')
+              }
+            }}
+          >
+            Download unmapped Meesho SKUs
+          </button>
+          <p className="mt-1 text-[11px] text-gray-500">
+            Lists Meesho listing SKUs not on the master. Fill OMS_SKU and re-upload the map.
+          </p>
           {skuMapGaps.length > 0 && (
             <div className="mt-3 rounded border border-amber-300/80 bg-amber-50/90 p-3 text-sm text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100">
               <div className="font-medium">
@@ -1039,6 +1079,43 @@ export default function Upload() {
             <p className="text-xs text-gray-500">
               {coverage.sku_mapping ? '✓ This session reports a loaded SKU map.' : '— No SKU map reported in coverage yet.'}
             </p>
+            <button
+              type="button"
+              className="px-3 py-1.5 border border-amber-400 text-amber-900 bg-amber-50 rounded-lg text-xs font-medium hover:bg-amber-100"
+              onClick={async () => {
+                try {
+                  const res = await fetch('/api/data/meesho-unmapped-skus-export?format=xlsx', {
+                    credentials: 'include',
+                  })
+                  if (!res.ok) {
+                    let msg = `Download failed (${res.status})`
+                    try {
+                      const j = (await res.json()) as { detail?: string }
+                      if (typeof j.detail === 'string') msg = j.detail
+                    } catch { /* ignore */ }
+                    showToast('error', msg)
+                    return
+                  }
+                  const blob = await res.blob()
+                  const cd = res.headers.get('Content-Disposition')
+                  const m = cd?.match(/filename="([^"]+)"/i)
+                  const filename = m?.[1] ?? 'meesho_unmapped_skus.xlsx'
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = filename
+                  document.body.appendChild(a)
+                  a.click()
+                  a.remove()
+                  URL.revokeObjectURL(url)
+                  showToast('success', 'Downloaded unmapped Meesho SKUs')
+                } catch (e: unknown) {
+                  showToast('error', e instanceof Error ? e.message : 'Download failed')
+                }
+              }}
+            >
+              Download unmapped Meesho SKUs
+            </button>
           </div>
         )}
 

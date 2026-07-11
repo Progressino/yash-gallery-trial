@@ -156,11 +156,22 @@ def _resolve_bom_item(conn, sku: str):
     return (sku if item else None), item
 
 
-def explode_bom_materials(finished_code: str, finished_name: str, finished_qty: float) -> list[dict]:
+def explode_bom_materials(
+    finished_code: str,
+    finished_name: str,
+    finished_qty: float,
+    process: str | None = None,
+) -> list[dict]:
     """Return material lines required to produce ``finished_qty`` of ``finished_code``.
 
     Size variants (e.g. ``1189YKMAROON-3XL``) resolve to the parent style BOM when the
     variant itself has no default BOM — same rules as ``/production/bom-inputs``.
+
+    When ``process`` is set (e.g. ``"Cutting"``), only BOM lines tagged with that
+    routing step are included. Untagged lines (``process_id`` NULL) are kept for
+    backward compatibility with legacy BOMs. Lines tagged for a different process
+    (e.g. Handwork on a Cutting JO) are excluded. When ``process`` is None, all
+    non-service lines are returned (Purchase MIN callers).
     """
     finished_qty = float(finished_qty or 0)
     if not finished_code or finished_qty <= 0:
@@ -181,13 +192,25 @@ def explode_bom_materials(finished_code: str, finished_name: str, finished_qty: 
         iconn.close()
         return []
 
-    rows = iconn.execute("SELECT * FROM bom_lines WHERE bom_id=?", (bom["id"],)).fetchall()
+    process_filter = (process or "").strip().lower()
+    rows = iconn.execute(
+        """SELECT bl.*, rs.name AS process_name
+           FROM bom_lines bl
+           LEFT JOIN routing_steps rs ON rs.id = bl.process_id
+           WHERE bl.bom_id=?""",
+        (bom["id"],),
+    ).fetchall()
     out: list[dict] = []
     for ln in rows:
         ln = dict(ln)
         ctype = (ln.get("component_type") or "RM").upper()
         if ctype in ("SVC", "SERVICE", "PROCESS"):
             continue
+        if process_filter:
+            pname = str(ln.get("process_name") or "").strip().lower()
+            # Untagged (legacy) kept; differently tagged processes excluded.
+            if pname and pname != process_filter:
+                continue
         comp = None
         code_guess = ""
         if ln.get("component_item_id"):
@@ -293,10 +316,13 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
     jo_lines = jo_lines or []
     finished_items = _finished_items_from_jo(jo, jo_lines)
 
+    jo_process = (jo.get("process") or "").strip() or None
     material_lines: list[dict] = []
     seen: set[tuple] = set()
     for fin in finished_items:
-        for m in explode_bom_materials(fin["code"], fin["name"], fin["qty"]):
+        for m in explode_bom_materials(
+            fin["code"], fin["name"], fin["qty"], process=jo_process
+        ):
             key = (fin["code"], m["material_code"])
             if key in seen:
                 for existing in material_lines:
@@ -347,29 +373,8 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
         header_code = jo.get("sku", "")
         header_name = jo.get("sku_name", "")
 
-    # Cutting: add planned fabric when not already covered by BOM explode.
-    fabric_code = (jo.get("fabric_code") or "").strip()
-    fabric_qty = float(jo.get("fabric_qty") or 0)
-    fabric_unit = jo.get("fabric_unit") or "MTR"
-    if fabric_code and fabric_qty > 0:
-        if not any(m["material_code"] == fabric_code for m in material_lines):
-            material_lines.insert(
-                0,
-                {
-                    "finished_item_code": header_code,
-                    "finished_item_name": header_name,
-                    "finished_planned_qty": total_finished_qty or fabric_qty,
-                    "material_code": fabric_code,
-                    "material_name": fabric_code,
-                    "material_type": "GF",
-                    "bom_qty_per_unit": (
-                        round(fabric_qty / total_finished_qty, 4) if total_finished_qty else fabric_qty
-                    ),
-                    "required_qty": fabric_qty,
-                    "unit": fabric_unit,
-                    "remarks": "From JO fabric plan",
-                },
-            )
+    # Never invent materials from JO fabric_code/qty — only certified BOM lines
+    # for this JO process appear on the issue note.
 
     primary_fin = {
         "code": header_code,

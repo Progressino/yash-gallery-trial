@@ -281,3 +281,21 @@ def test_restore_skips_github_when_paused_but_uses_bundled(monkeypatch, tmp_path
     assert sm.restore_sku_mapping_to_session(sess) is True
     assert sess.sku_mapping == {"BUNDLED": "BUNDLED"}
 
+
+
+def test_build_meesho_unmapped_skus_df():
+    import pandas as pd
+    from backend.services.sales import build_meesho_unmapped_skus_df
+
+    meesho = pd.DataFrame(
+        {
+            "SKU": ["KNOWN-L", "KNOWN-L", "MISSING-XL", "MEESHO_TOTAL", "", "MISSING-XL"],
+            "OMS_SKU": ["KNOWN-L", "KNOWN-L", "MISSING-XL", "", "", "MISSING-XL"],
+        }
+    )
+    mapping = {"KNOWN-L": "KNOWN-L"}
+    out = build_meesho_unmapped_skus_df(meesho, mapping)
+    assert list(out.columns) == ["Meesho_SKU", "row_count", "OMS_SKU"]
+    assert list(out["Meesho_SKU"]) == ["MISSING-XL"]
+    assert int(out.iloc[0]["row_count"]) == 2
+    assert out.iloc[0]["OMS_SKU"] == ""

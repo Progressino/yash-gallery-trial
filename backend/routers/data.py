@@ -30,6 +30,7 @@ from ..services.meesho import apply_meesho_listing_sku_recovery_for_export
 from ..services.sales import (
     _filter_by_reporting_days,
     apply_upload_report_day_gate,
+    build_meesho_unmapped_skus_df,
     canonical_sales_sku,
     canonical_sales_sku_series,
     daily_dsr_report_to_csv_rows,
@@ -4912,6 +4913,57 @@ def sales_export(
     part_end = (end_date or "all").replace(":", "")
     fname = f"intelligence-sales_{part_start}_{part_end}_{len(export_df)}_rows.csv"
 
+    return StreamingResponse(
+        iter([body]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@router.get("/meesho-unmapped-skus-export")
+def meesho_unmapped_skus_export(request: Request, format: str = "csv"):
+    """
+    Distinct Meesho listing SKUs not present on the SKU master.
+
+    Columns: Meesho_SKU, row_count, OMS_SKU (blank for fill-in).
+    Fill OMS_SKU and re-upload via SKU Mapping.
+    """
+    import pandas as pd
+
+    sess = _sess(request)
+    from ..services.shared_frames import resolve_meesho_frame
+
+    meesho = resolve_meesho_frame(getattr(sess, "meesho_df", None))
+    if meesho is None or getattr(meesho, "empty", True):
+        raise HTTPException(
+            status_code=404,
+            detail="No Meesho data loaded — upload Meesho orders first.",
+        )
+    mapping = sess.sku_mapping or {}
+    out = build_meesho_unmapped_skus_df(meesho, mapping)
+    if out.empty:
+        raise HTTPException(
+            status_code=404,
+            detail="All Meesho listing SKUs are already on the SKU master (or Meesho SKU column is empty).",
+        )
+
+    fmt = (format or "csv").strip().lower()
+    if fmt in ("xlsx", "xls", "excel"):
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            out.to_excel(writer, index=False, sheet_name="Unmapped_Meesho")
+        body = buf.getvalue()
+        fname = f"meesho_unmapped_skus_{len(out)}.xlsx"
+        return StreamingResponse(
+            iter([body]),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
+
+    buf = io.StringIO()
+    out.to_csv(buf, index=False)
+    body = buf.getvalue().encode("utf-8")
+    fname = f"meesho_unmapped_skus_{len(out)}.csv"
     return StreamingResponse(
         iter([body]),
         media_type="text/csv; charset=utf-8",

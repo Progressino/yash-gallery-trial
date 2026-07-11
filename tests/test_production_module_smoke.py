@@ -471,6 +471,86 @@ def test_multi_size_jo_issue_note_sums_all_lines(isolated_module_dbs, client):
     assert fab2["required_qty"] == pytest.approx(442.5)
 
 
+def test_cutting_issue_note_filters_process_and_skips_foreign_fabric(isolated_module_dbs, client):
+    """Cutting note: only Cutting BOM lines; never invent JO fabric not on BOM; skip Handwork."""
+    import sqlite3
+
+    parent_id = _seed_parent_with_bom(
+        isolated_module_dbs["ITEM_DB_PATH"], parent_code="1189YKPROC"
+    )
+    conn = sqlite3.connect(isolated_module_dbs["ITEM_DB_PATH"])
+    type_id = conn.execute("SELECT item_type_id FROM items WHERE id=?", (parent_id,)).fetchone()[0]
+    bom_id = conn.execute(
+        "SELECT id FROM bom_headers WHERE item_id=? AND is_default=1", (parent_id,)
+    ).fetchone()[0]
+
+    for name, sort in (("Cutting", 1), ("Handwork", 2)):
+        conn.execute(
+            "INSERT OR IGNORE INTO routing_steps (name, description, sort_order) VALUES (?, ?, ?)",
+            (name, name, sort),
+        )
+    cut_id = conn.execute("SELECT id FROM routing_steps WHERE name='Cutting'").fetchone()[0]
+    hw_id = conn.execute("SELECT id FROM routing_steps WHERE name='Handwork'").fetchone()[0]
+
+    # Tag existing FAB-CTN as Cutting
+    conn.execute(
+        "UPDATE bom_lines SET process_id=? WHERE bom_id=? AND component_name='Cotton Fabric'",
+        (cut_id, bom_id),
+    )
+
+    btn = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id) VALUES (?, ?, ?)",
+        ("MEHROON-BTN", "Mehroon Mold Button", type_id),
+    ).lastrowid
+    conn.execute(
+        """INSERT INTO bom_lines
+           (bom_id, component_item_id, component_name, component_type, quantity, unit, process_id)
+           VALUES (?, ?, 'Mehroon Mold Button', 'ACC', 5, 'PCS', ?)""",
+        (bom_id, btn, hw_id),
+    )
+    # Extra Cutting material
+    bord = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id) VALUES (?, ?, ?)",
+        ("P500Border", "P500 Border", type_id),
+    ).lastrowid
+    conn.execute(
+        """INSERT INTO bom_lines
+           (bom_id, component_item_id, component_name, component_type, quantity, unit, process_id)
+           VALUES (?, ?, 'P500 Border', 'SFG', 1.2, 'MTR', ?)""",
+        (bom_id, bord, cut_id),
+    )
+    conn.commit()
+    conn.close()
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-07-11",
+            "sku": "1189YKPROC",
+            "sku_name": "1189YKPROC",
+            "process": "Cutting",
+            "planned_qty": 10,
+            # Foreign fabric not on BOM — must NOT appear on the issue note
+            "fabric_code": "D7Denim1",
+            "fabric_qty": 70,
+            "fabric_unit": "MTR",
+        },
+    )
+    assert r.status_code == 200, r.text
+    jo_num = r.json()["jo_number"]
+    orders = client.get("/api/production/orders").json()
+    jo = next(o for o in orders if o["jo_number"] == jo_num)
+    note = client.get(f"/api/production/orders/{jo['id']}/issue-note").json()
+    codes = {l["material_code"] for l in note["lines"]}
+
+    assert "D7Denim1" not in codes
+    assert "MEHROON-BTN" not in codes
+    assert "FAB-CTN" in codes
+    assert "P500Border" in codes
+    fab = next(l for l in note["lines"] if l["material_code"] == "FAB-CTN")
+    assert fab["required_qty"] == pytest.approx(15.0)  # 10 × 1.5
+
+
 def test_jo_outsource_requires_vendor_name(isolated_module_dbs, client):
     r = client.post(
         "/api/production/orders",

@@ -1266,6 +1266,24 @@ export default function Production() {
               />
               <button
                 type="button"
+                onClick={() => {
+                  const csv = [
+                    'so_number,sku,sku_name,planned_qty,process,exec_type,vendor_name,vendor_rate,expected_completion,fabric_code,fabric_qty,fabric_unit,remarks',
+                    'SO-0001,1046YKBLUE-L,Blue Kurta L,50,Cutting,Inhouse,,0,2026-07-20,P500Border Cotton,12.5,MTR,sample cutting JO',
+                    'SO-0001,1046YKBLUE-L,Blue Kurta L,50,Stitching,Outsource,Vendor ABC,25,2026-07-25,,,MTR,sample stitching JO',
+                  ].join('\n')
+                  const a = document.createElement('a')
+                  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv)
+                  a.download = 'production_jo_import_template.csv'
+                  a.click()
+                }}
+                className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50"
+                title="Download CSV template showing importable Job Order columns"
+              >
+                📥 Template
+              </button>
+              <button
+                type="button"
                 onClick={() => joImportRef.current?.click()}
                 className="px-4 py-2 border border-[#002B5B] text-[#002B5B] rounded-lg text-sm font-medium hover:bg-blue-50"
               >
@@ -1277,6 +1295,11 @@ export default function Production() {
               </button>
             </div>
           </div>
+          <p className="text-xs text-gray-500 -mt-1 mb-2">
+            JO import: required <code className="bg-gray-100 px-1 rounded">so_number</code> + <code className="bg-gray-100 px-1 rounded">sku</code>.
+            Optional <code className="bg-gray-100 px-1 rounded">process</code> overrides the active tab.
+            Fabric columns apply mainly to Cutting JOs. <code className="bg-gray-100 px-1 rounded">exec_type</code>: Inhouse | Outsource.
+          </p>
 
           {/* Ready to process — always visible for stage context */}
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">

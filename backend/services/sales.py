@@ -285,6 +285,65 @@ def list_sku_mapping_gaps(sales_df: pd.DataFrame, mapping: Dict[str, str], *, li
     return bad[:limit]
 
 
+def build_meesho_unmapped_skus_df(
+    meesho_df: pd.DataFrame,
+    mapping: Dict[str, str],
+) -> pd.DataFrame:
+    """
+    Distinct Meesho listing SKUs that are not on the SKU master.
+
+    Uses the listing ``SKU`` column (not identity-filled ``OMS_SKU``). Operators fill
+    the blank ``OMS_SKU`` column and re-upload the master map.
+    """
+    cols = ["Meesho_SKU", "row_count", "OMS_SKU"]
+    if meesho_df is None or getattr(meesho_df, "empty", True):
+        return pd.DataFrame(columns=cols)
+    if "SKU" not in meesho_df.columns:
+        return pd.DataFrame(columns=cols)
+
+    work = meesho_df.copy()
+    listing = work["SKU"].map(lambda v: clean_sku(v) if not pd.isna(v) else "")
+    work = work.assign(_listing=listing)
+    work = work[work["_listing"].astype(str).str.len() > 0]
+    work = work[~work["_listing"].map(_is_aggregate_sales_sku)]
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+
+    mapping = mapping or {}
+    if not mapping:
+        # No master loaded — every distinct listing is "unmapped" for operators.
+        g = (
+            work.groupby("_listing", sort=True)
+            .size()
+            .reset_index(name="row_count")
+            .rename(columns={"_listing": "Meesho_SKU"})
+        )
+        g["OMS_SKU"] = ""
+        return g[cols]
+
+    key_set, val_set, num_embed = mapping_lookup_sets(mapping)
+    uniq = work["_listing"].unique().tolist()
+    unmapped = [
+        s
+        for s in uniq
+        if not sku_recognized_in_master(
+            s, mapping, key_set=key_set, val_set=val_set, numeric_embed=num_embed
+        )
+    ]
+    if not unmapped:
+        return pd.DataFrame(columns=cols)
+    unmapped_set = set(unmapped)
+    sub = work[work["_listing"].isin(unmapped_set)]
+    g = (
+        sub.groupby("_listing", sort=True)
+        .size()
+        .reset_index(name="row_count")
+        .rename(columns={"_listing": "Meesho_SKU"})
+    )
+    g["OMS_SKU"] = ""
+    return g[cols]
+
+
 def _resolve_mtr_sku(sku, mapping: Dict[str, str]) -> str:
     raw = str(sku).strip().upper()
     stripped = _PL_RE.sub(r"\1\2", raw)
