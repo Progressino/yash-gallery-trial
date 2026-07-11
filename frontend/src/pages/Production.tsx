@@ -845,12 +845,14 @@ export default function Production() {
     setModal(type)
     if (type === 'issue-fabric') {
       setFabricIssueForm(f => ({ ...f, fabric_code: jo.fabric_code || '', issued_qty: jo.fabric_qty || 0, fabric_name: '' }))
-      // Prefer BOM fabric for the JO SKU (or first line)
-      const sku = jo.sku || jo.lines?.[0]?.sku
-      const qty = jo.planned_qty || jo.lines?.[0]?.planned_qty || 1
-      if (sku) {
+      // Sum BOM fabric across ALL JO size lines (not just the first size × BOM).
+      const lines = (jo.lines || []).filter(l => (l.planned_qty || 0) > 0 && l.sku)
+      const totalPcs = lines.reduce((s, l) => s + (Number(l.planned_qty) || 0), 0) || Number(jo.planned_qty) || 1
+      const anchorSku = jo.sku || lines[0]?.sku
+      if (anchorSku && totalPcs > 0) {
         try {
-          const res = await api.get(`/production/bom-inputs/${encodeURIComponent(sku)}`, { params: { qty } })
+          // Prefer one call with total pcs on a size/parent SKU — backend resolves parent BOM.
+          const res = await api.get(`/production/bom-inputs/${encodeURIComponent(anchorSku)}`, { params: { qty: totalPcs } })
           const inputs = (res.data?.inputs ?? []) as { material_code?: string; material_name?: string; adj_qty?: number; unit?: string }[]
           const fabric = inputs.find(i => String(i.unit || '').toUpperCase().includes('MTR')) || inputs[0]
           if (fabric?.material_code) {
@@ -861,6 +863,34 @@ export default function Production() {
               issued_qty: Number(fabric.adj_qty) || f.issued_qty,
               unit: fabric.unit || f.unit || 'MTR',
             }))
+          } else if (lines.length > 1) {
+            // Fallback: sum per-line BOM if anchor call returned nothing
+            let sumQty = 0
+            let code = jo.fabric_code || ''
+            let name = ''
+            let unit = 'MTR'
+            for (const line of lines) {
+              const r2 = await api.get(`/production/bom-inputs/${encodeURIComponent(line.sku)}`, {
+                params: { qty: Number(line.planned_qty) || 1 },
+              })
+              const ins = (r2.data?.inputs ?? []) as { material_code?: string; material_name?: string; adj_qty?: number; unit?: string }[]
+              const fab = ins.find(i => String(i.unit || '').toUpperCase().includes('MTR')) || ins[0]
+              if (fab?.material_code) {
+                code = fab.material_code
+                name = fab.material_name || name
+                unit = fab.unit || unit
+                sumQty += Number(fab.adj_qty) || 0
+              }
+            }
+            if (sumQty > 0) {
+              setFabricIssueForm(f => ({
+                ...f,
+                fabric_code: code || f.fabric_code,
+                fabric_name: name,
+                issued_qty: sumQty,
+                unit,
+              }))
+            }
           }
         } catch { /* keep JO fabric defaults */ }
       }
@@ -901,17 +931,19 @@ export default function Production() {
           return u.includes('MTR') || u.includes('M') || code.includes('FABRIC') || code.includes('RAYON') || code.includes('COTTON')
         }) || inputs[0]
         if (fabric?.material_code) {
+          const adj = Number(fabric.adj_qty) || 0
           setNewForm(f => ({
             ...f,
             fabric_code: f.fabric_code || fabric.material_code || '',
-            fabric_qty: f.fabric_qty > 0 ? f.fabric_qty : Number(fabric.adj_qty) || 0,
+            // Accumulate fabric across every size line added to the Cutting JO.
+            fabric_qty: (Number(f.fabric_qty) || 0) + adj,
             fabric_unit: fabric.unit || f.fabric_unit || 'MTR',
           }))
           setFabricIssueForm(ff => ({
             ...ff,
             fabric_code: fabric.material_code || ff.fabric_code,
             fabric_name: fabric.material_name || ff.fabric_name,
-            issued_qty: Number(fabric.adj_qty) || ff.issued_qty,
+            issued_qty: (Number(ff.issued_qty) || 0) + adj,
             unit: fabric.unit || ff.unit || 'MTR',
           }))
         }

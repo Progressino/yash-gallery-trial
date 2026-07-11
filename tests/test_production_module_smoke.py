@@ -413,6 +413,64 @@ def test_jo_auto_creates_bom_issue_note(isolated_module_dbs, client):
     assert any(n["in_number"] == note["in_number"] for n in listed)
 
 
+def test_multi_size_jo_issue_note_sums_all_lines(isolated_module_dbs, client):
+    """Cutting JO with many size lines must BOM × sum(qty), not first size only."""
+    import sqlite3
+
+    parent_id = _seed_parent_with_bom(
+        isolated_module_dbs["ITEM_DB_PATH"], parent_code="1189YKMAROON"
+    )
+    conn = sqlite3.connect(isolated_module_dbs["ITEM_DB_PATH"])
+    type_id = conn.execute("SELECT item_type_id FROM items WHERE id=?", (parent_id,)).fetchone()[0]
+    # Size variants exist but BOM stays on parent only (production reality).
+    for size, _ in (("3XL", 30), ("L", 105), ("XL", 160)):
+        conn.execute(
+            "INSERT INTO items (item_code, item_name, item_type_id, parent_id) VALUES (?,?,?,?)",
+            (f"1189YKMAROON-{size}", f"1189YKMAROON {size}", type_id, parent_id),
+        )
+    conn.commit()
+    conn.close()
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-07-11",
+            "sku": "1189YKMAROON",
+            "sku_name": "1189YKMAROON",
+            "process": "Cutting",
+            "planned_qty": 295,
+            # Stale/wrong JO fabric plan from first size only — BOM explode must ignore this
+            # when parent BOM covers all size lines.
+            "fabric_code": "FAB-CTN",
+            "fabric_qty": 70,
+            "fabric_unit": "MTR",
+            "lines": [
+                {"sku": "1189YKMAROON-3XL", "sku_name": "3XL", "planned_qty": 30},
+                {"sku": "1189YKMAROON-L", "sku_name": "L", "planned_qty": 105},
+                {"sku": "1189YKMAROON-XL", "sku_name": "XL", "planned_qty": 160},
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    jo_num = r.json()["jo_number"]
+    orders = client.get("/api/production/orders").json()
+    jo = next(o for o in orders if o["jo_number"] == jo_num)
+    note = client.get(f"/api/production/orders/{jo['id']}/issue-note").json()
+
+    assert note["planned_qty"] == pytest.approx(295.0)
+    fab = next(l for l in note["lines"] if l["material_code"] == "FAB-CTN")
+    # 295 pcs × 1.5 MTR = 442.5 — NOT 30 × 1.5 = 45 / first-line fabric_qty 70
+    assert fab["required_qty"] == pytest.approx(442.5)
+    assert fab["finished_planned_qty"] == pytest.approx(295.0)
+
+    # Refresh BOM must keep the full sum
+    regen = client.post(f"/api/production/orders/{jo['id']}/regenerate-issue-note")
+    assert regen.status_code == 200, regen.text
+    note2 = regen.json()["issue_note"]
+    fab2 = next(l for l in note2["lines"] if l["material_code"] == "FAB-CTN")
+    assert fab2["required_qty"] == pytest.approx(442.5)
+
+
 def test_jo_outsource_requires_vendor_name(isolated_module_dbs, client):
     r = client.post(
         "/api/production/orders",
