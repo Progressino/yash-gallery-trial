@@ -320,8 +320,12 @@ def _build_via_streaming(
     from ..concurrency import _UPLOAD_MEMORY_LOCK
 
     if not _UPLOAD_MEMORY_LOCK.acquire(timeout=120):
-        logger.warning("Quarterly streaming skipped: memory lock busy")
-        return {"loaded": False, "rows": []}
+        # Do not return empty — that poisons the shared cache UI with
+        # "No quarterly data in uploads" while Tier-1 Meesho/etc. are fine.
+        logger.warning(
+            "Quarterly streaming memory lock busy — building without exclusive lock"
+        )
+        return _run()
     try:
         return _run()
     finally:
