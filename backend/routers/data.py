@@ -5019,9 +5019,14 @@ def sku_deepdive(
     df0 = apply_upload_report_day_gate(sales) if sales is not None and not sales.empty else pd.DataFrame()
 
     # Detect whether Meesho is loaded but has no per-SKU data (TCS ZIP format).
-    # Cheap check on meesho_df — avoid scanning the full unified sales table.
+    # Prefer shared/warm/disk frame over a stale session copy.
     meesho_note: str | None = None
-    meesho_df = getattr(sess, "meesho_df", None)
+    try:
+        from ..services.shared_frames import session_platform_df
+
+        meesho_df = session_platform_df(sess, "meesho_df")
+    except Exception:
+        meesho_df = getattr(sess, "meesho_df", None)
     if meesho_df is not None and not getattr(meesho_df, "empty", True):
         sku_col = next((c for c in ("OMS_SKU", "SKU", "Sku") if c in meesho_df.columns), None)
         if sku_col:

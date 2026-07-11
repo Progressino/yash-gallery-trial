@@ -45,3 +45,66 @@ def test_should_skip_session_copy_large_keys(monkeypatch):
     monkeypatch.setenv("SESSION_SHARED_FRAMES", "1")
     assert sf.should_skip_session_copy("sales_df") is True
     assert sf.should_skip_session_copy("sku_mapping") is False
+
+
+def test_platform_frame_for_window_falls_back_to_disk_when_mem_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+    mem = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-05-01"]),
+            "SKU": ["X"],
+            "OMS_SKU": ["X"],
+            "TxnType": ["Shipment"],
+            "Quantity": [1.0],
+        }
+    )
+    disk = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-02-01", "2025-02-02"]),
+            "SKU": ["A", "B"],
+            "OMS_SKU": ["A", "B"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+        }
+    )
+    disk.to_parquet(tmp_path / "meesho_df.parquet", index=False)
+    monkeypatch.setattr(sf, "warm_frame", lambda attr, sess=None: mem if attr == "meesho_df" else pd.DataFrame())
+
+    out = sf.platform_frame_for_window(
+        "meesho_df", None, start_date="2025-01-01", end_date="2025-03-31"
+    )
+    assert len(out) == 2
+    out_mem = sf.platform_frame_for_window(
+        "meesho_df", None, start_date="2026-04-01", end_date="2026-07-01"
+    )
+    assert len(out_mem) == 1
+
+
+def test_platform_frame_prefers_disk_when_mem_meesho_mostly_blank(tmp_path, monkeypatch):
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+    mem = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-02-01", "2025-02-02"]),
+            "SKU": ["", ""],
+            "OMS_SKU": ["", ""],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+        }
+    )
+    disk = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-02-01", "2025-02-02"]),
+            "SKU": ["1057YKBLUE-5XL", "165YK251MUSTRAD-XL"],
+            "OMS_SKU": ["1057YKBLUE-5XL", "165YK251MUSTRAD-XL"],
+            "TxnType": ["Shipment", "Shipment"],
+            "Quantity": [1.0, 1.0],
+        }
+    )
+    disk.to_parquet(tmp_path / "meesho_df.parquet", index=False)
+    monkeypatch.setattr(sf, "warm_frame", lambda attr, sess=None: mem if attr == "meesho_df" else pd.DataFrame())
+
+    out = sf.platform_frame_for_window(
+        "meesho_df", None, start_date="2025-01-01", end_date="2025-03-31"
+    )
+    assert len(out) == 2
+    assert out["OMS_SKU"].tolist() == ["1057YKBLUE-5XL", "165YK251MUSTRAD-XL"]

@@ -128,13 +128,25 @@ def platform_frame_for_window(
     if mem is not None and hasattr(mem, "empty") and not mem.empty:
         if not has_window:
             return mem
-        date_col = "Date" if "Date" in mem.columns else None
+        date_col = (
+            "Date"
+            if "Date" in mem.columns
+            else ("TxnDate" if "TxnDate" in mem.columns else None)
+        )
         if date_col:
             d = pd.to_datetime(mem[date_col], errors="coerce")
             in_w = mem[(d >= pd.Timestamp(s)) & (d <= pd.Timestamp(e))]
-            # Always return the window slice — returning full mem forced deepdive
-            # to scan entire platform history (~10s+) even when dates were set.
-            return in_w
+            # If RAM only holds a recent slice (or other incomplete window), fall through
+            # to full-history disk parquet instead of returning an empty frame.
+            if not in_w.empty:
+                # Stale session/RAM Meesho can still hold pre-OMS-fill blanks; prefer disk
+                # when the window is mostly unusable for SKU deepdive.
+                if attr == "meesho_df" and _meesho_window_mostly_blank(in_w):
+                    pass  # fall through to disk
+                else:
+                    return in_w
+        else:
+            return mem
 
     disk_dir = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
     path = disk_dir / f"{attr}.parquet"
@@ -156,13 +168,40 @@ def platform_frame_for_window(
                 pass
             # Fallback: read full parquet then slice (filters unsupported / schema drift).
             full = pd.read_parquet(path)
-            if full is None or getattr(full, "empty", True) or "Date" not in full.columns:
+            if full is None or getattr(full, "empty", True):
                 return full if full is not None else pd.DataFrame()
-            d = pd.to_datetime(full["Date"], errors="coerce")
+            date_col = (
+                "Date"
+                if "Date" in full.columns
+                else ("TxnDate" if "TxnDate" in full.columns else None)
+            )
+            if not date_col:
+                return full
+            d = pd.to_datetime(full[date_col], errors="coerce")
             return full[(d >= pd.Timestamp(s)) & (d <= pd.Timestamp(e))]
         return pd.read_parquet(path)
     except Exception:
         return mem if mem is not None else pd.DataFrame()
+
+
+def _meesho_window_mostly_blank(df: pd.DataFrame) -> bool:
+    """True when ≥25% of rows lack usable SKU/OMS (stale TCS cache / pre-fill RAM)."""
+    if df is None or getattr(df, "empty", True):
+        return True
+    bad = {"", "NAN", "NONE", "NAT", "MEESHO_TOTAL"}
+    sku = (
+        df["SKU"].astype(str).str.strip().str.upper()
+        if "SKU" in df.columns
+        else pd.Series("", index=df.index, dtype=str)
+    )
+    oms = (
+        df["OMS_SKU"].astype(str).str.strip().str.upper()
+        if "OMS_SKU" in df.columns
+        else pd.Series("", index=df.index, dtype=str)
+    )
+    blank = sku.isin(bad) & oms.isin(bad)
+    n = int(len(df))
+    return n > 0 and int(blank.sum()) / n >= 0.25
 
 
 def frame_row_count(key: str, sess) -> int:

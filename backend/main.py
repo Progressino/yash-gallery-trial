@@ -1595,6 +1595,41 @@ def _top_up_warm_cache_from_disk() -> None:
         cur = _warm_cache.get(key)
         cur_rows = int(len(cur)) if cur is not None and hasattr(cur, "__len__") else 0
         replace = cur_rows <= 0 or cur_rows < int(disk_rows * 0.9)
+        # Meesho: also replace when disk has far fewer blank OMS rows (post OMS-fill parquet).
+        if key == "meesho_df" and cur is not None and hasattr(cur, "columns"):
+            try:
+                bad = {"", "NAN", "NONE", "NAT", "MEESHO_TOTAL"}
+
+                def _blank_n(df) -> int:
+                    sku = (
+                        df["SKU"].astype(str).str.strip().str.upper()
+                        if "SKU" in df.columns
+                        else None
+                    )
+                    oms = (
+                        df["OMS_SKU"].astype(str).str.strip().str.upper()
+                        if "OMS_SKU" in df.columns
+                        else None
+                    )
+                    if sku is None and oms is None:
+                        return 0
+                    if sku is None:
+                        return int(oms.isin(bad).sum())
+                    if oms is None:
+                        return int(sku.isin(bad).sum())
+                    return int((sku.isin(bad) & oms.isin(bad)).sum())
+
+                cur_blank = _blank_n(cur)
+                disk_blank = _blank_n(val)
+                if disk_blank + 500 < cur_blank:
+                    replace = True
+                    log.info(
+                        "Warm cache meesho_df blank improvement disk=%d vs mem=%d — replacing",
+                        disk_blank,
+                        cur_blank,
+                    )
+            except Exception:
+                pass
         if key == "daily_inventory_history_df":
             try:
                 from .services.daily_inventory_history import (
