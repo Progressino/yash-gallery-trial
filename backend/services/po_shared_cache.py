@@ -452,9 +452,12 @@ def lookup_shared_cache(sess, body: dict) -> Optional[dict[str, Any]]:
             continue
         if mfp.get("existing_po") != fp.get("existing_po"):
             continue
-        if mfp.get("demand_basis", mfp.get("params", {}).get("demand_basis")) != (
-            fp.get("params") or {}
-        ).get("demand_basis"):
+        # Inventory changes must invalidate (soft path previously skipped this).
+        if int(mfp.get("inventory_rows") or 0) != int(fp.get("inventory_rows") or 0):
+            continue
+        if int(mfp.get("inventory_skus") or 0) != int(fp.get("inventory_skus") or 0):
+            continue
+        if str(mfp.get("inventory_snapshot") or "") != str(fp.get("inventory_snapshot") or ""):
             continue
         cache_key = str(meta.get("cache_key") or p.name.replace(".meta.json", ""))
         if not _parquet_path(cache_key).is_file():
