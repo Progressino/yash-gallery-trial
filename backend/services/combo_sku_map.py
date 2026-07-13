@@ -337,12 +337,17 @@ def resolve_demand_components(
     combo_map: Optional[ComboBom],
     *,
     strip_pl: bool = False,
+    attribute_combo_to_listing_only: bool = False,
 ) -> List[Tuple[str, float]]:
     """
     Map one listing/seller SKU to demand targets for PO nets.
 
     Prefers combo BOM on the raw listing key (before 1:1 mapping can drop
     sibling components). Falls back to canonical OMS key.
+
+    When ``attribute_combo_to_listing_only`` is True (quarterly File-matching),
+    combo listing keys stay on the listing identity and are NOT collapsed via
+    the 1:1 master map onto a component OMS SKU.
     """
     from .po_engine import _PL_RE, _strip_pl, canonical_oms_key
 
@@ -361,6 +366,9 @@ def resolve_demand_components(
     for cand in candidates:
         comps = lookup_combo_components(cand, bom)
         if comps:
+            if attribute_combo_to_listing_only:
+                listing = cand or _norm_key(stripped) or stripped
+                return [(listing, 1.0)] if listing else []
             return [(c, float(q)) for c, q in comps if c]
 
     if strip_pl:
@@ -373,8 +381,21 @@ def resolve_demand_components(
         mapped = canonical_oms_key(stripped, sku_mapping)
 
     if mapped:
+        # Combo stubs in the master map (listing → first component) must not
+        # collapse listing sales onto components for File-matching history.
+        if attribute_combo_to_listing_only:
+            mapped_comps = lookup_combo_components(mapped, bom)
+            raw_is_listing = any(lookup_combo_components(c, bom) for c in candidates)
+            if raw_is_listing:
+                listing = candidates[0] or stripped
+                return [(listing, 1.0)]
+            # If 1:1 map pointed at a combo listing key, keep that listing.
+            if mapped_comps:
+                return [(mapped, 1.0)]
         comps = lookup_combo_components(mapped, bom)
         if comps:
+            if attribute_combo_to_listing_only:
+                return [(mapped, 1.0)]
             return [(c, float(q)) for c, q in comps if c]
         return [(mapped, 1.0)]
     return []
@@ -387,18 +408,27 @@ def build_sku_explode_map(
     *,
     strip_pl: bool = False,
     retain_combo_listings: bool = False,
+    attribute_combo_to_listing_only: bool = False,
 ) -> Dict[str, List[Tuple[str, float]]]:
     out: Dict[str, List[Tuple[str, float]]] = {}
     bom = combo_map or {}
     for s in unique_skus:
         key = s if s is None or isinstance(s, str) else str(s)
         comps = resolve_demand_components(
-            key, sku_mapping, bom, strip_pl=strip_pl
+            key,
+            sku_mapping,
+            bom,
+            strip_pl=strip_pl,
+            attribute_combo_to_listing_only=attribute_combo_to_listing_only,
         )
         if not comps:
             out[key] = []
             continue
-        if retain_combo_listings and lookup_combo_components(key, bom):
+        if (
+            retain_combo_listings
+            and not attribute_combo_to_listing_only
+            and lookup_combo_components(key, bom)
+        ):
             # Keep the listing row (sales visibility) and still fan demand to components.
             listing = _norm_key(key) or str(key).strip()
             retained: List[Tuple[str, float]] = []
@@ -422,6 +452,7 @@ def explode_sku_qty_dataframe(
     combo_map: Optional[ComboBom] = None,
     strip_pl: bool = False,
     retain_combo_listings: bool = False,
+    attribute_combo_to_listing_only: bool = False,
 ) -> pd.DataFrame:
     """
     Fan listing SKUs out to combo components (qty × component multiplier).
@@ -429,6 +460,10 @@ def explode_sku_qty_dataframe(
     When ``retain_combo_listings`` is True, combo keys also keep a listing row at
     the original qty (for PO/quarterly visibility) while components still receive
     exploded demand for stocking.
+
+    When ``attribute_combo_to_listing_only`` is True, combo listing keys keep their
+    own identity (no component fan, no 1:1 collapse onto a component OMS) — used
+    for quarterly history that must match File/Deepdive SKU sales.
 
     When combo_map is empty, still applies 1:1 canonical / strip_pl resolution
     so callers can use this as a single canonicalize+explode step.
@@ -444,6 +479,7 @@ def explode_sku_qty_dataframe(
         combo_map or {},
         strip_pl=strip_pl,
         retain_combo_listings=retain_combo_listings,
+        attribute_combo_to_listing_only=attribute_combo_to_listing_only,
     )
 
     # Drop rows that resolve to nothing.

@@ -277,19 +277,21 @@ def _accumulate_shipment_frame(
     if work.empty:
         return 0
 
-    from .combo_sku_map import explode_sku_qty_dataframe
+    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
 
-    # Quarterly history: 1:1 canonicalize only (no combo fan-out). Matching File /
-    # Deepdive requires listing-level attribution; PO demand still explodes in sales_df.
+    # Quarterly history must match File/Deepdive: keep combo listing identity.
+    # Do NOT collapse 1592DPT34BLUE-XL → 1592YKBLUE-XL via master-map stubs, and
+    # do NOT fan listing sales onto components (that is for PO demand only).
     _ = canonical_oms  # call-site flag retained; explode uses strip_pl + mapping
     work = explode_sku_qty_dataframe(
         work,
         sku_col="SKU",
         qty_col="Qty",
         sku_mapping=sku_mapping,
-        combo_map={},
+        combo_map=resolve_active_combo_sku_map(),
         strip_pl=bool(strip_pl),
         retain_combo_listings=False,
+        attribute_combo_to_listing_only=True,
     )
     if work.empty:
         return 0
@@ -617,18 +619,20 @@ def _accumulate_sales_df_shipments(
     if work.empty:
         return 0
 
-    from .combo_sku_map import explode_sku_qty_dataframe
+    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
 
-    # sales_df may already include combo explode from build_sales_df — only 1:1
-    # canonicalize here so quarterly does not double-count components.
+    # sales_df may already include combo explode from build_sales_df — only
+    # canonicalize with listing-only combo handling so quarterly does not
+    # re-collapse combo stubs onto components.
     work = explode_sku_qty_dataframe(
         work,
         sku_col="SKU",
         qty_col="Qty",
         sku_mapping=sku_mapping,
-        combo_map={},
+        combo_map=resolve_active_combo_sku_map(),
         strip_pl=False,
         retain_combo_listings=False,
+        attribute_combo_to_listing_only=True,
     )
     work = work[work["SKU"].astype(str).str.len() > 0]
     if group_by_parent:

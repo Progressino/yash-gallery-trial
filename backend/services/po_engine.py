@@ -164,22 +164,19 @@ def _platform_shipment_history_part(
     tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
     tmp["Qty"] = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
     tmp["TxnType"] = work_df[txn_col].values if txn_col else "Shipment"
-    from .combo_sku_map import explode_sku_qty_dataframe
+    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
 
-    # Combo explode + 1:1 canonical / PL strip in one pass (combo listing keys
-    # must be resolved before last-wins 1:1 mapping drops sibling components).
+    # Quarterly File-matching: preserve combo listing keys (no component collapse).
     _ = canonical_oms  # kept for call-site compatibility; explode uses strip_pl flag
-    # Quarterly history must match File/Deepdive SKU sales: attribute units to the
-    # listing/OMS key after 1:1 map only. Combo explode is for PO demand (sales_df),
-    # not for quarter columns — exploding here inflates component SKUs vs File.
     tmp = explode_sku_qty_dataframe(
         tmp,
         sku_col="SKU",
         qty_col="Qty",
         sku_mapping=sku_mapping,
-        combo_map={},
+        combo_map=resolve_active_combo_sku_map(),
         strip_pl=bool(strip_pl),
         retain_combo_listings=False,
+        attribute_combo_to_listing_only=True,
     )
     return tmp.dropna(subset=["Date"])
 
@@ -399,16 +396,17 @@ def calculate_quarterly_history(
 
     # Combo / DPT listings stay as listing keys for quarterly history (match File).
     # PO demand explode happens separately in calculate_po / sales_df.
-    from .combo_sku_map import explode_sku_qty_dataframe
+    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
 
     hist = explode_sku_qty_dataframe(
         hist,
         sku_col="SKU",
         qty_col="Qty",
         sku_mapping=sku_mapping,
-        combo_map={},
+        combo_map=resolve_active_combo_sku_map(combo_sku_map),
         strip_pl=False,
         retain_combo_listings=False,
+        attribute_combo_to_listing_only=True,
     )
     if hist.empty:
         return pd.DataFrame()

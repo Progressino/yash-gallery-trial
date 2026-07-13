@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 34  # Sold=gross; quarterly no combo explode (match File)
+QUARTERLY_CACHE_SCHEMA = 35  # listing-only combo attribution; Sold=gross; restore history
 
 
 def normalize_quarterly_demand_basis(demand_basis: object) -> str:

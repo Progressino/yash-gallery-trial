@@ -166,6 +166,8 @@ def test_quarterly_history_keeps_combo_listing_without_component_fan():
             "Source": ["Meesho"],
         }
     )
+    # Master map stub that would otherwise collapse listing → component.
+    mapping = {"1003DPT21MULTI-L": "1003YKMUSTARD-L"}
     bom = {
         "1003DPT21MULTI-L": [
             ("1003YKMUSTARD-L", 1.0),
@@ -173,7 +175,7 @@ def test_quarterly_history_keeps_combo_listing_without_component_fan():
         ]
     }
     pivot = calculate_quarterly_history(
-        sales_df=sales, sku_mapping={}, n_quarters=4, combo_sku_map=bom
+        sales_df=sales, sku_mapping=mapping, n_quarters=4, combo_sku_map=bom
     )
 
     assert not pivot.empty
@@ -183,6 +185,24 @@ def test_quarterly_history_keeps_combo_listing_without_component_fan():
     assert "DPT21MULTI" not in skus
     listing = pivot.loc[pivot["OMS_SKU"] == "1003DPT21MULTI-L"].iloc[0]
     assert int(listing["Units_90d"]) == 2
+
+
+def test_attribute_combo_to_listing_only_ignores_master_map_stub():
+    from backend.services.combo_sku_map import explode_sku_qty_dataframe
+
+    df = pd.DataFrame({"SKU": ["1592DPT34BLUE-XL"], "Qty": [10.0]})
+    combo = {"1592DPT34BLUE-XL": [("1592YKBLUE-XL", 1.0), ("DPT34BLUE", 1.0)]}
+    mapping = {"1592DPT34BLUE-XL": "1592YKBLUE-XL"}
+    out = explode_sku_qty_dataframe(
+        df,
+        sku_col="SKU",
+        qty_col="Qty",
+        sku_mapping=mapping,
+        combo_map=combo,
+        attribute_combo_to_listing_only=True,
+    )
+    assert list(out["SKU"]) == ["1592DPT34BLUE-XL"]
+    assert float(out["Qty"].iloc[0]) == 10.0
 
 
 def test_merge_combo_sku_map_overlay():
