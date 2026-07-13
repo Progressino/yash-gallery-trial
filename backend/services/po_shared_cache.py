@@ -450,14 +450,21 @@ def lookup_shared_cache(sess, body: dict) -> Optional[dict[str, Any]]:
             continue
         if mfp.get("sales_through") != fp.get("sales_through"):
             continue
-        if mfp.get("existing_po") != fp.get("existing_po"):
+        # Empty/pre-hydrate sessions often report ep:N:0 / inv=0 — still allow hit;
+        # once session has real inventory/EP, require equality.
+        cur_ep = str(fp.get("existing_po") or "")
+        saved_ep = str(mfp.get("existing_po") or "")
+        if cur_ep and not cur_ep.rstrip().endswith(":0") and cur_ep != saved_ep:
             continue
-        # Inventory changes must invalidate (soft path previously skipped this).
-        if int(mfp.get("inventory_rows") or 0) != int(fp.get("inventory_rows") or 0):
+        cur_inv = int(fp.get("inventory_rows") or 0)
+        if cur_inv > 0 and cur_inv != int(mfp.get("inventory_rows") or 0):
             continue
-        if int(mfp.get("inventory_skus") or 0) != int(fp.get("inventory_skus") or 0):
+        cur_skus = int(fp.get("inventory_skus") or 0)
+        if cur_skus > 0 and cur_skus != int(mfp.get("inventory_skus") or 0):
             continue
-        if str(mfp.get("inventory_snapshot") or "") != str(fp.get("inventory_snapshot") or ""):
+        cur_snap = str(fp.get("inventory_snapshot") or "")
+        saved_snap = str(mfp.get("inventory_snapshot") or "")
+        if cur_snap and saved_snap and cur_snap != saved_snap:
             continue
         cache_key = str(meta.get("cache_key") or p.name.replace(".meta.json", ""))
         if not _parquet_path(cache_key).is_file():
@@ -624,6 +631,8 @@ def shared_cache_availability(sess, body: dict) -> dict[str, Any]:
 
 def invalidate_all_shared_caches() -> int:
     """Drop every shared PO calculate result (e.g. after Existing PO re-upload)."""
+    import traceback
+
     removed = 0
     for p in _shared_dir().glob("*.meta.json"):
         try:
@@ -633,6 +642,9 @@ def invalidate_all_shared_caches() -> int:
             removed += 1
         except Exception:
             continue
+    if removed:
+        stack = "".join(traceback.format_stack(limit=12))
+        _log.warning("invalidate_all_shared_caches removed=%s\n%s", removed, stack)
     return removed
 
 
