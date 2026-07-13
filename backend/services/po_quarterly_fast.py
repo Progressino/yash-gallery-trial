@@ -520,8 +520,13 @@ def _accumulate_tier1_platform_history(
     platform_day_keys: Set[PlatformDayKey],
     progress_cb: ProgressCb = None,
     demand_basis: str = "Sold",
-) -> None:
-    """Primary quarterly source — Tier-1 bulk + Tier-2 uploads (warm cache / disk / SQLite)."""
+) -> set[str]:
+    """Primary quarterly source — Tier-1 bulk + Tier-2 uploads (warm cache / disk / SQLite).
+
+    Returns platform names that loaded a non-empty Tier-1 frame covering the window
+    so Tier-3 gap-fill can skip them (avoids OOM re-reading hundreds of daily blobs).
+    """
+    covered: set[str] = set()
     if progress_cb:
         progress_cb(10, "Loading Tier-1 bulk platform history…")
     warm_frames = _warm_cache_platform_frames()
@@ -535,7 +540,10 @@ def _accumulate_tier1_platform_history(
         )
         if df is None or df.empty:
             continue
-        date_col = next((c for c in ("Date", "TxnDate") if c in df.columns), None)
+        date_col = next(
+            (c for c in ("Date", "TxnDate", "Reporting_Date") if c in df.columns),
+            None,
+        )
         if date_col:
             d = pd.to_datetime(df[date_col], errors="coerce")
             df = df[(d >= start_ts) & (d <= end_ts)]
@@ -560,6 +568,8 @@ def _accumulate_tier1_platform_history(
             platform_day_keys=platform_day_keys,
             demand_basis=demand_basis,
         )
+        covered.add(plat)
+    return covered
 
 
 def _accumulate_sales_df_shipments(
@@ -756,7 +766,7 @@ def calculate_quarterly_from_tier3_streaming(
     days_30: dict[str, Set[pd.Timestamp]] = defaultdict(set)
     platform_day_keys: Set[PlatformDayKey] = set()
 
-    _accumulate_tier1_platform_history(
+    tier1_covered = _accumulate_tier1_platform_history(
         sku_mapping,
         group_by_parent=group_by_parent,
         start_ts=start_ts,
@@ -773,6 +783,17 @@ def calculate_quarterly_from_tier3_streaming(
         demand_basis=demand_basis,
     )
 
+    skip_env = {
+        p.strip().lower()
+        for p in (os.environ.get("PO_QUARTERLY_SKIP_TIER3") or "").split(",")
+        if p.strip()
+    }
+    skip_tier3 = {p.lower() for p in tier1_covered} | skip_env
+    # Restored Amazon MTR already spans the quarterly window — never re-scan
+    # hundreds of amazon Tier-3 blobs (OOM on 6.5GB hosts).
+    if "amazon" in skip_tier3 or "amazon" in {p.lower() for p in tier1_covered}:
+        skip_tier3.add("amazon")
+
     conn = _get_conn()
     clause = _tier3_window_sql_clause()
     count_sql = f"""
@@ -788,16 +809,25 @@ def calculate_quarterly_from_tier3_streaming(
           AND ({clause})
         ORDER BY file_date ASC
     """
+    plats_for_tier3 = [
+        (plat, sp, ca)
+        for plat, sp, ca in _PLATFORM_SPECS
+        if plat.lower() not in skip_tier3
+    ]
     total = 0
-    for plat, _sp, _ca in _PLATFORM_SPECS:
+    for plat, _sp, _ca in plats_for_tier3:
         row = conn.execute(count_sql, (plat, s1, s0)).fetchone()
         total += int(row[0] if row else 0)
 
     if progress_cb:
-        progress_cb(8, f"Gap-filling from {total} Tier-3 daily file(s)…")
+        skipped = ",".join(sorted(skip_tier3)) or "none"
+        progress_cb(
+            8,
+            f"Gap-filling from {total} Tier-3 daily file(s) (skip: {skipped})…",
+        )
 
     done = 0
-    for plat, _sp, _ca in _PLATFORM_SPECS:
+    for plat, _sp, _ca in plats_for_tier3:
         rows = conn.execute(select_sql, (plat, s1, s0))
         for _fn, blob in rows:
             done += 1
