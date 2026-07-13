@@ -131,6 +131,22 @@ def normalize_planning_date(body: dict) -> str:
     return str(pd.Timestamp.now(tz=IST).normalize().date())
 
 
+def _frame_for_fingerprint(sess, attr: str) -> pd.DataFrame:
+    """Prefer session frame; fall back to warm/disk so lookup works pre-hydrate."""
+    df = getattr(sess, attr, None)
+    if df is not None and not getattr(df, "empty", True):
+        return df
+    try:
+        from .shared_frames import warm_frame
+
+        warm = warm_frame(attr, sess)
+        if warm is not None and not getattr(warm, "empty", True):
+            return warm
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
 def _sales_through(sess) -> str:
     """Server-wide sales freshness for cache fingerprint (not per-session pointers)."""
     try:
@@ -148,12 +164,21 @@ def _sales_through(sess) -> str:
 
 def _existing_po_fingerprint(sess) -> str:
     """Changes whenever the uploaded Existing PO sheet is replaced or its totals change."""
-    ep = getattr(sess, "existing_po_df", None)
+    ep = _frame_for_fingerprint(sess, "existing_po_df")
     gen = int(getattr(sess, "existing_po_generation", 0) or 0)
-    if ep is None or getattr(ep, "empty", True):
-        return f"ep:{gen}:0"
     uploaded = str(getattr(sess, "existing_po_uploaded_at", "") or "")
     fn = str(getattr(sess, "existing_po_filename", "") or "")
+    try:
+        from .existing_po import read_existing_po_disk_meta
+
+        disk = read_existing_po_disk_meta() or {}
+        gen = max(gen, int(disk.get("existing_po_generation") or 0))
+        uploaded = uploaded or str(disk.get("existing_po_uploaded_at") or "")
+        fn = fn or str(disk.get("existing_po_filename") or "")
+    except Exception:
+        pass
+    if ep is None or getattr(ep, "empty", True):
+        return f"ep:{gen}:0"
     n = int(len(ep))
     sku_n = 0
     if "OMS_SKU" in ep.columns:
@@ -167,7 +192,7 @@ def _existing_po_fingerprint(sess) -> str:
 
 def _sku_status_fingerprint(sess) -> str:
     """Changes when SKU status / lead sheet is uploaded or closed counts shift."""
-    df = getattr(sess, "sku_status_lead_df", None)
+    df = _frame_for_fingerprint(sess, "sku_status_lead_df")
     if df is None or getattr(df, "empty", True):
         return "ss:0"
     n = int(len(df))
@@ -184,6 +209,15 @@ def _sku_status_fingerprint(sess) -> str:
 def _sku_mapping_fingerprint(sess) -> str:
     """Changes when SKU mapping master is merged or replaced."""
     m = getattr(sess, "sku_mapping", None) or {}
+    if not m:
+        try:
+            import backend.main as _main
+
+            warm = (_main._warm_cache or {}).get("sku_mapping")
+            if isinstance(warm, dict) and warm:
+                m = warm["mapping"] if isinstance(warm.get("mapping"), dict) else warm
+        except Exception:
+            m = {}
     if not m:
         return "map:0"
     return f"map:{len(m)}"
@@ -251,19 +285,36 @@ def invalidate_po_after_sales_or_returns_change(sess) -> None:
         _log.exception("invalidate_platform_build_cache after data change failed")
 
 
+def _inventory_snapshot_for_fp(sess) -> str:
+    s = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
+    if s:
+        return s
+    try:
+        from .daily_inventory_history import read_daily_inventory_history_disk_meta
+
+        meta = read_daily_inventory_history_disk_meta() or {}
+        for k in ("inventory_snapshot_date", "snapshot_date", "as_of", "daily_inventory_history_as_of"):
+            v = str(meta.get(k) or "").strip()[:10]
+            if v:
+                return v
+    except Exception:
+        pass
+    return ""
+
+
 def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
     """Inputs that must match for a shared PO table to stay valid."""
     planning = normalize_planning_date(body)
-    inv = getattr(sess, "inventory_df_variant", None)
+    inv = _frame_for_fingerprint(sess, "inventory_df_variant")
     inv_rows = int(len(inv)) if inv is not None and hasattr(inv, "__len__") else 0
     inv_skus = 0
     if inv is not None and not getattr(inv, "empty", True) and "OMS_SKU" in inv.columns:
         inv_skus = int(inv["OMS_SKU"].astype(str).nunique())
 
-    sales = getattr(sess, "sales_df", None)
+    sales = _frame_for_fingerprint(sess, "sales_df")
     sales_rows = int(len(sales)) if sales is not None and hasattr(sales, "__len__") else 0
 
-    hist = getattr(sess, "daily_inventory_history_df", None)
+    hist = _frame_for_fingerprint(sess, "daily_inventory_history_df")
     hist_rows = int(len(hist)) if hist is not None and hasattr(hist, "__len__") else 0
 
     params = _calc_params_for_fingerprint(body)
@@ -298,7 +349,7 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
         "sales_rows": sales_rows,
         "inventory_rows": inv_rows,
         "inventory_skus": inv_skus,
-        "inventory_snapshot": str(getattr(sess, "inventory_snapshot_date", "") or ""),
+        "inventory_snapshot": _inventory_snapshot_for_fp(sess),
         "inventory_history_rows": hist_rows,
         # Intentionally omit warm_cache_generation / pipeline_snapshot_hash —
         # those change on every process restart and were causing shared-cache
@@ -369,20 +420,49 @@ def lookup_shared_cache(sess, body: dict) -> Optional[dict[str, Any]]:
     key, fp = build_cache_key(sess, body)
     meta_path = _meta_path(key)
     parquet = _parquet_path(key)
-    if not meta_path.is_file() or not parquet.is_file():
+    if meta_path.is_file() and parquet.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = None
+        if meta and _meta_is_fresh(meta) and meta.get("fingerprint") == fp and not _shared_cache_stale_vs_disk(meta):
+            meta["cache_key"] = key
+            return meta
+
+    # Soft match: pre-hydrate sessions often differ on row counts / snapshot strings
+    # even when the PO inputs (params + sales_through + existing PO) are identical.
+    planning = str(fp.get("planning_date") or "")[:10]
+    if not planning:
         return None
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if not _meta_is_fresh(meta):
-        return None
-    if meta.get("fingerprint") != fp:
-        return None
-    if _shared_cache_stale_vs_disk(meta):
-        return None
-    meta["cache_key"] = key
-    return meta
+    for p in sorted(_shared_dir().glob(f"{planning}_*.meta.json"), reverse=True):
+        try:
+            meta = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not _meta_is_fresh(meta):
+            continue
+        if _shared_cache_stale_vs_disk(meta):
+            continue
+        mfp = meta.get("fingerprint") if isinstance(meta.get("fingerprint"), dict) else {}
+        if mfp.get("params") != fp.get("params"):
+            continue
+        if mfp.get("po_merge_version") != fp.get("po_merge_version"):
+            continue
+        if mfp.get("sales_through") != fp.get("sales_through"):
+            continue
+        if mfp.get("existing_po") != fp.get("existing_po"):
+            continue
+        if mfp.get("demand_basis", mfp.get("params", {}).get("demand_basis")) != (
+            fp.get("params") or {}
+        ).get("demand_basis"):
+            continue
+        cache_key = str(meta.get("cache_key") or p.name.replace(".meta.json", ""))
+        if not _parquet_path(cache_key).is_file():
+            continue
+        meta["cache_key"] = cache_key
+        _log.info("PO shared cache soft-hit key=%s", cache_key[:20])
+        return meta
+    return None
 
 
 def save_shared_cache(
