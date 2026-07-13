@@ -227,7 +227,7 @@ def test_tier1_records_days_into_empty_keyset_so_tier3_dedups():
 # ── Flipkart Event Sub Type sign logic ───────────────────────────────────────
 
 def _make_quarterly_kwargs(q_label_map: dict) -> dict:
-    """Shared kwargs for accumulate tests."""
+    """Shared kwargs for accumulate tests (Net signing — matches historical assertions)."""
     today = pd.Timestamp.today()
     start_ts = pd.Timestamp("2024-04-01")
     end_ts = pd.Timestamp("2026-06-30")
@@ -244,6 +244,7 @@ def _make_quarterly_kwargs(q_label_map: dict) -> dict:
         units_90=defaultdict(int),
         units_30=defaultdict(int),
         days_30=defaultdict(set),
+        demand_basis="Net",
     )
 
 
@@ -322,6 +323,7 @@ def test_amazon_sales_df_net_excludes_cancel_from_quarterly():
         units_30=units_30,
         days_30=days_30,
         platform_day_keys=set(),
+        demand_basis="Net",
     )
     assert n > 0
     assert quarter_sums[("AMZ-SKU-FAST", quarter_col_name(fy, qn))] == 10
@@ -415,10 +417,71 @@ def test_flipkart_sales_df_returncancel_adds():
         units_30=units_30,
         days_30=days_30,
         platform_day_keys=set(),
+        demand_basis="Net",
     )
     assert n > 0
     # Net = 15 + 2 - 3 - 1 = 13
     assert quarter_sums[("FK-SKU", quarter_col_name(fy, qn))] == 13
+
+
+def test_sold_gross_ignores_refund_and_cancel():
+    """Sold (Gross) counts Shipment only — Refund/Cancel/ReturnCancel do not change qty."""
+    q_label_map = {(2025, 4): "Jan-Mar 2025"}
+    kwargs = _make_quarterly_kwargs(q_label_map)
+    kwargs["demand_basis"] = "Sold"
+    kwargs["quarter_sums"] = defaultdict(int)
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2025-01-20"] * 4),
+        "OMS_SKU": ["SKU-GROSS"] * 4,
+        "TxnType": ["Shipment", "ReturnCancel", "Refund", "Cancel"],
+        "Quantity": [20, 3, 4, 1],
+    })
+    _accumulate_shipment_frame(df, "flipkart", None, **kwargs)
+    assert kwargs["quarter_sums"][("SKU-GROSS", "Jan-Mar 2025")] == 20
+
+
+def test_combo_listing_retained_in_quarterly_sold():
+    """Combo explode keeps listing SKU row (qty=1×) plus component demand."""
+    from backend.services.combo_sku_map import explode_sku_qty_dataframe
+
+    df = pd.DataFrame({"SKU": ["COMBO-LISTING-M"], "Qty": [10.0]})
+    combo = {"COMBO-LISTING-M": [("COMP-A-M", 1.0), ("COMP-B-M", 1.0)]}
+    out = explode_sku_qty_dataframe(
+        df,
+        sku_col="SKU",
+        qty_col="Qty",
+        sku_mapping={},
+        combo_map=combo,
+        strip_pl=False,
+        retain_combo_listings=True,
+    )
+    by_sku = dict(zip(out["SKU"], out["Qty"]))
+    assert by_sku["COMBO-LISTING-M"] == 10.0
+    assert by_sku["COMP-A-M"] == 10.0
+    assert by_sku["COMP-B-M"] == 10.0
+    assert "_Combo_Fan" in out.columns
+    fan_by = dict(zip(out["SKU"], out["_Combo_Fan"]))
+    assert fan_by["COMBO-LISTING-M"] is False or fan_by["COMBO-LISTING-M"] == False
+    assert fan_by["COMP-A-M"] is True or fan_by["COMP-A-M"] == True
+    assert fan_by["COMP-B-M"] is True or fan_by["COMP-B-M"] == True
+
+
+def test_quarterly_sold_does_not_fan_combo_onto_components():
+    """Quarterly Sold(Gross) attributes combo listing sales to the listing only."""
+    q_label_map = {(2025, 4): "Jan-Mar 2025"}
+    kwargs = _make_quarterly_kwargs(q_label_map)
+    kwargs["demand_basis"] = "Sold"
+    kwargs["quarter_sums"] = defaultdict(int)
+    df = pd.DataFrame({
+        "Date": pd.to_datetime(["2025-01-15"]),
+        "OMS_SKU": ["DPT34BLUE"],
+        "TxnType": ["Shipment"],
+        "Quantity": [5],
+    })
+    _accumulate_shipment_frame(df, "flipkart", None, **kwargs)
+    assert kwargs["quarter_sums"][("DPT34BLUE", "Jan-Mar 2025")] == 5
+    # Must NOT create phantom component keys from explode
+    assert all(not str(k[0]).startswith("1592YKBLUE") for k in kwargs["quarter_sums"])
 
 
 def test_meesho_quarterly_backfills_sku_from_suborder_sibling():
@@ -462,6 +525,7 @@ def test_meesho_quarterly_backfills_sku_from_suborder_sibling():
         units_90=units_90,
         units_30=units_30,
         days_30=days_30,
+        demand_basis="Net",
     )
     assert n == 2
     assert quarter_sums[("1055YKGREEN-XS", "Oct-Dec 2025")] == 1
@@ -641,6 +705,7 @@ def test_amazon_quarterly_1379_xxl_q1_2025_matches_deepdive_net():
         units_90=defaultdict(int),
         units_30=defaultdict(int),
         days_30=defaultdict(set),
+        demand_basis="Net",
     )
     assert n > 0
     po_q1 = quarter_sums[("1379YKGREEN-XXL", "Jan-Mar 2025")]

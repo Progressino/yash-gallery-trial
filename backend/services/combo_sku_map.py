@@ -468,6 +468,8 @@ def explode_sku_qty_dataframe(
             )
             scaled = True
         _ = scaled
+        if retain_combo_listings:
+            out["_Combo_Fan"] = False
         return out
 
     keep = work.loc[lengths > 0]
@@ -476,12 +478,17 @@ def explode_sku_qty_dataframe(
     out = keep.loc[idx].reset_index(drop=True)
     new_skus: List[str] = []
     new_mults: List[float] = []
+    is_fan: List[bool] = []
     for s, n in zip(keep[sku_col].tolist(), keep_len.tolist()):
         comps = explode_map[s]
+        listing = _norm_key(s) or str(s).strip()
         for i in range(n):
             c, q = comps[i]
             new_skus.append(c)
             new_mults.append(float(q))
+            # Retained listing row (first identity) is not fan demand; component
+            # copies are. Used so quarterly can ignore combo-inflated components.
+            is_fan.append(bool(retain_combo_listings and c != listing))
     out[sku_col] = new_skus
     mult_arr = np.asarray(new_mults, dtype=float)
     if qty_col in out.columns:
@@ -490,6 +497,8 @@ def explode_sku_qty_dataframe(
         out["Units_Effective"] = (
             pd.to_numeric(out["Units_Effective"], errors="coerce").fillna(0) * mult_arr
         )
+    if retain_combo_listings:
+        out["_Combo_Fan"] = is_fan
     return out
 
 

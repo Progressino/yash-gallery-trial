@@ -11,11 +11,25 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 32  # Combo listings retained in quarterly + component explode
+QUARTERLY_CACHE_SCHEMA = 34  # Sold=gross; quarterly no combo explode (match File)
 
 
-def quarterly_cache_key(group_by_parent: bool, n_quarters: int) -> tuple:
-    return (QUARTERLY_CACHE_SCHEMA, bool(group_by_parent), int(n_quarters))
+def normalize_quarterly_demand_basis(demand_basis: object) -> str:
+    s = str(demand_basis or "Sold").strip().lower()
+    return "net" if s == "net" else "sold"
+
+
+def quarterly_cache_key(
+    group_by_parent: bool,
+    n_quarters: int,
+    demand_basis: object = "Sold",
+) -> tuple:
+    return (
+        QUARTERLY_CACHE_SCHEMA,
+        bool(group_by_parent),
+        int(n_quarters),
+        normalize_quarterly_demand_basis(demand_basis),
+    )
 
 
 _QUARTER_META_COLS = frozenset(
@@ -300,6 +314,7 @@ def _build_via_streaming(
     n_quarters: int,
     progress_cb: Optional[Callable[[int, str], None]] = None,
     acquire_memory_lock: bool = True,
+    demand_basis: str = "Sold",
 ) -> dict[str, Any]:
     from .po_quarterly_fast import calculate_quarterly_from_tier3_streaming
 
@@ -311,6 +326,7 @@ def _build_via_streaming(
             group_by_parent=group_by_parent,
             n_quarters=n_quarters,
             progress_cb=progress_cb,
+            demand_basis=demand_basis,
         )
         return _pivot_to_payload(pivot, n_quarters=n_quarters)
 
@@ -361,6 +377,7 @@ def build_quarterly_payload(
     group_by_parent: bool = False,
     n_quarters: int = 8,
     progress_cb: Optional[Callable[[int, str], None]] = None,
+    demand_basis: str = "Sold",
 ) -> dict[str, Any]:
     """Never merge Tier-3 into session — warm-cache frames or streaming aggregate only."""
     _ensure_session_operational_frames(sess)
@@ -393,6 +410,7 @@ def build_quarterly_payload(
             group_by_parent=group_by_parent,
             n_quarters=n_quarters,
             progress_cb=progress_cb,
+            demand_basis=demand_basis,
         )
 
     # Never use session platform frames when Tier-3 exists — span can look wide while
@@ -433,6 +451,7 @@ def build_quarterly_payload(
         group_by_parent=group_by_parent,
         n_quarters=n_quarters,
         progress_cb=progress_cb,
+        demand_basis=demand_basis,
     )
 
 
@@ -442,6 +461,7 @@ def try_build_quarterly_payload_sync(
     group_by_parent: bool = False,
     n_quarters: int = 8,
     timeout_sec: Optional[float] = None,
+    demand_basis: str = "Sold",
 ) -> Optional[dict[str, Any]]:
     raw = (os.environ.get("QUARTERLY_SYNC_TIMEOUT_SEC") or "45").strip()
     try:
@@ -455,6 +475,7 @@ def try_build_quarterly_payload_sync(
             sess,
             group_by_parent=group_by_parent,
             n_quarters=n_quarters,
+            demand_basis=demand_basis,
         )
         try:
             return fut.result(timeout=limit)
@@ -468,6 +489,7 @@ def build_incremental_quarterly_payload(
     group_by_parent: bool = False,
     n_recent_quarters: int = 2,
     progress_cb: Optional[Callable[[int, str], None]] = None,
+    demand_basis: str = "Sold",
 ) -> dict[str, Any]:
     """Refresh only recent quarters + rolling ADS metrics (after Tier-3 daily uploads)."""
     import datetime
@@ -491,6 +513,7 @@ def build_incremental_quarterly_payload(
         group_by_parent=group_by_parent,
         n_quarters=recent_n,
         progress_cb=progress_cb,
+        demand_basis=demand_basis,
     )
 
 
@@ -499,6 +522,7 @@ def get_quarterly_payload_for_po(
     *,
     group_by_parent: bool = False,
     n_quarters: int = 8,
+    demand_basis: str = "Sold",
 ) -> dict[str, Any]:
     """Fast path for Calculate PO — shared cache only, never blocks on a full rebuild."""
     from .po_quarterly_cache import (
@@ -507,7 +531,7 @@ def get_quarterly_payload_for_po(
         schedule_quarterly_refresh_if_stale,
     )
 
-    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
+    cache_key = quarterly_cache_key(group_by_parent, n_quarters, demand_basis)
     sess_cache = (getattr(sess, "_quarterly_cache", None) or {}).get(cache_key)
     if sess_cache and sess_cache.get("loaded") and not quarterly_is_stale(sess_cache):
         return normalize_quarterly_payload(sess_cache, n_quarters=n_quarters)
@@ -531,13 +555,17 @@ def warmup_quarterly_cache(
     *,
     group_by_parent: bool = False,
     n_quarters: int = 8,
+    demand_basis: str = "Sold",
 ) -> Tuple[dict[str, Any], bool]:
     """Return cached quarterly data; schedule background refresh when stale."""
     from .po_quarterly_cache import schedule_quarterly_refresh_if_stale
 
-    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
+    cache_key = quarterly_cache_key(group_by_parent, n_quarters, demand_basis)
     payload = get_quarterly_payload_for_po(
-        sess, group_by_parent=group_by_parent, n_quarters=n_quarters
+        sess,
+        group_by_parent=group_by_parent,
+        n_quarters=n_quarters,
+        demand_basis=demand_basis,
     )
     started = schedule_quarterly_refresh_if_stale(
         cache_key, sess, force_full=not payload.get("loaded")
@@ -670,7 +698,10 @@ def attach_quarterly_columns_to_po_df(
         return po_df
 
     payload = get_quarterly_payload_for_po(
-        sess, group_by_parent=group_by_parent, n_quarters=n_quarters
+        sess,
+        group_by_parent=group_by_parent,
+        n_quarters=n_quarters,
+        demand_basis=demand_basis,
     )
 
     if not payload or not payload.get("loaded") or not payload.get("rows"):
@@ -780,7 +811,7 @@ def schedule_shared_quarterly_prewarm() -> None:
                 store_shared_quarterly,
             )
 
-            key = quarterly_cache_key(False, 8)
+            key = quarterly_cache_key(False, 8, "Sold")
             existing = get_shared_quarterly(key)
             if existing and existing.get("loaded") and not quarterly_is_stale(existing):
                 return

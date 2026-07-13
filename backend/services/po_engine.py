@@ -164,19 +164,22 @@ def _platform_shipment_history_part(
     tmp["Date"] = pd.to_datetime(tmp["Date"], errors="coerce")
     tmp["Qty"] = pd.to_numeric(tmp["Qty"], errors="coerce").fillna(0)
     tmp["TxnType"] = work_df[txn_col].values if txn_col else "Shipment"
-    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+    from .combo_sku_map import explode_sku_qty_dataframe
 
     # Combo explode + 1:1 canonical / PL strip in one pass (combo listing keys
     # must be resolved before last-wins 1:1 mapping drops sibling components).
     _ = canonical_oms  # kept for call-site compatibility; explode uses strip_pl flag
+    # Quarterly history must match File/Deepdive SKU sales: attribute units to the
+    # listing/OMS key after 1:1 map only. Combo explode is for PO demand (sales_df),
+    # not for quarter columns — exploding here inflates component SKUs vs File.
     tmp = explode_sku_qty_dataframe(
         tmp,
         sku_col="SKU",
         qty_col="Qty",
         sku_mapping=sku_mapping,
-        combo_map=resolve_active_combo_sku_map(),
+        combo_map={},
         strip_pl=bool(strip_pl),
-        retain_combo_listings=True,
+        retain_combo_listings=False,
     )
     return tmp.dropna(subset=["Date"])
 
@@ -184,11 +187,19 @@ def _platform_shipment_history_part(
 def _sales_shipment_history_part(sales_df: pd.DataFrame) -> pd.DataFrame:
     if sales_df is None or sales_df.empty or "Sku" not in sales_df.columns:
         return pd.DataFrame()
+    src = sales_df
+    # Ignore combo-fan component copies for history / File-matching paths.
+    if "_Combo_Fan" in sales_df.columns:
+        fan = sales_df["_Combo_Fan"].fillna(False).astype(bool)
+        if fan.any():
+            src = sales_df.loc[~fan]
+            if src.empty:
+                return pd.DataFrame()
     cols = ["Sku", "TxnDate", "Quantity", "Transaction Type"]
-    src_col = next((c for c in ("Source", "Platform", "Channel") if c in sales_df.columns), None)
+    src_col = next((c for c in ("Source", "Platform", "Channel") if c in src.columns), None)
     if src_col:
         cols.append(src_col)
-    tmp = sales_df[cols].copy()
+    tmp = src[cols].copy()
     if src_col:
         tmp.columns = ["SKU", "Date", "Qty", "TxnType", "_Source"]
     else:
@@ -344,6 +355,7 @@ def calculate_quarterly_history(
     n_quarters: int = 8,
     retain_bundled_listing_skus: Optional[set[str]] = None,
     combo_sku_map: Optional[dict] = None,
+    demand_basis: str = "Sold",
 ) -> pd.DataFrame:
     sales_part = _sales_shipment_history_part(sales_df)
     plat_parts = _collect_platform_shipment_history_parts(
@@ -355,15 +367,13 @@ def calculate_quarterly_history(
         return pd.DataFrame()
 
     hist = pd.concat(parts, ignore_index=True)
-    # Net sold = Sale + ReturnCancel (positive) − Return/Cancellation (negative).
-    _POSITIVE_TXN = frozenset({"shipment", "returncancel"})
-    _NEGATIVE_TXN = frozenset({"refund", "cancel"})
-    _ALL_NET_TXN = _POSITIVE_TXN | _NEGATIVE_TXN
+    # Sold (Gross) = Shipment only. Net = Sale + ReturnCancel − Refund − Cancel.
+    from .po_quarterly_fast import _NET_TXN_TYPES, _qty_signs_for_demand_basis
+
     _txn = hist["TxnType"].astype(str).str.strip().str.lower()
-    hist = hist[_txn.isin(_ALL_NET_TXN)].copy()
+    hist = hist[_txn.isin(_NET_TXN_TYPES)].copy()
     hist["Date"] = pd.to_datetime(hist["Date"], errors="coerce")
     hist = hist.dropna(subset=["Date"])
-    hist["Qty"] = pd.to_numeric(hist["Qty"], errors="coerce").fillna(0)
     _txn_lower = hist["TxnType"].astype(str).str.strip().str.lower()
     _plat = (
         hist["_Platform"].astype(str).str.strip().str.lower()
@@ -376,31 +386,29 @@ def calculate_quarterly_history(
         else pd.Series("", index=hist.index)
     )
     _is_amazon = (_plat == "amazon") | _src.eq("amazon")
-    # Amazon MTR net = Shipment − Refund (cancels / free replacements excluded from demand).
-    _neg = _txn_lower.eq("refund") | (~_is_amazon & _txn_lower.eq("cancel"))
-    _zero = _is_amazon & _txn_lower.isin(["cancel", "freereplacement"])
-    hist["Qty"] = np.where(
-        _zero,
-        0,
-        np.where(_neg, -hist["Qty"].abs(), hist["Qty"].abs()),
+    hist["Qty"] = _qty_signs_for_demand_basis(
+        _txn_lower,
+        hist["Qty"],
+        demand_basis=demand_basis,
+        is_amazon=_is_amazon,
     )
     hist = hist.drop(columns=["_Platform", "_Source"], errors="ignore")
     hist = hist[hist["Qty"] != 0]
     if hist.empty:
         return pd.DataFrame()
 
-    # Combo / DPT listings → component OMS SKUs (exact PO nets), then canonical keys.
-    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+    # Combo / DPT listings stay as listing keys for quarterly history (match File).
+    # PO demand explode happens separately in calculate_po / sales_df.
+    from .combo_sku_map import explode_sku_qty_dataframe
 
-    _combo = resolve_active_combo_sku_map(combo_sku_map)
     hist = explode_sku_qty_dataframe(
         hist,
         sku_col="SKU",
         qty_col="Qty",
         sku_mapping=sku_mapping,
-        combo_map=_combo,
+        combo_map={},
         strip_pl=False,
-        retain_combo_listings=True,
+        retain_combo_listings=False,
     )
     if hist.empty:
         return pd.DataFrame()

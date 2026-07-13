@@ -635,7 +635,11 @@ export default function POEngine() {
   const [materialQty, setMaterialQty] = useState<Record<string, number>>({})
 
   const fetchQuarterlyWithPoll = async (seq: number): Promise<void> => {
-    const paramsQ = { group_by_parent: params.group_by_parent, n_quarters: 8 }
+    const paramsQ = {
+      group_by_parent: params.group_by_parent,
+      n_quarters: 8,
+      demand_basis: params.demand_basis,
+    }
     const maxPolls = 90
     for (let poll = 0; poll < maxPolls; poll++) {
       if (seq !== poRunSeqRef.current) return
@@ -726,13 +730,19 @@ export default function POEngine() {
   }
 
   const quarterlyAutoFetch = useRef(false)
+  const quarterlyBasisRef = useRef(params.demand_basis)
   useEffect(() => {
     if (activeTab !== 'quarterly') return
+    if (quarterlyBasisRef.current !== params.demand_basis) {
+      quarterlyBasisRef.current = params.demand_basis
+      quarterlyAutoFetch.current = false
+      setQuarterly({ loaded: false, rows: [], columns: [] })
+    }
     if (quarterly?.loaded && (quarterly.rows?.length ?? 0) > 0) return
     if (quarterlyLoading || quarterlyAutoFetch.current) return
     quarterlyAutoFetch.current = true
     void runQuarterlyOnly()
-  }, [activeTab, quarterly?.loaded, quarterly?.rows?.length, quarterlyLoading])
+  }, [activeTab, quarterly?.loaded, quarterly?.rows?.length, quarterlyLoading, params.demand_basis])
 
   const markPoTableStaleAfterLedgerChange = useCallback((serverMessage?: string) => {
     if (result?.ok && (result.rows?.length ?? 0) > 0) {
@@ -1496,7 +1506,7 @@ export default function POEngine() {
                   onChange={e => setParams({ ...params, demand_basis: e.target.value })}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                 >
-                  <option value="Sold">Sold</option>
+                  <option value="Sold">Sold (Gross)</option>
                   <option value="Net">Net</option>
                 </select>
               </div>
@@ -2698,7 +2708,7 @@ export default function POEngine() {
                   onChange={e => setShipParams({ ...shipParams, demand_basis: e.target.value })}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                 >
-                  <option value="Sold">Sold</option>
+                  <option value="Sold">Sold (Gross)</option>
                   <option value="Net">Net</option>
                 </select>
               </div>

@@ -971,6 +971,7 @@ def build_sales_df(
                     sku_mapping=None,  # keep raw listing keys for BOM lookup
                     combo_map=_combo,
                     strip_pl=False,
+                    retain_combo_listings=True,
                 )
     except Exception:
         pass

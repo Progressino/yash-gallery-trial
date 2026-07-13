@@ -77,6 +77,36 @@ _NEGATIVE_TXN_TYPES = frozenset({"refund", "cancel"})
 _NET_TXN_TYPES = _POSITIVE_TXN_TYPES | _NEGATIVE_TXN_TYPES
 
 
+def normalize_quarterly_demand_basis(demand_basis: object) -> str:
+    """``sold`` = gross shipments; ``net`` = shipments − returns/cancels."""
+    s = str(demand_basis or "Sold").strip().lower()
+    return "net" if s == "net" else "sold"
+
+
+def _qty_signs_for_demand_basis(
+    txn_lower: pd.Series,
+    qty: pd.Series,
+    *,
+    demand_basis: str,
+    is_amazon: object = False,
+) -> np.ndarray:
+    """Apply Sold(Gross) vs Net signing for quarterly qty aggregation."""
+    basis = normalize_quarterly_demand_basis(demand_basis)
+    q = pd.to_numeric(qty, errors="coerce").fillna(0)
+    txn = txn_lower.astype(str).str.strip().str.lower()
+    if basis == "sold":
+        # Gross: count shipments only (matches seller "sold units" / File exports).
+        return np.where(txn.eq("shipment"), q.abs(), 0.0)
+    if isinstance(is_amazon, pd.Series):
+        amz = is_amazon.fillna(False).astype(bool)
+    else:
+        amz = bool(is_amazon)
+        amz = pd.Series(amz, index=txn.index)
+    neg = txn.eq("refund") | (~amz & txn.eq("cancel"))
+    zero = amz & txn.isin(["cancel", "freereplacement"])
+    return np.where(zero, 0.0, np.where(neg, -q.abs(), q.abs()))
+
+
 def _quarter_seq(n_quarters: int) -> list[tuple[int, int]]:
     today = pd.Timestamp.today()
     cur_fy, cur_q = get_indian_fy_quarter(today)
@@ -140,6 +170,7 @@ def _accumulate_shipment_frame(
     days_30: dict[str, Set[pd.Timestamp]],
     platform_day_keys: Optional[Set[PlatformDayKey]] = None,
     skip_days: Optional[Set[PlatformDayKey]] = None,
+    demand_basis: str = "Sold",
 ) -> int:
     """Add one blob's shipment rows into aggregate dicts. Returns rows processed."""
     from .daily_store import _PLATFORM_METRICS_COLUMNS
@@ -208,9 +239,7 @@ def _accumulate_shipment_frame(
     if not sku_col or not date_col or not qty_col:
         return 0
 
-    # Net sold = Sale + ReturnCancel (positive) − Return − Cancellation (negative).
-    # Prior versions only counted "Shipment" (gross); now all four event types are
-    # included with the correct sign so the quarterly reflects true net sold units.
+    # Sold (Gross) = Shipment only. Net = Sale + ReturnCancel − Refund − Cancel.
     ship_mask = pd.Series(True, index=df.index)
     if txn_col:
         _txn_str = df[txn_col].astype(str).str.strip().str.lower()
@@ -228,18 +257,11 @@ def _accumulate_shipment_frame(
             rename[asin_col] = "ASIN"
         work = work.rename(columns=rename)
         _txn_lower = work["_Txn"].astype(str).str.strip().str.lower()
-        if platform == "amazon":
-            # Amazon MTR net: Shipment − Refund (cancels / free replacements not demand).
-            _neg = _txn_lower == "refund"
-            _zero = _txn_lower.isin(["cancel", "freereplacement"])
-        else:
-            _neg = _txn_lower.isin(_NEGATIVE_TXN_TYPES)
-            _zero = pd.Series(False, index=work.index)
-        work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
-        work["Qty"] = np.where(
-            _zero,
-            0,
-            np.where(_neg, -work["Qty"].abs(), work["Qty"].abs()),
+        work["Qty"] = _qty_signs_for_demand_basis(
+            _txn_lower,
+            work["Qty"],
+            demand_basis=demand_basis,
+            is_amazon=(platform == "amazon"),
         )
         work = work.drop(columns=["_Txn"])
     else:
@@ -247,7 +269,7 @@ def _accumulate_shipment_frame(
         if asin_col:
             rename[asin_col] = "ASIN"
         work = work.rename(columns=rename)
-        work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
+        work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0).abs()
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
     work = work.dropna(subset=["Date"])
     work = work[(work["Date"] >= start_ts) & (work["Date"] <= end_ts)]
@@ -255,19 +277,19 @@ def _accumulate_shipment_frame(
     if work.empty:
         return 0
 
-    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+    from .combo_sku_map import explode_sku_qty_dataframe
 
-    # Combo / DPT listings → component OMS SKUs; non-combo rows canonicalize 1:1.
-    # Must run on raw listing keys (before last-wins 1:1 map drops siblings).
+    # Quarterly history: 1:1 canonicalize only (no combo fan-out). Matching File /
+    # Deepdive requires listing-level attribution; PO demand still explodes in sales_df.
     _ = canonical_oms  # call-site flag retained; explode uses strip_pl + mapping
     work = explode_sku_qty_dataframe(
         work,
         sku_col="SKU",
         qty_col="Qty",
         sku_mapping=sku_mapping,
-        combo_map=resolve_active_combo_sku_map(),
+        combo_map={},
         strip_pl=bool(strip_pl),
-        retain_combo_listings=True,
+        retain_combo_listings=False,
     )
     if work.empty:
         return 0
@@ -495,6 +517,7 @@ def _accumulate_tier1_platform_history(
     days_30: dict[str, Set[pd.Timestamp]],
     platform_day_keys: Set[PlatformDayKey],
     progress_cb: ProgressCb = None,
+    demand_basis: str = "Sold",
 ) -> None:
     """Primary quarterly source — Tier-1 bulk + Tier-2 uploads (warm cache / disk / SQLite)."""
     if progress_cb:
@@ -533,6 +556,7 @@ def _accumulate_tier1_platform_history(
             units_30=units_30,
             days_30=days_30,
             platform_day_keys=platform_day_keys,
+            demand_basis=demand_basis,
         )
 
 
@@ -551,6 +575,7 @@ def _accumulate_sales_df_shipments(
     units_30: dict[str, int],
     days_30: dict[str, Set[pd.Timestamp]],
     platform_day_keys: Set[PlatformDayKey],
+    demand_basis: str = "Sold",
 ) -> int:
     """Append unified sales shipment rows for SKU-days not already on platform side."""
     from .po_engine import _sales_shipment_history_part
@@ -558,6 +583,13 @@ def _accumulate_sales_df_shipments(
     part = _sales_shipment_history_part(sales_df)
     if part.empty:
         return 0
+    # Drop combo-fan component copies so quarterly matches File (listing-level).
+    if "_Combo_Fan" in sales_df.columns:
+        fan = sales_df["_Combo_Fan"].fillna(False).astype(bool)
+        if fan.any():
+            part = _sales_shipment_history_part(sales_df.loc[~fan])
+            if part.empty:
+                return 0
     work = part.copy()
     # Include all net-relevant TxnTypes with correct signs (mirrors _accumulate_shipment_frame).
     _txn_lower = work["TxnType"].astype(str).str.strip().str.lower()
@@ -570,15 +602,12 @@ def _accumulate_sales_df_shipments(
         if "_Source" in work.columns
         else pd.Series("", index=work.index)
     )
-    _is_amazon = _src.eq("amazon")
-    _neg = _txn_lower2.eq("refund") | (~_is_amazon & _txn_lower2.eq("cancel"))
-    _zero = _is_amazon & _txn_lower2.isin(["cancel", "freereplacement"])
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
-    work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0)
-    work["Qty"] = np.where(
-        _zero,
-        0,
-        np.where(_neg, -work["Qty"].abs(), work["Qty"].abs()),
+    work["Qty"] = _qty_signs_for_demand_basis(
+        _txn_lower2,
+        work["Qty"],
+        demand_basis=demand_basis,
+        is_amazon=_src.eq("amazon"),
     )
     # Keep _Source through explode + gap-fill so Meesho sales are not suppressed
     # merely because Amazon already recorded the same (SKU, day).
@@ -588,16 +617,18 @@ def _accumulate_sales_df_shipments(
     if work.empty:
         return 0
 
-    from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+    from .combo_sku_map import explode_sku_qty_dataframe
 
+    # sales_df may already include combo explode from build_sales_df — only 1:1
+    # canonicalize here so quarterly does not double-count components.
     work = explode_sku_qty_dataframe(
         work,
         sku_col="SKU",
         qty_col="Qty",
         sku_mapping=sku_mapping,
-        combo_map=resolve_active_combo_sku_map(),
+        combo_map={},
         strip_pl=False,
-        retain_combo_listings=True,
+        retain_combo_listings=False,
     )
     work = work[work["SKU"].astype(str).str.len() > 0]
     if group_by_parent:
@@ -690,6 +721,7 @@ def calculate_quarterly_from_tier3_streaming(
     group_by_parent: bool = False,
     n_quarters: int = 8,
     progress_cb: ProgressCb = None,
+    demand_basis: str = "Sold",
 ) -> pd.DataFrame:
     """
     Aggregate quarterly pivot: Tier-1/2 bulk first, Tier-3 dailies gap-fill, then sales_df.
@@ -734,6 +766,7 @@ def calculate_quarterly_from_tier3_streaming(
         days_30=days_30,
         platform_day_keys=platform_day_keys,
         progress_cb=progress_cb,
+        demand_basis=demand_basis,
     )
 
     conn = _get_conn()
@@ -800,6 +833,7 @@ def calculate_quarterly_from_tier3_streaming(
                 days_30=days_30,
                 platform_day_keys=platform_day_keys,
                 skip_days=platform_day_keys,
+                demand_basis=demand_basis,
             )
             del d, blob
     conn.close()
@@ -822,6 +856,7 @@ def calculate_quarterly_from_tier3_streaming(
             units_30=units_30,
             days_30=days_30,
             platform_day_keys=platform_day_keys,
+            demand_basis=demand_basis,
         )
 
     if not quarter_sums:

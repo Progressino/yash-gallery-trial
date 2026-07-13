@@ -154,7 +154,8 @@ def test_calculate_po_base_attributes_combo_demand_to_components():
     assert "1003YKMUSTARD-3XL" in str(listing.get("Bundle_Size") or "")
 
 
-def test_quarterly_history_explodes_combo_platform_rows():
+def test_quarterly_history_keeps_combo_listing_without_component_fan():
+    """Quarterly matches File: combo listing units stay on the listing SKU only."""
     today = pd.Timestamp.today().normalize()
     sales = pd.DataFrame(
         {
@@ -177,11 +178,9 @@ def test_quarterly_history_explodes_combo_platform_rows():
 
     assert not pivot.empty
     skus = set(pivot["OMS_SKU"].astype(str))
-    assert "1003YKMUSTARD-L" in skus
-    assert "DPT21MULTI" in skus
     assert "1003DPT21MULTI-L" in skus
-    m = pivot.loc[pivot["OMS_SKU"] == "1003YKMUSTARD-L"].iloc[0]
-    assert int(m["Units_90d"]) == 2
+    assert "1003YKMUSTARD-L" not in skus
+    assert "DPT21MULTI" not in skus
     listing = pivot.loc[pivot["OMS_SKU"] == "1003DPT21MULTI-L"].iloc[0]
     assert int(listing["Units_90d"]) == 2
 

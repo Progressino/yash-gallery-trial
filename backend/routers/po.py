@@ -1929,7 +1929,12 @@ def po_quarterly_debug(request: Request):
 
 
 @router.get("/quarterly")
-def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: int = 8):
+def po_quarterly(
+    request: Request,
+    group_by_parent: bool = False,
+    n_quarters: int = 8,
+    demand_basis: str = "Sold",
+):
     sess = request.state.session
     if sess is None:
         return {"loaded": False}
@@ -1947,10 +1952,12 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
     from ..services.po_quarterly_warmup import (
         quarterly_cache_key,
         normalize_quarterly_payload,
+        normalize_quarterly_demand_basis,
     )
 
     sid = getattr(request.state, "session_id", None) or ""
-    cache_key = quarterly_cache_key(group_by_parent, n_quarters)
+    basis = normalize_quarterly_demand_basis(demand_basis)
+    cache_key = quarterly_cache_key(group_by_parent, n_quarters, basis)
 
     shared = get_shared_quarterly(cache_key)
     if shared and shared.get("loaded") and shared.get("rows"):
@@ -1999,6 +2006,7 @@ def po_quarterly(request: Request, group_by_parent: bool = False, n_quarters: in
             sid,
             group_by_parent=group_by_parent,
             n_quarters=n_quarters,
+            demand_basis=basis,
         )
     return {
         "loaded": False,

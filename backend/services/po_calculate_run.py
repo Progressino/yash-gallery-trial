@@ -605,7 +605,9 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
                     from .po_quarterly_warmup import quarterly_cache_key
 
                     key = quarterly_cache_key(
-                        bool(body.get("group_by_parent", False)), 8
+                        bool(body.get("group_by_parent", False)),
+                        8,
+                        str(body.get("demand_basis", "Sold")),
                     )
                     schedule_quarterly_refresh_if_stale(key, sess, force_full=False)
                 except Exception:

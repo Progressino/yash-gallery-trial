@@ -64,6 +64,7 @@ def start_quarterly_background(
     *,
     group_by_parent: bool = False,
     n_quarters: int = 8,
+    demand_basis: str = "Sold",
 ) -> bool:
     from .po_quarterly_cache import (
         get_shared_quarterly,
@@ -75,7 +76,7 @@ def start_quarterly_background(
     if not session_id:
         return False
 
-    key = quarterly_cache_key(group_by_parent, n_quarters)
+    key = quarterly_cache_key(group_by_parent, n_quarters, demand_basis)
     shared = get_shared_quarterly(key)
     if shared and shared.get("loaded"):
         set_quarterly_job(session_id, status="ready", progress=100, result=shared)
@@ -101,6 +102,7 @@ def start_quarterly_background(
             group_by_parent=group_by_parent,
             n_quarters=n_quarters,
             progress_cb=progress_cb,
+            demand_basis=demand_basis,
         )
 
     started = start_shared_quarterly_build(key, _build)

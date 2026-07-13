@@ -23,14 +23,16 @@ _RECENT_METRIC_COLS = frozenset(
 
 
 def _disk_path(key: tuple) -> str:
-    """Key is ``(schema_version, group_by_parent, n_quarters)`` from quarterly_cache_key."""
-    if len(key) >= 3:
-        schema, group_by_parent, n_quarters = key[0], key[1], key[2]
+    """Key is ``(schema_version, group_by_parent, n_quarters, demand_basis)`` from quarterly_cache_key."""
+    if len(key) >= 4:
+        schema, group_by_parent, n_quarters, basis = key[0], key[1], key[2], key[3]
+    elif len(key) >= 3:
+        schema, group_by_parent, n_quarters, basis = key[0], key[1], key[2], "sold"
     else:
-        schema, group_by_parent, n_quarters = 0, key[0], key[1]
+        schema, group_by_parent, n_quarters, basis = 0, key[0], key[1], "sold"
     return os.path.join(
         _DISK_CACHE_DIR,
-        f"quarterly_v{int(schema)}_{int(bool(group_by_parent))}_{int(n_quarters)}.json",
+        f"quarterly_v{int(schema)}_{int(bool(group_by_parent))}_{int(n_quarters)}_{basis}.json",
     )
 
 
@@ -350,6 +352,7 @@ def schedule_quarterly_refresh_if_stale(
                 group_by_parent=bool(key[1]) if len(key) >= 2 else False,
                 n_quarters=n_q,
                 progress_cb=progress_cb,
+                demand_basis=str(key[3]) if len(key) >= 4 else "Sold",
             )
 
         return start_shared_quarterly_build(key, _full)
@@ -370,6 +373,7 @@ def schedule_quarterly_refresh_if_stale(
             group_by_parent=bool(key[1]) if len(key) >= 2 else False,
             n_recent_quarters=recent_n,
             progress_cb=progress_cb,
+            demand_basis=str(key[3]) if len(key) >= 4 else "Sold",
         )
 
     return start_incremental_quarterly_refresh(

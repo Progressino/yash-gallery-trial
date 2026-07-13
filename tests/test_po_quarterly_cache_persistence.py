@@ -19,9 +19,11 @@ def tmp_cache_dir(tmp_path, monkeypatch):
 
 
 def test_disk_path_uses_schema_group_and_n_quarters(tmp_cache_dir):
-    key = quarterly_cache_key(False, 8)
+    from backend.services.po_quarterly_warmup import QUARTERLY_CACHE_SCHEMA
+
+    key = quarterly_cache_key(False, 8, "Sold")
     path = qc._disk_path(key)
-    assert path.endswith("quarterly_v16_0_8.json")
+    assert path.endswith(f"quarterly_v{QUARTERLY_CACHE_SCHEMA}_0_8_sold.json")
 
 
 def test_store_persists_to_disk_and_survives_memory_clear(tmp_cache_dir):
