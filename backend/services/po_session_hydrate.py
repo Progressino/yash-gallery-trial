@@ -321,12 +321,9 @@ def ensure_po_sidecars_hydrated(sess) -> dict[str, int]:
         _persist_sidecars_to_warm_disk(
             {k: _main._warm_cache[k] for k in _PO_SIDECAR_KEYS if k in _main._warm_cache}
         )
-        try:
-            from .po_shared_cache import invalidate_all_shared_caches
-
-            invalidate_all_shared_caches()
-        except Exception:
-            _log.exception("invalidate shared cache after PO sidecar restore failed")
+        # Do NOT wipe shared PO cache here — routine sidecar rehydrate was
+        # deleting valid caches and forcing full recalculate (OOM on prod).
+        # Existing-PO freshness is checked on lookup via _shared_cache_stale_vs_disk.
         _log.info("PO sidecars restored (sku_status=%s daily_inv=%s)", stats.get("sku_status_lead_df"), stats.get("daily_inventory_history_df"))
         sess._quarterly_cache.clear()
 

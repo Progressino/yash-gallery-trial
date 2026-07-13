@@ -5,6 +5,7 @@ import axios from 'axios'
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import api, {
+  downloadPoPlatformMatchExport,
   getCoverage,
   getCoverageResilient,
   getPoReadiness,
@@ -180,6 +181,8 @@ function POFreshInner() {
   const [quarterlyLoading, setQuarterlyLoading] = useState(false)
   const [quarterlyMsg, setQuarterlyMsg] = useState<string>()
   const [quarterlyPage, setQuarterlyPage] = useState(0)
+  const [platformMatchBusy, setPlatformMatchBusy] = useState(false)
+  const [platformMatchErr, setPlatformMatchErr] = useState<string | null>(null)
   const progressThrottle = useRef(0)
   const calcRunSeq = useRef(0)
   const [actionMsg, setActionMsg] = useState<string | null>(null)
@@ -1248,6 +1251,32 @@ function POFreshInner() {
 
           {tab === 'quarterly' && (
             <div className="p-6 space-y-4">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  disabled={platformMatchBusy}
+                  onClick={() => {
+                    setPlatformMatchErr(null)
+                    setPlatformMatchBusy(true)
+                    void downloadPoPlatformMatchExport({
+                      nQuarters: 8,
+                      demandBasis: params.demand_basis,
+                      groupByParent: params.group_by_parent,
+                      format: 'xlsx',
+                    })
+                      .catch(e => setPlatformMatchErr(e instanceof Error ? e.message : 'Export failed'))
+                      .finally(() => setPlatformMatchBusy(false))
+                  }}
+                  className="text-xs px-3 py-1.5 rounded border border-[var(--po-primary)]/40 text-[var(--po-primary)] hover:bg-[var(--po-surface-2)] disabled:opacity-50"
+                  title="SKU × Amazon/Flipkart/Myntra/Meesho/Snapdeal × quarter"
+                >
+                  {platformMatchBusy ? 'Building match…' : '⬇ Platform Match (xlsx)'}
+                </button>
+                {platformMatchErr && <span className="text-xs text-red-600">{platformMatchErr}</span>}
+              </div>
+              <p className="text-[11px] text-[var(--po-outline)]">
+                Splits sales by marketplace with the same Sold/Net rules as quarterly — use to find which platform drives File gaps.
+              </p>
               {!quarterly?.rows?.length ? (
                 <p className="text-sm text-[var(--po-outline)]">
                   {quarterlyLoading

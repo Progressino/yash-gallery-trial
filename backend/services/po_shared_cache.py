@@ -266,14 +266,6 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
     hist = getattr(sess, "daily_inventory_history_df", None)
     hist_rows = int(len(hist)) if hist is not None and hasattr(hist, "__len__") else 0
 
-    warm_gen = 0
-    try:
-        import backend.main as _main
-
-        warm_gen = int(getattr(_main, "_warm_cache_generation", 0) or 0)
-    except Exception:
-        pass
-
     params = _calc_params_for_fingerprint(body)
 
     tier3_token: dict[str, str] = {}
@@ -308,7 +300,9 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
         "inventory_skus": inv_skus,
         "inventory_snapshot": str(getattr(sess, "inventory_snapshot_date", "") or ""),
         "inventory_history_rows": hist_rows,
-        "warm_cache_generation": warm_gen,
+        # Intentionally omit warm_cache_generation / pipeline_snapshot_hash —
+        # those change on every process restart and were causing shared-cache
+        # misses (full recalculate → OOM) even when sales/inventory were identical.
         "raise_ledger": _raise_ledger_fingerprint(
             planning, int(body.get("raise_ledger_lookback_days") or 14)
         ),
@@ -317,7 +311,6 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
         "sku_mapping": _sku_mapping_fingerprint(sess),
         "return_overlay": _return_overlay_fingerprint(sess),
         "tier3_sync_token": tier3_token,
-        "pipeline_snapshot_hash": str(getattr(sess, "po_pipeline_snapshot_id", "") or ""),
         "pipeline_version": PO_PIPELINE_VERSION,
     }
 

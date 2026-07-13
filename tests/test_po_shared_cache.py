@@ -87,6 +87,22 @@ def test_cache_key_changes_when_params_differ():
     assert k1 != k2
 
 
+def test_cache_key_stable_across_warm_generation(monkeypatch):
+    """Restarts bump warm_cache_generation — must not force a full recalculate."""
+    import backend.main as main_mod
+
+    sess = _minimal_session()
+    body = {"planning_date": _PLAN_DATE, "period_days": 30, "lead_time": 60}
+    monkeypatch.setattr(main_mod, "_warm_cache_generation", 1, raising=False)
+    k1, _ = psc.build_cache_key(sess, body)
+    monkeypatch.setattr(main_mod, "_warm_cache_generation", 9, raising=False)
+    sess.po_pipeline_snapshot_id = "PO_OTHER_HASH"
+    k2, fp = psc.build_cache_key(sess, body)
+    assert k1 == k2
+    assert "warm_cache_generation" not in fp
+    assert "pipeline_snapshot_hash" not in fp
+
+
 def test_save_lookup_and_apply_to_session():
     sess = _minimal_session()
     body = {

@@ -4,6 +4,7 @@ import { useSearchParams, Link } from 'react-router-dom'
 import axios from 'axios'
 import {
   api,
+  downloadPoPlatformMatchExport,
   getCoverage,
   getPoCalculateStatus,
   getPoSkuAudit,
@@ -589,6 +590,8 @@ export default function POEngine() {
   const [quarterlyLoading, setQuarterlyLoading] = useState(false)
   const [quarterlyProgress, setQuarterlyProgress] = useState<number | null>(null)
   const [quarterlyLoadMessage, setQuarterlyLoadMessage] = useState<string | undefined>()
+  const [platformMatchBusy, setPlatformMatchBusy] = useState(false)
+  const [platformMatchErr, setPlatformMatchErr] = useState<string | null>(null)
   const [shipLoading, setShipLoading] = useState(false)
   const [raiseModal, setRaiseModal] = useState(false)
   const [raiseConfirmBusy, setRaiseConfirmBusy] = useState(false)
@@ -726,6 +729,23 @@ export default function POEngine() {
         setQuarterlyProgress(null)
         setQuarterlyLoadMessage(undefined)
       }
+    }
+  }
+
+  const downloadPlatformMatch = async () => {
+    setPlatformMatchErr(null)
+    setPlatformMatchBusy(true)
+    try {
+      await downloadPoPlatformMatchExport({
+        nQuarters: 8,
+        demandBasis: params.demand_basis,
+        groupByParent: params.group_by_parent,
+        format: 'xlsx',
+      })
+    } catch (e) {
+      setPlatformMatchErr(e instanceof Error ? e.message : 'Platform match export failed')
+    } finally {
+      setPlatformMatchBusy(false)
     }
   }
 
@@ -2596,13 +2616,31 @@ export default function POEngine() {
                   className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-blue-300"
                 />
                 <span className="text-xs text-gray-400">{qFiltered.length} SKUs</span>
-                <button
-                  onClick={() => downloadQCsv(quarterly.rows ?? [], quarterly.columns ?? [])}
-                  className="ml-auto text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
-                >
-                  ⬇ Export CSV
-                </button>
+                <div className="ml-auto flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => void downloadPlatformMatch()}
+                    disabled={platformMatchBusy}
+                    title="Excel: SKU × Amazon/Flipkart/Myntra/Meesho/Snapdeal × quarter — same Sold/Net rules as this tab"
+                    className="text-xs px-3 py-1.5 rounded border border-[#002B5B]/30 text-[#002B5B] hover:bg-sky-50 disabled:opacity-50"
+                  >
+                    {platformMatchBusy ? 'Building match…' : '⬇ Platform Match (xlsx)'}
+                  </button>
+                  <button
+                    onClick={() => downloadQCsv(quarterly.rows ?? [], quarterly.columns ?? [])}
+                    className="text-xs px-3 py-1.5 rounded border border-gray-300 hover:bg-gray-50"
+                  >
+                    ⬇ Export CSV
+                  </button>
+                </div>
               </div>
+              {platformMatchErr && (
+                <p className="text-xs text-red-600 -mt-1">{platformMatchErr}</p>
+              )}
+              <p className="text-[11px] text-gray-500 -mt-1">
+                Platform Match splits quarterly units by marketplace (Amazon, Flipkart, Myntra, Meesho, Snapdeal)
+                using the same <strong>{params.demand_basis === 'Net' ? 'Net' : 'Sold (Gross)'}</strong> basis as this tab — use it to see which channel drives File gaps.
+              </p>
 
               <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto">
                 <table className="w-full text-sm">

@@ -19,19 +19,28 @@ def _trim_sales_for_po_memory(
     use_seasonality: bool,
     use_ly_fallback: bool,
 ) -> pd.DataFrame:
-    """Local Mac: pass a recent sales window into the engine to avoid OOM on full history."""
+    """Pass a recent sales window into the engine to avoid OOM on full history.
+
+    Always trims when the unified sales frame is large (production catalog).
+    Local ``WARM_CACHE_PO_SESSION_ONLY`` also forces trim for smaller frames.
+    """
     if sales_df is None or getattr(sales_df, "empty", True):
         return sales_df
+    force_local = False
     try:
         from backend.main import warm_cache_po_session_only
-        from .po_ads_horizon import po_ads_history_horizon_days
 
-        if not warm_cache_po_session_only():
-            return sales_df
+        force_local = bool(warm_cache_po_session_only())
     except Exception:
+        force_local = False
+    n = int(len(sales_df))
+    # ~200k rows is enough for ADS windows; full 1.5M+ catalogs OOM the 7GB VPS.
+    if n < 200_000 and not force_local:
         return sales_df
     if "TxnDate" not in sales_df.columns:
         return sales_df
+    from .po_ads_horizon import po_ads_history_horizon_days
+
     horizon = po_ads_history_horizon_days(
         period_days,
         use_seasonality=use_seasonality,
@@ -48,7 +57,7 @@ def _trim_sales_for_po_memory(
     trimmed = sales_df.loc[mask]
     if len(trimmed) < len(sales_df):
         logger.info(
-            "PO local memory trim: %s → %s sales rows (horizon=%dd)",
+            "PO sales memory trim: %s → %s rows (horizon=%dd)",
             f"{len(sales_df):,}",
             f"{len(trimmed):,}",
             horizon,

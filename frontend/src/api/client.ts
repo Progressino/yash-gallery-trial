@@ -2078,6 +2078,46 @@ export async function downloadIntelligenceSalesCsv(opts: {
   URL.revokeObjectURL(url)
 }
 
+/**
+ * Multi-platform sales match workbook (Amazon / Flipkart / Myntra / Meesho / Snapdeal)
+ * for File vs App quarterly reconciliation. Same Sold/Net + combo rules as Quarterly tab.
+ */
+export async function downloadPoPlatformMatchExport(opts: {
+  nQuarters?: number
+  demandBasis?: string
+  groupByParent?: boolean
+  format?: 'xlsx' | 'zip'
+}): Promise<void> {
+  const p = new URLSearchParams()
+  p.set('n_quarters', String(opts.nQuarters ?? 8))
+  p.set('demand_basis', opts.demandBasis ?? 'Sold')
+  p.set('group_by_parent', opts.groupByParent ? 'true' : 'false')
+  p.set('format', opts.format ?? 'xlsx')
+  const res = await fetch(`/api/po/platform-match-export?${p}`, { credentials: 'include' })
+  if (!res.ok) {
+    let msg = `Platform match export failed (${res.status})`
+    try {
+      const j = (await res.json()) as { detail?: string }
+      if (typeof j.detail === 'string') msg = j.detail
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get('Content-Disposition')
+  const m = cd?.match(/filename="([^"]+)"/i)
+  const filename = m?.[1] ?? 'platform_sales_match.xlsx'
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 // ── Daily sales management ────────────────────────────────────
 
 export interface DailyUpload {

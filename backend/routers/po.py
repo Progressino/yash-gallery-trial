@@ -2014,3 +2014,56 @@ def po_quarterly(
         "progress": 8,
         "message": "Building quarterly history (first load may take 1–3 minutes)…",
     }
+
+
+@router.get("/platform-match-export")
+def po_platform_match_export(
+    request: Request,
+    group_by_parent: bool = False,
+    n_quarters: int = 8,
+    demand_basis: str = "Sold",
+    format: str = "xlsx",
+):
+    """
+    Multi-platform sales match workbook for File/Deepdive reconciliation.
+
+    Sheets: Readme, Quarter×Platform summary, SKU×Platform totals,
+    SKU×Platform×Quarter (long), and wide SKU×Platform×Quarter.
+
+    Uses the same Sold(Gross)/Net rules and combo listing attribution as
+    quarterly history so marketplace gaps are comparable to the Quarterly tab.
+    """
+    from fastapi import HTTPException
+    from fastapi.responses import StreamingResponse
+
+    from ..services.po_platform_match import build_platform_match_export_bytes
+    from ..services.po_quarterly_warmup import normalize_quarterly_demand_basis
+    from ..services.shared_frames import session_sales_df
+
+    sess = request.state.session
+    if sess is None:
+        raise HTTPException(status_code=401, detail="No session.")
+
+    sales = session_sales_df(sess)
+    if sales is None or getattr(sales, "empty", True):
+        # Disk / warm fallback already attempted inside session_sales_df
+        raise HTTPException(
+            status_code=404,
+            detail="No sales data loaded — restore warm cache or rebuild sales first.",
+        )
+
+    basis = normalize_quarterly_demand_basis(demand_basis)
+    n_q = max(1, min(int(n_quarters or 8), 16))
+    body, media, fname = build_platform_match_export_bytes(
+        sales,
+        getattr(sess, "sku_mapping", None) or {},
+        n_quarters=n_q,
+        demand_basis=basis,
+        group_by_parent=bool(group_by_parent),
+        fmt=format,
+    )
+    return StreamingResponse(
+        iter([body]),
+        media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
