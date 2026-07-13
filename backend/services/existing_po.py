@@ -1183,9 +1183,10 @@ def ensure_existing_po_hydrated(sess) -> bool:
                 from ..services.po_raise_remove import invalidate_po_calculate_result
 
                 invalidate_po_calculate_result(sess)
-                from ..services.po_shared_cache import invalidate_all_shared_caches
-
-                invalidate_all_shared_caches()
+                # Do not wipe shared PO cache on routine Existing-PO restore into a
+                # new session — that was deleting valid caches on every login/hydrate
+                # and forcing full recalculate (OOM). Lookup already rejects stale
+                # caches via _shared_cache_stale_vs_disk when a newer sheet lands.
         except Exception:
             pass
     return changed
