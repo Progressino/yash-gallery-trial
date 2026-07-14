@@ -669,6 +669,12 @@ export default function Production() {
   const [expandedIssueNote, setExpandedIssueNote] = useState<number | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
   const [filterStatus, setFilterStatus] = useState('')
+  const [listSearch, setListSearch] = useState('')
+  const [filterSO, setFilterSO] = useState('')
+  const [filterSku, setFilterSku] = useState('')
+  const [filterVendor, setFilterVendor] = useState('')
+  const [sortBy, setSortBy] = useState<'so_number' | 'sku' | 'vendor_name' | 'available_qty' | 'jo_date' | 'status'>('so_number')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [modal, setModal] = useState<ModalType>(null)
   const [activeJO, setActiveJO] = useState<JO | null>(null)
   const [activeLineId, setActiveLineId] = useState<number | null>(null)
@@ -773,6 +779,126 @@ export default function Production() {
       .map(p => String(p.processor_name || '').trim())
       .filter(Boolean),
   )].sort((a, b) => a.localeCompare(b))
+
+  const soBuyerMap = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const so of soList as { so_number?: string; buyer?: string; customer?: string }[]) {
+      const key = String(so.so_number || '').trim()
+      if (!key) continue
+      m.set(key, String(so.buyer || so.customer || '').trim())
+    }
+    return m
+  }, [soList])
+
+  const soOptions = useMemo(() => {
+    const fromJO = processJOs.map(j => j.so_number).concat(allJOs.map(j => j.so_number))
+    const fromReady = (readyLines as { so_number?: string }[]).map(r => String(r.so_number || ''))
+    const fromSO = (soList as { so_number?: string }[]).map(s => String(s.so_number || ''))
+    return [...new Set([...fromJO, ...fromReady, ...fromSO].map(s => s.trim()).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+  }, [processJOs, allJOs, readyLines, soList])
+
+  const skuOptions = useMemo(() => {
+    const fromJO = processJOs.map(j => j.sku).concat(allJOs.map(j => j.sku))
+    const fromReady = (readyLines as { sku?: string }[]).map(r => String(r.sku || ''))
+    return [...new Set([...fromJO, ...fromReady].map(s => s.trim()).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+  }, [processJOs, allJOs, readyLines])
+
+  const vendorOptions = useMemo(() => {
+    const fromJO = processJOs.map(j => j.vendor_name).concat(allJOs.map(j => j.vendor_name))
+    const fromSO = [...soBuyerMap.values()]
+    return [...new Set([...fromJO, ...fromSO, ...vendorSuggestions].map(s => String(s || '').trim()).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b))
+  }, [processJOs, allJOs, soBuyerMap, vendorSuggestions])
+
+  const matchesListQuery = (parts: Array<string | number | null | undefined>) => {
+    const q = listSearch.trim().toLowerCase()
+    if (!q) return true
+    return parts.some(p => String(p ?? '').toLowerCase().includes(q))
+  }
+
+  const filteredReadyLines = useMemo(() => {
+    let rows = (readyLines as any[]).map(r => ({
+      ...r,
+      vendor_name: soBuyerMap.get(String(r.so_number || '').trim()) || '',
+    }))
+    if (filterSO) rows = rows.filter(r => String(r.so_number || '') === filterSO)
+    if (filterSku) rows = rows.filter(r => String(r.sku || '') === filterSku)
+    if (filterVendor) {
+      rows = rows.filter(r => String(r.vendor_name || '').toLowerCase() === filterVendor.toLowerCase())
+    }
+    rows = rows.filter(r =>
+      matchesListQuery([r.so_number, r.sku, r.vendor_name, r.fabric_code, r.fabric_name]),
+    )
+    const dir = sortDir === 'asc' ? 1 : -1
+    rows = [...rows].sort((a, b) => {
+      if (sortBy === 'available_qty') {
+        return (Number(a.available_qty || a.reserved_qty || 0) - Number(b.available_qty || b.reserved_qty || 0)) * dir
+      }
+      const ak = String(a[sortBy === 'vendor_name' ? 'vendor_name' : sortBy === 'sku' ? 'sku' : 'so_number'] || '')
+      const bk = String(b[sortBy === 'vendor_name' ? 'vendor_name' : sortBy === 'sku' ? 'sku' : 'so_number'] || '')
+      return ak.localeCompare(bk, undefined, { numeric: true }) * dir
+    })
+    return rows
+  }, [readyLines, soBuyerMap, filterSO, filterSku, filterVendor, listSearch, sortBy, sortDir])
+
+  const filteredProcessJOs = useMemo(() => {
+    let rows = [...processJOs]
+    if (filterSO) rows = rows.filter(j => j.so_number === filterSO)
+    if (filterSku) rows = rows.filter(j => j.sku === filterSku)
+    if (filterVendor) {
+      rows = rows.filter(j =>
+        String(j.vendor_name || '').toLowerCase() === filterVendor.toLowerCase()
+        || String(soBuyerMap.get(j.so_number) || '').toLowerCase() === filterVendor.toLowerCase(),
+      )
+    }
+    rows = rows.filter(j =>
+      matchesListQuery([j.jo_number, j.so_number, j.sku, j.sku_name, j.vendor_name, soBuyerMap.get(j.so_number)]),
+    )
+    const dir = sortDir === 'asc' ? 1 : -1
+    rows.sort((a, b) => {
+      if (sortBy === 'jo_date') return String(a.jo_date || '').localeCompare(String(b.jo_date || '')) * dir
+      if (sortBy === 'status') return String(a.status || '').localeCompare(String(b.status || '')) * dir
+      if (sortBy === 'available_qty') return ((a.balance_qty || 0) - (b.balance_qty || 0)) * dir
+      const key = sortBy === 'vendor_name' ? 'vendor_name' : sortBy === 'sku' ? 'sku' : 'so_number'
+      return String(a[key] || '').localeCompare(String(b[key] || ''), undefined, { numeric: true }) * dir
+    })
+    return rows
+  }, [processJOs, filterSO, filterSku, filterVendor, listSearch, sortBy, sortDir, soBuyerMap])
+
+  const filteredAllJOs = useMemo(() => {
+    let rows = [...allJOs]
+    if (filterSO) rows = rows.filter(j => j.so_number === filterSO)
+    if (filterSku) rows = rows.filter(j => j.sku === filterSku)
+    if (filterVendor) {
+      rows = rows.filter(j =>
+        String(j.vendor_name || '').toLowerCase() === filterVendor.toLowerCase()
+        || String(soBuyerMap.get(j.so_number) || '').toLowerCase() === filterVendor.toLowerCase(),
+      )
+    }
+    rows = rows.filter(j =>
+      matchesListQuery([j.jo_number, j.so_number, j.sku, j.sku_name, j.vendor_name, j.process, soBuyerMap.get(j.so_number)]),
+    )
+    const dir = sortDir === 'asc' ? 1 : -1
+    rows.sort((a, b) => {
+      if (sortBy === 'jo_date') return String(a.jo_date || '').localeCompare(String(b.jo_date || '')) * dir
+      if (sortBy === 'status') return String(a.status || '').localeCompare(String(b.status || '')) * dir
+      if (sortBy === 'available_qty') return ((a.balance_qty || 0) - (b.balance_qty || 0)) * dir
+      const key = sortBy === 'vendor_name' ? 'vendor_name' : sortBy === 'sku' ? 'sku' : 'so_number'
+      return String(a[key] || '').localeCompare(String(b[key] || ''), undefined, { numeric: true }) * dir
+    })
+    return rows
+  }, [allJOs, filterSO, filterSku, filterVendor, listSearch, sortBy, sortDir, soBuyerMap])
+
+  const clearListFilters = () => {
+    setListSearch('')
+    setFilterSO('')
+    setFilterSku('')
+    setFilterVendor('')
+    setSortBy('so_number')
+    setSortDir('asc')
+  }
 
   const { data: joValidation } = useQuery({
     queryKey: ['jo-validate', newForm.process, newForm.so_number, newForm.sku, newForm.planned_qty],
@@ -1227,18 +1353,71 @@ export default function Production() {
           {/* Process selector */}
           <div className="flex flex-wrap gap-1 bg-gray-100 p-1 rounded-lg w-fit">
             {allProcesses.map(p => (
-              <button key={p} onClick={() => { setActiveProcess(p); setExpanded(null) }}
+              <button key={p} onClick={() => { setActiveProcess(p); setExpanded(null); clearListFilters() }}
                 className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${activeProcess === p ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
                 {PROCESS_ICONS[p] || ''} {p}
               </button>
             ))}
           </div>
 
+          <div className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="search"
+                value={listSearch}
+                onChange={e => setListSearch(e.target.value)}
+                placeholder="Search SO / SKU / vendor…"
+                className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm min-w-[14rem] flex-1"
+              />
+              <select value={filterSO} onChange={e => setFilterSO(e.target.value)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm max-w-[11rem]">
+                <option value="">All SOs</option>
+                {soOptions.map(so => <option key={so} value={so}>{so}</option>)}
+              </select>
+              <select value={filterSku} onChange={e => setFilterSku(e.target.value)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm max-w-[12rem]">
+                <option value="">All SKUs</option>
+                {skuOptions.map(sku => <option key={sku} value={sku}>{sku}</option>)}
+              </select>
+              <select value={filterVendor} onChange={e => setFilterVendor(e.target.value)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm max-w-[12rem]">
+                <option value="">All vendors / buyers</option>
+                {vendorOptions.map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+              <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
+                <option value="">All Statuses</option>
+                {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
+              </select>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-gray-500">Sort</span>
+              <select value={sortBy} onChange={e => setSortBy(e.target.value as typeof sortBy)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm">
+                <option value="so_number">SO</option>
+                <option value="sku">SKU</option>
+                <option value="vendor_name">Vendor / Buyer</option>
+                <option value="available_qty">Qty</option>
+                <option value="jo_date">JO date</option>
+                <option value="status">Status</option>
+              </select>
+              <button type="button" onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}
+                className="px-2 py-1.5 border border-gray-200 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                title="Toggle sort direction">
+                {sortDir === 'asc' ? '↑ Asc' : '↓ Desc'}
+              </button>
+              {(listSearch || filterSO || filterSku || filterVendor) && (
+                <button type="button" onClick={clearListFilters}
+                  className="text-xs text-indigo-700 hover:underline ml-1">
+                  Clear filters
+                </button>
+              )}
+            </div>
+          </div>
+
           <div className="flex items-center justify-between flex-wrap gap-2">
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
-              <option value="">All Statuses</option>
-              {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
-            </select>
+            <p className="text-xs text-gray-500">
+              Showing {filteredReadyLines.length}/{readyLines.length} ready · {filteredProcessJOs.length}/{processJOs.length} JOs
+            </p>
             <div className="flex items-center gap-2">
               <input
                 ref={joImportRef}
@@ -1305,7 +1484,7 @@ export default function Production() {
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
             <p className="text-sm font-semibold text-amber-800 mb-2">
               ⚡ {activeProcess === 'Cutting' ? 'Ready to Cut' : activeProcess === 'Stitching' ? 'Ready to Stitch' : activeProcess === 'Embroidery' ? 'Ready for Embroidery' : `Ready for ${activeProcess}`}
-              {readyLines.length > 0 ? ` — ${readyLines.length} line(s)` : ''}
+              {readyLines.length > 0 ? ` — ${filteredReadyLines.length} of ${readyLines.length} line(s)` : ''}
             </p>
             {readyLines.length === 0 ? (
               <p className="text-xs text-amber-700">
@@ -1313,14 +1492,22 @@ export default function Production() {
                   ? 'No printed-fabric reservations yet. Reserve fabric under Grey Fabric → Ready to Cut.'
                   : `No pieces waiting from the previous process for ${activeProcess}.`}
               </p>
+            ) : filteredReadyLines.length === 0 ? (
+              <p className="text-xs text-amber-700">No ready lines match the current search / filters.</p>
             ) : (
               <div className="space-y-2 max-h-56 overflow-y-auto">
-                {(readyLines as any[]).map((r: any, i: number) => (
+                {filteredReadyLines.map((r: any, i: number) => (
                   <div key={i} className="bg-white rounded-lg border border-amber-200 px-3 py-2 flex items-center justify-between gap-2">
                     <div className="text-xs min-w-0">
                       <span className="font-semibold text-[#002B5B]">SO: {r.so_number}</span>
                       <span className="mx-2 text-gray-400">·</span>
                       <span className="font-mono break-all">{r.sku}</span>
+                      {r.vendor_name && (
+                        <>
+                          <span className="mx-2 text-gray-400">·</span>
+                          <span className="text-gray-700">Buyer: <b>{r.vendor_name}</b></span>
+                        </>
+                      )}
                       {r.fabric_code && <span className="mx-2 text-gray-400">· Fabric: <b>{r.fabric_code}</b></span>}
                       <span className="mx-2 text-gray-400">·</span>
                       <span className="text-green-700 font-semibold">
@@ -1350,8 +1537,11 @@ export default function Production() {
 
           {/* JO list */}
           <div className="space-y-3">
-            {processJOs.map(renderJOCard)}
+            {filteredProcessJOs.map(renderJOCard)}
             {processJOs.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No {activeProcess} job orders.</p>}
+            {processJOs.length > 0 && filteredProcessJOs.length === 0 && (
+              <p className="text-center text-gray-400 py-8 text-sm">No job orders match the current search / filters.</p>
+            )}
           </div>
         </div>
       )}
@@ -1359,15 +1549,63 @@ export default function Production() {
       {/* TRACKER TAB */}
       {tab === 'tracker' && (
         <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
-              <option value="">All Statuses</option>
-              {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
-            </select>
-            <p className="text-sm text-gray-500">{allJOs.length} job orders</p>
+          <div className="bg-white border border-gray-200 rounded-xl p-3 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="search"
+                value={listSearch}
+                onChange={e => setListSearch(e.target.value)}
+                placeholder="Search SO / SKU / vendor / JO…"
+                className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm min-w-[14rem] flex-1"
+              />
+              <select value={filterSO} onChange={e => setFilterSO(e.target.value)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm max-w-[11rem]">
+                <option value="">All SOs</option>
+                {soOptions.map(so => <option key={so} value={so}>{so}</option>)}
+              </select>
+              <select value={filterSku} onChange={e => setFilterSku(e.target.value)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm max-w-[12rem]">
+                <option value="">All SKUs</option>
+                {skuOptions.map(sku => <option key={sku} value={sku}>{sku}</option>)}
+              </select>
+              <select value={filterVendor} onChange={e => setFilterVendor(e.target.value)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm max-w-[12rem]">
+                <option value="">All vendors / buyers</option>
+                {vendorOptions.map(v => <option key={v} value={v}>{v}</option>)}
+              </select>
+              <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
+                <option value="">All Statuses</option>
+                {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
+              </select>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-gray-500">Sort</span>
+              <select value={sortBy} onChange={e => setSortBy(e.target.value as typeof sortBy)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm">
+                <option value="so_number">SO</option>
+                <option value="sku">SKU</option>
+                <option value="vendor_name">Vendor / Buyer</option>
+                <option value="jo_date">JO date</option>
+                <option value="status">Status</option>
+                <option value="available_qty">Balance qty</option>
+              </select>
+              <button type="button" onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}
+                className="px-2 py-1.5 border border-gray-200 rounded-lg text-sm text-gray-700 hover:bg-gray-50">
+                {sortDir === 'asc' ? '↑ Asc' : '↓ Desc'}
+              </button>
+              {(listSearch || filterSO || filterSku || filterVendor) && (
+                <button type="button" onClick={clearListFilters} className="text-xs text-indigo-700 hover:underline">
+                  Clear filters
+                </button>
+              )}
+              <p className="text-sm text-gray-500 ml-auto">{filteredAllJOs.length} of {allJOs.length} job orders</p>
+            </div>
           </div>
-          {allJOs.map(renderJOCard)}
+          {filteredAllJOs.map(renderJOCard)}
           {allJOs.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No job orders found.</p>}
+          {allJOs.length > 0 && filteredAllJOs.length === 0 && (
+            <p className="text-center text-gray-400 py-8 text-sm">No job orders match the current search / filters.</p>
+          )}
         </div>
       )}
 
