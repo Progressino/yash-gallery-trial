@@ -428,7 +428,15 @@ def _resolve_ads_sales_source(
 
     if mat_sales is not None and not mat_sales.empty:
         logger.info("PO ADS fast path: %s (%d rows, skipping platform rebuild)", mat_label, len(mat_sales))
-        return mat_sales, mat_label
+        return (
+            _trim_sales_for_po_memory(
+                mat_sales,
+                period_days=period,
+                use_seasonality=use_season,
+                use_ly_fallback=use_ly,
+            ),
+            mat_label,
+        )
 
     # ── Fast path 2: session sales_df when deep enough ───────────────────────────
     if not sales_df.empty:

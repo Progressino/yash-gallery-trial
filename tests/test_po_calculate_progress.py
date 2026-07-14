@@ -33,8 +33,12 @@ def test_po_job_is_stale_sooner_at_low_progress():
     job_id = create_po_job("sess-stuck-2", status="running", progress=2, message="Calculating…")
     from backend.services import po_calculate_jobs as jobs
 
+    # Hydrate can sit at ≤10% for many minutes — only fail after the long idle window.
     with jobs._lock:
         jobs._jobs[job_id]["updated_at"] = time.time() - 200
+    assert po_job_is_stale(job_id) is False
+    with jobs._lock:
+        jobs._jobs[job_id]["updated_at"] = time.time() - 950
     assert po_job_is_stale(job_id) is True
     with jobs._lock:
         jobs._jobs[job_id]["updated_at"] = time.time() - 60

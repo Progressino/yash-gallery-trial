@@ -40,6 +40,17 @@ def set_po_job(job_id: str, **fields: Any) -> None:
             _latest_by_session[sid] = job_id
 
 
+def touch_po_job(job_id: str) -> None:
+    """Refresh ``updated_at`` without changing status/progress (alive heartbeat)."""
+    if not job_id:
+        return
+    with _lock:
+        row = _jobs.get(job_id)
+        if not row:
+            return
+        row["updated_at"] = time.time()
+
+
 def get_po_job_by_id(job_id: str) -> dict[str, Any]:
     if not job_id:
         return {}
@@ -71,8 +82,12 @@ def clear_po_job(session_id: str) -> None:
             _jobs.pop(job_id, None)
 
 
-def po_job_is_stale(job_id: str, *, max_idle_sec: float = 1200.0) -> bool:
-    """True when a running job has not updated progress recently (likely crashed or OOM)."""
+def po_job_is_stale(job_id: str, *, max_idle_sec: float = 1800.0) -> bool:
+    """True when a running job has not updated progress recently (likely crashed or OOM).
+
+    Early stages (hydrate / warm-cache restore) legitimately run for many minutes on
+    large catalogs without progress ticks — do not treat that as a dead server.
+    """
     if not job_id:
         return False
     with _lock:
@@ -85,9 +100,13 @@ def po_job_is_stale(job_id: str, *, max_idle_sec: float = 1200.0) -> bool:
     progress = int(row.get("progress") or 0)
     idle_limit = max_idle_sec
     if progress <= 10:
-        idle_limit = min(idle_limit, 180.0)
+        # Hydrate + warm attach before the engine heartbeat starts.
+        idle_limit = min(idle_limit, 900.0)
     elif progress <= 30:
-        idle_limit = min(idle_limit, 600.0)
+        # Snapshot / ADS window prep (still before or around engine start).
+        idle_limit = min(idle_limit, 1200.0)
+    elif progress < 95:
+        idle_limit = min(idle_limit, 900.0)
     return (time.time() - updated) >= idle_limit
 
 

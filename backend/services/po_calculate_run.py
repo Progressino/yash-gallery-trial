@@ -34,8 +34,8 @@ def _trim_sales_for_po_memory(
     except Exception:
         force_local = False
     n = int(len(sales_df))
-    # ~200k rows is enough for ADS windows; full 1.5M+ catalogs OOM the 7GB VPS.
-    if n < 200_000 and not force_local:
+    # ~80k–150k rows covers ADS horizons; full 1.3M+ catalogs OOM the 6.5GB VPS.
+    if n < 80_000 and not force_local:
         return sales_df
     if "TxnDate" not in sales_df.columns:
         return sales_df
@@ -229,8 +229,8 @@ def execute_po_calculate(
 
     def _calc_heartbeat() -> None:
         pct = 32
-        while not _hb_stop.wait(20):
-            pct = min(pct + 3, 78)
+        while not _hb_stop.wait(15):
+            pct = min(pct + 2, 78)
             _set_po_calculate_progress(
                 sess,
                 progress_id,
@@ -451,7 +451,7 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
     import threading
 
     from ..session import store
-    from .po_calculate_jobs import set_po_job
+    from .po_calculate_jobs import get_po_job_by_id, set_po_job, touch_po_job
     from .po_session_hydrate import hydrate_po_session_for_calculate
     from .shared_frames import session_inventory_variant, session_sales_df
 
@@ -471,6 +471,32 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
     sess.po_calculate_progress = 2
     sess.po_calculate_message = "Preparing PO calculation…"
     _po_wall_start = time.perf_counter()
+
+    # Heartbeat from job start — hydrate can take minutes with no progress ticks.
+    _prep_hb_stop = threading.Event()
+
+    def _prep_heartbeat() -> None:
+        tick = 0
+        while not _prep_hb_stop.wait(15):
+            job = get_po_job_by_id(job_id)
+            if str(job.get("status") or "") != "running":
+                break
+            pct = int(job.get("progress") or 2)
+            if pct >= 30:
+                # Engine phase has its own heartbeat.
+                touch_po_job(job_id)
+                continue
+            tick += 1
+            next_pct = min(pct + (1 if tick % 2 == 0 else 0), 28)
+            _set_po_calculate_progress(
+                sess,
+                job_id,
+                next_pct,
+                f"Hydrating sales and inventory… ({next_pct}%)",
+            )
+
+    _prep_hb = threading.Thread(target=_prep_heartbeat, daemon=True, name="po-prep-hb")
+    _prep_hb.start()
 
     try:
         from .po_result_spill import clear_spill
@@ -513,6 +539,13 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
         except Exception:
             pass
         hydrate_po_session_for_calculate(sess)
+        _set_po_calculate_progress(sess, job_id, 10, "Sales and inventory ready…")
+        try:
+            import gc as _gc
+
+            _gc.collect()
+        except Exception:
+            pass
 
         from .po_pipeline import check_calculate_gate
 
@@ -689,3 +722,5 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
             record_po_calculate(time.perf_counter() - _po_wall_start, ok=False)
         except Exception:
             pass
+    finally:
+        _prep_hb_stop.set()

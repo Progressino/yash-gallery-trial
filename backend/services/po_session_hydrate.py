@@ -756,10 +756,16 @@ _PO_PLATFORM_ATTRS = (
 
 
 def _hydrate_platform_frames_from_disk_for_po(sess) -> None:
-    """PO-session-only warm cache skips platform RAM; read parquets for ADS when empty."""
+    """PO-session-only warm cache skips platform RAM; read parquets for ADS when empty.
+
+    Skip when unified ``sales_df`` is already large enough — ADS prefers that path and
+    loading every platform parquet doubles peak RAM (common OOM on Calculate PO).
+    """
     import backend.main as _main
 
     if not _main.warm_cache_po_session_only():
+        return
+    if _df_row_count(getattr(sess, "sales_df", None)) >= 50_000:
         return
     if any(
         _df_row_count(getattr(sess, attr, None)) > 0 for attr in _PO_PLATFORM_ATTRS
