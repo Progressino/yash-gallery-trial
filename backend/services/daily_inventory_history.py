@@ -1757,6 +1757,26 @@ def overlay_inventory_variant_from_history(
         meta["reason"] = "snapshot_fresh"
         return inv_df, meta
 
+    # Authoritative Actual-inventory workbook already has exact per-SKU Available.
+    # Daily history often carries older RAR OMS Qtys dated "newer" on the calendar —
+    # overlaying those destroys SKU-exact stock while roughly preserving catalog totals.
+    try:
+        import backend.main as _main
+
+        warm_meta = (_main._warm_cache or {}).get("inventory_session_meta") or {}
+        dbg = warm_meta.get("inventory_debug") if isinstance(warm_meta, dict) else {}
+        sources = warm_meta.get("inventory_snapshot_date_sources") if isinstance(warm_meta, dict) else None
+        if isinstance(dbg, dict) and dbg.get("actual_inventory_workbook"):
+            meta["reason"] = "actual_inventory_workbook"
+            return inv_df, meta
+        if isinstance(sources, list) and any(
+            "actual inventory" in str(s).lower() for s in sources
+        ):
+            meta["reason"] = "actual_inventory_workbook"
+            return inv_df, meta
+    except Exception:
+        pass
+
     latest = latest_inventory_qty_by_sku(history_df, as_of=hist_max)
     if latest.empty:
         meta["reason"] = "no_latest_rows"
