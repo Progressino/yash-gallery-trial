@@ -2414,7 +2414,7 @@ def inventory_history_wide_matrix(
         "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
         "window_end": str(end_date or today_ist_timestamp().date()),
         "channel": channel,
-        "channel_split_available": inventory_channel_split_available(df),
+        "channel_split_available": False,
     }
     if df is None or df.empty:
         return empty
@@ -2426,28 +2426,114 @@ def inventory_history_wide_matrix(
     date_strs = [str(pd.Timestamp(d).date()) for d in dates_sorted]
 
     # Trim to the view window BEFORE channel coalesce — full-history combine was 60–90s.
-    base = df
-    if "Date" in base.columns:
-        _dates = pd.to_datetime(base["Date"], errors="coerce")
-        base = base.loc[(_dates >= view_start) & (_dates <= view_end)]
-    if base is None or base.empty:
+    work = df
+    if "Date" in work.columns:
+        _dates = pd.to_datetime(work["Date"], errors="coerce")
+        # Avoid full Series copy when Date is already datetime64[ns]
+        if getattr(_dates.dt, "tz", None) is not None:
+            _dates = _dates.dt.tz_localize(None)
+        work = work.loc[(_dates >= view_start) & (_dates <= view_end)]
+    if work is None or work.empty:
         return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
 
-    channel_df = filter_inventory_history_channel(base, channel)
+    # Cheap channel-split probe on the window only (not full history).
+    split_available = False
+    if "Channel" in work.columns:
+        ch_probe = work["Channel"].astype(str).str.strip().str.lower()
+        split_available = bool(ch_probe.isin(["oms", "amazon"]).any())
+    empty = {**empty, "channel_split_available": split_available}
+
+    # Fast path: no OMS/Amazon channel split — skip coalesce/max combine.
+    if channel == "combined" and not split_available:
+        work = work.copy()
+        work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+        work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+        work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0.0)
+        work = work.dropna(subset=["_d"])
+        work = work[work["OMS_SKU"].str.len() > 0]
+        needle = (q or "").strip().upper()
+        if needle:
+            work = work[work["OMS_SKU"].str.contains(needle, na=False)]
+        if work.empty:
+            return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
+
+        # Collapse rare duplicate SKU-days with max — cheaper than full source-rank coalesce.
+        daily = work.groupby(["OMS_SKU", "_d"], as_index=False, sort=False)["Qty"].max()
+        sku_rank = (
+            daily.groupby("OMS_SKU", sort=False)["Qty"]
+            .max()
+            .sort_values(ascending=False)
+        )
+        sku_list = sku_rank.index.astype(str).tolist()
+        total = int(len(sku_list))
+        start_i = max(0, int(offset))
+        end_i = start_i + max(1, int(limit))
+        page_skus = sku_list[start_i:end_i]
+
+        totals_map = daily.groupby("_d", sort=False)["Qty"].sum()
+        date_totals = [float(totals_map.get(d, 0.0) or 0.0) for d in dates_sorted]
+        carried = 0.0
+        date_totals_filled: list[float] = []
+        gap_dates: list[str] = []
+        for d, tot in zip(dates_sorted, date_totals):
+            if tot > 0:
+                carried = tot
+                date_totals_filled.append(tot)
+            elif carried > 0:
+                date_totals_filled.append(carried)
+                gap_dates.append(str(pd.Timestamp(d).date()))
+            else:
+                date_totals_filled.append(0.0)
+
+        if not page_skus:
+            return {
+                **empty,
+                "loaded": True,
+                "dates": date_strs,
+                "date_totals": date_totals_filled,
+                "gap_dates": gap_dates,
+                "total": total,
+            }
+
+        page = daily[daily["OMS_SKU"].isin(page_skus)]
+        pivot = page.pivot(index="OMS_SKU", columns="_d", values="Qty")
+        pivot = pivot.reindex(index=page_skus, columns=dates_sorted)
+        pivot = pivot.ffill(axis=1).fillna(0.0)
+        rows = [
+            {
+                "sku": str(sku),
+                "qtys": [float(row.get(d, 0.0) or 0.0) for d in dates_sorted],
+            }
+            for sku, row in pivot.iterrows()
+        ]
+        return {
+            "loaded": True,
+            "dates": date_strs,
+            "date_totals": date_totals_filled,
+            "gap_dates": gap_dates,
+            "rows": rows,
+            "total": total,
+            "limit": int(limit),
+            "offset": start_i,
+            "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
+            "window_days": span,
+            "window_end": str(date_strs[-1]) if date_strs else str(end_date or today_ist_timestamp().date()),
+            "channel": channel,
+            "channel_split_available": split_available,
+        }
+
+    channel_df = filter_inventory_history_channel(work, channel)
     if channel_df is None or channel_df.empty:
         return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
 
-    trimmed = filter_inventory_history_window(
-        channel_df, days=span, end_date=str(view_end.date())
-    )
-    if trimmed.empty:
-        return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
-
+    # Window already applied above — skip second filter_inventory_history_window copy.
+    trimmed = channel_df
     if sales_df is not None and not getattr(sales_df, "empty", True):
         repaired, _actions = repair_inventory_history_spikes(trimmed, sales_df)
         work = repaired if _actions else trimmed
     else:
         work = trimmed
+    work = work.copy()
     work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
     work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0.0)
 
@@ -2468,26 +2554,12 @@ def inventory_history_wide_matrix(
     start_i = max(0, int(offset))
     end_i = start_i + max(1, int(limit))
     page_skus = sku_list[start_i:end_i]
-    if not page_skus:
-        work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
-        totals = work.groupby("_d", sort=False)["Qty"].sum()
-        date_totals = [float(totals.get(d, 0.0) or 0.0) for d in dates_sorted]
-        return {
-            **empty,
-            "loaded": True,
-            "dates": date_strs,
-            "date_totals": date_totals,
-            "total": total,
-        }
-
     work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     totals = work.groupby("_d", sort=False)["Qty"].sum()
     date_totals = [float(totals.get(d, 0.0) or 0.0) for d in dates_sorted]
-    # Carry last known Total Inv across calendar gaps so missing upload days don't
-    # look like zero stock (SKU cells already ffill in the fast path below).
     carried = 0.0
-    date_totals_filled: list[float] = []
-    gap_dates: list[str] = []
+    date_totals_filled = []
+    gap_dates = []
     for d, tot in zip(dates_sorted, date_totals):
         if tot > 0:
             carried = tot
@@ -2499,9 +2571,16 @@ def inventory_history_wide_matrix(
             date_totals_filled.append(0.0)
     date_totals = date_totals_filled
 
-    # UI fast path (no sales_df): skip densify/spike-repair calendar expansion —
-    # pivot page SKUs and forward-fill gaps. Full densify OOMs / 60–90s on prod.
     if sales_df is None or getattr(sales_df, "empty", True):
+        if not page_skus:
+            return {
+                **empty,
+                "loaded": True,
+                "dates": date_strs,
+                "date_totals": date_totals,
+                "gap_dates": gap_dates,
+                "total": total,
+            }
         page = work[work["OMS_SKU"].isin(page_skus)]
         if page.empty:
             return {
@@ -2540,7 +2619,7 @@ def inventory_history_wide_matrix(
             "window_days": span,
             "window_end": str(date_strs[-1]) if date_strs else str(end_date or today_ist_timestamp().date()),
             "channel": channel,
-            "channel_split_available": inventory_channel_split_available(df),
+            "channel_split_available": split_available,
         }
 
     page_dense = densify_inventory_history_for_view(
