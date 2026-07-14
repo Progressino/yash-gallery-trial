@@ -2267,6 +2267,10 @@ def _detect_inventory_type(filename: str, content_bytes: bytes) -> str:
                     return "myntra"
                 if "live on website" in joined or ("sku" in joined and "available to promise" in joined):
                     return "flipkart"
+                if "available inventory" in joined or (
+                    "sku" in joined and ("not in" in joined or any("oms-" in c for c in cols))
+                ):
+                    return "oms"
                 if "item skucode" in joined or "buffer stock" in joined:
                     return "oms"
             except Exception:
@@ -2600,8 +2604,13 @@ def _inventory_apply_parse_result(
     sess.inventory_df_variant = df_variant
     sess.inventory_df_parent = df_parent
     try:
+        from ..services.inventory import sync_manual_overlay_from_inventory_frame
         from ..services.manual_intransit_sheet import apply_manual_intransit_overlay_to_inventory
 
+        # Actual-inventory workbook already has exact Manual/Not_In per SKU — sync
+        # overlay FROM the frame so a stale overlay cannot reshuffle totals.
+        if debug.get("actual_inventory_workbook"):
+            sync_manual_overlay_from_inventory_frame(sess, df_variant)
         _mit_df = getattr(sess, "manual_intransit_overlay_df", None)
         if _mit_df is not None and not _mit_df.empty:
             apply_manual_intransit_overlay_to_inventory(sess)

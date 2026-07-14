@@ -1311,11 +1311,132 @@ def _parse_combo_csv(csv_bytes: bytes) -> pd.DataFrame:
 # ── Main loader ───────────────────────────────────────────────
 
 def _parse_oms_or_combo(csv_bytes: bytes) -> pd.DataFrame:
-    """Try OMS CSV first, then Combo SKUs CSV. Returns OMS_Inventory column."""
+    """Try Actual-inventory workbook, then OMS CSV, then Combo SKUs CSV."""
+    part = parse_actual_inventory_workbook(csv_bytes)
+    if not part.empty:
+        return part
     part = _parse_oms_csv(csv_bytes)
     if not part.empty:
         return part
     return _parse_combo_csv(csv_bytes)
+
+
+def is_actual_inventory_workbook(df: pd.DataFrame) -> bool:
+    """True for the Ops 'Actual inventory' Available-Inventory workbook."""
+    if df is None or getattr(df, "empty", True):
+        return False
+    cols = [str(c).strip().lower() for c in df.columns]
+    joined = " | ".join(cols)
+    has_sku = any(c in ("sku", "oms_sku", "oms sku", "item skucode") for c in cols) or "sku" in joined
+    has_available = "available inventory" in joined or "available_inventory" in joined
+    has_oms = any("oms-" in c or c == "oms" or c.startswith("oms ") for c in cols) or "inventory" in joined
+    has_notin = "not in" in joined or "challan" in joined
+    return bool(has_sku and (has_available or (has_oms and has_notin)))
+
+
+def parse_actual_inventory_workbook(file_bytes: bytes) -> pd.DataFrame:
+    """
+    Parse the Ops Actual inventory.xlsx (Sku + OMS + marketplace warehouses + Available).
+
+    SKUs are kept 1:1 (upper/stripped only — no seller→OMS remapping) so Available
+    Inventory lands on the exact OMS_SKU the workbook lists.
+    """
+    if not file_bytes:
+        return pd.DataFrame()
+    try:
+        df = pd.read_excel(io.BytesIO(file_bytes))
+    except Exception:
+        return pd.DataFrame()
+    if df is None or df.empty or not is_actual_inventory_workbook(df):
+        return pd.DataFrame()
+
+    col_map = {str(c).strip(): c for c in df.columns}
+
+    def _find(*needles: str) -> str | None:
+        for label, raw in col_map.items():
+            low = label.lower()
+            for n in needles:
+                if n in low:
+                    return raw
+        return None
+
+    sku_col = _find("item skucode", "oms_sku", "oms sku") or _find("sku")
+    if sku_col is None:
+        return pd.DataFrame()
+
+    oms_col = _find("oms-") or _find("oms inventory") or next(
+        (raw for label, raw in col_map.items() if label.strip().lower() in ("oms", "inventory")),
+        None,
+    )
+    notin_col = _find("not in", "challan")
+    buffer_col = _find("buffer")
+    amazon_col = _find("amazon other", "amazon")
+    flipkart_col = _find("flipkart", "flipkaet")
+    myntra_col = _find("myntra")
+    transit_col = _find("in tarnsit", "in transit", "intransit")
+
+    out = pd.DataFrame()
+    # Exact SKU identity: uppercase + strip, collapse internal whitespace so
+    # "1952YKBLACK -S" joins the catalog as 1952YKBLACK-S — never seller-map.
+    out["OMS_SKU"] = (
+        df[sku_col]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .str.replace(r"\s+", "", regex=True)
+    )
+    out = out[~out["OMS_SKU"].isin({"", "NAN", "NONE", "TOTAL", "SKU"})]
+
+    def _num(col) -> pd.Series:
+        if col is None:
+            return pd.Series(0.0, index=df.index)
+        return pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    out["OMS_Inventory"] = _num(oms_col).reindex(out.index).fillna(0.0).to_numpy()
+    out["Buffer_Stock"] = _num(buffer_col).reindex(out.index).fillna(0.0).to_numpy()
+    out["Amazon_Inventory"] = _num(amazon_col).reindex(out.index).fillna(0.0).to_numpy()
+    out["Flipkart_Inventory"] = _num(flipkart_col).reindex(out.index).fillna(0.0).to_numpy()
+    out["Myntra_Other_Inventory"] = _num(myntra_col).reindex(out.index).fillna(0.0).to_numpy()
+    out["Manual_InTransit"] = _num(transit_col).reindex(out.index).fillna(0.0).to_numpy()
+    out["Not_In_Inventory_Qty"] = _num(notin_col).reindex(out.index).fillna(0.0).to_numpy()
+
+    num_cols = [
+        "OMS_Inventory",
+        "Buffer_Stock",
+        "Amazon_Inventory",
+        "Flipkart_Inventory",
+        "Myntra_Other_Inventory",
+        "Manual_InTransit",
+        "Not_In_Inventory_Qty",
+    ]
+    out = out.groupby("OMS_SKU", as_index=False)[num_cols].sum()
+    out = recompute_inventory_totals(out)
+    out.attrs["actual_inventory_workbook"] = True
+    return out
+
+
+def sync_manual_overlay_from_inventory_frame(sess, inv: pd.DataFrame) -> None:
+    """Replace session manual overlay from inventory Manual/Not_In columns (1:1)."""
+    if inv is None or getattr(inv, "empty", True):
+        return
+    cols = []
+    if "Manual_InTransit" in inv.columns:
+        cols.append("Manual_InTransit")
+    if "Not_In_Inventory_Qty" in inv.columns:
+        cols.append("Not_In_Inventory_Qty")
+    if not cols:
+        return
+    ov = inv[["OMS_SKU", *cols]].copy()
+    for c in ("Manual_InTransit", "Not_In_Inventory_Qty"):
+        if c not in ov.columns:
+            ov[c] = 0
+        ov[c] = pd.to_numeric(ov[c], errors="coerce").fillna(0).astype(int)
+    ov = ov[(ov["Manual_InTransit"] > 0) | (ov["Not_In_Inventory_Qty"] > 0)].reset_index(drop=True)
+    sess.manual_intransit_overlay_df = ov
+    sess.manual_intransit_filename = getattr(sess, "manual_intransit_filename", "") or "from_actual_inventory.xlsx"
+    from datetime import datetime, timezone
+
+    sess.manual_intransit_uploaded_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def load_inventory_consolidated(
@@ -1350,6 +1471,8 @@ def load_inventory_consolidated(
             if ob:
                 part = _parse_oms_or_combo(ob)
                 if not part.empty:
+                    if bool(getattr(part, "attrs", {}).get("actual_inventory_workbook")):
+                        debug["actual_inventory_workbook"] = True
                     oms_parts.append(part)
 
     # ── Flipkart (standalone uploads — RAR FK files appended into fk_parts below) ──
@@ -1535,6 +1658,7 @@ def load_inventory_consolidated(
         _all_src = [
             "OMS_Inventory", "Buffer_Stock", "Amazon_Inventory", "Flipkart_Inventory",
             "Myntra_Other_Inventory", "Meesho_Inventory",
+            "Manual_InTransit", "Not_In_Inventory_Qty",
         ]
         agg_cols = [c for c in _all_src if c in combined_oms.columns]
         oms_part = combined_oms.groupby("OMS_SKU")[agg_cols].sum().reset_index()
@@ -1563,15 +1687,16 @@ def load_inventory_consolidated(
 
     # ── Normalize OMS_SKU case before merge to prevent case-based duplicates ──
     # (OMS CSV may use lowercase sizes like "6xl" while Amazon uses "6XL")
+    # Actual-inventory workbook is already 1:1 SKU-exact — do NOT collapse size
+    # suffixes (XXXL→3XL etc.) or stock lands on the wrong OMS_SKU.
+    _skip_size_collapse = bool(debug.get("actual_inventory_workbook"))
     for i, df in enumerate(inv_dfs):
         if "OMS_SKU" in df.columns:
             df = df.copy()
-            df["OMS_SKU"] = (
-                df["OMS_SKU"]
-                .str.strip()
-                .str.upper()
-                .map(collapse_duplicate_trailing_size_suffix)
-            )
+            skus = df["OMS_SKU"].astype(str).str.strip().str.upper()
+            if not _skip_size_collapse:
+                skus = skus.map(collapse_duplicate_trailing_size_suffix)
+            df["OMS_SKU"] = skus
             num_cols = [c for c in df.columns if c != "OMS_SKU"]
             df = df.groupby("OMS_SKU")[num_cols].sum().reset_index()
             inv_dfs[i] = df
@@ -1586,6 +1711,8 @@ def load_inventory_consolidated(
         consolidated[inv_cols] = consolidated[inv_cols].fillna(0)
 
     consolidated = recompute_inventory_totals(consolidated)
+    if debug.get("actual_inventory_workbook") and hasattr(consolidated, "attrs"):
+        consolidated.attrs["actual_inventory_workbook"] = True
 
     if group_by_parent:
         consolidated["Parent_SKU"] = consolidated["OMS_SKU"].apply(get_parent_sku)
@@ -1597,6 +1724,8 @@ def load_inventory_consolidated(
 
     result = consolidated[consolidated["Total_Inventory"] > 0].reset_index(drop=True)
     result = strip_fba_intransit_unless_enabled(result)
+    if debug.get("actual_inventory_workbook") and hasattr(result, "attrs"):
+        result.attrs["actual_inventory_workbook"] = True
     if return_debug:
         return result, debug
     return result
