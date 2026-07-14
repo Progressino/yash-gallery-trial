@@ -147,13 +147,17 @@ def combine_inventory_channels(df: pd.DataFrame | None) -> pd.DataFrame:
     OMS + Amazon FBA combined, so keeping them alongside separate channel rows
     causes double-counting and large artificial spikes in the history).
     """
-    work = _coalesce_history_rows(_ensure_channel_column(df))
-    if work.empty:
+    work = _ensure_channel_column(df)
+    if work is None or getattr(work, "empty", True):
         return pd.DataFrame(columns=_STORE_COLS)
     ch = work["Channel"].astype(str).str.strip().str.lower()
     if not ch.isin(["oms", "amazon"]).any():
-        # Legacy / no channel split: return blank-channel rows as-is.
-        return work.drop(columns=["Channel"], errors="ignore")
+        # Legacy / no channel split: coalesce once and return (no per-channel max).
+        return _coalesce_history_rows(work).drop(columns=["Channel"], errors="ignore")
+    work = _coalesce_history_rows(work)
+    if work.empty:
+        return pd.DataFrame(columns=_STORE_COLS)
+    ch = work["Channel"].astype(str).str.strip().str.lower()
     # Drop blank-channel rows for any date that already has explicit
     # oms or amazon rows, so they don't inflate the combined max.
     explicit_dates = work.loc[ch.isin(["oms", "amazon"]), "Date"].unique()

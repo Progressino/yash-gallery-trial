@@ -48,49 +48,74 @@ def _warm_cache_parquet(name: str, *, columns: list[str] | None = None) -> pd.Da
 
 
 def _inventory_history_df_for_matrix_read(sess) -> pd.DataFrame:
-    """Prefer the newest inventory history among session, warm cache, and disk.
+    """Fast matrix read — prefer in-RAM warm/session; avoid full parquet reloads.
 
-    Uploads often land on session + disk while warm RAM stays stale — reading warm
-    first made daily snapshot uploads look missing until restart.
+    Never copy large frames on every page request (that previously spiked RAM and
+    made Inventory History hang at "Loading matrix…").
     """
-    from ..services.daily_inventory_history import inventory_history_max_date
+    from ..services.daily_inventory_history import (
+        inventory_history_max_date,
+        read_daily_inventory_history_disk_meta,
+    )
 
-    candidates: list[pd.DataFrame] = []
     sess_df = getattr(sess, "daily_inventory_history_df", None)
-    if sess_df is not None and not getattr(sess_df, "empty", True):
-        candidates.append(sess_df)
+    warm = None
     try:
         import backend.main as _main
 
-        wc = (_main._warm_cache or {}).get("daily_inventory_history_df")
-        if wc is not None and not getattr(wc, "empty", True):
-            candidates.append(wc)
+        warm = (_main._warm_cache or {}).get("daily_inventory_history_df")
     except Exception:
-        pass
-    disk = _warm_cache_parquet("daily_inventory_history_df")
-    if not disk.empty:
-        candidates.append(disk)
+        warm = None
 
-    if not candidates:
+    def _max_ord(df: pd.DataFrame | None) -> int:
+        if df is None or getattr(df, "empty", True):
+            return 0
+        mx = inventory_history_max_date(df)
+        return int(pd.Timestamp(mx).toordinal()) if mx is not None else 0
+
+    warm_ord = _max_ord(warm)
+    sess_ord = _max_ord(sess_df)
+    disk_meta_ord = 0
+    try:
+        meta = read_daily_inventory_history_disk_meta() or {}
+        mx = str(meta.get("daily_inventory_history_max_date") or "")[:10]
+        if len(mx) == 10:
+            disk_meta_ord = int(pd.Timestamp(mx).toordinal())
+    except Exception:
+        disk_meta_ord = 0
+
+    # Prefer the newest in-RAM frame when it already matches disk meta (or is newer).
+    if warm_ord and warm_ord >= disk_meta_ord and warm_ord >= sess_ord:
+        return warm
+    if sess_ord and sess_ord >= disk_meta_ord and sess_ord >= warm_ord:
+        return sess_df
+
+    disk = _warm_cache_parquet("daily_inventory_history_df")
+    if disk.empty:
+        if warm is not None and not getattr(warm, "empty", True):
+            return warm
+        if sess_df is not None and not getattr(sess_df, "empty", True):
+            return sess_df
         return _inventory_history_df_for_read(sess)
 
-    def _score(df: pd.DataFrame) -> tuple:
-        mx = inventory_history_max_date(df)
-        mx_ord = int(pd.Timestamp(mx).toordinal()) if mx is not None else 0
-        return (mx_ord, int(len(df)), int(df["OMS_SKU"].nunique()) if "OMS_SKU" in df.columns else 0)
+    disk_ord = _max_ord(disk)
+    best = disk
+    best_ord = disk_ord
+    if warm_ord >= best_ord and warm is not None and not getattr(warm, "empty", True):
+        best, best_ord = warm, warm_ord
+    if sess_ord >= best_ord and sess_df is not None and not getattr(sess_df, "empty", True):
+        best, best_ord = sess_df, sess_ord
 
-    best = max(candidates, key=_score)
-    # Keep warm + session aligned with the winning frame so pagination stays consistent.
+    # Point warm/session at the winner without deep-copying (~400k-row frames).
     try:
         import backend.main as _main
 
         if not getattr(_main, "_warm_cache", None):
             _main._warm_cache = {}
-        warm = (_main._warm_cache or {}).get("daily_inventory_history_df")
-        if warm is None or getattr(warm, "empty", True) or _score(best) > _score(warm):
-            _main._warm_cache["daily_inventory_history_df"] = best.copy()
-        if sess_df is None or getattr(sess_df, "empty", True) or _score(best) > _score(sess_df):
-            sess.daily_inventory_history_df = best.copy()
+        if best is not warm:
+            _main._warm_cache["daily_inventory_history_df"] = best
+        if best is not sess_df:
+            sess.daily_inventory_history_df = best
     except Exception:
         pass
     return best
@@ -139,51 +164,13 @@ def _inventory_matrix_payload(
     end_date: Optional[str] = None,
     channel: str = "combined",
 ) -> dict:
-    from ..services.daily_inventory_history import (
-        detect_inventory_history_integrity_issues,
-        inventory_history_wide_matrix,
-        repair_inventory_history_integrity,
-    )
+    from ..services.daily_inventory_history import inventory_history_wide_matrix
 
     try:
         df = _inventory_history_df_for_matrix_read(sess)
-        integrity: dict = {"ok": True, "repaired": False, "warnings": [], "actions": []}
-        try:
-            issues = detect_inventory_history_integrity_issues(df)
-            if not issues.get("ok"):
-                repaired, integrity = repair_inventory_history_integrity(
-                    df,
-                    variant_df=getattr(sess, "inventory_df_variant", None),
-                    sales_df=None,
-                )
-                if integrity.get("repaired"):
-                    df = repaired
-                    sess.daily_inventory_history_df = repaired
-                    try:
-                        import backend.main as _main
-
-                        if not getattr(_main, "_warm_cache", None):
-                            _main._warm_cache = {}
-                        _main._warm_cache["daily_inventory_history_df"] = repaired.copy()
-                        _main.sync_daily_inventory_history_sidecar(sess)
-                    except Exception:
-                        logging.getLogger(__name__).exception(
-                            "persist inventory integrity repair failed"
-                        )
-                    # Drop stale parquet reads so disk fallback matches repair.
-                    for key in list(_PARQUET_DISK_CACHE.keys()):
-                        if key and key[0] == "daily_inventory_history_df":
-                            _PARQUET_DISK_CACHE.pop(key, None)
-                else:
-                    integrity = {**issues, "repaired": False, "actions": []}
-            else:
-                integrity = {**issues, "repaired": False, "actions": []}
-        except Exception:
-            logging.getLogger(__name__).exception("inventory integrity check failed")
-
-        # Never attach full sales_df here — spike-repair over ~1.8M sales rows
-        # peaks multi-GB and OOMs the 6.5GB prod container (matrix then "fails").
-        # Calendar densify still roll-forwards last known on-hand without sales.
+        # Integrity repair (duplicate/spike detection) intentionally NOT on this path —
+        # it scanned/copied ~400k rows and hung the UI at "Loading matrix…". Repair runs
+        # on snapshot upload / warm-cache load instead.
         out = inventory_history_wide_matrix(
             df,
             q=q,
@@ -195,7 +182,7 @@ def _inventory_matrix_payload(
             channel=channel,
         )
         out["ok"] = True
-        out["integrity"] = integrity
+        out["integrity"] = {"ok": True, "repaired": False, "warnings": [], "actions": []}
         return out
     except Exception as e:
         logging.getLogger(__name__).exception("inventory history matrix failed")
