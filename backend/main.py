@@ -1313,18 +1313,18 @@ def _merge_recent_sqlite_into_warm_cache(months: int = 4) -> None:
 
 
 def _spawn_background_sales_rebuild() -> None:
-    """Rebuild sales_df from the current _warm_cache platform DFs in a background thread.
+    """Rebuild sales_df from Tier-3 (or warm platforms) in a background thread.
 
-    Runs after a Tier-3 top-up so the Dashboard / SKU Deepdive pick up the
-    latest daily uploads without blocking container health checks.
-    Updates _warm_cache["sales_df"] and saves sales_df.parquet to disk when done.
+    Under ``WARM_CACHE_PO_SESSION_ONLY`` warm platform frames are empty — rebuilding
+    from them previously wiped Amazon/etc. out of ``sales_df.parquet``.
     """
     import threading
 
     def _rebuild() -> None:
         global _warm_cache
         try:
-            import time, os
+            import os
+            import time
             import pandas as pd
             from .services.sales import build_sales_df
             from .services.sku_mapping import load_sku_mapping_from_disk
@@ -1333,43 +1333,127 @@ def _spawn_background_sales_rebuild() -> None:
             log.info("Background sales_df rebuild starting…")
 
             wc = _warm_cache or {}
-            mtr_df      = wc.get("mtr_df",      pd.DataFrame())
-            myntra_df   = wc.get("myntra_df",    pd.DataFrame())
-            meesho_df   = wc.get("meesho_df",    pd.DataFrame())
-            flipkart_df = wc.get("flipkart_df",  pd.DataFrame())
-            snapdeal_df = wc.get("snapdeal_df",  pd.DataFrame())
-            sku_mapping = wc.get("sku_mapping")
-            if not sku_mapping or not isinstance(sku_mapping, dict):
-                sku_mapping = load_sku_mapping_from_disk() or {}
-
-            # Return overlay (optional)
-            ov = wc.get("po_return_overlay_df", pd.DataFrame())
-            try:
-                from .services.po_return_import import aggregate_return_overlay_for_use
-                ov = aggregate_return_overlay_for_use(ov)
-            except Exception:
-                ov = None
-
-            new_sales = build_sales_df(
-                mtr_df      = mtr_df,
-                myntra_df   = myntra_df,
-                meesho_df   = meesho_df,
-                flipkart_df = flipkart_df,
-                snapdeal_df = snapdeal_df,
-                sku_mapping = sku_mapping,
-                return_overlay_df = ov,
+            po_session_only = str(os.environ.get("WARM_CACHE_PO_SESSION_ONLY", "") or "").strip().lower() in (
+                "1", "true", "yes", "on",
             )
+            existing = wc.get("sales_df")
+            if not isinstance(existing, pd.DataFrame):
+                existing = pd.DataFrame()
 
-            if new_sales.empty:
-                log.warning("Background sales_df rebuild returned empty — keeping existing.")
-                return
+            # Prefer Tier-3 patch when platform frames are empty / PO_SESSION_ONLY.
+            mtr_df = wc.get("mtr_df", pd.DataFrame())
+            myntra_df = wc.get("myntra_df", pd.DataFrame())
+            meesho_df = wc.get("meesho_df", pd.DataFrame())
+            flipkart_df = wc.get("flipkart_df", pd.DataFrame())
+            snapdeal_df = wc.get("snapdeal_df", pd.DataFrame())
+            plat_rows = sum(
+                len(x) for x in (mtr_df, myntra_df, meesho_df, flipkart_df, snapdeal_df)
+                if isinstance(x, pd.DataFrame)
+            )
+            if po_session_only or plat_rows < 1000:
+                try:
+                    from .services.daily_store import load_platform_data
+                    from .services.sales import (
+                        build_sales_df,
+                        patch_sales_df_after_daily_upload,
+                        sales_date_window_from_platform_dfs,
+                    )
+
+                    sku_mapping = wc.get("sku_mapping") or load_sku_mapping_from_disk() or {}
+                    plats = {
+                        "amazon": load_platform_data("amazon", months=1),
+                        "myntra": load_platform_data("myntra", months=1),
+                        "meesho": load_platform_data("meesho", months=1),
+                        "flipkart": load_platform_data("flipkart", months=1),
+                        "snapdeal": load_platform_data("snapdeal", months=1),
+                    }
+                    plat_frames = {
+                        k: v for k, v in plats.items()
+                        if v is not None and not getattr(v, "empty", True)
+                    }
+                    if not plat_frames:
+                        log.warning("Background Tier-3 sales patch: no platform rows — keeping existing")
+                        return
+                    d0, d1 = sales_date_window_from_platform_dfs(plat_frames)
+                    if d0 is None or d1 is None:
+                        log.warning("Background Tier-3 sales patch: no date window — keeping existing")
+                        return
+                    fresh = build_sales_df(
+                        mtr_df=plat_frames.get("amazon", pd.DataFrame()),
+                        myntra_df=plat_frames.get("myntra", pd.DataFrame()),
+                        meesho_df=plat_frames.get("meesho", pd.DataFrame()),
+                        flipkart_df=plat_frames.get("flipkart", pd.DataFrame()),
+                        snapdeal_df=plat_frames.get("snapdeal", pd.DataFrame()),
+                        sku_mapping=sku_mapping,
+                    )
+                    new_sales = patch_sales_df_after_daily_upload(
+                        existing if not existing.empty else pd.DataFrame(),
+                        fresh,
+                        set(plat_frames.keys()),
+                        d0,
+                        d1,
+                    )
+                    log.info(
+                        "Background sales_df Tier-3 patch %s→%s (%d rows)",
+                        d0.date(), d1.date(), len(new_sales),
+                    )
+                except Exception:
+                    log.exception("Background Tier-3 sales patch failed — keeping existing")
+                    return
+            else:
+                sku_mapping = wc.get("sku_mapping")
+                if not sku_mapping or not isinstance(sku_mapping, dict):
+                    sku_mapping = load_sku_mapping_from_disk() or {}
+                ov = wc.get("po_return_overlay_df", pd.DataFrame())
+                try:
+                    from .services.po_return_import import aggregate_return_overlay_for_use
+                    ov = aggregate_return_overlay_for_use(ov)
+                except Exception:
+                    ov = None
+                new_sales = build_sales_df(
+                    mtr_df=mtr_df,
+                    myntra_df=myntra_df,
+                    meesho_df=meesho_df,
+                    flipkart_df=flipkart_df,
+                    snapdeal_df=snapdeal_df,
+                    sku_mapping=sku_mapping,
+                    return_overlay_df=ov,
+                )
+                if new_sales.empty:
+                    log.warning("Background sales_df rebuild returned empty — keeping existing.")
+                    return
+                # Guard: never persist a rebuild that drops recent Amazon volume.
+                if not existing.empty and "Source" in existing.columns and "TxnDate" in existing.columns:
+                    try:
+                        ex = existing.copy()
+                        ex["TxnDate"] = pd.to_datetime(ex["TxnDate"], errors="coerce")
+                        cutoff = ex["TxnDate"].max() - pd.Timedelta(days=14)
+                        ex_amz = float(
+                            ex.loc[
+                                (ex["TxnDate"] >= cutoff)
+                                & (ex["Source"].astype(str).str.upper() == "AMAZON"),
+                                "Units_Effective" if "Units_Effective" in ex.columns else "Quantity",
+                            ].sum()
+                        )
+                        ns = new_sales.copy()
+                        ns["TxnDate"] = pd.to_datetime(ns["TxnDate"], errors="coerce")
+                        ns_amz = float(
+                            ns.loc[
+                                (ns["TxnDate"] >= cutoff)
+                                & (ns["Source"].astype(str).str.upper() == "AMAZON"),
+                                "Units_Effective" if "Units_Effective" in ns.columns else "Quantity",
+                            ].sum()
+                        )
+                        if ex_amz > 1000 and ns_amz < ex_amz * 0.5:
+                            log.warning(
+                                "Background sales rebuild dropped Amazon (%.0f → %.0f) — keeping existing",
+                                ex_amz, ns_amz,
+                            )
+                            return
+                    except Exception:
+                        log.exception("Amazon guard on background sales rebuild failed")
 
             _warm_cache["sales_df"] = new_sales
-            # Bump the warm-cache generation so that existing sessions (which still
-            # hold the old, inflated sales_df) are forced to re-attach on their next
-            # request.  Without this, _warm_cache_has_more() returns False (the
-            # clean rebuild has *fewer* rows after shadow-row dedup) and sessions
-            # never see the corrected data until they restart.
             global _warm_cache_generation
             _warm_cache_generation = max(int(_warm_cache_generation or 0) + 1, 2)
             log.info(
@@ -1378,7 +1462,6 @@ def _spawn_background_sales_rebuild() -> None:
                 len(new_sales), time.time() - t0, _warm_cache_generation,
             )
 
-            # Persist to disk so the next restart fast-path loads fresh data
             parquet_path = os.path.join(_DISK_CACHE_DIR, "sales_df.parquet")
             try:
                 new_sales.to_parquet(parquet_path, index=False)

@@ -48,19 +48,52 @@ def _warm_cache_parquet(name: str, *, columns: list[str] | None = None) -> pd.Da
 
 
 def _inventory_history_df_for_matrix_read(sess) -> pd.DataFrame:
-    """Fast matrix read — disk/warm cache only; skip roll-forward on every page."""
+    """Prefer the newest inventory history among session, warm cache, and disk.
+
+    Uploads often land on session + disk while warm RAM stays stale — reading warm
+    first made daily snapshot uploads look missing until restart.
+    """
+    from ..services.daily_inventory_history import inventory_history_max_date
+
+    candidates: list[pd.DataFrame] = []
+    sess_df = getattr(sess, "daily_inventory_history_df", None)
+    if sess_df is not None and not getattr(sess_df, "empty", True):
+        candidates.append(sess_df)
     try:
         import backend.main as _main
 
         wc = (_main._warm_cache or {}).get("daily_inventory_history_df")
-        if wc is not None and not wc.empty:
-            return wc
+        if wc is not None and not getattr(wc, "empty", True):
+            candidates.append(wc)
     except Exception:
         pass
     disk = _warm_cache_parquet("daily_inventory_history_df")
     if not disk.empty:
-        return disk
-    return _inventory_history_df_for_read(sess)
+        candidates.append(disk)
+
+    if not candidates:
+        return _inventory_history_df_for_read(sess)
+
+    def _score(df: pd.DataFrame) -> tuple:
+        mx = inventory_history_max_date(df)
+        mx_ord = int(pd.Timestamp(mx).toordinal()) if mx is not None else 0
+        return (mx_ord, int(len(df)), int(df["OMS_SKU"].nunique()) if "OMS_SKU" in df.columns else 0)
+
+    best = max(candidates, key=_score)
+    # Keep warm + session aligned with the winning frame so pagination stays consistent.
+    try:
+        import backend.main as _main
+
+        if not getattr(_main, "_warm_cache", None):
+            _main._warm_cache = {}
+        warm = (_main._warm_cache or {}).get("daily_inventory_history_df")
+        if warm is None or getattr(warm, "empty", True) or _score(best) > _score(warm):
+            _main._warm_cache["daily_inventory_history_df"] = best.copy()
+        if sess_df is None or getattr(sess_df, "empty", True) or _score(best) > _score(sess_df):
+            sess.daily_inventory_history_df = best.copy()
+    except Exception:
+        pass
+    return best
 
 
 def _inventory_history_df_for_read(sess) -> pd.DataFrame:

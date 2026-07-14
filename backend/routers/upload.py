@@ -554,6 +554,11 @@ def _rebuild_sales_sync(
     """Rebuild combined sales_df from platform frames. Caller should hold ``_daily_restore_lock``."""
     try:
         from ..services.platform_session_window import platform_frames_trimmed_for_sales_build
+        import os
+
+        po_session_only = str(os.environ.get("WARM_CACHE_PO_SESSION_ONLY", "") or "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
 
         if platforms_touched and _daily_auto_fast_ingest_enabled():
             buffers = getattr(sess, "_daily_auto_parsed_buffers", None) or {}
@@ -580,6 +585,22 @@ def _rebuild_sales_sync(
                 if ok_patch:
                     return ok_patch, msg_patch
             _sync_session_platforms_from_sqlite(sess)
+
+        # PO_SESSION_ONLY: platform frames in RAM are intentionally empty/shallow —
+        # never rebuild sales from them (that previously wiped Amazon after deploy).
+        existing = _session_or_warm_sales_df(sess)
+        if po_session_only and existing is not None and not getattr(existing, "empty", True) and len(existing) >= 50_000:
+            plats = set(platforms_touched) if platforms_touched else {
+                "amazon", "myntra", "meesho", "flipkart", "snapdeal"
+            }
+            ok_patch, msg_patch = _patch_sales_from_tier3_platforms(sess, plats)
+            if ok_patch:
+                return ok_patch, msg_patch
+            return False, (
+                "Refusing full sales rebuild under WARM_CACHE_PO_SESSION_ONLY "
+                f"(would drop platform history). Tier-3 patch failed: {msg_patch}"
+            )
+
         trimmed = platform_frames_trimmed_for_sales_build(sess)
         sess.sales_df = build_sales_df(
             mtr_df=trimmed["mtr_df"],

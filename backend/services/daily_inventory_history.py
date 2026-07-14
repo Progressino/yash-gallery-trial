@@ -2479,6 +2479,21 @@ def inventory_history_wide_matrix(
     work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     totals = work.groupby("_d", sort=False)["Qty"].sum()
     date_totals = [float(totals.get(d, 0.0) or 0.0) for d in dates_sorted]
+    # Carry last known Total Inv across calendar gaps so missing upload days don't
+    # look like zero stock (SKU cells already ffill in the fast path below).
+    carried = 0.0
+    date_totals_filled: list[float] = []
+    gap_dates: list[str] = []
+    for d, tot in zip(dates_sorted, date_totals):
+        if tot > 0:
+            carried = tot
+            date_totals_filled.append(tot)
+        elif carried > 0:
+            date_totals_filled.append(carried)
+            gap_dates.append(str(pd.Timestamp(d).date()))
+        else:
+            date_totals_filled.append(0.0)
+    date_totals = date_totals_filled
 
     # UI fast path (no sales_df): skip densify/spike-repair calendar expansion —
     # pivot page SKUs and forward-fill gaps. Full densify OOMs / 60–90s on prod.
@@ -2490,6 +2505,7 @@ def inventory_history_wide_matrix(
                 "loaded": True,
                 "dates": date_strs,
                 "date_totals": date_totals,
+                "gap_dates": gap_dates,
                 "total": total,
             }
         page = (
@@ -2511,6 +2527,7 @@ def inventory_history_wide_matrix(
             "loaded": True,
             "dates": date_strs,
             "date_totals": date_totals,
+            "gap_dates": gap_dates,
             "rows": rows,
             "total": total,
             "limit": int(limit),

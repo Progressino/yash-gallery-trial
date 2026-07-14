@@ -82,6 +82,7 @@ export default function InventoryHistory() {
 
   const dates = matrixQ.data?.dates ?? []
   const dateTotals = matrixQ.data?.date_totals ?? []
+  const gapDates = new Set(matrixQ.data?.gap_dates ?? [])
   const matrixRows = matrixQ.data?.rows ?? []
   const totalSkus = matrixQ.data?.total ?? 0
   const inStockMin = matrixQ.data?.in_stock_min_qty ?? 1
@@ -357,11 +358,18 @@ export default function InventoryHistory() {
                       </th>
                       {dates.map((d, i) => {
                         const total = dateTotals[i] ?? 0
+                        const carried = gapDates.has(d)
                         return (
                           <th
                             key={`${d}-total`}
-                            className="border border-gray-200 px-1 py-1 text-center text-[10px] font-bold text-indigo-900 whitespace-nowrap tabular-nums"
-                            title={`${d}: ${total.toLocaleString()} units`}
+                            className={`border border-gray-200 px-1 py-1 text-center text-[10px] font-bold whitespace-nowrap tabular-nums ${
+                              carried ? 'bg-amber-50 text-amber-900' : 'text-indigo-900'
+                            }`}
+                            title={
+                              carried
+                                ? `${d}: ${total.toLocaleString()} units (carried — no upload this day)`
+                                : `${d}: ${total.toLocaleString()} units`
+                            }
                           >
                             {total > 0
                               ? total.toLocaleString(undefined, { maximumFractionDigits: 0 })
