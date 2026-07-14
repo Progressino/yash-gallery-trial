@@ -926,22 +926,291 @@ def _sales_for_inventory_rollforward(sess) -> pd.DataFrame | None:
 
 
 def _variant_snapshot_qty_series(variant: pd.DataFrame) -> pd.Series | None:
-    """Total on-hand per SKU row for daily snapshot → history append."""
+    """On-hand per SKU for daily snapshot → history append.
+
+    Prefer ``OMS_Inventory`` when present so snapshot columns stay consistent with
+    the uploaded wide OMS history (~100–160K). ``Total_Inventory`` includes
+    marketplace FBA and historically produced ~190–250K duplicate-looking spikes
+    (OMS + Amazon) on Combined totals.
+    """
     if variant is None or getattr(variant, "empty", True):
         return None
+    if "OMS_Inventory" in variant.columns:
+        oms = pd.to_numeric(variant["OMS_Inventory"], errors="coerce").fillna(0.0)
+        if float(oms.sum()) > 0:
+            return oms
     if "Total_Inventory" in variant.columns:
         return pd.to_numeric(variant["Total_Inventory"], errors="coerce").fillna(0.0)
     try:
         from .inventory import recompute_inventory_totals
 
         work = recompute_inventory_totals(variant.copy())
+        if "OMS_Inventory" in work.columns:
+            oms = pd.to_numeric(work["OMS_Inventory"], errors="coerce").fillna(0.0)
+            if float(oms.sum()) > 0:
+                return oms
         if "Total_Inventory" in work.columns:
             return pd.to_numeric(work["Total_Inventory"], errors="coerce").fillna(0.0)
     except Exception:
         pass
-    if "OMS_Inventory" in variant.columns:
-        return pd.to_numeric(variant["OMS_Inventory"], errors="coerce").fillna(0.0)
     return None
+
+
+def _day_qty_totals(hist: pd.DataFrame) -> pd.Series:
+    """Combined day totals (max across channels per SKU, then sum)."""
+    if hist is None or getattr(hist, "empty", True):
+        return pd.Series(dtype=float)
+    combined = combine_inventory_channels(hist)
+    if combined.empty:
+        return pd.Series(dtype=float)
+    days = pd.to_datetime(combined["Date"], errors="coerce").dt.normalize()
+    qty = pd.to_numeric(combined["Qty"], errors="coerce").fillna(0.0)
+    return qty.groupby(days).sum().sort_index()
+
+
+def detect_inventory_history_integrity_issues(
+    hist: pd.DataFrame | None,
+    *,
+    extreme_ratio: float = 1.20,
+    extreme_delta: float = 15000.0,
+) -> dict:
+    """Detect exact-key duplicates and extreme day-total spikes (no sales load)."""
+    empty = {
+        "ok": True,
+        "duplicate_rows": 0,
+        "spike_dates": [],
+        "day_totals": {},
+        "warnings": [],
+    }
+    if hist is None or getattr(hist, "empty", True):
+        return empty
+    work = _ensure_source_column(_ensure_channel_column(hist.copy()))
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0.0)
+    work = work.dropna(subset=["Date"])
+    if work.empty:
+        return empty
+
+    keys = _history_dedupe_keys(work)
+    dup_mask = work.duplicated(subset=keys, keep=False)
+    duplicate_rows = int(dup_mask.sum())
+
+    totals = _day_qty_totals(work)
+    spike_dates: list[str] = []
+    nonzero = [(pd.Timestamp(d).normalize(), float(v)) for d, v in totals.items() if float(v) > 0]
+    for i, (day, total) in enumerate(nonzero):
+        prev_total = nonzero[i - 1][1] if i > 0 else None
+        consecutive = (
+            prev_total is not None
+            and prev_total > 0
+            and total > prev_total * extreme_ratio
+            and (total - prev_total) > extreme_delta
+        )
+        # Snapshot column elevated vs nearest non-snapshot neighbors (e.g. 167K OMS
+        # then 193K Total_Inventory then 105K derived — consecutive ratio may be only ~1.15).
+        neighbor_vals: list[float] = []
+        for j in range(max(0, i - 3), min(len(nonzero), i + 4)):
+            if j == i:
+                continue
+            nd, nv = nonzero[j]
+            day_rows = work.loc[work["Date"] == nd]
+            if day_rows.empty:
+                continue
+            dominant = day_rows["Source"].astype(str).str.strip().str.lower().mode()
+            dom = str(dominant.iloc[0]) if len(dominant) else ""
+            if dom != "snapshot":
+                neighbor_vals.append(nv)
+        neighbor_base = float(pd.Series(neighbor_vals).median()) if neighbor_vals else 0.0
+        day_rows = work.loc[work["Date"] == day]
+        dominant = (
+            day_rows["Source"].astype(str).str.strip().str.lower().mode()
+            if not day_rows.empty
+            else pd.Series(dtype=str)
+        )
+        is_snap_day = bool(len(dominant) and str(dominant.iloc[0]) == "snapshot")
+        snap_ratio = 1.12  # softer than consecutive — Total vs OMS neighbors
+        vs_neighbors = (
+            is_snap_day
+            and neighbor_base > 0
+            and total > neighbor_base * snap_ratio
+            and (total - neighbor_base) > extreme_delta
+        )
+        if consecutive or vs_neighbors:
+            spike_dates.append(str(day.date()))
+
+    warnings: list[str] = []
+    if duplicate_rows:
+        warnings.append(
+            f"Removed or pending collapse of {duplicate_rows:,} duplicate SKU-day rows."
+        )
+    for d in spike_dates:
+        warnings.append(
+            f"{d}: inventory total spiked vs neighboring days — likely OMS+marketplace "
+            "double-count on a snapshot column."
+        )
+    return {
+        "ok": duplicate_rows == 0 and not spike_dates,
+        "duplicate_rows": duplicate_rows,
+        "spike_dates": spike_dates,
+        "day_totals": {str(pd.Timestamp(k).date()): float(v) for k, v in totals.items()},
+        "warnings": warnings,
+    }
+
+
+def repair_inventory_history_integrity(
+    hist: pd.DataFrame | None,
+    *,
+    variant_df: pd.DataFrame | None = None,
+    sales_df: pd.DataFrame | None = None,
+    persist_report: bool = True,
+) -> tuple[pd.DataFrame, dict]:
+    """Collapse duplicates and replace spike snapshot days with a consistent series.
+
+    Spike repair order:
+    1. Coalesce exact-key duplicates (snapshot > uploaded > derived).
+    2. ``repair_snapshot_channel_totals`` (drop Amazon-channel snapshot doubles).
+    3. Rewrite spike days from ``OMS_Inventory`` when the current variant matches.
+    4. Otherwise replace spike day with previous non-zero day's per-SKU qty (derived).
+    5. Optional sales-aware ``repair_inventory_history_spikes`` when sales_df is small/safe.
+    """
+    report = {
+        "ok": True,
+        "repaired": False,
+        "actions": [],
+        "warnings": [],
+        "spike_dates_fixed": [],
+        "duplicates_removed": 0,
+    }
+    if hist is None or getattr(hist, "empty", True):
+        return hist if hist is not None else pd.DataFrame(columns=_STORE_COLS), report
+
+    before = len(hist)
+    work = _coalesce_history_rows(hist)
+    removed = max(0, before - len(work))
+    if removed:
+        report["duplicates_removed"] = int(removed)
+        report["actions"].append(f"coalesced_duplicates:{removed}")
+        report["repaired"] = True
+
+    repaired_channels = repair_snapshot_channel_totals(work, variant_df)
+    if repaired_channels is not None and len(repaired_channels) != len(work):
+        report["actions"].append("repair_snapshot_channel_totals")
+        report["repaired"] = True
+        work = repaired_channels
+    else:
+        work = repaired_channels if repaired_channels is not None else work
+
+    issues = detect_inventory_history_integrity_issues(work)
+    spike_dates = list(issues.get("spike_dates") or [])
+    report["warnings"] = list(issues.get("warnings") or [])
+
+    if spike_dates:
+        work = _ensure_source_column(_ensure_channel_column(work))
+        work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+        for day_s in spike_dates:
+            day = pd.Timestamp(day_s).normalize()
+            totals = _day_qty_totals(work)
+            non_zero_days = [
+                pd.Timestamp(d).normalize() for d, v in totals.items() if float(v) > 0
+            ]
+            prev_days = [d for d in non_zero_days if d < day]
+            if not prev_days:
+                continue
+            prev = max(prev_days)
+            day_mask = work["Date"] == day
+            if not bool(day_mask.any()):
+                continue
+
+            # Prefer OMS rewrite only when this spike is the latest history day and
+            # we have a current variant (same calendar day as the live snapshot).
+            use_oms = False
+            if variant_df is not None and not getattr(variant_df, "empty", True):
+                max_hist = max(non_zero_days) if non_zero_days else None
+                if max_hist is not None and day == max_hist and "OMS_Inventory" in variant_df.columns:
+                    use_oms = True
+
+            if use_oms:
+                tmp = variant_df.copy()
+                tmp["OMS_SKU"] = tmp["OMS_SKU"].astype(str).str.strip().str.upper()
+                tmp["OMS_Inventory"] = pd.to_numeric(
+                    tmp["OMS_Inventory"], errors="coerce"
+                ).fillna(0.0)
+                oms_map = {
+                    str(r["OMS_SKU"]): float(r["OMS_Inventory"])
+                    for _, r in tmp.iterrows()
+                    if str(r["OMS_SKU"])
+                }
+                skus = work.loc[day_mask, "OMS_SKU"].astype(str).str.strip().str.upper()
+                work.loc[day_mask, "Qty"] = skus.map(lambda s: oms_map.get(s, 0.0)).values
+                work.loc[day_mask, "Channel"] = ""
+                work.loc[day_mask, "Source"] = "snapshot"
+                report["actions"].append(f"rewrote_spike_oms:{day_s}")
+                report["spike_dates_fixed"].append(day_s)
+                report["repaired"] = True
+                continue
+
+            prev_rows = work.loc[work["Date"] == prev].copy()
+            if prev_rows.empty:
+                continue
+            ch_col = (
+                prev_rows["Channel"].astype(str)
+                if "Channel" in prev_rows.columns
+                else pd.Series([""] * len(prev_rows), index=prev_rows.index)
+            )
+            prev_rows = prev_rows.assign(Channel=ch_col)
+            prev_rows = prev_rows.groupby(["OMS_SKU", "Channel"], as_index=False)["Qty"].max()
+            replacement = pd.DataFrame(
+                {
+                    "OMS_SKU": prev_rows["OMS_SKU"].values,
+                    "Date": day,
+                    "Qty": prev_rows["Qty"].values,
+                    "Source": "derived",
+                    "Channel": prev_rows["Channel"].values,
+                }
+            )
+            work = pd.concat([work.loc[~day_mask], replacement], ignore_index=True)
+            report["actions"].append(f"replaced_spike_with_prev:{day_s}:{prev.date()}")
+            report["spike_dates_fixed"].append(day_s)
+            report["repaired"] = True
+
+        work = _coalesce_history_rows(work)
+
+    # Sales-aware repair when a compact frame is provided (avoid OOM on full sales).
+    if sales_df is not None and not getattr(sales_df, "empty", True) and len(sales_df) <= 400_000:
+        work2, actions = repair_inventory_history_spikes(work, sales_df)
+        if actions:
+            work = work2
+            report["actions"].extend(actions)
+            report["repaired"] = True
+
+    issues_after = detect_inventory_history_integrity_issues(work)
+    report["ok"] = bool(issues_after.get("ok"))
+    report["warnings"] = list(issues_after.get("warnings") or [])
+    report["spike_dates_remaining"] = list(issues_after.get("spike_dates") or [])
+    if report["spike_dates_fixed"]:
+        fixed = ", ".join(report["spike_dates_fixed"])
+        report["user_message"] = (
+            f"Auto-fixed inventory spikes on {fixed} "
+            "(removed duplicate OMS+marketplace totals)."
+        )
+    elif report["duplicates_removed"]:
+        report["user_message"] = (
+            f"Auto-collapsed {report['duplicates_removed']:,} duplicate inventory rows."
+        )
+    else:
+        report["user_message"] = ""
+
+    if persist_report and report.get("repaired"):
+        try:
+            import logging
+
+            logging.getLogger(__name__).info(
+                "inventory history integrity repair: %s", report.get("actions")
+            )
+        except Exception:
+            pass
+    return work.reset_index(drop=True), report
 
 
 def refresh_inventory_history_rollforward(
@@ -1020,12 +1289,10 @@ def refresh_inventory_history_rollforward(
                 hist_skus = set(merged["OMS_SKU"].astype(str).str.strip().str.upper())
                 work = work[work["OMS_SKU"].isin(hist_skus)]
                 if not work.empty:
-                    # Store Total_Inventory (work["Qty"] from _variant_snapshot_qty_series)
-                    # as a blank-channel snapshot row — this is the PO combined on-hand
-                    # total (OMS + marketplace in-transit etc.). Do NOT store
-                    # OMS_Inventory as a separate "oms" channel: that under-counts the
-                    # Combined view (~130K vs ~163K). Also do NOT store Amazon_Inventory
-                    # as a separate "amazon" channel: that double-counts FBA SKUs.
+                    # Store OMS-aligned snapshot qty as blank-channel rows so the
+                    # history matrix stays on the same series as the uploaded OMS sheet.
+                    # Do NOT also store Amazon_Inventory as a separate channel — that
+                    # double-counts FBA into Combined totals (~190–250K spikes).
                     incoming = pd.DataFrame({
                         "OMS_SKU": work["OMS_SKU"].values,
                         "Date": snap_ts,
@@ -1044,6 +1311,15 @@ def refresh_inventory_history_rollforward(
     end_anchor = inventory_history_max_date(merged)
     end_s = str(end_anchor.date()) if end_anchor is not None else None
     merged = filter_inventory_history_window(merged, days=span, end_date=end_s)
+    integrity_report: dict = {}
+    try:
+        merged, integrity_report = repair_inventory_history_integrity(
+            merged,
+            variant_df=getattr(sess, "inventory_df_variant", None),
+            sales_df=None,
+        )
+    except Exception:
+        integrity_report = {"ok": False, "repaired": False, "actions": ["integrity_repair_failed"]}
     sess.daily_inventory_history_df = merged
     sess._quarterly_cache.clear()
     if end_anchor is not None:
@@ -1062,6 +1338,7 @@ def refresh_inventory_history_rollforward(
         "min_date": str(pd.Timestamp(min_d).date()) if pd.notna(min_d) else "",
         "max_date": str(pd.Timestamp(max_d).date()) if pd.notna(max_d) else "",
         "cap_date": str(cap_ts.date()),
+        "integrity": integrity_report,
     }
 
 
@@ -2854,6 +3131,8 @@ __all__ = [
     "wide_matrix_upload_end_date",
     "_ensure_source_column",
     "_coalesce_history_rows",
+    "detect_inventory_history_integrity_issues",
+    "repair_inventory_history_integrity",
     "ensure_latest_daily_inventory_authoritative",
     "disk_inventory_meta_looks_placeholder",
     "session_inventory_matrix_stats",

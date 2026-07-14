@@ -106,10 +106,48 @@ def _inventory_matrix_payload(
     end_date: Optional[str] = None,
     channel: str = "combined",
 ) -> dict:
-    from ..services.daily_inventory_history import inventory_history_wide_matrix
+    from ..services.daily_inventory_history import (
+        detect_inventory_history_integrity_issues,
+        inventory_history_wide_matrix,
+        repair_inventory_history_integrity,
+    )
 
     try:
         df = _inventory_history_df_for_matrix_read(sess)
+        integrity: dict = {"ok": True, "repaired": False, "warnings": [], "actions": []}
+        try:
+            issues = detect_inventory_history_integrity_issues(df)
+            if not issues.get("ok"):
+                repaired, integrity = repair_inventory_history_integrity(
+                    df,
+                    variant_df=getattr(sess, "inventory_df_variant", None),
+                    sales_df=None,
+                )
+                if integrity.get("repaired"):
+                    df = repaired
+                    sess.daily_inventory_history_df = repaired
+                    try:
+                        import backend.main as _main
+
+                        if not getattr(_main, "_warm_cache", None):
+                            _main._warm_cache = {}
+                        _main._warm_cache["daily_inventory_history_df"] = repaired.copy()
+                        _main.sync_daily_inventory_history_sidecar(sess)
+                    except Exception:
+                        logging.getLogger(__name__).exception(
+                            "persist inventory integrity repair failed"
+                        )
+                    # Drop stale parquet reads so disk fallback matches repair.
+                    for key in list(_PARQUET_DISK_CACHE.keys()):
+                        if key and key[0] == "daily_inventory_history_df":
+                            _PARQUET_DISK_CACHE.pop(key, None)
+                else:
+                    integrity = {**issues, "repaired": False, "actions": []}
+            else:
+                integrity = {**issues, "repaired": False, "actions": []}
+        except Exception:
+            logging.getLogger(__name__).exception("inventory integrity check failed")
+
         # Never attach full sales_df here — spike-repair over ~1.8M sales rows
         # peaks multi-GB and OOMs the 6.5GB prod container (matrix then "fails").
         # Calendar densify still roll-forwards last known on-hand without sales.
@@ -124,6 +162,7 @@ def _inventory_matrix_payload(
             channel=channel,
         )
         out["ok"] = True
+        out["integrity"] = integrity
         return out
     except Exception as e:
         logging.getLogger(__name__).exception("inventory history matrix failed")
@@ -138,6 +177,7 @@ def _inventory_matrix_payload(
             "limit": int(limit),
             "offset": int(offset),
             "channel": channel,
+            "integrity": {"ok": False, "repaired": False, "warnings": [str(e)]},
         }
 
 

@@ -237,3 +237,35 @@ def test_validate_catalog_all_skus_diverse_sparse_patterns():
     per_sku = dense.groupby("OMS_SKU")["Date"].nunique()
     assert (per_sku == 30).all()
     assert per_sku.shape[0] == report["sku_count"]
+
+
+def test_repair_inventory_history_integrity_collapses_dups_and_spikes():
+    from backend.services.daily_inventory_history import (
+        detect_inventory_history_integrity_issues,
+        repair_inventory_history_integrity,
+    )
+
+    # Exact duplicate SKU-day rows + a Total-like spike day.
+    hist = pd.concat(
+        [
+            _hist("SKU-A", ["2026-07-03"], [80000.0], source="uploaded"),
+            _hist("SKU-B", ["2026-07-03"], [70000.0], source="uploaded"),
+            _hist("SKU-A", ["2026-07-03"], [80000.0], source="uploaded"),  # dup
+            _hist("SKU-A", ["2026-07-04"], [140000.0], source="snapshot"),
+            _hist("SKU-B", ["2026-07-04"], [120000.0], source="snapshot"),
+        ],
+        ignore_index=True,
+    )
+    issues = detect_inventory_history_integrity_issues(hist)
+    assert issues["duplicate_rows"] >= 2
+    assert "2026-07-04" in issues["spike_dates"]
+
+    repaired, report = repair_inventory_history_integrity(hist, sales_df=None)
+    assert report["repaired"] is True
+    assert report["duplicates_removed"] >= 1
+    assert "2026-07-04" in report["spike_dates_fixed"]
+    totals = repaired.groupby(pd.to_datetime(repaired["Date"]).dt.normalize())["Qty"].sum()
+    assert float(totals.loc[pd.Timestamp("2026-07-03")]) == 150000.0
+    assert float(totals.loc[pd.Timestamp("2026-07-04")]) == 150000.0
+    after = detect_inventory_history_integrity_issues(repaired)
+    assert after["ok"] is True

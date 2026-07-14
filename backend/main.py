@@ -1846,21 +1846,27 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
 
         if "daily_inventory_history_df" in loaded:
             try:
-                from .services.daily_inventory_history import repair_snapshot_channel_totals
+                from .services.daily_inventory_history import repair_inventory_history_integrity
+                from .services.helpers import _coerce_df_for_parquet
 
                 hist = loaded["daily_inventory_history_df"]
                 variant = loaded.get("inventory_df_variant")
-                repaired = repair_snapshot_channel_totals(hist, variant)
-                if len(repaired) != len(hist):
+                repaired, report = repair_inventory_history_integrity(
+                    hist, variant_df=variant, sales_df=None
+                )
+                if report.get("repaired"):
                     log.info(
-                        "Repaired daily_inventory_history_df snapshot channels on disk load "
-                        "(%d → %d rows)",
-                        len(hist),
-                        len(repaired),
+                        "Repaired daily_inventory_history_df integrity on disk load: %s",
+                        report.get("actions"),
                     )
+                    try:
+                        hist_path = _DISK_CACHE_DIR / "daily_inventory_history_df.parquet"
+                        _coerce_df_for_parquet(repaired).to_parquet(hist_path, index=False)
+                    except Exception:
+                        log.exception("persist integrity repair on Phase-0 load failed")
                 loaded["daily_inventory_history_df"] = repaired
             except Exception:
-                log.exception("repair_snapshot_channel_totals on Phase-0 disk load failed")
+                log.exception("inventory history integrity repair on Phase-0 disk load failed")
 
         if not loaded:
             return False, {}

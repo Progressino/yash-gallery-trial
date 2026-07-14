@@ -1108,6 +1108,17 @@ export type InventoryHistoryMatrixRow = { sku: string; qtys: number[] }
 
 export type InventoryHistoryChannel = 'combined' | 'oms' | 'amazon'
 
+export type InventoryHistoryIntegrity = {
+  ok?: boolean
+  repaired?: boolean
+  warnings?: string[]
+  actions?: string[]
+  spike_dates_fixed?: string[]
+  spike_dates_remaining?: string[]
+  duplicates_removed?: number
+  user_message?: string
+}
+
 export async function getPoDailyInventoryHistoryMatrix(
   q = '',
   limit = 150,
@@ -1128,6 +1139,7 @@ export async function getPoDailyInventoryHistoryMatrix(
     window_end?: string
     channel?: string
     channel_split_available?: boolean
+    integrity?: InventoryHistoryIntegrity
   }>('/po/daily-inventory-history/matrix', {
     params: {
       q,
