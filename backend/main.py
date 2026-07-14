@@ -19,7 +19,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from .concurrency import run_aux, run_heavy, _UPLOAD_MEMORY_LOCK
+from .concurrency import run_aux, run_auth, run_heavy, _UPLOAD_MEMORY_LOCK
 
 from .session import store
 from .routers import upload, data, cache, po, shipment, auth as auth_router
@@ -3241,17 +3241,38 @@ def _session_coverage_light(path: str, method: str, query: str) -> bool:
 
 
 def _session_po_calculate_light(path: str, method: str) -> bool:
-    """PO calc poll/start/result/quarterly — avoid PG restore + warm-cache copy during long jobs."""
+    """PO calc poll/start/result/quarterly — avoid PG restore + warm-cache copy during long jobs.
+
+    Must match job-scoped paths too (`/status/{job_id}`, `/result/{job_id}`). Exact-path
+    matching previously sent those through full session restore while PO held the GIL /
+    AUX queue — status polls hung for minutes and the UI reported "did not start".
+    """
     if method == "POST" and path == "/api/po/calculate":
         return True
-    if method == "GET" and path in (
-        "/api/po/calculate/status",
-        "/api/po/calculate/result",
+    if method != "GET":
+        return False
+    if path in (
         "/api/po/calculate/shared-cache",
         "/api/po/quarterly",
     ):
         return True
+    if path == "/api/po/calculate/status" or path.startswith("/api/po/calculate/status/"):
+        return True
+    if path == "/api/po/calculate/result" or path.startswith("/api/po/calculate/result/"):
+        return True
     return False
+
+
+def _session_po_status_or_result_poll(path: str, method: str) -> bool:
+    """True for status/result polls that must stay off AUX and skip frame attach."""
+    if method != "GET":
+        return False
+    return (
+        path == "/api/po/calculate/status"
+        or path.startswith("/api/po/calculate/status/")
+        or path == "/api/po/calculate/result"
+        or path.startswith("/api/po/calculate/result/")
+    )
 
 
 def _session_uses_stitching_db_only(path: str) -> bool:
@@ -3374,7 +3395,11 @@ async def session_middleware(request: Request, call_next):
 
     if _session_po_calculate_light(path, request.method):
         sid = request.cookies.get(SESSION_COOKIE)
-        if request.method == "POST" and path == "/api/po/calculate":
+        if _session_po_status_or_result_poll(path, request.method):
+            # Status/result must never queue behind AUX (warm attach / PG persist) or
+            # copy multi-GB frames while PO calc saturates the process.
+            sid, sess = await run_auth(store.get_or_empty, sid)
+        elif request.method == "POST" and path == "/api/po/calculate":
             sid, sess = await run_aux(store.get_or_empty, sid)
             if getattr(sess, "sales_df", None) is None or (
                 hasattr(sess.sales_df, "empty") and sess.sales_df.empty

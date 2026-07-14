@@ -1526,6 +1526,10 @@ export async function waitForPoCalculate(
       throw e
     }
     let st = data.status ?? 'idle'
+    // Queued / preparing still means the server accepted the job — never treat as idle.
+    if (st === 'queued' || st === 'preparing' || st === 'pending') {
+      st = 'running'
+    }
     if (st === 'running') {
       sawRunning = true
       idlePolls = 0
@@ -1533,9 +1537,14 @@ export async function waitForPoCalculate(
         typeof data.progress === 'number' && Number.isFinite(data.progress)
           ? Math.max(0, Math.min(100, Math.round(data.progress)))
           : undefined
+      const tickMsg =
+        data.message ||
+        lastServerMessage ||
+        (st === 'running' ? 'Queued on server…' : 'Calculating PO recommendations…')
       if (data.message) lastServerMessage = data.message
+      else if (!lastServerMessage) lastServerMessage = tickMsg
       if (prog != null) lastServerProgress = prog
-      onTick?.(data.message || lastServerMessage, prog)
+      onTick?.(tickMsg, prog)
       await new Promise(r => setTimeout(r, 2000))
       continue
     }
@@ -1638,6 +1647,22 @@ export async function startPoCalculate(
   body: Record<string, unknown>,
   onTick?: (message: string, progress?: number) => void,
 ): Promise<POCalculateResult> {
+  const rememberJobId = (jobId?: string) => {
+    if (!jobId || typeof sessionStorage === 'undefined') return
+    try {
+      sessionStorage.setItem('po_calculate_job_id', jobId)
+    } catch {
+      /* ignore quota / private mode */
+    }
+  }
+  const rememberedJobId = (): string | undefined => {
+    if (typeof sessionStorage === 'undefined') return undefined
+    try {
+      return sessionStorage.getItem('po_calculate_job_id') || undefined
+    } catch {
+      return undefined
+    }
+  }
   try {
     const { data } = await api.post<
       POCalculateResult & { status?: string; from_shared_cache?: boolean; job_id?: string }
@@ -1651,6 +1676,7 @@ export async function startPoCalculate(
     }
     const jobId = data.job_id
     if (jobId) {
+      rememberJobId(jobId)
       return waitForPoCalculate(onTick, 900_000, jobId)
     }
     if (data.from_shared_cache) {
@@ -1673,19 +1699,19 @@ export async function startPoCalculate(
         po_merge_version: data.po_merge_version ?? loaded.po_merge_version,
       }
     }
-    if (data.status === 'running' || (!data.rows && data.status !== 'done')) {
-      return waitForPoCalculate(onTick)
+    if (data.status === 'running' || data.status === 'queued' || (!data.rows && data.status !== 'done')) {
+      return waitForPoCalculate(onTick, 900_000, rememberedJobId())
     }
     return data
   } catch (e: unknown) {
     if (_isAxiosTimeout(e)) {
       onTick?.('Still calculating on server…')
-      return waitForPoCalculate(onTick)
+      return waitForPoCalculate(onTick, 900_000, rememberedJobId())
     }
     if (axios.isAxiosError(e) && e.response?.status === 502) {
       onTick?.('Still calculating on server — checking progress…', 8)
       await _sleep(2000)
-      return waitForPoCalculate(onTick)
+      return waitForPoCalculate(onTick, 900_000, rememberedJobId())
     }
     throw e
   }

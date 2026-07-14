@@ -1866,8 +1866,10 @@ def calculate_po_base(
             inv_window_start = inv_window_end - timedelta(days=int(ADS_WINDOW) - 1)
 
             po_skus = set(po_df["OMS_SKU"].astype(str))
-            ih_src = inventory_history_df.copy()
+            # Avoid copying the full dense history before trim — trim returns a new frame.
+            ih_src = inventory_history_df
             if "OMS_SKU" in ih_src.columns:
+                ih_src = ih_src.copy()
                 ih_src["OMS_SKU"] = ih_src["OMS_SKU"].astype(str).map(_canonical_oms_key)
             ih = trim_inventory_history_for_po(
                 ih_src,

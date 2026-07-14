@@ -1622,7 +1622,10 @@ def po_dashboard(request: Request, body: PODashboardRequest):
 def _po_calculate_status_payload(job: dict, *, sid: str = "") -> dict:
     """Build status JSON from job store row (or session fallback fields)."""
     st = str(job.get("status") or "idle")
-    msg = str(job.get("message") or "")
+    # Older UIs only treat ``running`` as in-progress; ``queued`` looked like idle.
+    if st in ("queued", "preparing", "pending"):
+        st = "running"
+    msg = str(job.get("message") or "") or ("Queued…" if st == "running" and not job.get("message") else "")
     progress = max(0, min(100, int(job.get("progress") or 0)))
     out: dict = {"status": st, "message": msg, "progress": progress}
     if job.get("job_id"):
@@ -1639,15 +1642,6 @@ def _po_calculate_status_payload(job: dict, *, sid: str = "") -> dict:
             out["columns"] = list(job["columns"])
     else:
         out["ok"] = True
-    if sid and st in ("running", "done", "error"):
-        try:
-            from ..services.po_calculate_jobs import get_latest_job_id, set_po_job
-
-            job_id = str(job.get("job_id") or get_latest_job_id(sid) or "")
-            if job_id:
-                set_po_job(job_id, **{k: v for k, v in job.items() if k != "updated_at"})
-        except Exception:
-            pass
     return out
 
 
