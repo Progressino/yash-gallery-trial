@@ -85,26 +85,65 @@ def canonical_oms_key(raw, sku_mapping: Optional[Dict[str, str]] = None) -> str:
     )
 
 
-_YKN_TYPO_RE = re.compile(r"YKN", re.I)
+# Typo form is YK + stray N + color (YKNMUSTARD). Do NOT match real colors that
+# start with N after YK (YKNAVY, YKNEON, YKNUDE) — a bare ``YKN``→``YK`` rewrite
+# turned every NAVY SKU into YKAVY and broke inventory joins.
+_YKN_TYPO_RE = re.compile(r"YKN(?!AVY|EON|UDE)", re.I)
 
 
 def _ykn_typo_canonical(sku: str) -> str:
-    """1059YKNMUSTARD → 1059YKMUSTARD (common marketplace listing typo)."""
+    """1059YKNMUSTARD → 1059YKMUSTARD (marketplace typo). Leaves YKNAVY intact."""
     return _YKN_TYPO_RE.sub("YK", str(sku).strip().upper(), count=1)
 
 
-def _strip_pl(sku: str, mapping: Dict[str, str]) -> str:
-    """Map an Amazon seller SKU to OMS SKU, stripping PL infix if needed."""
+def _strip_pl(
+    sku: str,
+    mapping: Dict[str, str],
+    *,
+    apply_sku_mapping: bool = True,
+) -> str:
+    """Strip Amazon PL infix; optionally apply seller→OMS sku_mapping.
+
+    Inventory frames must call with ``apply_sku_mapping=False``. Mapping often
+    points distinct in-warehouse OMS rows at each other (BOTTLE↔BOTTEL,
+    POWER→POWDER, banded size A→B), and ``drop_duplicates`` then throws away
+    real stock — which made PO Total_Inventory look wrong across the grid.
+    """
     raw = str(sku).strip().upper()
     stripped = _PL_RE.sub(r"\1\2", raw)
-    if stripped in mapping:
-        return mapping[stripped]
-    if raw in mapping:
-        return mapping[raw]
+    if apply_sku_mapping:
+        if stripped in mapping:
+            return mapping[stripped]
+        if raw in mapping:
+            return mapping[raw]
     fixed = _ykn_typo_canonical(stripped)
     if fixed != stripped:
-        return mapping.get(fixed, mapping.get(stripped, fixed))
+        if apply_sku_mapping:
+            return mapping.get(fixed, mapping.get(stripped, fixed))
+        return fixed
     return stripped
+
+
+def inventory_oms_key(raw) -> str:
+    """Normalize inventory OMS_SKU without seller→OMS remapping.
+
+    Sales still use ``canonical_oms_key(..., sku_mapping)`` so marketplace
+    aliases land on inventory rows; inventory keys stay the warehouse codes.
+    """
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return ""
+    stripped = str(raw).strip()
+    if stripped.lower() in ("nan", "none", "nat"):
+        return ""
+    t = normalize_id_token_for_mapping(stripped)
+    t = clean_sku(t or raw)
+    if not t or str(t).strip().lower() in ("nan", "none", "nat"):
+        t = stripped.upper() if stripped else ""
+    if str(t).strip().lower() in ("nan", "none", "nat"):
+        return ""
+    return collapse_duplicate_trailing_size_suffix(
+        _strip_pl(str(t).strip(), {}, apply_sku_mapping=False)
+    )
 
 
 def get_indian_fy_quarter(date: pd.Timestamp) -> tuple:
@@ -1492,20 +1531,30 @@ def calculate_po_base(
             raw_key = str(raw).strip().upper()
             if not raw_key:
                 continue
-            mapped = canonical_oms_key(raw, sku_mapping)
-            if (
-                mapped
-                and mapped != existing_po_merge_key(raw)
-                and is_bundled_size_range_sku(mapped)
-            ):
+            # Detect bundled inventory listings by merge-key shape, not seller map
+            # (seller map can wrongly retarget S-M → L-XL and collapse stock).
+            mapped = inventory_oms_key(raw)
+            if mapped and is_bundled_size_range_sku(mapped):
                 _bundled_from_per_size_inv.add(mapped)
     _ep_prepared = pd.DataFrame()
     _unique_inv_skus = inv_work["OMS_SKU"].unique()
-    _inv_canon_cache = {s: _canonical_oms_key(s) for s in _unique_inv_skus}
+    _inv_canon_cache = {s: inventory_oms_key(s) for s in _unique_inv_skus}
     inv_work["OMS_SKU"] = inv_work["OMS_SKU"].map(_inv_canon_cache).fillna("")
     inv_work = inv_work[inv_work["OMS_SKU"].str.len() > 0]
     if inv_work["OMS_SKU"].duplicated().any():
-        inv_work = inv_work.drop_duplicates(subset=["OMS_SKU"], keep="last")
+        # True key collisions (e.g. XXXL→3XL collapse) — sum stock, never keep-last
+        # (keep-last discarded the high-stock CRYSTALTEAL / banded-size rows).
+        _num_inv_cols = [
+            c
+            for c in inv_work.columns
+            if c != "OMS_SKU"
+            and pd.api.types.is_numeric_dtype(inv_work[c])
+        ]
+        _other = [c for c in inv_work.columns if c not in _num_inv_cols and c != "OMS_SKU"]
+        _agg = {c: "sum" for c in _num_inv_cols}
+        for c in _other:
+            _agg[c] = "first"
+        inv_work = inv_work.groupby("OMS_SKU", as_index=False).agg(_agg)
 
     # Pipeline-only SKUs (OOS / dropped from inventory upload) must enter po_df before
     # inventory-history Eff_Days — otherwise they are injected later with Eff_Days=0.

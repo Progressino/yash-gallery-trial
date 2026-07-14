@@ -1774,13 +1774,30 @@ def overlay_inventory_variant_from_history(
         return inv_df, meta
 
     hist_qty = pd.to_numeric(merged["History_Qty"], errors="coerce").fillna(0.0)
-    # Matrix cells are total on-hand per day — update Total_Inventory only so we do not
-    # mirror the same figure into OMS_Inventory (that made PO stock look doubled).
-    if "Total_Inventory" in merged.columns:
-        cur = pd.to_numeric(merged["Total_Inventory"], errors="coerce").fillna(0.0)
-        merged["Total_Inventory"] = np.where(has_hist, hist_qty, cur)
-    else:
-        merged["Total_Inventory"] = np.where(has_hist, hist_qty, 0.0)
+    # History snapshots prefer OMS_Inventory (see ``_variant_snapshot_qty_series``).
+    # Write OMS from history and keep marketplace as (Total − old OMS) so PO totals
+    # stay aligned with Inventory History without wiping FBA/Myntra stock.
+    cur_oms = (
+        pd.to_numeric(merged["OMS_Inventory"], errors="coerce").fillna(0.0)
+        if "OMS_Inventory" in merged.columns
+        else pd.Series(0.0, index=merged.index)
+    )
+    cur_total = (
+        pd.to_numeric(merged["Total_Inventory"], errors="coerce").fillna(0.0)
+        if "Total_Inventory" in merged.columns
+        else cur_oms.copy()
+    )
+    mkt = (cur_total - cur_oms).clip(lower=0.0)
+    oms_new = pd.Series(
+        np.where(has_hist, hist_qty, cur_oms.to_numpy()),
+        index=merged.index,
+    )
+    total_new = pd.Series(
+        np.where(has_hist, oms_new.to_numpy() + mkt.to_numpy(), cur_total.to_numpy()),
+        index=merged.index,
+    )
+    merged["OMS_Inventory"] = oms_new
+    merged["Total_Inventory"] = total_new
     merged.drop(columns=["History_Qty"], inplace=True)
 
     meta["applied"] = True

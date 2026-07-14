@@ -102,7 +102,9 @@ def _hydrate_warm_worker(session_id: str) -> None:
         sess._warm_cache_gen = int(getattr(_main, "_warm_cache_generation", 0) or 0)
         sess._warm_cache_only = True
         sess._quarterly_cache.clear()
-        resume_auto_data_restore(sess)
+        # Do not call resume_auto_data_restore here — it clears `_shared_frames` /
+        # `_warm_cache_only` and forces Tier-3 rebuild storms right after attach.
+        sess.pause_auto_data_restore = False
         n_mtr = len(sess.mtr_df) if hasattr(sess.mtr_df, "__len__") else 0
         n_inv = len(sess.inventory_df_variant)
         n_sales = len(sess.sales_df)
@@ -614,12 +616,40 @@ def cache_hydrate_warm(request: Request):
                 ),
             )
 
-        from ..concurrency import DAILY_UPLOAD_EXECUTOR
+        from ..concurrency import SESSION_RESTORE_EXECUTOR
+        import backend.main as _main_attach
+
+        # Instant path: pointer-attach shared frames so Upload leaves 0/8 in seconds
+        # (previously always queued a full copy behind daily uploads → Irfan-style hangs).
+        try:
+            _main_attach.try_attach_shared_frames_fast(sess)
+        except Exception:
+            _log.exception("hydrate-warm sync shared attach failed session=%s", sid[:8])
+
+        if session_warm_hydration_complete(sess):
+            try:
+                from ..services.perf_metrics import record_cache
+
+                record_cache(hit=True, source="warm_cache", name="hydrate_warm_attach")
+            except Exception:
+                pass
+            n_sales = len(sess.sales_df) if hasattr(sess.sales_df, "__len__") else 0
+            n_inv = (
+                len(sess.inventory_df_variant)
+                if hasattr(sess.inventory_df_variant, "__len__")
+                else 0
+            )
+            return CacheStatusResponse(
+                ok=True,
+                message=(
+                    f"Attached shared warm cache ({n_sales:,} sales, {n_inv:,} inventory rows)."
+                ),
+            )
 
         status = schedule_session_hydrate(
             sid,
             _hydrate_warm_worker,
-            executor=DAILY_UPLOAD_EXECUTOR,
+            executor=SESSION_RESTORE_EXECUTOR,
         )
         if status == HydrateSchedule.READY:
             try:
