@@ -581,6 +581,20 @@ def _prepare_inventory_history(
                 progress_cb(27, "Releasing trimmed inventory memory…")
             _gc.collect()
 
+    # Inventory tab applies manual overlay before display; PO must too before any
+    # history overlay or engine merge (otherwise Total_Inventory mirrors stale warm).
+    try:
+        from .inventory import recompute_inventory_totals
+        from .manual_intransit_sheet import ensure_manual_intransit_overlay_applied
+
+        ensure_manual_intransit_overlay_applied(sess)
+        fixed = getattr(sess, "inventory_df_variant", None)
+        if fixed is not None and hasattr(fixed, "empty") and not fixed.empty:
+            sess.inventory_df_variant = recompute_inventory_totals(fixed)
+            inv_variant = sess.inventory_df_variant
+    except Exception:
+        logger.exception("manual inventory overlay before PO history prep failed")
+
     inv_df = (
         inv_parent
         if group_by_parent and inv_parent is not None and not inv_parent.empty

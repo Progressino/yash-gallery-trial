@@ -838,6 +838,27 @@ def hydrate_po_session_for_calculate(sess) -> dict[str, int]:
     except Exception:
         _log.exception("ensure_existing_po_hydrated during PO hydrate failed")
 
+    # Sidecars (manual in-transit / not-in-inventory) load AFTER the first inventory
+    # sync above. Apply them here so PO Total_Inventory matches the Inventory tab —
+    # warm parquet often has stale Not_In_Inventory_Qty baked in; only the overlay
+    # apply + recompute rebuilds Marketplace_Total correctly.
+    try:
+        from .inventory import recompute_inventory_totals
+        from .manual_intransit_sheet import ensure_manual_intransit_overlay_applied
+
+        ensure_manual_intransit_overlay_applied(sess)
+        inv = getattr(sess, "inventory_df_variant", None)
+        if inv is not None and hasattr(inv, "empty") and not inv.empty:
+            sess.inventory_df_variant = recompute_inventory_totals(inv)
+            try:
+                wc = getattr(_main, "_warm_cache", None)
+                if isinstance(wc, dict):
+                    wc["inventory_df_variant"] = sess.inventory_df_variant
+            except Exception:
+                pass
+    except Exception:
+        _log.exception("manual in-transit overlay apply during PO hydrate failed")
+
     _hydrate_platform_frames_from_disk_for_po(sess)
 
     stats = {

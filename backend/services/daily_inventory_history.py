@@ -1775,30 +1775,35 @@ def overlay_inventory_variant_from_history(
 
     hist_qty = pd.to_numeric(merged["History_Qty"], errors="coerce").fillna(0.0)
     # History snapshots prefer OMS_Inventory (see ``_variant_snapshot_qty_series``).
-    # Write OMS from history and keep marketplace as (Total − old OMS) so PO totals
-    # stay aligned with Inventory History without wiping FBA/Myntra stock.
+    # Update OMS from history, then rebuild Marketplace_Total / Total_Inventory from
+    # source columns (Amazon/Myntra/… + Manual_InTransit + Not_In_Inventory_Qty).
+    # Do NOT preserve (Total − OMS) — that freezes stale baked Not_In totals from warm.
     cur_oms = (
         pd.to_numeric(merged["OMS_Inventory"], errors="coerce").fillna(0.0)
         if "OMS_Inventory" in merged.columns
         else pd.Series(0.0, index=merged.index)
     )
-    cur_total = (
-        pd.to_numeric(merged["Total_Inventory"], errors="coerce").fillna(0.0)
-        if "Total_Inventory" in merged.columns
-        else cur_oms.copy()
-    )
-    mkt = (cur_total - cur_oms).clip(lower=0.0)
     oms_new = pd.Series(
         np.where(has_hist, hist_qty, cur_oms.to_numpy()),
         index=merged.index,
     )
-    total_new = pd.Series(
-        np.where(has_hist, oms_new.to_numpy() + mkt.to_numpy(), cur_total.to_numpy()),
-        index=merged.index,
-    )
     merged["OMS_Inventory"] = oms_new
-    merged["Total_Inventory"] = total_new
     merged.drop(columns=["History_Qty"], inplace=True)
+    try:
+        from .inventory import recompute_inventory_totals
+
+        merged = recompute_inventory_totals(merged)
+    except Exception:
+        cur_total = (
+            pd.to_numeric(merged["Total_Inventory"], errors="coerce").fillna(0.0)
+            if "Total_Inventory" in merged.columns
+            else oms_new.copy()
+        )
+        mkt = (cur_total - cur_oms).clip(lower=0.0)
+        merged["Total_Inventory"] = pd.Series(
+            np.where(has_hist, oms_new.to_numpy() + mkt.to_numpy(), cur_total.to_numpy()),
+            index=merged.index,
+        )
 
     meta["applied"] = True
     meta["skus_updated"] = int(has_hist.sum())
