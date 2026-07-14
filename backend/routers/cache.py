@@ -626,19 +626,27 @@ def cache_hydrate_warm(request: Request):
         except Exception:
             _log.exception("hydrate-warm sync shared attach failed session=%s", sid[:8])
 
-        if session_warm_hydration_complete(sess):
+        n_sales = (
+            len(sess.sales_df)
+            if getattr(sess, "sales_df", None) is not None
+            and hasattr(sess.sales_df, "__len__")
+            else 0
+        )
+        n_inv = (
+            len(sess.inventory_df_variant)
+            if getattr(sess, "inventory_df_variant", None) is not None
+            and hasattr(sess.inventory_df_variant, "__len__")
+            else 0
+        )
+        # With WARM_CACHE_PO_SESSION_ONLY, platforms stay empty in RAM — sales+inventory
+        # means the session is usable even if session_warm_hydration_complete is picky.
+        if n_sales > 0 or session_warm_hydration_complete(sess):
             try:
                 from ..services.perf_metrics import record_cache
 
                 record_cache(hit=True, source="warm_cache", name="hydrate_warm_attach")
             except Exception:
                 pass
-            n_sales = len(sess.sales_df) if hasattr(sess.sales_df, "__len__") else 0
-            n_inv = (
-                len(sess.inventory_df_variant)
-                if hasattr(sess.inventory_df_variant, "__len__")
-                else 0
-            )
             return CacheStatusResponse(
                 ok=True,
                 message=(

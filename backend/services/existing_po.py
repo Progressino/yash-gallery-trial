@@ -671,8 +671,13 @@ def resolve_manual_existing_po_raise_date(sess) -> str | None:
     return None
 
 
-def manual_existing_po_raise_skus(sess) -> set[str]:
-    """SKUs blocked from re-raise — positive ``PO_Qty_Ordered`` on the Existing PO sheet."""
+def manual_existing_po_raise_skus(sess, *, hydrate: bool = True) -> set[str]:
+    """SKUs blocked from re-raise — positive ``PO_Qty_Ordered`` on the Existing PO sheet.
+
+    ``hydrate=False`` when called from Existing-PO restore/reconcile to avoid
+    recurse: hydrate → reconcile → raise_skus → hydrate (which wedged AUX and
+    left Upload/Intelligence at 0/8).
+    """
     def _from_existing_po_df(ep) -> set[str]:
         if ep is None or getattr(ep, "empty", True) or "OMS_SKU" not in ep.columns:
             return set()
@@ -690,19 +695,20 @@ def manual_existing_po_raise_skus(sess) -> set[str]:
         _sync_manual_raise_block_skus(sess, block)
         return block
 
-    try:
-        ensure_existing_po_hydrated(sess)
-    except Exception:
-        _log.exception("ensure_existing_po_hydrated during manual raise block lookup failed")
-    ep = getattr(sess, "existing_po_df", None)
-    block = _from_existing_po_df(ep)
-    if block:
-        sess.existing_po_manual_upload = True
-        _d = resolve_manual_existing_po_raise_date(sess)
-        if _d:
-            sess.existing_po_manual_raise_date = _d
-        _sync_manual_raise_block_skus(sess, block)
-        return block
+    if hydrate:
+        try:
+            ensure_existing_po_hydrated(sess)
+        except Exception:
+            _log.exception("ensure_existing_po_hydrated during manual raise block lookup failed")
+        ep = getattr(sess, "existing_po_df", None)
+        block = _from_existing_po_df(ep)
+        if block:
+            sess.existing_po_manual_upload = True
+            _d = resolve_manual_existing_po_raise_date(sess)
+            if _d:
+                sess.existing_po_manual_raise_date = _d
+            _sync_manual_raise_block_skus(sess, block)
+            return block
 
     # Never fall back to stale sidecar JSON (may list every SKU on the sheet).
     return set()
@@ -1080,8 +1086,12 @@ def restore_existing_po_from_warm_cache_light(sess) -> bool:
 
 
 def ensure_existing_po_coverage_light(sess) -> bool:
-    """Fast Existing PO attach for light coverage polls — warm cache first, one disk read max."""
-    ensure_latest_existing_po_authoritative(sess)
+    """Fast Existing PO attach for light coverage polls — warm/disk only, no reconcile.
+
+    Must not call ``ensure_latest_existing_po_authoritative`` here: that runs
+    finalize + manual-raise reconcile (iterrows over 10k SKUs) on every coverage
+    poll and wedged AUX, leaving the UI at Syncing / 0/8.
+    """
     ep = getattr(sess, "existing_po_df", None)
     if ep is not None and not getattr(ep, "empty", True):
         if not existing_po_looks_aggregated_bundled_only(ep):
@@ -1902,7 +1912,7 @@ def reconcile_existing_po_manual_raise_sidecar(sess) -> None:
             except Exception:
                 pass
         return
-    manual_existing_po_raise_skus(sess)
+    manual_existing_po_raise_skus(sess, hydrate=False)
 
 
 def ensure_latest_existing_po_authoritative(sess) -> bool:

@@ -454,14 +454,14 @@ def manual_raise_block_skus_from_existing_po(ep: pd.DataFrame) -> set[str]:
     out: set[str] = set()
     if ep is None or getattr(ep, "empty", True) or "OMS_SKU" not in ep.columns:
         return out
-    for _, row in ep.iterrows():
-        ordered = int(pd.to_numeric(row.get("PO_Qty_Ordered"), errors="coerce") or 0)
-        if ordered <= 0:
-            continue
-        sku = str(row.get("OMS_SKU") or "").strip().upper()
-        if sku:
-            out.add(sku)
-    return out
+    if "PO_Qty_Ordered" not in ep.columns:
+        return out
+    ordered = pd.to_numeric(ep["PO_Qty_Ordered"], errors="coerce").fillna(0)
+    mask = ordered > 0
+    if not bool(mask.any()):
+        return out
+    skus = ep.loc[mask, "OMS_SKU"].astype(str).str.strip().str.upper()
+    return {s for s in skus.tolist() if s and s.lower() not in ("nan", "none")}
 
 
 def seed_ledger_from_manual_existing_po_upload(
