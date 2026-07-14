@@ -526,7 +526,12 @@ def restore_po_sidecars_from_warm(sess) -> bool:
             wc_max = inventory_history_max_date(wc)
             cur_max = inventory_history_max_date(cur) if cur is not None and hasattr(cur, "empty") and not cur.empty else None
             if wc_max is not None and (cur_max is None or wc_max > cur_max):
-                setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
+                try:
+                    from .services.shared_frames import assign_frame_no_copy
+
+                    assign_frame_no_copy(sess, key, wc)
+                except Exception:
+                    setattr(sess, key, wc)
                 try:
                     from .services.daily_inventory_history import apply_daily_inventory_history_meta
 
@@ -581,12 +586,25 @@ def restore_po_sidecars_from_warm(sess) -> bool:
                             setattr(sess, key, merged)
                             changed = True
             else:
-                setattr(sess, key, wc.copy() if hasattr(wc, "copy") else wc)
+                try:
+                    from .services.shared_frames import assign_frame_no_copy
+
+                    assign_frame_no_copy(sess, key, wc)
+                except Exception:
+                    setattr(sess, key, wc)
                 changed = True
             continue
         if cur is not None and hasattr(cur, "empty") and not cur.empty:
             continue
-        val = wc.copy() if hasattr(wc, "copy") else wc
+        try:
+            from .services.shared_frames import assign_frame_no_copy, should_skip_session_copy
+
+            if should_skip_session_copy(key):
+                val = wc
+            else:
+                val = wc.copy() if hasattr(wc, "copy") else wc
+        except Exception:
+            val = wc.copy() if hasattr(wc, "copy") else wc
         if key == "po_raise_ledger_df":
             try:
                 from .services.po_raise_import import strip_suppressed_ledger_rows
@@ -594,7 +612,12 @@ def restore_po_sidecars_from_warm(sess) -> bool:
                 val = strip_suppressed_ledger_rows(val)
             except Exception:
                 pass
-        setattr(sess, key, val)
+        try:
+            from .services.shared_frames import assign_frame_no_copy
+
+            assign_frame_no_copy(sess, key, val)
+        except Exception:
+            setattr(sess, key, val)
         changed = True
         # When the return overlay is newly restored, invalidate sales so it
         # gets rebuilt with the return deduction applied.
@@ -1018,8 +1041,9 @@ def _merge_loose_disk_into_cache_dict(cache: dict) -> dict:
     if not cache:
         cache = {}
     loose = _warm_cache_loose_parquets_from_dir(Path(_DISK_CACHE_DIR))
+    skip_platforms = set(_WARM_PLATFORM_KEYS) if warm_cache_po_session_only() else set()
     for key, val in loose.items():
-        if key == "mtr_df":
+        if key in skip_platforms or key == "mtr_df":
             continue
         if val is None or not hasattr(val, "__len__") or len(val) <= 0:
             continue
@@ -1861,6 +1885,7 @@ def _warm_cache_loose_parquets_from_dir(disk_dir: "Path") -> dict:
     out: dict = {}
     if not disk_dir.is_dir():
         return out
+    skip_platforms = set(_WARM_PLATFORM_KEYS) if warm_cache_po_session_only() else set()
     for key in (
         "mtr_df",
         "myntra_df",
@@ -1877,6 +1902,8 @@ def _warm_cache_loose_parquets_from_dir(disk_dir: "Path") -> dict:
         "po_return_overlay_df",
         "manual_intransit_overlay_df",
     ):
+        if key in skip_platforms:
+            continue
         p = disk_dir / f"{key}.parquet"
         if p.is_file():
             try:

@@ -12,8 +12,10 @@ import {
   getCoverageResilient,
   type ManualIntransitParseReport,
   waitForDailyAutoIngest, waitForReturnsImport, waitForSalesRebuild, waitForTier1Bulk, verifyDailyUpload,
+  verifyDailyUploadWindow,
   dailyAutoSummaryFromCoverage, dailyAutoSummaryFromUpload, formatDailyAutoCompleteToast,
   type DailyUploadVerifyResponse,
+  type DailyUploadVerifyWindowResponse,
   type CoverageResponse,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   resetAllAppData, getDataQuality, getUploadReconciliation, invalidateDataQueries,
@@ -495,6 +497,7 @@ export default function Upload() {
     return d.toISOString().slice(0, 10)
   })
   const [verifyResult, setVerifyResult] = useState<DailyUploadVerifyResponse | null>(null)
+  const [verifyWindow, setVerifyWindow] = useState<DailyUploadVerifyWindowResponse | null>(null)
   const [verifyBusy, setVerifyBusy] = useState(false)
 
   const runUploadVerify = async (dateOverride?: string) => {
@@ -502,15 +505,39 @@ export default function Upload() {
     if (!day) return
     setVerifyBusy(true)
     try {
-      const v = await verifyDailyUpload(day)
+      const [v, win] = await Promise.all([
+        verifyDailyUpload(day),
+        verifyDailyUploadWindow({ days: 7, endDate: day }),
+      ])
       setVerifyResult(v)
-      if (v.ok && v.sales_ready) {
+      setVerifyWindow(win)
+      const missing = v.missing_core_platforms ?? []
+      const notInSales = v.tier3_not_in_sales ?? []
+      if (v.complete) {
+        showToast('success', v.message, 10_000)
+        await refresh({ light: true })
+      } else if (missing.length || notInSales.length || (win.incomplete_count ?? 0) > 0) {
+        showToast(
+          'error',
+          [
+            v.message,
+            missing.length ? `Missing uploads: ${missing.join(', ')}` : '',
+            notInSales.length ? `Uploaded but not in Sales History: ${notInSales.join(', ')}` : '',
+            win.incomplete_count
+              ? `${win.incomplete_count} day(s) in the last week still missing core platforms.`
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' '),
+          16_000,
+        )
+        await refresh({ light: true })
+      } else if (v.ok && v.sales_ready) {
         showToast('success', v.message, 10_000)
         await refresh({ light: true })
       } else if (v.ok) {
         showToast('success', `${v.message} Tap ↻ Rebuild if dashboard is still empty.`, 12_000)
       } else if ((v.tier3_upload_count ?? 0) > 0) {
-        // Files exist in Tier-3 but don't cover the exact date — not an error, just informational.
         showToast('success', v.message, 12_000)
       } else {
         showToast('error', v.message, 12_000)
@@ -1744,19 +1771,63 @@ export default function Upload() {
             {verifyResult && (
               <div
                 className={`text-xs rounded border px-2 py-2 ${
-                  verifyResult.ok && verifyResult.sales_ready
+                  verifyResult.complete
                     ? 'border-green-200 bg-green-50 text-green-900'
-                    : verifyResult.ok
-                      ? 'border-amber-200 bg-amber-50 text-amber-900'
-                      : 'border-red-200 bg-red-50 text-red-900'
+                    : (verifyResult.missing_core_platforms?.length ||
+                        verifyResult.tier3_not_in_sales?.length)
+                      ? 'border-amber-200 bg-amber-50 text-amber-950'
+                      : verifyResult.ok && verifyResult.sales_ready
+                        ? 'border-green-200 bg-green-50 text-green-900'
+                        : verifyResult.ok
+                          ? 'border-amber-200 bg-amber-50 text-amber-900'
+                          : 'border-red-200 bg-red-50 text-red-900'
                 }`}
               >
                 <p>{verifyResult.message}</p>
+                {(verifyResult.missing_core_platforms?.length ?? 0) > 0 && (
+                  <p className="mt-1 font-semibold text-amber-900">
+                    Missing uploads for {verifyResult.date}:{' '}
+                    {verifyResult.missing_core_platforms!.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}
+                  </p>
+                )}
+                {(verifyResult.tier3_not_in_sales?.length ?? 0) > 0 && (
+                  <p className="mt-1 font-semibold text-red-800">
+                    Uploaded but not in Sales History:{' '}
+                    {verifyResult.tier3_not_in_sales!.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}
+                  </p>
+                )}
+                {verifyResult.sales_platforms && verifyResult.sales_platforms.length > 0 && (
+                  <p className="mt-1">
+                    Sales History platforms:{' '}
+                    {verifyResult.sales_platforms.join(', ')}
+                    {verifyResult.sales_units_by_platform
+                      ? ` (${Object.entries(verifyResult.sales_units_by_platform)
+                          .map(([k, n]) => `${k}:${Math.round(n)}`)
+                          .join(', ')})`
+                      : ''}
+                  </p>
+                )}
                 {verifyResult.tier3_platforms.length > 0 && (
                   <p className="mt-1">
                     Tier-3: {verifyResult.tier3_platforms.join(', ')} ({verifyResult.tier3_upload_count} file
                     {verifyResult.tier3_upload_count === 1 ? '' : 's'})
                   </p>
+                )}
+                {verifyWindow && verifyWindow.incomplete_count > 0 && (
+                  <div className="mt-2 space-y-1 border-t border-amber-200/80 pt-2">
+                    <p className="font-semibold">
+                      Last 7 days: {verifyWindow.incomplete_count} day(s) missing core platforms
+                    </p>
+                    {verifyWindow.incomplete_days.slice(-5).map(d => (
+                      <p key={d.date} className="text-amber-900">
+                        {d.date}: missing{' '}
+                        {d.missing_platforms.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}
+                        {d.present_platforms.length
+                          ? ` (have ${d.present_platforms.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')})`
+                          : ''}
+                      </p>
+                    ))}
+                  </div>
                 )}
                 {verifyResult.session_sales_rows > 0 && (
                   <p className="mt-0.5">Session sales rows: {verifyResult.session_sales_rows.toLocaleString()}</p>
@@ -3044,11 +3115,18 @@ function DailyHistory({ allowDelete = false }: { allowDelete?: boolean }) {
     refetchInterval: 10000,
   })
 
+  const { data: coverageWindow } = useQuery({
+    queryKey: ['daily-verify-window'],
+    queryFn: () => verifyDailyUploadWindow({ days: 7 }),
+    refetchInterval: 30_000,
+  })
+
   const deleteMut = useMutation({
     mutationFn: (id: number) => deleteDailyUpload(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['daily-summary'] })
       qc.invalidateQueries({ queryKey: ['daily-uploads'] })
+      qc.invalidateQueries({ queryKey: ['daily-verify-window'] })
     },
   })
 
@@ -3069,6 +3147,27 @@ function DailyHistory({ allowDelete = false }: { allowDelete?: boolean }) {
 
   return (
     <div className="space-y-4">
+      {coverageWindow && coverageWindow.incomplete_count > 0 && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+          <p className="font-semibold">
+            {coverageWindow.incomplete_count} day(s) in the last week missing Amazon / Flipkart / Meesho / Myntra
+          </p>
+          <ul className="mt-1 space-y-0.5 list-disc pl-4">
+            {coverageWindow.incomplete_days.slice(-5).map(d => (
+              <li key={d.date}>
+                <strong>{d.date}</strong>: missing{' '}
+                {d.missing_platforms.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}
+                {d.present_platforms.length
+                  ? ` — have ${d.present_platforms.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}`
+                  : ''}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1 text-amber-800">
+            Upload the missing platform files for those dates (Daily order upload), then wait for sales rebuild.
+          </p>
+        </div>
+      )}
       {/* Per-platform summary cards */}
       {hasSummary && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

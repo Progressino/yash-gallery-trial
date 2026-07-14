@@ -370,6 +370,8 @@ def _parse_flipkart_xlsx(
                     return "Shipment"
 
                 xl["TxnType"]        = xl["Event Sub Type"].apply(_fk_txn)
+                # Item Quantity is Gross Units on Flipkart Sales Report (seller-hub Gross).
+                # Sale rows → Shipment; Return rows → Refund. Do not substitute Final Sale.
                 xl["Quantity"]       = pd.to_numeric(xl.get("Item Quantity", 1), errors="coerce").fillna(0).astype("float32")
                 xl["Invoice_Amount"] = pd.to_numeric(xl.get("Buyer Invoice Amount", 0), errors="coerce").fillna(0).astype("float32")
                 _eff_sku = _fk_coalesced_listing_sku_series(xl)

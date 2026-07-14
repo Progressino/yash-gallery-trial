@@ -23,6 +23,12 @@ def _as_naive_day(ts: pd.Timestamp | str) -> pd.Timestamp:
     return pd.Timestamp(t.date())
 
 
+def _is_smoke_test_sku(sku: str) -> bool:
+    """True for synthetic rows from scripts/smoke_uploads_production.py."""
+    u = (sku or "").strip().upper()
+    return u.startswith("SMOKE-") or u.startswith("SMOKE_")
+
+
 def _normalize_sales_tall(sales_df: pd.DataFrame | None) -> pd.DataFrame:
     if sales_df is None or getattr(sales_df, "empty", True):
         return pd.DataFrame(columns=["OMS_SKU", "Date", "Units", "Source", "TxnType"])
@@ -51,6 +57,8 @@ def _normalize_sales_tall(sales_df: pd.DataFrame | None) -> pd.DataFrame:
     )
     out = out.dropna(subset=["Date"])
     out = out[out["OMS_SKU"].str.len() > 0]
+    # Never surface synthetic smoke-test SKUs in Sales History.
+    out = out[~out["OMS_SKU"].map(_is_smoke_test_sku)]
     return out.reset_index(drop=True)
 
 
@@ -235,9 +243,10 @@ def sales_history_wide_matrix(
     }
     date_totals = [float(totals_map.get(pd.Timestamp(d).normalize(), 0.0)) for d in dates_sorted]
 
+    # Rank by total units in the window (not peak day — peak ranked smoke test SKUs first).
     sku_rank = (
         daily.groupby("OMS_SKU", as_index=False)["Units"]
-        .max()
+        .sum()
         .sort_values(["Units", "OMS_SKU"], ascending=[False, True])["OMS_SKU"]
         .astype(str)
         .tolist()

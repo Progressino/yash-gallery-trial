@@ -68,6 +68,23 @@ def _sales_source_to_platform(src) -> str:
             return plat
     return s
 
+
+_PLATFORM_DISPLAY = {
+    "amazon": "Amazon",
+    "myntra": "Myntra",
+    "meesho": "Meesho",
+    "flipkart": "Flipkart",
+    "snapdeal": "Snapdeal",
+}
+
+
+def _platform_display(platform: object) -> str:
+    p = str(platform or "").strip().lower()
+    return _PLATFORM_DISPLAY.get(p) or (str(platform).strip().title() if platform else "Other")
+
+
+PlatformQuarterKey = Tuple[str, str, str]  # (OMS_SKU, quarter_col, platform_display)
+
 _SALES_READ_COLS = ["Sku", "TxnDate", "Quantity", "Transaction Type", "Source"]
 
 # Transaction types that contribute positively (net sold) vs negatively (returns/cancels).
@@ -171,6 +188,7 @@ def _accumulate_shipment_frame(
     platform_day_keys: Optional[Set[PlatformDayKey]] = None,
     skip_days: Optional[Set[PlatformDayKey]] = None,
     demand_basis: str = "Sold",
+    platform_quarter_sums: Optional[dict[PlatformQuarterKey, int]] = None,
 ) -> int:
     """Add one blob's shipment rows into aggregate dicts. Returns rows processed."""
     from .daily_store import _PLATFORM_METRICS_COLUMNS
@@ -348,8 +366,12 @@ def _accumulate_shipment_frame(
     cols_lbl = [q_label_map[(int(f), int(q))] for f, q in zip(fy, qn)]
     skus = work["SKU"].astype(str).values
     qtys = work["Qty"].astype(int).values
+    plat_label = _platform_display(platform)
     for sku, col, q in zip(skus, cols_lbl, qtys):
-        quarter_sums[(sku, col)] += int(q)
+        iq = int(q)
+        quarter_sums[(sku, col)] += iq
+        if platform_quarter_sums is not None:
+            platform_quarter_sums[(sku, col, plat_label)] += iq
 
     recent = work[work["Date"] >= cutoff_90]
     if not recent.empty:
@@ -520,6 +542,7 @@ def _accumulate_tier1_platform_history(
     platform_day_keys: Set[PlatformDayKey],
     progress_cb: ProgressCb = None,
     demand_basis: str = "Sold",
+    platform_quarter_sums: Optional[dict[PlatformQuarterKey, int]] = None,
 ) -> set[str]:
     """Primary quarterly source — Tier-1 bulk + Tier-2 uploads (warm cache / disk / SQLite).
 
@@ -567,6 +590,7 @@ def _accumulate_tier1_platform_history(
             days_30=days_30,
             platform_day_keys=platform_day_keys,
             demand_basis=demand_basis,
+            platform_quarter_sums=platform_quarter_sums,
         )
         covered.add(plat)
     return covered
@@ -588,6 +612,7 @@ def _accumulate_sales_df_shipments(
     days_30: dict[str, Set[pd.Timestamp]],
     platform_day_keys: Set[PlatformDayKey],
     demand_basis: str = "Sold",
+    platform_quarter_sums: Optional[dict[PlatformQuarterKey, int]] = None,
 ) -> int:
     """Append unified sales shipment rows for SKU-days not already on platform side."""
     from .po_engine import _sales_shipment_history_part
@@ -651,9 +676,12 @@ def _accumulate_sales_df_shipments(
     work = work.copy()
     work["_day"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work["_sku"] = work["SKU"].astype(str)
+    if "_Source" in work.columns:
+        work["_plat"] = work["_Source"].map(_sales_source_to_platform)
+    else:
+        work["_plat"] = ""
     if platform_day_keys:
         if "_Source" in work.columns:
-            work["_plat"] = work["_Source"].map(_sales_source_to_platform)
             keys = list(zip(work["_plat"], work["_sku"], work["_day"]))
             keep = np.array(
                 [
@@ -681,7 +709,7 @@ def _accumulate_sales_df_shipments(
             keys = list(zip(work["_sku"], work["_day"]))
             keep = np.array([k not in sku_days_on_platform for k in keys], dtype=bool)
             work = work.loc[keep]
-    work = work.drop(columns=["_day", "_sku", "_plat", "_Source"], errors="ignore")
+    work = work.drop(columns=["_day", "_sku", "_Source"], errors="ignore")
     if work.empty:
         return 0
 
@@ -706,8 +734,15 @@ def _accumulate_sales_df_shipments(
     cols_lbl = [q_label_map[(int(f), int(q))] for f, q in zip(fy, qn)]
     skus = work["SKU"].astype(str).values
     qtys = work["Qty"].astype(int).values
-    for sku, col, q in zip(skus, cols_lbl, qtys):
-        quarter_sums[(sku, col)] += int(q)
+    plats = [
+        _platform_display(p) if p else "Other"
+        for p in work["_plat"].astype(str).values
+    ] if "_plat" in work.columns else ["Other"] * len(skus)
+    for sku, col, q, plat in zip(skus, cols_lbl, qtys, plats):
+        iq = int(q)
+        quarter_sums[(sku, col)] += iq
+        if platform_quarter_sums is not None:
+            platform_quarter_sums[(sku, col, plat)] += iq
 
     recent = work[work["Date"] >= cutoff_90]
     if not recent.empty:
@@ -736,6 +771,7 @@ def calculate_quarterly_from_tier3_streaming(
     n_quarters: int = 8,
     progress_cb: ProgressCb = None,
     demand_basis: str = "Sold",
+    platform_quarter_sums: Optional[dict[PlatformQuarterKey, int]] = None,
 ) -> pd.DataFrame:
     """
     Aggregate quarterly pivot: Tier-1/2 bulk first, Tier-3 dailies gap-fill, then sales_df.
@@ -781,6 +817,7 @@ def calculate_quarterly_from_tier3_streaming(
         platform_day_keys=platform_day_keys,
         progress_cb=progress_cb,
         demand_basis=demand_basis,
+        platform_quarter_sums=platform_quarter_sums,
     )
 
     skip_env = {
@@ -868,6 +905,7 @@ def calculate_quarterly_from_tier3_streaming(
                 platform_day_keys=platform_day_keys,
                 skip_days=platform_day_keys,
                 demand_basis=demand_basis,
+                platform_quarter_sums=platform_quarter_sums,
             )
             del d, blob
     conn.close()
@@ -891,6 +929,7 @@ def calculate_quarterly_from_tier3_streaming(
             days_30=days_30,
             platform_day_keys=platform_day_keys,
             demand_basis=demand_basis,
+            platform_quarter_sums=platform_quarter_sums,
         )
 
     if not quarter_sums:
@@ -928,3 +967,42 @@ def calculate_quarterly_from_tier3_streaming(
         pivot = apply_quarterly_bundled_fan_out(pivot, ordered_q_cols)
 
     return pivot
+
+
+def calculate_platform_match_long_from_tier3(
+    sku_mapping: Optional[Dict[str, str]],
+    *,
+    group_by_parent: bool = False,
+    n_quarters: int = 8,
+    demand_basis: str = "Sold",
+    progress_cb: ProgressCb = None,
+) -> pd.DataFrame:
+    """
+    SKU × Quarter × Platform units using the same Tier-1/Tier-3/sales_df path as
+    PO quarterly history — so marketplace totals match the Quarterly tab.
+    """
+    from .po_quarterly_warmup import quarterly_report_window
+
+    start, end = quarterly_report_window(n_quarters)
+    platform_quarter_sums: dict[PlatformQuarterKey, int] = defaultdict(int)
+    calculate_quarterly_from_tier3_streaming(
+        sku_mapping,
+        start,
+        end,
+        group_by_parent=group_by_parent,
+        n_quarters=n_quarters,
+        progress_cb=progress_cb,
+        demand_basis=demand_basis,
+        platform_quarter_sums=platform_quarter_sums,
+    )
+    if not platform_quarter_sums:
+        return pd.DataFrame(columns=["OMS_SKU", "Quarter", "Platform", "Units"])
+    rows = [
+        {"OMS_SKU": sku, "Quarter": qcol, "Platform": plat, "Units": int(units)}
+        for (sku, qcol, plat), units in platform_quarter_sums.items()
+        if int(units) != 0
+    ]
+    long = pd.DataFrame(rows)
+    if long.empty:
+        return long
+    return long.sort_values(["OMS_SKU", "Quarter", "Platform"]).reset_index(drop=True)

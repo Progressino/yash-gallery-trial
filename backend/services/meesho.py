@@ -529,7 +529,9 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
                 df["_Month"] = None
             rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
 
-    # ForwardReports = shipments (used when no TCS data present)
+    # ForwardReports = shipments (used when no TCS data present).
+    # Some supplier months omit Sku entirely — never emit blank-SKU rows (they overwrite
+    # good LineKeys on merge and wipe Sold). Prefer skipping over blank ingest.
     _fwd_key = next((k for k in ["forwardreports.xlsx"] if k in files), None)
     if _fwd_key and not rows:
         df = _read_excel_zip_member(inner_zf, files[_fwd_key])
@@ -542,16 +544,25 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             df["_OrderId"] = df.get("sub_order_num", "").astype(str)
             _sz = _meesho_size_column(df)
             df["_SKU"]     = _combine_meesho_sku_size(_meesho_sku_base_series(df), df[_sz] if _sz else None)
-            def _meesho_txn(s):
-                if _meesho_status_implies_refund(s):
-                    return "Refund"
-                s2 = str(s).lower()
-                if "cancel" in s2:
-                    return "Cancel"
-                return "Shipment"
-            df["_TxnType"] = df.get("order_status", "").apply(_meesho_txn)
-            df["_Month"]   = None
-            rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
+            df["_SKU"]     = _clean_meesho_str_series(df["_SKU"])
+            has_sku = df["_SKU"].astype(str).str.strip().ne("")
+            if not bool(has_sku.any()):
+                # Archive without listing SKUs — leave empty so caller can fall back / skip.
+                pass
+            else:
+                df = df.loc[has_sku].copy()
+
+                def _meesho_txn(s):
+                    if _meesho_status_implies_refund(s):
+                        return "Refund"
+                    s2 = str(s).lower()
+                    if "cancel" in s2:
+                        return "Cancel"
+                    return "Shipment"
+
+                df["_TxnType"] = df.get("order_status", "").apply(_meesho_txn)
+                df["_Month"] = None
+                rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
 
     # Reverse / AdjustmentFileReverse = returns (mutually exclusive filenames)
     _rev_key = next((k for k in ["reverse.xlsx", "adjustmentfilereverse.xlsx"] if k in files), None)
@@ -953,6 +964,17 @@ def load_meesho_from_zip(
         return pd.DataFrame(), len(items), skipped
 
     combined = pd.concat(dfs, ignore_index=True)
+    # Final guard: blank listing SKUs must never land in Tier-1 (merge would wipe good twins).
+    if "SKU" in combined.columns:
+        sku_ok = (
+            combined["SKU"].map(_clean_meesho_cell).astype(str).str.strip().ne("")
+        )
+        dropped = int((~sku_ok).sum())
+        if dropped:
+            skipped.append(f"Dropped {dropped} blank-SKU rows")
+            combined = combined.loc[sku_ok].copy()
+    if combined.empty:
+        return pd.DataFrame(), len(items), skipped
     from .daily_store import _dedup_platform_df
     from .helpers import apply_dsr_segment_from_upload_filename
 

@@ -1262,16 +1262,22 @@ function POFreshInner() {
                       nQuarters: 8,
                       demandBasis: params.demand_basis,
                       groupByParent: params.group_by_parent,
-                      format: 'xlsx',
+                      format: 'zip',
+                      timeoutMs: 120_000,
                     })
                       .catch(e => setPlatformMatchErr(e instanceof Error ? e.message : 'Export failed'))
                       .finally(() => setPlatformMatchBusy(false))
                   }}
                   className="text-xs px-3 py-1.5 rounded border border-[var(--po-primary)]/40 text-[var(--po-primary)] hover:bg-[var(--po-surface-2)] disabled:opacity-50"
-                  title="SKU × Amazon/Flipkart/Myntra/Meesho/Snapdeal × quarter"
+                  title="SKU × Amazon/Flipkart/Myntra/Meesho/Snapdeal × quarter (CSV zip — faster than xlsx)"
                 >
-                  {platformMatchBusy ? 'Building match…' : '⬇ Platform Match (xlsx)'}
+                  {platformMatchBusy ? 'Building match…' : '⬇ Platform Match (zip)'}
                 </button>
+                {platformMatchBusy && (
+                  <span className="text-xs text-[var(--po-outline)]">
+                    Usually under 1 min — leave this tab open.
+                  </span>
+                )}
                 {platformMatchErr && <span className="text-xs text-red-600">{platformMatchErr}</span>}
               </div>
               <p className="text-[11px] text-[var(--po-outline)]">

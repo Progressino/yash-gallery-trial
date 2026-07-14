@@ -1716,9 +1716,16 @@ export type JobStatusResponse = {
 
 export type DailyUploadVerifyResponse = {
   ok: boolean
+  /** True when all core platforms are uploaded AND reflected in sales for the date. */
+  complete?: boolean
   date: string
   message: string
   tier3_platforms: string[]
+  missing_core_platforms?: string[]
+  sales_platforms?: string[]
+  sales_missing_platforms?: string[]
+  tier3_not_in_sales?: string[]
+  sales_units_by_platform?: Record<string, number>
   tier3_upload_count: number
   tier3_summary?: DailySummary
   recent_uploads: Array<Record<string, unknown>>
@@ -1731,9 +1738,44 @@ export type DailyUploadVerifyResponse = {
   last_ingest_message?: string
 }
 
+export type DailyUploadVerifyWindowResponse = {
+  ok: boolean
+  start: string
+  end: string
+  core_platforms: string[]
+  days: Array<{
+    date: string
+    present_platforms: string[]
+    missing_platforms: string[]
+    complete: boolean
+  }>
+  incomplete_count: number
+  incomplete_days: Array<{
+    date: string
+    present_platforms: string[]
+    missing_platforms: string[]
+    complete: boolean
+  }>
+  message: string
+}
+
 export async function verifyDailyUpload(date: string): Promise<DailyUploadVerifyResponse> {
   const { data } = await api.get<DailyUploadVerifyResponse>('/upload/daily-auto/verify', {
     params: { date },
+    timeout: 30_000,
+  })
+  return data
+}
+
+export async function verifyDailyUploadWindow(opts?: {
+  days?: number
+  endDate?: string
+}): Promise<DailyUploadVerifyWindowResponse> {
+  const { data } = await api.get<DailyUploadVerifyWindowResponse>('/upload/daily-auto/verify-window', {
+    params: {
+      days: opts?.days ?? 7,
+      ...(opts?.endDate ? { end_date: opts.endDate } : {}),
+    },
     timeout: 30_000,
   })
   return data
@@ -2087,13 +2129,33 @@ export async function downloadPoPlatformMatchExport(opts: {
   demandBasis?: string
   groupByParent?: boolean
   format?: 'xlsx' | 'zip'
+  /** Browser abort — Cloudflare often cuts ~100s; keep under that. */
+  timeoutMs?: number
 }): Promise<void> {
   const p = new URLSearchParams()
   p.set('n_quarters', String(opts.nQuarters ?? 8))
   p.set('demand_basis', opts.demandBasis ?? 'Sold')
   p.set('group_by_parent', opts.groupByParent ? 'true' : 'false')
   p.set('format', opts.format ?? 'xlsx')
-  const res = await fetch(`/api/po/platform-match-export?${p}`, { credentials: 'include' })
+  const timeoutMs = opts.timeoutMs ?? 90_000
+  const ctrl = new AbortController()
+  const timer = window.setTimeout(() => ctrl.abort(), timeoutMs)
+  let res: Response
+  try {
+    res = await fetch(`/api/po/platform-match-export?${p}`, {
+      credentials: 'include',
+      signal: ctrl.signal,
+    })
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error(
+        'Platform match timed out in the browser (takes 1–3 min on large sales). Use a direct download or try again when the server is idle.',
+      )
+    }
+    throw e
+  } finally {
+    window.clearTimeout(timer)
+  }
   if (!res.ok) {
     let msg = `Platform match export failed (${res.status})`
     try {

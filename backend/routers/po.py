@@ -110,7 +110,9 @@ def _inventory_matrix_payload(
 
     try:
         df = _inventory_history_df_for_matrix_read(sess)
-        sales_df = _sales_df_for_read(sess)
+        # Never attach full sales_df here — spike-repair over ~1.8M sales rows
+        # peaks multi-GB and OOMs the 6.5GB prod container (matrix then "fails").
+        # Calendar densify still roll-forwards last known on-hand without sales.
         out = inventory_history_wide_matrix(
             df,
             q=q,
@@ -118,7 +120,7 @@ def _inventory_matrix_payload(
             offset=max(0, int(offset)),
             days=min(max(1, int(days)), 120),
             end_date=end_date,
-            sales_df=sales_df,
+            sales_df=None,
             channel=channel,
         )
         out["ok"] = True
@@ -2030,38 +2032,72 @@ def po_platform_match_export(
     Sheets: Readme, Quarter×Platform summary, SKU×Platform totals,
     SKU×Platform×Quarter (long), and wide SKU×Platform×Quarter.
 
-    Uses the same Sold(Gross)/Net rules and combo listing attribution as
-    quarterly history so marketplace gaps are comparable to the Quarterly tab.
+    Uses the same Sold(Gross)/Net rules and sales aggregation as quarterly history
+    so marketplace gaps are comparable to the Quarterly tab.
     """
     from fastapi import HTTPException
     from fastapi.responses import StreamingResponse
 
     from ..services.po_platform_match import build_platform_match_export_bytes
     from ..services.po_quarterly_warmup import normalize_quarterly_demand_basis
-    from ..services.shared_frames import session_sales_df
 
     sess = request.state.session
     if sess is None:
         raise HTTPException(status_code=401, detail="No session.")
 
-    sales = session_sales_df(sess)
-    if sales is None or getattr(sales, "empty", True):
-        # Disk / warm fallback already attempted inside session_sales_df
-        raise HTTPException(
-            status_code=404,
-            detail="No sales data loaded — restore warm cache or rebuild sales first.",
-        )
-
     basis = normalize_quarterly_demand_basis(demand_basis)
     n_q = max(1, min(int(n_quarters or 8), 16))
-    body, media, fname = build_platform_match_export_bytes(
-        sales,
-        getattr(sess, "sku_mapping", None) or {},
-        n_quarters=n_q,
-        demand_basis=basis,
-        group_by_parent=bool(group_by_parent),
-        fmt=format,
-    )
+
+    def _build():
+        try:
+            import backend.main as _main
+
+            _main.try_attach_shared_frames_fast(sess)
+        except Exception:
+            pass
+        try:
+            from ..services.shared_frames import session_sales_df
+
+            sales = session_sales_df(sess)
+        except Exception:
+            sales = getattr(sess, "sales_df", None)
+        # Prefer sales_df path on prod: align_with_quarterly rebuilds Tier-1/Tier-3
+        # platform frames from disk and OOMs / times out on the 6.5GB container
+        # (especially with WARM_CACHE_PO_SESSION_ONLY). Unified sales uses the same
+        # Sold/Net rules as Quarterly History.
+        return build_platform_match_export_bytes(
+            sales,
+            getattr(sess, "sku_mapping", None) or {},
+            n_quarters=n_q,
+            demand_basis=basis,
+            group_by_parent=bool(group_by_parent),
+            fmt=format,
+            align_with_quarterly=False,
+        )
+
+    from ..concurrency import _UPLOAD_MEMORY_LOCK
+
+    try:
+        if _UPLOAD_MEMORY_LOCK.acquire(timeout=30):
+            try:
+                body, media, fname = _build()
+            finally:
+                _UPLOAD_MEMORY_LOCK.release()
+        else:
+            body, media, fname = _build()
+    except HTTPException:
+        raise
+    except TypeError as e:
+        # Hotfix mismatch: older po_platform_match without align_with_quarterly.
+        logging.getLogger(__name__).exception("platform match export TypeError")
+        raise HTTPException(status_code=500, detail=f"Platform match export failed: {e}") from e
+    except Exception as e:
+        logging.getLogger(__name__).exception("platform match export failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Platform match export failed: {type(e).__name__}: {e}",
+        ) from e
+
     return StreamingResponse(
         iter([body]),
         media_type=media,

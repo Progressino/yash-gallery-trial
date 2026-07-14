@@ -2144,7 +2144,15 @@ def inventory_history_wide_matrix(
     dates_sorted = list(pd.date_range(view_start, view_end, freq="D"))
     date_strs = [str(pd.Timestamp(d).date()) for d in dates_sorted]
 
-    channel_df = filter_inventory_history_channel(df, channel)
+    # Trim to the view window BEFORE channel coalesce — full-history combine was 60–90s.
+    base = df
+    if "Date" in base.columns:
+        _dates = pd.to_datetime(base["Date"], errors="coerce")
+        base = base.loc[(_dates >= view_start) & (_dates <= view_end)]
+    if base is None or base.empty:
+        return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
+
+    channel_df = filter_inventory_history_channel(base, channel)
     if channel_df is None or channel_df.empty:
         return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
 
@@ -2154,8 +2162,11 @@ def inventory_history_wide_matrix(
     if trimmed.empty:
         return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
 
-    repaired, _actions = repair_inventory_history_spikes(trimmed, sales_df)
-    work = repaired if _actions else trimmed
+    if sales_df is not None and not getattr(sales_df, "empty", True):
+        repaired, _actions = repair_inventory_history_spikes(trimmed, sales_df)
+        work = repaired if _actions else trimmed
+    else:
+        work = trimmed
     work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
     work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0.0)
 
@@ -2177,15 +2188,61 @@ def inventory_history_wide_matrix(
     end_i = start_i + max(1, int(limit))
     page_skus = sku_list[start_i:end_i]
     if not page_skus:
-        date_totals = [
-            float(work.loc[work["Date"] == d, "Qty"].sum()) for d in dates_sorted
-        ]
+        work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+        totals = work.groupby("_d", sort=False)["Qty"].sum()
+        date_totals = [float(totals.get(d, 0.0) or 0.0) for d in dates_sorted]
         return {
             **empty,
             "loaded": True,
             "dates": date_strs,
             "date_totals": date_totals,
             "total": total,
+        }
+
+    work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    totals = work.groupby("_d", sort=False)["Qty"].sum()
+    date_totals = [float(totals.get(d, 0.0) or 0.0) for d in dates_sorted]
+
+    # UI fast path (no sales_df): skip densify/spike-repair calendar expansion —
+    # pivot page SKUs and forward-fill gaps. Full densify OOMs / 60–90s on prod.
+    if sales_df is None or getattr(sales_df, "empty", True):
+        page = work[work["OMS_SKU"].isin(page_skus)]
+        if page.empty:
+            return {
+                **empty,
+                "loaded": True,
+                "dates": date_strs,
+                "date_totals": date_totals,
+                "total": total,
+            }
+        page = (
+            page.groupby(["OMS_SKU", "_d"], as_index=False)["Qty"]
+            .max()
+            .rename(columns={"_d": "Date"})
+        )
+        pivot = page.pivot(index="OMS_SKU", columns="Date", values="Qty")
+        pivot = pivot.reindex(index=page_skus, columns=dates_sorted)
+        pivot = pivot.ffill(axis=1).fillna(0.0)
+        rows = [
+            {
+                "sku": str(sku),
+                "qtys": [float(row.get(d, 0.0) or 0.0) for d in dates_sorted],
+            }
+            for sku, row in pivot.iterrows()
+        ]
+        return {
+            "loaded": True,
+            "dates": date_strs,
+            "date_totals": date_totals,
+            "rows": rows,
+            "total": total,
+            "limit": int(limit),
+            "offset": start_i,
+            "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
+            "window_days": span,
+            "window_end": str(date_strs[-1]) if date_strs else str(end_date or today_ist_timestamp().date()),
+            "channel": channel,
+            "channel_split_available": inventory_channel_split_available(df),
         }
 
     page_dense = densify_inventory_history_for_view(
@@ -2207,9 +2264,6 @@ def inventory_history_wide_matrix(
 
     page_dense["Date"] = pd.to_datetime(page_dense["Date"], errors="coerce").dt.normalize()
     page_dense["Qty"] = pd.to_numeric(page_dense["Qty"], errors="coerce").fillna(0.0)
-    date_totals = [
-        float(work.loc[work["Date"] == d, "Qty"].sum()) for d in dates_sorted
-    ]
 
     pivot = page_dense.pivot(index="OMS_SKU", columns="Date", values="Qty")
     pivot = pivot.reindex(index=page_skus, columns=dates_sorted).fillna(0.0)

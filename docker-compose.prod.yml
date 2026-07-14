@@ -79,11 +79,15 @@ services:
       # Disable MTR row-count guard so accounts with <500K rows use fast-path from disk cache.
       - WARM_CACHE_MIN_MTR_ROWS=0
       - SESSION_SHARED_FRAMES=1
+      # 7.8 GB host: skip loading full Amazon MTR (~3 GB RAM) + other platform frames into
+      # warm cache. Unified sales_df covers PO / Intelligence; Amazon/Myntra/etc. pages
+      # read windowed rows from disk via _warm_disk_platform_frame when needed.
+      - WARM_CACHE_PO_SESSION_ONLY=1
       # Limit Tier-3 SQLite restore to the last 2 months to avoid loading 12 months of
       # platform DataFrames into memory on every session restore (prevents OOM on 5.5 GB VPS).
       # The warm cache disk already contains full bulk history; only recent deltas are needed.
       - AUTO_RESTORE_MONTHS=1
-      - SESSION_MAX_ACTIVE=12
+      - SESSION_MAX_ACTIVE=8
       # Disable background Intelligence bundle precompute on startup to prevent a concurrent
       # 1-2 GB build_sales_df spike while session hydration is also running. The bundle is
       # built on first request (2-3s delay) rather than consuming an extra 1-2 GB at startup.

@@ -449,6 +449,102 @@ def _schedule_sales_cache_save(sess: AppSession) -> None:
     threading.Thread(target=_run, name="sales-cache-save", daemon=True).start()
 
 
+def _session_or_warm_sales_df(sess) -> pd.DataFrame:
+    """Prefer session sales; fall back to process warm cache / disk."""
+    sales = getattr(sess, "sales_df", None)
+    if sales is not None and not getattr(sales, "empty", True):
+        return sales
+    try:
+        from ..services.shared_frames import session_sales_df
+
+        sales = session_sales_df(sess)
+        if sales is not None and not getattr(sales, "empty", True):
+            return sales
+    except Exception:
+        pass
+    try:
+        import backend.main as _main
+
+        wc = (_main._warm_cache or {}).get("sales_df")
+        if wc is not None and not getattr(wc, "empty", True):
+            return wc
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def _patch_sales_from_tier3_platforms(
+    sess,
+    platforms: set[str] | list[str],
+    *,
+    months: int | None = None,
+) -> tuple[bool, str]:
+    """
+    Load recent Tier-3 rows for ``platforms``, build a sales slice, and patch into
+    the existing unified sales_df. Preserves deep history when PO_SESSION_ONLY
+    leaves platform frames empty in RAM.
+    """
+    from ..services.daily_store import load_platform_data
+    from ..services.sales import (
+        build_sales_df,
+        patch_sales_df_after_daily_upload,
+        sales_date_window_from_platform_dfs,
+    )
+
+    plats = {str(p).strip().lower() for p in platforms if str(p).strip()}
+    if not plats:
+        plats = {"amazon", "myntra", "meesho", "flipkart", "snapdeal"}
+    months_n = int(months if months is not None else _daily_rebuild_sqlite_months())
+    max_files = _daily_rebuild_max_files()
+    plat_frames: dict[str, pd.DataFrame] = {}
+    for plat in plats:
+        recent = load_platform_data(plat, months=months_n, dedup=False, max_files=max_files)
+        if recent is not None and not recent.empty:
+            plat_frames[plat] = recent
+    if not plat_frames:
+        return False, "No Tier-3 platform rows to patch into sales."
+
+    d0, d1 = sales_date_window_from_platform_dfs(plat_frames)
+    if d0 is None or d1 is None:
+        return False, "Could not determine Tier-3 date window for sales patch."
+
+    fresh = build_sales_df(
+        mtr_df=plat_frames.get("amazon", pd.DataFrame()),
+        myntra_df=plat_frames.get("myntra", pd.DataFrame()),
+        meesho_df=plat_frames.get("meesho", pd.DataFrame()),
+        flipkart_df=plat_frames.get("flipkart", pd.DataFrame()),
+        snapdeal_df=plat_frames.get("snapdeal", pd.DataFrame()),
+        sku_mapping=sess.sku_mapping,
+        **_sales_overlay_build_kwargs(sess),
+    )
+    existing = _session_or_warm_sales_df(sess)
+    sess.sales_df = patch_sales_df_after_daily_upload(
+        existing, fresh, set(plat_frames.keys()), d0, d1
+    )
+    # Keep session platform attrs topped up for UI that still reads them.
+    attrs = {
+        "amazon": "mtr_df",
+        "myntra": "myntra_df",
+        "meesho": "meesho_df",
+        "flipkart": "flipkart_df",
+        "snapdeal": "snapdeal_df",
+    }
+    for plat, frame in plat_frames.items():
+        attr = attrs.get(plat)
+        if not attr:
+            continue
+        cur = getattr(sess, attr, None)
+        setattr(sess, attr, _merge_platform_data(cur, frame, plat, source_filename=None))
+    sess._quarterly_cache.clear()
+    _session_data_changed(sess)
+    _finalize_sales_data_refresh(sess)
+    rows = len(sess.sales_df)
+    return True, (
+        f"Sales patched from Tier-3 ({', '.join(sorted(plat_frames))} · "
+        f"{str(d0.date())}→{str(d1.date())} · {rows:,} rows)."
+    )
+
+
 def _rebuild_sales_sync(
     sess,
     *,
@@ -467,8 +563,22 @@ def _rebuild_sales_sync(
                 )
                 if ok_inc:
                     return ok_inc, msg_inc
+            # Prefer Tier-3 patch over reload+full rebuild (full rebuild from
+            # empty PO_SESSION_ONLY platform frames dropped Amazon etc. from sales).
+            ok_patch, msg_patch = _patch_sales_from_tier3_platforms(sess, platforms_touched)
+            if ok_patch:
+                return ok_patch, msg_patch
             _replace_touched_platforms_from_sqlite(sess, platforms_touched)
         elif refresh_sqlite:
+            touched = platforms_touched or getattr(sess, "_daily_auto_platforms_touched", None)
+            plats = set(touched) if touched else {
+                "amazon", "myntra", "meesho", "flipkart", "snapdeal"
+            }
+            existing = _session_or_warm_sales_df(sess)
+            if existing is not None and not getattr(existing, "empty", True) and len(existing) >= 50_000:
+                ok_patch, msg_patch = _patch_sales_from_tier3_platforms(sess, plats)
+                if ok_patch:
+                    return ok_patch, msg_patch
             _sync_session_platforms_from_sqlite(sess)
         trimmed = platform_frames_trimmed_for_sales_build(sess)
         sess.sales_df = build_sales_df(
@@ -665,15 +775,13 @@ def _run_daily_auto_sales_rebuild(session_id: str) -> None:
     """Background task: rebuild sales after Tier-3 ingest (bounded SQLite, no full re-merge)."""
     sess = _resolve_upload_session(session_id)
     touched = getattr(sess, "_daily_auto_platforms_touched", None) if sess else None
-    # Always sync from SQLite after a daily upload so the session reflects the
-    # freshly-saved files even when warm-cache data is already loaded (otherwise
-    # the incremental buffer path may miss data that was in a prior warm cache
-    # but not included in this ingest session's parsed buffers).
-    refresh_sqlite = True
+    # Always sync/patch from SQLite after a daily upload so sales_df reflects the
+    # freshly-saved files even when warm-cache platform frames were skipped
+    # (WARM_CACHE_PO_SESSION_ONLY).
     _run_sales_rebuild_worker(
         session_id,
-        refresh_sqlite=refresh_sqlite,
-        platforms_touched=None if refresh_sqlite else (touched if touched else None),
+        refresh_sqlite=True,
+        platforms_touched=set(touched) if touched else None,
     )
 
 
@@ -769,9 +877,11 @@ async def reset_stuck_daily_upload(request: Request):
 def verify_daily_upload(request: Request, date: str = ""):
     """
     Confirm Tier-3 persistence and session sales for a calendar day (YYYY-MM-DD).
-    Use after upload to verify data before opening Intelligence.
+    Use after upload to verify data before opening Intelligence / Sales History.
     """
     from ..services.daily_store import get_upload_report_day_coverage, get_summary, list_uploads
+    from ..services.daily_sales_history import _CORE_PLATFORMS
+    from ..services.sales import txn_reporting_naive_ist
 
     day = str(date or "").strip()[:10]
     if not day or len(day) < 10:
@@ -792,32 +902,57 @@ def verify_daily_upload(request: Request, date: str = ""):
     ]
     sess = _get_session(request)
     ingest = getattr(sess, "daily_auto_ingest_result", None) or {}
-    sales_df = getattr(sess, "sales_df", None)
+    sales_df = _session_or_warm_sales_df(sess)
     sales_rows = len(sales_df) if sales_df is not None and not sales_df.empty else 0
     sales_ready = sales_rows > 0
     session_sales_range: dict[str, str | None] = {"min": None, "max": None}
+    sales_platforms: list[str] = []
+    sales_units_by_platform: dict[str, float] = {}
+    sales_missing: list[str] = list(_CORE_PLATFORMS)
     if sales_ready and sales_df is not None and "TxnDate" in sales_df.columns:
         try:
-            import pandas as pd
-            from ..services.sales import txn_reporting_naive_ist
-
-            t = txn_reporting_naive_ist(sales_df["TxnDate"]).dropna()
-            if not t.empty:
+            t_all = txn_reporting_naive_ist(sales_df["TxnDate"])
+            t_valid = t_all.dropna()
+            if not t_valid.empty:
                 session_sales_range = {
-                    "min": str(t.min().normalize())[:10],
-                    "max": str(t.max().normalize())[:10],
+                    "min": str(t_valid.min().normalize())[:10],
+                    "max": str(t_valid.max().normalize())[:10],
                 }
+            day_mask = t_all.notna() & (t_all.dt.normalize() == pd.Timestamp(day).normalize())
+            day_rows = sales_df.loc[day_mask]
+            if not day_rows.empty and "Source" in day_rows.columns:
+                src = day_rows["Source"].astype(str).str.strip().str.lower()
+                qty_col = "Units_Effective" if "Units_Effective" in day_rows.columns else "Quantity"
+                qty = pd.to_numeric(day_rows[qty_col], errors="coerce").fillna(0.0)
+                by = qty.groupby(src).sum()
+                sales_units_by_platform = {str(k): float(v) for k, v in by.items() if str(k)}
+                present: set[str] = set()
+                for k in sales_units_by_platform:
+                    kl = k.lower()
+                    if "amazon" in kl:
+                        present.add("amazon")
+                    elif "flipkart" in kl:
+                        present.add("flipkart")
+                    elif "meesho" in kl:
+                        present.add("meesho")
+                    elif "myntra" in kl:
+                        present.add("myntra")
+                    elif "snapdeal" in kl:
+                        present.add("snapdeal")
+                sales_platforms = sorted(present)
+                sales_missing = [p for p in _CORE_PLATFORMS if p not in present]
         except Exception:
-            pass
-    dashboard_ready = sales_ready and any(
-        not getattr(sess, attr).empty
-        for attr in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
-        if getattr(sess, attr, None) is not None and hasattr(getattr(sess, attr), "empty")
+            _log.exception("verify_daily_upload sales day slice failed")
+
+    dashboard_ready = sales_ready and (
+        bool(tier3_platforms)
+        or any(
+            not getattr(sess, attr).empty
+            for attr in ("mtr_df", "myntra_df", "meesho_df", "flipkart_df", "snapdeal_df")
+            if getattr(sess, attr, None) is not None and hasattr(getattr(sess, attr), "empty")
+        )
     )
     ok = bool(tier3_platforms)
-    # If no files cover the exact date but nearby files exist (e.g. a range report
-    # uploaded for Jun 18–21 when verifying Jun 22), treat as OK and surface which
-    # platforms are actually present in the database so the user is not alarmed.
     nearby_platforms: list[str] = []
     nearby_range_str = ""
     if not ok and recent:
@@ -827,7 +962,20 @@ def verify_daily_upload(request: Request, date: str = ""):
         if date_froms and date_tos:
             nearby_range_str = f"{min(date_froms)} → {max(date_tos)}"
         if nearby_platforms:
-            ok = True  # Files exist, just not specifically for this exact calendar date
+            ok = True
+
+    present_tier3 = {str(p).strip().lower() for p in (tier3_platforms or nearby_platforms)}
+    missing_core = [p for p in _CORE_PLATFORMS if p not in present_tier3]
+    # Uploaded to Tier-3 but not yet visible in Sales History / sales_df for that day.
+    tier3_not_in_sales = sorted(
+        p for p in present_tier3 if p in _CORE_PLATFORMS and p in sales_missing
+    )
+    complete = (
+        ok
+        and sales_ready
+        and not missing_core
+        and not tier3_not_in_sales
+    )
 
     hint = ""
     if ok and not tier3_platforms and nearby_platforms:
@@ -844,15 +992,46 @@ def verify_daily_upload(request: Request, date: str = ""):
         )
     elif ok and not sales_ready:
         hint = " Tier-3 saved — wait for sales rebuild or tap ↻ Rebuild on this page."
-    from ..services.daily_sales_history import _CORE_PLATFORMS
+    if missing_core and (tier3_platforms or nearby_platforms):
+        hint += (
+            f" Missing core platform uploads for {day}: {', '.join(missing_core)}."
+        )
+    if tier3_not_in_sales:
+        hint += (
+            f" Uploaded but not yet in Sales History for {day}: "
+            f"{', '.join(tier3_not_in_sales)} — rebuild sales or re-upload."
+        )
 
-    present = {str(p).strip().lower() for p in (tier3_platforms or nearby_platforms)}
-    missing_core = [p for p in _CORE_PLATFORMS if p not in present]
+    message = (
+        (
+            f"Tier-3 has {len(tier3_platforms)} platform(s) for {day}: {', '.join(tier3_platforms)}."
+            if tier3_platforms
+            else f"Uploads saved for {', '.join(nearby_platforms) or 'none'}."
+        )
+        + (
+            f" Sales History for {day}: {', '.join(sales_platforms) or 'none'}."
+            if sales_ready
+            else " Sales not rebuilt yet — wait or tap ↻ Rebuild."
+        )
+        + (
+            f" Missing core uploads: {', '.join(missing_core)}."
+            if missing_core and tier3_platforms
+            else ""
+        )
+        + (f" Session sales: {sales_rows:,} rows." if sales_ready else "")
+        + hint
+    )
+
     return {
         "ok": ok,
+        "complete": complete,
         "date": day,
         "tier3_platforms": tier3_platforms or nearby_platforms,
         "missing_core_platforms": missing_core,
+        "sales_platforms": sales_platforms,
+        "sales_missing_platforms": sales_missing,
+        "tier3_not_in_sales": tier3_not_in_sales,
+        "sales_units_by_platform": sales_units_by_platform,
         "tier3_upload_count": len(recent),
         "tier3_summary": tier3_summary,
         "recent_uploads": recent[:12],
@@ -863,19 +1042,50 @@ def verify_daily_upload(request: Request, date: str = ""):
         "daily_auto_ingest_status": getattr(sess, "daily_auto_ingest_status", "idle"),
         "sales_rebuild_status": getattr(sess, "sales_rebuild_status", "idle"),
         "last_ingest_message": str(ingest.get("message") or ""),
+        "message": message,
+    }
+
+
+@router.get("/daily-auto/verify-window")
+def verify_daily_upload_window(request: Request, days: int = 7, end_date: str = ""):
+    """Coverage checklist for the last N days — used after every daily upload."""
+    from ..services.daily_sales_history import _CORE_PLATFORMS, today_ist_timestamp
+    from ..services.daily_store import get_upload_report_day_coverage
+
+    span = max(1, min(int(days or 7), 30))
+    end_s = str(end_date or "").strip()[:10]
+    if len(end_s) == 10:
+        end = pd.Timestamp(end_s).normalize()
+    else:
+        end = pd.Timestamp(today_ist_timestamp().date())
+    start = end - pd.Timedelta(days=span - 1)
+    coverage = get_upload_report_day_coverage()
+    rows: list[dict] = []
+    for d in pd.date_range(start, end, freq="D"):
+        iso = str(pd.Timestamp(d).date())
+        present = [p for p in _CORE_PLATFORMS if iso in (coverage.get(p) or set())]
+        missing = [p for p in _CORE_PLATFORMS if p not in present]
+        rows.append(
+            {
+                "date": iso,
+                "present_platforms": present,
+                "missing_platforms": missing,
+                "complete": len(missing) == 0,
+            }
+        )
+    incomplete = [r for r in rows if not r["complete"]]
+    return {
+        "ok": True,
+        "start": str(start.date()),
+        "end": str(end.date()),
+        "core_platforms": list(_CORE_PLATFORMS),
+        "days": rows,
+        "incomplete_count": len(incomplete),
+        "incomplete_days": incomplete,
         "message": (
-            (
-                f"Tier-3 has {len(tier3_platforms)} platform(s) for {day}: {', '.join(tier3_platforms)}."
-                if tier3_platforms
-                else f"Uploads saved for {', '.join(nearby_platforms) or 'none'}."
-            )
-            + (
-                f" Missing core uploads: {', '.join(missing_core)}."
-                if missing_core and tier3_platforms
-                else ""
-            )
-            + (f" Session sales: {sales_rows:,} rows." if sales_ready else " Sales not rebuilt yet — wait or tap ↻ Rebuild.")
-            + hint
+            f"All core platforms present for {span} day(s)."
+            if not incomplete
+            else f"{len(incomplete)} day(s) missing core uploads — see incomplete_days."
         ),
     }
 

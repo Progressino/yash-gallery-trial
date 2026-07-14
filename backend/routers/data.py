@@ -3522,11 +3522,18 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         meesho=_plat_ok or frame_row_count("meesho_df", sess) > 0,
         flipkart=_plat_ok or frame_row_count("flipkart_df", sess) > 0,
         snapdeal=_plat_ok or frame_row_count("snapdeal_df", sess) > 0,
-        inventory=not _inv.empty or frame_row_count("inventory_df_variant", sess) > 0,
+        inventory=(
+            not _inv.empty
+            or frame_row_count("inventory_df_variant", sess) > 0
+            or _disk_parquet_row_count("inventory_df_variant") > 0
+        ),
         daily_orders=len(sess.daily_sales_sources) > 0 or tier3_any,
         existing_po=session_has_existing_po(sess),
         sku_status_lead=not sess.sku_status_lead_df.empty,
-        daily_inventory_history=frame_row_count("daily_inventory_history_df", sess) > 0,
+        daily_inventory_history=(
+            frame_row_count("daily_inventory_history_df", sess) > 0
+            or _disk_parquet_row_count("daily_inventory_history_df") > 0
+        ),
         manual_intransit_sheet=not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty,
         po_raise_ledger=bool(_po_ledger_ok),
         return_sheet=bool(_ret_ok),
@@ -3536,9 +3543,13 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         meesho_rows=_coverage_platform_row_count(sess, "meesho_df", "meesho"),
         flipkart_rows=_coverage_platform_row_count(sess, "flipkart_df", "flipkart"),
         snapdeal_rows=_coverage_platform_row_count(sess, "snapdeal_df", "snapdeal"),
-        inventory_rows=int(len(_inv)),
+        inventory_rows=int(len(_inv)) or frame_row_count("inventory_df_variant", sess) or _disk_parquet_row_count("inventory_df_variant"),
         sku_status_lead_rows=int(len(sess.sku_status_lead_df)),
-        daily_inventory_history_rows=int(len(sess.daily_inventory_history_df)),
+        daily_inventory_history_rows=(
+            int(len(sess.daily_inventory_history_df))
+            or frame_row_count("daily_inventory_history_df", sess)
+            or _disk_parquet_row_count("daily_inventory_history_df")
+        ),
         daily_inventory_history_skus=(
             int(sess.daily_inventory_history_df["OMS_SKU"].nunique())
             if not sess.daily_inventory_history_df.empty

@@ -28,7 +28,15 @@ function hydrationLabel(r: PoReadinessResponse | undefined): string {
   return 'Opening PO engine…'
 }
 
-function LoadingDataScreen({ readiness }: { readiness: PoReadinessResponse | undefined }) {
+function LoadingDataScreen({
+  readiness,
+  error,
+  onRetry,
+}: {
+  readiness: PoReadinessResponse | undefined
+  error?: string | null
+  onRetry?: () => void
+}) {
   const pct = readiness?.data_ready ? 85 : readiness ? 40 : null
 
   return (
@@ -41,6 +49,20 @@ function LoadingDataScreen({ readiness }: { readiness: PoReadinessResponse | und
           </p>
         </div>
         <PageLoadingStripe active label={hydrationLabel(readiness)} percent={pct} />
+        {error ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950 space-y-2">
+            <p>{error}</p>
+            {onRetry ? (
+              <button
+                type="button"
+                className="underline font-semibold"
+                onClick={onRetry}
+              >
+                Retry now
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {readiness ? (
           <dl className="grid grid-cols-2 gap-2 text-xs text-slate-600">
             <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
@@ -74,31 +96,42 @@ function LoadingDataScreen({ readiness }: { readiness: PoReadinessResponse | und
 
 export default function PoHydrationGate() {
   const hydrateRequested = useRef(false)
+  const lastHydrateAt = useRef(0)
   const coveragePoReady = useSession(s => s.po_ready === true)
 
-  const { data: readiness } = useQuery({
+  const { data: readiness, isError, refetch, isFetching } = useQuery({
     queryKey: ['po-readiness-gate'],
-    queryFn: () => getPoReadiness({ timeout: 45_000 }),
+    queryFn: () => getPoReadiness({ timeout: 20_000 }),
     refetchInterval: q => (q.state.data?.po_ready || coveragePoReady ? false : 2_000),
+    retry: 2,
+    retryDelay: 1_500,
     staleTime: 0,
   })
 
   const ready = readiness?.po_ready === true || coveragePoReady
 
+  // Attach warm cache while blocked — do not wait until already ready.
   useEffect(() => {
-    if (hydrateRequested.current) return
-    if (!ready) {
-      if (readiness?.critical_restore_running) return
-      return
-    }
+    if (ready || readiness?.critical_restore_running) return
+    const now = Date.now()
+    if (hydrateRequested.current && now - lastHydrateAt.current < 15_000) return
     hydrateRequested.current = true
-    void cacheHydrateWarm().catch(() => {
-      hydrateRequested.current = false
-    })
+    lastHydrateAt.current = now
+    void cacheHydrateWarm()
+      .catch(() => undefined)
+      .finally(() => {
+        hydrateRequested.current = false
+      })
   }, [ready, readiness])
 
   if (!ready) {
-    return <LoadingDataScreen readiness={readiness} />
+    return (
+      <LoadingDataScreen
+        readiness={readiness}
+        error={isError && !isFetching ? 'Could not reach the server (API gateway). Retry in a moment.' : null}
+        onRetry={() => void refetch()}
+      />
+    )
   }
 
   return <Outlet />

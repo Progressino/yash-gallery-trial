@@ -13,7 +13,7 @@ from typing import Dict, Optional
 
 import pandas as pd
 
-from .po_engine import get_indian_fy_quarter, get_parent_sku, quarter_col_name
+from .po_engine import get_parent_sku, quarter_col_name
 from .po_quarterly_fast import (
     _NET_TXN_TYPES,
     _ordered_q_cols,
@@ -99,14 +99,7 @@ def build_platform_match_frames(
     if sales_df is None or getattr(sales_df, "empty", True):
         return _empty_bundle(q_cols, basis, n_quarters, group_by_parent, empty_long)
 
-    work = sales_df.copy()
-    # Drop combo-fan component copies — keep listing identity (matches quarterly File).
-    if "_Combo_Fan" in work.columns:
-        fan = work["_Combo_Fan"].fillna(False).astype(bool)
-        if fan.any():
-            work = work.loc[~fan].copy()
-
-    colmap = {c.lower(): c for c in work.columns}
+    colmap = {c.lower(): c for c in sales_df.columns}
     sku_c = colmap.get("sku") or colmap.get("oms_sku")
     date_c = colmap.get("txndate") or colmap.get("date")
     qty_c = colmap.get("quantity") or colmap.get("qty")
@@ -116,29 +109,48 @@ def build_platform_match_frames(
         logger.warning("platform_match: sales_df missing required columns")
         return _empty_bundle(q_cols, basis, n_quarters, group_by_parent, empty_long)
 
+    # Column-select only — avoid copying the full ~1.8M-row warm frame (OOM / 3min hangs).
+    keep = [sku_c, date_c, qty_c, txn_c]
+    if src_c:
+        keep.append(src_c)
+    fan_c = "_Combo_Fan" if "_Combo_Fan" in sales_df.columns else None
+    if fan_c:
+        keep.append(fan_c)
+    work = sales_df.loc[:, keep]
+    if fan_c:
+        fan = work[fan_c].fillna(False).astype(bool)
+        if bool(fan.any()):
+            work = work.loc[~fan]
+
+    dates = pd.to_datetime(work[date_c], errors="coerce")
+    in_window = dates.notna() & (dates >= start_ts) & (dates <= end_ts)
+    work = work.loc[in_window]
+    dates = dates.loc[in_window]
+    if work.empty:
+        return _empty_bundle(q_cols, basis, n_quarters, group_by_parent, empty_long)
+
     slim = pd.DataFrame(
         {
             "SKU": work[sku_c].astype(str).str.strip(),
-            "Date": pd.to_datetime(work[date_c], errors="coerce"),
+            "Date": dates,
             "Qty": pd.to_numeric(work[qty_c], errors="coerce").fillna(0),
             "TxnType": work[txn_c].astype(str).str.strip(),
             "Source": work[src_c].astype(str) if src_c else "",
         }
     )
     txn_lower = slim["TxnType"].str.lower()
-    slim = slim[txn_lower.isin(_NET_TXN_TYPES)].copy()
+    slim = slim.loc[txn_lower.isin(_NET_TXN_TYPES)]
     if slim.empty:
         return _empty_bundle(q_cols, basis, n_quarters, group_by_parent, empty_long)
 
     txn_lower = slim["TxnType"].str.lower()
     is_amz = slim["Source"].astype(str).str.strip().str.lower().str.contains("amazon", na=False)
+    slim = slim.copy()
     slim["Qty"] = _qty_signs_for_demand_basis(
         txn_lower, slim["Qty"], demand_basis=basis, is_amazon=is_amz
     )
-    slim = slim.dropna(subset=["Date"])
-    slim = slim[(slim["Date"] >= start_ts) & (slim["Date"] <= end_ts)]
-    slim = slim[slim["Qty"] != 0]
-    slim = slim[slim["SKU"].astype(str).str.len() > 0]
+    slim = slim.loc[slim["Qty"] != 0]
+    slim = slim.loc[slim["SKU"].astype(str).str.len() > 0]
     if slim.empty:
         return _empty_bundle(q_cols, basis, n_quarters, group_by_parent, empty_long)
 
@@ -161,8 +173,18 @@ def build_platform_match_frames(
         slim["SKU"] = slim["SKU"].map(lambda s: get_parent_sku(s))
 
     slim["Platform"] = slim["Source"].map(normalize_platform_display)
-    fy_q = slim["Date"].map(lambda d: get_indian_fy_quarter(pd.Timestamp(d)))
-    slim["Quarter"] = [q_label_map.get((fy, qn), "") for fy, qn in fy_q]
+    # Vectorized Indian FY quarter labels (avoid per-row Python map — large sales windows).
+    months = slim["Date"].dt.month
+    years = slim["Date"].dt.year
+    fy = years.where(months < 4, years + 1)
+    qn = pd.Series(4, index=slim.index, dtype=int)
+    qn = qn.mask((months >= 4) & (months <= 6), 1)
+    qn = qn.mask((months >= 7) & (months <= 9), 2)
+    qn = qn.mask((months >= 10) & (months <= 12), 3)
+    label_by_key = {(fy_i, q_i): lab for (fy_i, q_i), lab in q_label_map.items()}
+    slim["Quarter"] = [
+        label_by_key.get((int(f), int(q)), "") for f, q in zip(fy.to_numpy(), qn.to_numpy())
+    ]
     slim = slim[slim["Quarter"].isin(q_cols)]
     if slim.empty:
         return _empty_bundle(q_cols, basis, n_quarters, group_by_parent, empty_long)
@@ -174,6 +196,37 @@ def build_platform_match_frames(
     )
     long["Units"] = long["Units"].round(0).astype(int)
     long = long.sort_values(["OMS_SKU", "Quarter", "Platform"]).reset_index(drop=True)
+
+    return _bundle_from_long(
+        long,
+        q_cols=q_cols,
+        basis=basis,
+        n_quarters=n_quarters,
+        group_by_parent=group_by_parent,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        method=(
+            "Unified sales_df by Source; Sold=shipments only; "
+            "Net=ship−returns/cancels (Amazon cancel rules); "
+            "combo listings stay on listing SKU (no component fan)."
+        ),
+    )
+
+
+def _bundle_from_long(
+    long: pd.DataFrame,
+    *,
+    q_cols: list[str],
+    basis: str,
+    n_quarters: int,
+    group_by_parent: bool,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    method: str,
+) -> dict[str, pd.DataFrame]:
+    empty_long = pd.DataFrame(columns=["OMS_SKU", "Quarter", "Platform", "Units"])
+    if long is None or long.empty:
+        return _empty_bundle(q_cols, basis, n_quarters, group_by_parent, empty_long)
 
     # Wide totals across the full window
     tot = (
@@ -224,35 +277,18 @@ def build_platform_match_frames(
             {"Key": "group_by_parent", "Value": str(bool(group_by_parent))},
             {"Key": "window_start", "Value": str(start_ts.date())},
             {"Key": "window_end", "Value": str(end_ts.date())},
-            {
-                "Key": "method",
-                "Value": (
-                    "Unified sales_df by Source; Sold=shipments only; "
-                    "Net=ship−returns/cancels (Amazon cancel rules); "
-                    "combo listings stay on listing SKU (no component fan)."
-                ),
-            },
+            {"Key": "method", "Value": method},
             {
                 "Key": "how_to_use",
                 "Value": (
                     "Filter SKU_Platform_Quarter to one Quarter (e.g. Jan-Mar 2025). "
-                    "Compare platform columns to File/Deepdive by marketplace. "
-                    "SKU_Platform_Total is the sum across all quarters in the window. "
-                    "Quarter_Platform_Summary shows marketplace mix drift over time."
+                    "Platform totals for a quarter must match the PO Quarterly History column. "
+                    "SKU_Platform_Total is the sum across all quarters in the window."
                 ),
             },
-            {
-                "Key": "platforms",
-                "Value": ", ".join(PLATFORM_DISPLAY_ORDER),
-            },
-            {
-                "Key": "sku_rows_long",
-                "Value": str(len(long)),
-            },
-            {
-                "Key": "distinct_skus",
-                "Value": str(long["OMS_SKU"].nunique()),
-            },
+            {"Key": "platforms", "Value": ", ".join(PLATFORM_DISPLAY_ORDER)},
+            {"Key": "sku_rows_long", "Value": str(len(long))},
+            {"Key": "distinct_skus", "Value": str(long["OMS_SKU"].nunique())},
         ]
     )
 
@@ -263,6 +299,47 @@ def build_platform_match_frames(
         "summary": summary,
         "notes": notes,
     }
+
+
+def build_platform_match_frames_aligned(
+    sku_mapping: Optional[Dict[str, str]] = None,
+    *,
+    n_quarters: int = 8,
+    demand_basis: str = "Sold",
+    group_by_parent: bool = False,
+    progress_cb=None,
+) -> dict[str, pd.DataFrame]:
+    """Platform match using the same Tier-1/Tier-3/sales path as PO Quarterly History."""
+    from .po_quarterly_fast import calculate_platform_match_long_from_tier3
+    from .po_quarterly_warmup import quarterly_report_window
+
+    basis = normalize_quarterly_demand_basis(demand_basis)
+    n_quarters = max(1, min(int(n_quarters or 8), 16))
+    q_cols = _ordered_q_cols(n_quarters)
+    start_s, end_s = quarterly_report_window(n_quarters)
+    start_ts = pd.Timestamp(start_s).normalize()
+    end_ts = pd.Timestamp(end_s).normalize() + pd.Timedelta(hours=23, minutes=59)
+    long = calculate_platform_match_long_from_tier3(
+        sku_mapping,
+        group_by_parent=group_by_parent,
+        n_quarters=n_quarters,
+        demand_basis=basis,
+        progress_cb=progress_cb,
+    )
+    return _bundle_from_long(
+        long,
+        q_cols=q_cols,
+        basis=basis,
+        n_quarters=n_quarters,
+        group_by_parent=group_by_parent,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        method=(
+            "Same Tier-1 bulk + Tier-3 gap-fill + sales_df path as PO Quarterly History; "
+            "Sold=shipments only; Net=ship−returns/cancels; "
+            "combo listings stay on listing SKU (no component fan)."
+        ),
+    )
 
 
 def _empty_bundle(
@@ -345,18 +422,30 @@ def build_platform_match_export_bytes(
     demand_basis: str = "Sold",
     group_by_parent: bool = False,
     fmt: str = "xlsx",
+    align_with_quarterly: bool = True,
 ) -> tuple[bytes, str, str]:
     """
     Returns (body, media_type, filename).
     ``fmt``: ``xlsx`` (default) or ``zip``.
+
+    When ``align_with_quarterly`` (default), uses the same Tier-1/Tier-3/sales
+    aggregation as PO Quarterly History so marketplace totals match the tab.
     """
-    frames = build_platform_match_frames(
-        sales_df,
-        sku_mapping,
-        n_quarters=n_quarters,
-        demand_basis=demand_basis,
-        group_by_parent=group_by_parent,
-    )
+    if align_with_quarterly:
+        frames = build_platform_match_frames_aligned(
+            sku_mapping,
+            n_quarters=n_quarters,
+            demand_basis=demand_basis,
+            group_by_parent=group_by_parent,
+        )
+    else:
+        frames = build_platform_match_frames(
+            sales_df,
+            sku_mapping,
+            n_quarters=n_quarters,
+            demand_basis=demand_basis,
+            group_by_parent=group_by_parent,
+        )
     basis = normalize_quarterly_demand_basis(demand_basis)
     basis_tag = "sold" if basis == "sold" else "net"
     today = pd.Timestamp.today().strftime("%Y-%m-%d")
