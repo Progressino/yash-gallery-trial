@@ -1898,18 +1898,16 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
     sess.po_calculate_result = {}
     sess.po_calculate_result_df = pd.DataFrame()
 
-    import asyncio
-
     from ..concurrency import PO_CALC_EXECUTOR
     from ..services.po_calculate_jobs import create_po_job
     from ..services.po_calculate_run import background_po_calculate
 
     job_id = create_po_job(
         sid,
-        status="queued",
+        status="running",
         ok=True,
-        progress=0,
-        message="Queued…",
+        progress=1,
+        message="Queued for calculator…",
     )
 
     if body_dict.get("use_shared_cache", True):
@@ -1919,13 +1917,10 @@ async def po_calculate(request: Request, body: PORequest, background_tasks: Back
         if cached:
             return {"ok": True, "job_id": job_id, "from_shared_cache": True}
 
-    asyncio.get_running_loop().run_in_executor(
-        PO_CALC_EXECUTOR,
-        background_po_calculate,
-        job_id,
-        sid,
-        body_dict,
-    )
+    # Use ThreadPoolExecutor.submit — NOT asyncio.run_in_executor.
+    # Discarding the asyncio Future when this request returns can cancel work that
+    # is still queued behind another PO job (jobs stuck at "Queued…" forever).
+    PO_CALC_EXECUTOR.submit(background_po_calculate, job_id, sid, body_dict)
     return {"ok": True, "job_id": job_id}
 
 
