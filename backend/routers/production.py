@@ -18,6 +18,8 @@ from ..db.production_db import (
     soft_reserve_all, release_so_reservations,
     list_soft_reservations_v2, get_soft_reserved_by_material,
     list_reservations, create_reservation, release_reservation, get_reserved_qty,
+    list_set_boms, get_set_bom, get_set_bom_for_sku, upsert_set_bom, delete_set_bom,
+    preview_set_match, commit_set_match, list_set_split_events, list_set_match_events,
 )
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
@@ -331,6 +333,34 @@ class PieceReceiptIn(BaseModel):
     receipt_date: Optional[str] = None
     received_by: Optional[str] = ''
     remarks: Optional[str] = ''
+    # Cutting receive: when Set BOM exists, explode into component SKUs (default on)
+    split_components: Optional[bool] = True
+
+
+class SetBomLineIn(BaseModel):
+    component_code: str
+    component_name: Optional[str] = ''
+    qty_per_set: int = 1
+    default_next_process: Optional[str] = ''
+    sort_order: Optional[int] = 0
+
+
+class SetBomIn(BaseModel):
+    style_key: str
+    style_name: Optional[str] = ''
+    remarks: Optional[str] = ''
+    active: Optional[bool] = True
+    lines: List[SetBomLineIn]
+
+
+class SetMatchIn(BaseModel):
+    so_number: str
+    main_sku: str
+    match_qty: Optional[int] = None
+    from_process: Optional[str] = 'Finishing'
+    to_process: Optional[str] = 'Packing'
+    matched_by: Optional[str] = ''
+    remarks: Optional[str] = ''
 
 class CostEntryIn(BaseModel):
     process: str = 'Cutting'
@@ -567,12 +597,78 @@ def post_issue_pieces(joid: int, body: PieceIssueIn):
 @router.post("/orders/{joid}/receive-pieces")
 def post_receive_pieces(joid: int, body: PieceReceiptIn):
     try:
-        receive_pieces(joid, body.model_dump())
+        result = receive_pieces(joid, body.model_dump())
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(500, f"Receive failed: {e}")
+    return result if isinstance(result, dict) else {"ok": True}
+
+
+# ── Set BOM + Set Match ────────────────────────────────────────────────────────
+
+@router.get("/set-bom")
+def get_set_bom_list():
+    return list_set_boms()
+
+
+@router.get("/set-bom/{style_key}")
+def get_set_bom_detail(style_key: str):
+    bom = get_set_bom(style_key)
+    if not bom:
+        raise HTTPException(404, f"No Set BOM for '{style_key}'")
+    return bom
+
+
+@router.get("/set-bom-for-sku/{sku:path}")
+def get_set_bom_by_sku(sku: str):
+    bom = get_set_bom_for_sku(sku)
+    return {"sku": sku, "bom": bom, "has_set_bom": bool(bom and bom.get("lines"))}
+
+
+@router.post("/set-bom")
+def post_set_bom(body: SetBomIn):
+    try:
+        return upsert_set_bom(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.delete("/set-bom/{style_key}")
+def remove_set_bom(style_key: str):
+    if not delete_set_bom(style_key):
+        raise HTTPException(404, f"No Set BOM for '{style_key}'")
     return {"ok": True}
+
+
+@router.get("/set-match")
+def get_set_match_preview(
+    so_number: str,
+    main_sku: str,
+    from_process: str = "Finishing",
+):
+    try:
+        return preview_set_match(so_number, main_sku, from_process)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/set-match")
+def post_set_match(body: SetMatchIn):
+    try:
+        return commit_set_match(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/set-events/splits")
+def get_set_splits(so_number: Optional[str] = None, main_sku: Optional[str] = None):
+    return list_set_split_events(so_number or "", main_sku or "")
+
+
+@router.get("/set-events/matches")
+def get_set_matches(so_number: Optional[str] = None, main_sku: Optional[str] = None):
+    return list_set_match_events(so_number or "", main_sku or "")
 
 @router.post("/orders/{joid}/add-cost")
 def post_add_cost(joid: int, body: CostEntryIn):

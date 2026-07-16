@@ -217,6 +217,55 @@ def init_db():
         updated_at      TEXT DEFAULT (datetime('now')),
         UNIQUE(so_number, material_code)
     );
+
+    -- Set BOM: style-level recipe of garment components (Top/Pant/Dupatta…)
+    CREATE TABLE IF NOT EXISTS set_bom_headers (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        style_key       TEXT NOT NULL UNIQUE,
+        style_name      TEXT DEFAULT '',
+        active          INTEGER DEFAULT 1,
+        remarks         TEXT DEFAULT '',
+        created_at      TEXT DEFAULT (datetime('now')),
+        updated_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS set_bom_lines (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        header_id           INTEGER NOT NULL REFERENCES set_bom_headers(id) ON DELETE CASCADE,
+        component_code      TEXT NOT NULL,
+        component_name      TEXT DEFAULT '',
+        qty_per_set         INTEGER NOT NULL DEFAULT 1,
+        default_next_process TEXT DEFAULT '',
+        sort_order          INTEGER DEFAULT 0,
+        UNIQUE(header_id, component_code)
+    );
+
+    -- Audit: Cutting receive → component stock split
+    CREATE TABLE IF NOT EXISTS set_split_events (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        jo_id           INTEGER REFERENCES job_orders(id),
+        jo_line_id      INTEGER REFERENCES jo_lines(id),
+        so_number       TEXT NOT NULL,
+        main_sku        TEXT NOT NULL,
+        process         TEXT NOT NULL DEFAULT 'Cutting',
+        split_qty       INTEGER NOT NULL,
+        components_json TEXT NOT NULL DEFAULT '[]',
+        created_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Audit: Finishing set-match → main SKU Packing stock
+    CREATE TABLE IF NOT EXISTS set_match_events (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        so_number       TEXT NOT NULL,
+        main_sku        TEXT NOT NULL,
+        from_process    TEXT NOT NULL DEFAULT 'Finishing',
+        to_process      TEXT NOT NULL DEFAULT 'Packing',
+        match_qty       INTEGER NOT NULL,
+        components_json TEXT NOT NULL DEFAULT '[]',
+        matched_by      TEXT DEFAULT '',
+        remarks         TEXT DEFAULT '',
+        created_at      TEXT DEFAULT (datetime('now'))
+    );
     """)
 
     # Migrations for existing DB
@@ -246,6 +295,9 @@ def init_db():
         ("jo_lines", "balance_qty", "INTEGER DEFAULT 0"),
         ("jo_lines", "vendor_rate", "REAL DEFAULT 0"),
         ("jo_lines", "process_cost", "REAL DEFAULT 0"),
+        ("jo_lines", "parent_sku", "TEXT DEFAULT ''"),
+        ("jo_lines", "sku_role", "TEXT DEFAULT 'MAIN'"),
+        ("jo_lines", "component_code", "TEXT DEFAULT ''"),
     ]
     for table, col, decl in migrations:
         try:
@@ -741,6 +793,12 @@ def issue_pieces(joid: int, data: dict):
     so_number = jo.get('so_number','')
     sku = data.get('sku') or jo.get('sku','')
 
+    try:
+        _assert_set_issue_allowed(conn, so_number, sku, from_process, to_process)
+    except ValueError:
+        conn.close()
+        raise
+
     # Validate stock inline (no separate connection)
     stock_row = conn.execute(
         "SELECT COALESCE(available_qty,0) FROM process_stock WHERE so_number=? AND sku=? AND process=?",
@@ -825,6 +883,13 @@ def receive_pieces(joid: int, data: dict):
                 f"Cannot receive {received} pcs — max {cap} allowed "
                 f"(planned {planned}, already {already})"
             )
+
+    try:
+        _assert_set_receive_allowed(conn, so_number, sku, process)
+    except ValueError:
+        conn.close()
+        raise
+
     conn.execute("""INSERT INTO jo_piece_receipts(jo_id,jo_line_id,process,so_number,sku,receipt_date,received_qty,rejected_qty,received_by,remarks)
         VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (joid, jo_line_id, process, so_number, sku,
@@ -842,6 +907,20 @@ def receive_pieces(joid: int, data: dict):
             balance_qty = planned_qty - (COALESCE(received_qty,0) + ?)
             WHERE id=? AND jo_id=?""", (received, rejected, received, jo_line_id, joid))
     _update_process_stock(conn, so_number, sku, process, qty_in=received)
+
+    split_info = None
+    split_flag = data.get("split_components", True)
+    if process == "Cutting" and split_flag is not False and str(split_flag).lower() not in ("0", "false", "no"):
+        split_info = _split_cutting_receive(
+            conn,
+            joid=joid,
+            jo_line_id=jo_line_id,
+            so_number=so_number,
+            main_sku=sku,
+            process=process,
+            split_qty=received,
+        )
+
     from ..services.document_qty_control import jo_should_auto_close
 
     jo_after = dict(conn.execute("SELECT planned_qty, received_qty, status FROM job_orders WHERE id=?", (joid,)).fetchone())
@@ -852,6 +931,7 @@ def receive_pieces(joid: int, data: dict):
         )
     conn.commit()
     conn.close()
+    return {"ok": True, "split": split_info}
 
 
 # ── Cost Entry ─────────────────────────────────────────────────────────────────
@@ -1271,3 +1351,456 @@ def get_mrp_commitments_for_so(so_number: str) -> list:
         d["can_create_jo"] = d["remaining_qty"] > 1e-9
         out.append(d)
     return out
+
+
+# ── Set BOM + Cutting split + Finishing set-match ─────────────────────────────
+
+def _set_bom_header_row(conn, style_key: str):
+    return conn.execute(
+        "SELECT * FROM set_bom_headers WHERE style_key=? AND COALESCE(active,1)=1",
+        (str(style_key or "").strip().upper(),),
+    ).fetchone()
+
+
+def _set_bom_lines(conn, header_id: int) -> list:
+    rows = conn.execute(
+        """SELECT * FROM set_bom_lines WHERE header_id=?
+           ORDER BY sort_order, id""",
+        (header_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _hydrate_set_bom(conn, header_row) -> Optional[dict]:
+    if not header_row:
+        return None
+    h = dict(header_row)
+    h["lines"] = _set_bom_lines(conn, h["id"])
+    return h
+
+
+def list_set_boms(active_only: bool = True) -> list:
+    conn = _connect()
+    q = "SELECT * FROM set_bom_headers"
+    if active_only:
+        q += " WHERE COALESCE(active,1)=1"
+    q += " ORDER BY style_key"
+    headers = [dict(r) for r in conn.execute(q).fetchall()]
+    out = []
+    for h in headers:
+        h["lines"] = _set_bom_lines(conn, h["id"])
+        out.append(h)
+    conn.close()
+    return out
+
+
+def get_set_bom(style_key: str) -> Optional[dict]:
+    conn = _connect()
+    bom = _hydrate_set_bom(conn, _set_bom_header_row(conn, style_key))
+    conn.close()
+    return bom
+
+
+def get_set_bom_for_sku(sku: str) -> Optional[dict]:
+    """Resolve Set BOM for a size SKU or component SKU."""
+    from ..services.set_components import style_key_for_set_bom, parse_component_sku
+
+    raw = str(sku or "").strip().upper()
+    if not raw:
+        return None
+    conn = _connect()
+    # Prefer exact style_key match, then stripped parent, then main of component.
+    candidates = []
+    main, _comp = parse_component_sku(raw)
+    if main:
+        candidates.append(main)
+        candidates.append(style_key_for_set_bom(main))
+    candidates.append(raw)
+    candidates.append(style_key_for_set_bom(raw))
+    seen = set()
+    for key in candidates:
+        k = str(key or "").strip().upper()
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        bom = _hydrate_set_bom(conn, _set_bom_header_row(conn, k))
+        if bom:
+            conn.close()
+            return bom
+    conn.close()
+    return None
+
+
+def upsert_set_bom(data: dict) -> dict:
+    from ..services.set_components import normalize_component_code
+
+    style_key = str(data.get("style_key") or "").strip().upper()
+    if not style_key:
+        raise ValueError("style_key is required")
+    lines_in = data.get("lines") or []
+    if not lines_in:
+        raise ValueError("At least one component line is required")
+    cleaned = []
+    seen_codes = set()
+    for i, ln in enumerate(lines_in):
+        code = normalize_component_code(ln.get("component_code") or ln.get("code") or "")
+        if code in seen_codes:
+            raise ValueError(f"Duplicate component code: {code}")
+        seen_codes.add(code)
+        qty = max(int(ln.get("qty_per_set") or 1), 1)
+        cleaned.append(
+            {
+                "component_code": code,
+                "component_name": str(ln.get("component_name") or code).strip(),
+                "qty_per_set": qty,
+                "default_next_process": str(ln.get("default_next_process") or "").strip(),
+                "sort_order": int(ln.get("sort_order") if ln.get("sort_order") is not None else i),
+            }
+        )
+    conn = _connect()
+    existing = conn.execute(
+        "SELECT id FROM set_bom_headers WHERE style_key=?", (style_key,)
+    ).fetchone()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    style_name = str(data.get("style_name") or "").strip()
+    remarks = str(data.get("remarks") or "").strip()
+    active = 1 if data.get("active", True) else 0
+    if existing:
+        hid = int(existing["id"])
+        conn.execute(
+            """UPDATE set_bom_headers
+               SET style_name=?, active=?, remarks=?, updated_at=?
+               WHERE id=?""",
+            (style_name, active, remarks, now, hid),
+        )
+        conn.execute("DELETE FROM set_bom_lines WHERE header_id=?", (hid,))
+    else:
+        conn.execute(
+            """INSERT INTO set_bom_headers(style_key, style_name, active, remarks, created_at, updated_at)
+               VALUES(?,?,?,?,?,?)""",
+            (style_key, style_name, active, remarks, now, now),
+        )
+        hid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    for ln in cleaned:
+        conn.execute(
+            """INSERT INTO set_bom_lines
+               (header_id, component_code, component_name, qty_per_set, default_next_process, sort_order)
+               VALUES(?,?,?,?,?,?)""",
+            (
+                hid,
+                ln["component_code"],
+                ln["component_name"],
+                ln["qty_per_set"],
+                ln["default_next_process"],
+                ln["sort_order"],
+            ),
+        )
+    conn.commit()
+    bom = _hydrate_set_bom(conn, conn.execute("SELECT * FROM set_bom_headers WHERE id=?", (hid,)).fetchone())
+    conn.close()
+    return bom
+
+
+def delete_set_bom(style_key: str) -> bool:
+    conn = _connect()
+    cur = conn.execute(
+        "DELETE FROM set_bom_headers WHERE style_key=?",
+        (str(style_key or "").strip().upper(),),
+    )
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
+    return deleted
+
+
+def _was_set_split(conn, so_number: str, main_sku: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM set_split_events WHERE so_number=? AND main_sku=? LIMIT 1",
+        (so_number, str(main_sku or "").strip().upper()),
+    ).fetchone()
+    return bool(row)
+
+
+def _assert_set_issue_allowed(conn, so_number: str, sku: str, from_process: str, to_process: str) -> None:
+    from ..services.set_components import parse_component_sku
+
+    sku_u = str(sku or "").strip().upper()
+    to_p = str(to_process or "").strip()
+    _main, comp = parse_component_sku(sku_u)
+    if to_p == "Packing":
+        if comp:
+            raise ValueError(
+                "Component SKUs cannot be issued to Packing — use Set Match to form complete sets"
+            )
+        # After Cutting split, Packing stock for the main SKU comes only from Set Match
+        if _was_set_split(conn, so_number, sku_u):
+            raise ValueError(
+                "This style was split into components — use Set Match to move complete sets to Packing"
+            )
+
+
+def _assert_set_receive_allowed(conn, so_number: str, sku: str, process: str) -> None:
+    from ..services.set_components import parse_component_sku
+
+    sku_u = str(sku or "").strip().upper()
+    proc = str(process or "").strip()
+    _main, comp = parse_component_sku(sku_u)
+    if proc == "Packing" and not comp and _was_set_split(conn, so_number, sku_u):
+        raise ValueError(
+            "For split set styles, Packing stock is created via Set Match — cannot receive Packing on main SKU"
+        )
+
+
+def _split_cutting_receive(
+    conn,
+    *,
+    joid: int,
+    jo_line_id,
+    so_number: str,
+    main_sku: str,
+    process: str,
+    split_qty: int,
+) -> Optional[dict]:
+    """Move Cutting stock from main SKU onto component SKUs per Set BOM."""
+    from ..services.set_components import component_sku, style_key_for_set_bom
+
+    main = str(main_sku or "").strip().upper()
+    if not main or split_qty <= 0:
+        return None
+    # Do not re-split a component receive
+    from ..services.set_components import parse_component_sku
+
+    if parse_component_sku(main)[1]:
+        return None
+
+    style_key = style_key_for_set_bom(main)
+    bom = _hydrate_set_bom(conn, _set_bom_header_row(conn, style_key))
+    if not bom:
+        # Also try exact main as style_key (size-level BOM)
+        bom = _hydrate_set_bom(conn, _set_bom_header_row(conn, main))
+    if not bom or not bom.get("lines"):
+        return None
+
+    components_out = []
+    for ln in bom["lines"]:
+        code = ln["component_code"]
+        ratio = max(int(ln.get("qty_per_set") or 1), 1)
+        qty = int(split_qty) * ratio
+        csku = component_sku(main, code)
+        _update_process_stock(conn, so_number, csku, process, qty_in=qty)
+        components_out.append(
+            {
+                "component_code": code,
+                "component_name": ln.get("component_name") or code,
+                "component_sku": csku,
+                "qty_per_set": ratio,
+                "qty": qty,
+                "default_next_process": ln.get("default_next_process") or "",
+            }
+        )
+
+    # Remove the just-received qty from main Cutting stock (components own it now)
+    _update_process_stock(conn, so_number, main, process, qty_out=split_qty)
+
+    if jo_line_id:
+        conn.execute(
+            """UPDATE jo_lines SET parent_sku=?, sku_role='MAIN', component_code=''
+               WHERE id=?""",
+            (main, jo_line_id),
+        )
+
+    conn.execute(
+        """INSERT INTO set_split_events
+           (jo_id, jo_line_id, so_number, main_sku, process, split_qty, components_json)
+           VALUES(?,?,?,?,?,?,?)""",
+        (
+            joid,
+            jo_line_id,
+            so_number,
+            main,
+            process,
+            split_qty,
+            json.dumps(components_out),
+        ),
+    )
+    return {
+        "main_sku": main,
+        "style_key": bom.get("style_key"),
+        "split_qty": split_qty,
+        "components": components_out,
+        "message": f"Split {split_qty} of {main} into {len(components_out)} component SKU(s)",
+    }
+
+
+def preview_set_match(
+    so_number: str,
+    main_sku: str,
+    from_process: str = "Finishing",
+) -> dict:
+    from ..services.set_components import component_sku, compute_complete_sets, parse_component_sku
+
+    so = str(so_number or "").strip()
+    main = str(main_sku or "").strip().upper()
+    if not so or not main:
+        raise ValueError("so_number and main_sku are required")
+    # If caller passed a component SKU, normalize to main
+    parsed_main, _ = parse_component_sku(main)
+    if parsed_main:
+        main = parsed_main
+
+    bom = get_set_bom_for_sku(main)
+    if not bom or not bom.get("lines"):
+        raise ValueError(f"No Set BOM defined for {main}")
+
+    conn = _connect()
+    avails = []
+    for ln in bom["lines"]:
+        code = ln["component_code"]
+        csku = component_sku(main, code)
+        stock_row = conn.execute(
+            "SELECT COALESCE(available_qty,0) FROM process_stock WHERE so_number=? AND sku=? AND process=?",
+            (so, csku, from_process),
+        ).fetchone()
+        avail = int(stock_row[0]) if stock_row else 0
+        avails.append(
+            {
+                "component_code": code,
+                "component_name": ln.get("component_name") or code,
+                "component_sku": csku,
+                "qty_per_set": max(int(ln.get("qty_per_set") or 1), 1),
+                "available_qty": avail,
+            }
+        )
+    conn.close()
+    result = compute_complete_sets(avails)
+    result["so_number"] = so
+    result["main_sku"] = main
+    result["from_process"] = from_process
+    result["style_key"] = bom.get("style_key")
+    return result
+
+
+def commit_set_match(data: dict) -> dict:
+    from ..services.set_components import component_sku
+
+    so = str(data.get("so_number") or "").strip()
+    main = str(data.get("main_sku") or "").strip().upper()
+    from_process = str(data.get("from_process") or "Finishing").strip() or "Finishing"
+    to_process = str(data.get("to_process") or "Packing").strip() or "Packing"
+    preview = preview_set_match(so, main, from_process)
+    complete = int(preview.get("complete_sets") or 0)
+    requested = data.get("match_qty")
+    match_qty = int(requested) if requested is not None else complete
+    if match_qty <= 0:
+        raise ValueError("match_qty must be greater than 0")
+    if match_qty > complete:
+        raise ValueError(
+            f"Only {complete} complete set(s) available at {from_process} — cannot match {match_qty}"
+        )
+
+    conn = _connect()
+    consumed = []
+    for row in preview.get("components") or []:
+        code = row["component_code"]
+        ratio = max(int(row.get("qty_per_set") or 1), 1)
+        need = match_qty * ratio
+        csku = row.get("component_sku") or component_sku(main, code)
+        stock_row = conn.execute(
+            "SELECT COALESCE(available_qty,0) FROM process_stock WHERE so_number=? AND sku=? AND process=?",
+            (so, csku, from_process),
+        ).fetchone()
+        avail = int(stock_row[0]) if stock_row else 0
+        if need > avail:
+            conn.close()
+            raise ValueError(f"Insufficient {csku} at {from_process}: need {need}, have {avail}")
+        _update_process_stock(conn, so, csku, from_process, qty_out=need)
+        consumed.append(
+            {
+                "component_code": code,
+                "component_sku": csku,
+                "qty_per_set": ratio,
+                "consumed_qty": need,
+                "remaining_qty": avail - need,
+            }
+        )
+
+    _update_process_stock(conn, so, main, to_process, qty_in=match_qty)
+    conn.execute(
+        """INSERT INTO set_match_events
+           (so_number, main_sku, from_process, to_process, match_qty, components_json, matched_by, remarks)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            so,
+            main,
+            from_process,
+            to_process,
+            match_qty,
+            json.dumps(consumed),
+            str(data.get("matched_by") or ""),
+            str(data.get("remarks") or ""),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    extras = [
+        {
+            "component_code": c["component_code"],
+            "component_sku": c["component_sku"],
+            "extra_wip_qty": int(c["remaining_qty"]),
+        }
+        for c in consumed
+        if int(c["remaining_qty"]) > 0
+    ]
+    return {
+        "ok": True,
+        "so_number": so,
+        "main_sku": main,
+        "match_qty": match_qty,
+        "from_process": from_process,
+        "to_process": to_process,
+        "components": consumed,
+        "extra_wip": extras,
+        "message": f"Matched {match_qty} complete set(s) → {main} at {to_process}",
+    }
+
+
+def list_set_split_events(so_number: str = "", main_sku: str = "") -> list:
+    conn = _connect()
+    q = "SELECT * FROM set_split_events WHERE 1=1"
+    params: list = []
+    if so_number:
+        q += " AND so_number=?"
+        params.append(so_number.strip())
+    if main_sku:
+        q += " AND main_sku=?"
+        params.append(main_sku.strip().upper())
+    q += " ORDER BY id DESC LIMIT 200"
+    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    conn.close()
+    for r in rows:
+        try:
+            r["components"] = json.loads(r.get("components_json") or "[]")
+        except Exception:
+            r["components"] = []
+    return rows
+
+
+def list_set_match_events(so_number: str = "", main_sku: str = "") -> list:
+    conn = _connect()
+    q = "SELECT * FROM set_match_events WHERE 1=1"
+    params: list = []
+    if so_number:
+        q += " AND so_number=?"
+        params.append(so_number.strip())
+    if main_sku:
+        q += " AND main_sku=?"
+        params.append(main_sku.strip().upper())
+    q += " ORDER BY id DESC LIMIT 200"
+    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    conn.close()
+    for r in rows:
+        try:
+            r["components"] = json.loads(r.get("components_json") or "[]")
+        except Exception:
+            r["components"] = []
+    return rows

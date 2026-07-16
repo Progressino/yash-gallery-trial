@@ -1542,3 +1542,146 @@ def test_mrp_commitment_aggregates_breakdown_slices(isolated_module_dbs):
     commits = production_db.get_mrp_commitments_for_so("SO-MULTI")
     slub = next(c for c in commits if c["material_code"] == "GF-SLUB")
     assert float(slub["mrp_qty"]) == pytest.approx(40.0, abs=0.01)
+
+
+def test_cutting_split_and_set_match(isolated_module_dbs, client):
+    """Set BOM → Cutting receive split → Finishing set-match → Packing stock."""
+    bom = client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "1001SET",
+            "style_name": "Test Set",
+            "lines": [
+                {"component_code": "TOP", "component_name": "Top", "qty_per_set": 1},
+                {"component_code": "PANT", "component_name": "Pant", "qty_per_set": 1},
+                {"component_code": "DUPATTA", "component_name": "Dupatta", "qty_per_set": 1},
+            ],
+        },
+    )
+    assert bom.status_code == 200, bom.text
+    assert len(bom.json()["lines"]) == 3
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-07-16",
+            "so_number": "SO-SET-1",
+            "sku": "1001SET-XS",
+            "process": "Cutting",
+            "planned_qty": 100,
+            "lines": [{"sku": "1001SET-XS", "style": "XS", "planned_qty": 100}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    jo = next(o for o in client.get("/api/production/orders").json() if o["jo_number"] == r.json()["jo_number"])
+    line = jo["lines"][0]
+
+    for_sku = client.get("/api/production/set-bom-for-sku/1001SET-XS")
+    assert for_sku.status_code == 200
+    if not for_sku.json().get("has_set_bom"):
+        from backend.services.set_components import style_key_for_set_bom
+
+        key = style_key_for_set_bom("1001SET-XS")
+        client.post(
+            "/api/production/set-bom",
+            json={
+                "style_key": key,
+                "style_name": "Test Set",
+                "lines": [
+                    {"component_code": "TOP", "qty_per_set": 1},
+                    {"component_code": "PANT", "qty_per_set": 1},
+                    {"component_code": "DUPATTA", "qty_per_set": 1},
+                ],
+            },
+        )
+
+    rec = client.post(
+        f"/api/production/orders/{jo['id']}/receive-pieces",
+        json={
+            "received_qty": 100,
+            "process": "Cutting",
+            "sku": "1001SET-XS",
+            "jo_line_id": line["id"],
+            "split_components": True,
+        },
+    )
+    assert rec.status_code == 200, rec.text
+    split = rec.json().get("split")
+    assert split and split.get("split_qty") == 100
+    assert len(split["components"]) == 3
+
+    main_stock = client.get(
+        "/api/production/process-stock",
+        params={"so_number": "SO-SET-1", "sku": "1001SET-XS"},
+    ).json()
+    assert int(main_stock.get("Cutting", {}).get("available", 0)) == 0
+
+    for code in ("TOP", "PANT", "DUPATTA"):
+        csku = f"1001SET-XS-{code}"
+        st = client.get(
+            "/api/production/process-stock",
+            params={"so_number": "SO-SET-1", "sku": csku},
+        ).json()
+        assert int(st.get("Cutting", {}).get("available", 0)) == 100, (csku, st)
+
+        iss = client.post(
+            f"/api/production/orders/{jo['id']}/issue-pieces",
+            json={
+                "issued_qty": 100 if code != "PANT" else 99,
+                "from_process": "Cutting",
+                "to_process": "Finishing",
+                "sku": csku,
+            },
+        )
+        assert iss.status_code == 200, iss.text
+
+    preview = client.get(
+        "/api/production/set-match",
+        params={"so_number": "SO-SET-1", "main_sku": "1001SET-XS", "from_process": "Finishing"},
+    )
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["complete_sets"] == 99
+    by_code = {c["component_code"]: c for c in body["components"]}
+    assert by_code["TOP"]["extra_qty"] == 1
+    assert by_code["DUPATTA"]["extra_qty"] == 1
+
+    blocked = client.post(
+        f"/api/production/orders/{jo['id']}/issue-pieces",
+        json={
+            "issued_qty": 1,
+            "from_process": "Finishing",
+            "to_process": "Packing",
+            "sku": "1001SET-XS",
+        },
+    )
+    assert blocked.status_code == 400
+
+    match = client.post(
+        "/api/production/set-match",
+        json={
+            "so_number": "SO-SET-1",
+            "main_sku": "1001SET-XS",
+            "from_process": "Finishing",
+            "to_process": "Packing",
+            "match_qty": 99,
+        },
+    )
+    assert match.status_code == 200, match.text
+    assert match.json()["match_qty"] == 99
+
+    packing = client.get(
+        "/api/production/process-stock",
+        params={"so_number": "SO-SET-1", "sku": "1001SET-XS"},
+    ).json()
+    assert int(packing.get("Packing", {}).get("available", 0)) == 99
+
+    over = client.post(
+        "/api/production/set-match",
+        json={
+            "so_number": "SO-SET-1",
+            "main_sku": "1001SET-XS",
+            "match_qty": 1,
+        },
+    )
+    assert over.status_code == 400
