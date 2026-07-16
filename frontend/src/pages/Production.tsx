@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
+import SetBomPanel from '../components/SetBomPanel'
 
 function apiErrorMessage(err: unknown, fallback: string): string {
   if (!axios.isAxiosError(err)) return fallback
@@ -697,24 +698,6 @@ export default function Production() {
   const [issuePiecesForm, setIssuePiecesForm] = useState({ issued_qty: 0, to_process: '', issued_by: '', remarks: '' })
   const [costForm, setCostForm] = useState({ cost_type: 'Labour', amount: 0, description: '' })
 
-  // Set BOM / Set Match
-  const [setBomForm, setSetBomForm] = useState({
-    style_key: '',
-    style_name: '',
-    lines: [
-      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching' },
-      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching' },
-      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery' },
-    ] as { component_code: string; component_name: string; qty_per_set: number; default_next_process: string }[],
-  })
-  const [setMatchForm, setSetMatchForm] = useState({
-    so_number: '',
-    main_sku: '',
-    from_process: 'Finishing',
-    match_qty: 0,
-  })
-  const [setMatchPreview, setSetMatchPreview] = useState<any>(null)
-
   // URL params auto-fill
   useEffect(() => {
     const p = new URLSearchParams(window.location.search)
@@ -760,11 +743,6 @@ export default function Production() {
     queryKey: ['prod-issue-notes'],
     queryFn: () => api.get('/production/issue-notes').then(r => r.data),
     enabled: tab === 'issue-notes',
-  })
-  const { data: setBoms = [] } = useQuery({
-    queryKey: ['set-boms'],
-    queryFn: () => api.get('/production/set-bom').then(r => r.data || []),
-    enabled: tab === 'sets',
   })
   const receiveSku = activeJO
     ? (activeLineId ? activeJO.lines.find(l => l.id === activeLineId)?.sku : activeJO.sku) || activeJO.sku
@@ -1002,28 +980,6 @@ export default function Production() {
     mutationFn: (id: number) => api.post(`/production/orders/${id}/next-process`, {}),
     onSuccess: (res) => { invalidateAll(); alert(`✅ Next process JO created: ${res.data.jo_number} — ${res.data.process}`) },
     onError: (e: unknown) => alert(apiErrorMessage(e, 'Error')),
-  })
-  const saveSetBomMut = useMutation({
-    mutationFn: (data: object) => api.post('/production/set-bom', data),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['set-boms'] })
-      alert('Set BOM saved')
-    },
-    onError: (e: unknown) => alert(apiErrorMessage(e, 'Failed to save Set BOM')),
-  })
-  const deleteSetBomMut = useMutation({
-    mutationFn: (styleKey: string) => api.delete(`/production/set-bom/${encodeURIComponent(styleKey)}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['set-boms'] }),
-    onError: (e: unknown) => alert(apiErrorMessage(e, 'Delete failed')),
-  })
-  const commitSetMatchMut = useMutation({
-    mutationFn: (data: object) => api.post('/production/set-match', data),
-    onSuccess: (res) => {
-      alert(res.data?.message || 'Set match committed')
-      setSetMatchPreview(null)
-      invalidateAll()
-    },
-    onError: (e: unknown) => alert(apiErrorMessage(e, 'Set match failed')),
   })
 
   const openModal = async (type: ModalType, jo: JO, lineId?: number) => {
@@ -1381,7 +1337,7 @@ export default function Production() {
 
       {/* Main tabs */}
       <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
-        {([['process','⚙️ Process'], ['tracker','📋 All JOs'], ['issue-notes','📋 Issue Notes'], ['reports','📊 Reports'], ['sets','🧩 Sets'], ['mrp','📐 Material Req. Planning']] as const).map(([key, label]) => (
+        {([['process','⚙️ Process'], ['sets','👔 Set Components'], ['tracker','📋 All JOs'], ['issue-notes','📋 Issue Notes'], ['reports','📊 Reports'], ['mrp','📐 Material Req. Planning']] as const).map(([key, label]) => (
           <button key={key} onClick={() => { setTab(key); setExpanded(null) }}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${tab === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
             {label}
@@ -1795,197 +1751,7 @@ export default function Production() {
 
       {/* SETS TAB — Set BOM + Set Match */}
       {tab === 'sets' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-white rounded-xl border p-4 space-y-3">
-            <h3 className="font-semibold text-gray-800">Set BOM (component recipe)</h3>
-            <p className="text-xs text-gray-500">Define Top/Pant/Dupatta for a style. Cutting receive will explode into component SKUs.</p>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-xs text-gray-500">Style key *</label>
-                <input value={setBomForm.style_key} onChange={e => setSetBomForm(f => ({ ...f, style_key: e.target.value.toUpperCase() }))}
-                  placeholder="e.g. 1001YKBEIGE" className="w-full border rounded px-2 py-1.5 text-sm mt-1 font-mono" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500">Style name</label>
-                <input value={setBomForm.style_name} onChange={e => setSetBomForm(f => ({ ...f, style_name: e.target.value }))}
-                  className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
-              </div>
-            </div>
-            <div className="border rounded-lg overflow-hidden">
-              <table className="w-full text-xs">
-                <thead className="bg-gray-50 text-gray-500">
-                  <tr>
-                    <th className="text-left px-2 py-1.5">Code</th>
-                    <th className="text-left px-2 py-1.5">Name</th>
-                    <th className="text-right px-2 py-1.5">Qty/set</th>
-                    <th className="text-left px-2 py-1.5">Next process</th>
-                    <th className="px-2 py-1.5"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {setBomForm.lines.map((ln, i) => (
-                    <tr key={i} className="border-t">
-                      <td className="px-2 py-1">
-                        <input value={ln.component_code} onChange={e => setSetBomForm(f => ({
-                          ...f, lines: f.lines.map((x, j) => j === i ? { ...x, component_code: e.target.value.toUpperCase() } : x),
-                        }))} className="w-full border rounded px-1.5 py-0.5 font-mono" />
-                      </td>
-                      <td className="px-2 py-1">
-                        <input value={ln.component_name} onChange={e => setSetBomForm(f => ({
-                          ...f, lines: f.lines.map((x, j) => j === i ? { ...x, component_name: e.target.value } : x),
-                        }))} className="w-full border rounded px-1.5 py-0.5" />
-                      </td>
-                      <td className="px-2 py-1">
-                        <input type="number" value={ln.qty_per_set} onChange={e => setSetBomForm(f => ({
-                          ...f, lines: f.lines.map((x, j) => j === i ? { ...x, qty_per_set: +e.target.value } : x),
-                        }))} className="w-16 border rounded px-1.5 py-0.5 text-right" />
-                      </td>
-                      <td className="px-2 py-1">
-                        <select value={ln.default_next_process} onChange={e => setSetBomForm(f => ({
-                          ...f, lines: f.lines.map((x, j) => j === i ? { ...x, default_next_process: e.target.value } : x),
-                        }))} className="w-full border rounded px-1.5 py-0.5">
-                          <option value="">—</option>
-                          {allProcesses.map(p => <option key={p}>{p}</option>)}
-                        </select>
-                      </td>
-                      <td className="px-2 py-1 text-center">
-                        <button onClick={() => setSetBomForm(f => ({ ...f, lines: f.lines.filter((_, j) => j !== i) }))}
-                          className="text-red-400 hover:text-red-600">✕</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => setSetBomForm(f => ({
-                ...f,
-                lines: [...f.lines, { component_code: '', component_name: '', qty_per_set: 1, default_next_process: '' }],
-              }))} className="px-3 py-1.5 text-xs border rounded-lg">+ Component</button>
-              <button onClick={() => saveSetBomMut.mutate(setBomForm)}
-                disabled={saveSetBomMut.isPending || !setBomForm.style_key || setBomForm.lines.length === 0}
-                className="px-3 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg disabled:opacity-50">
-                {saveSetBomMut.isPending ? 'Saving…' : 'Save Set BOM'}
-              </button>
-            </div>
-            <div className="border-t pt-3 space-y-1">
-              <p className="text-xs font-semibold text-gray-600">Saved Set BOMs</p>
-              {(setBoms as any[]).length === 0 && <p className="text-xs text-gray-400">None yet.</p>}
-              {(setBoms as any[]).map((b: any) => (
-                <div key={b.style_key} className="flex items-center justify-between text-xs border rounded-lg px-2 py-1.5">
-                  <button className="text-left" onClick={() => setSetBomForm({
-                    style_key: b.style_key,
-                    style_name: b.style_name || '',
-                    lines: (b.lines || []).map((l: any) => ({
-                      component_code: l.component_code,
-                      component_name: l.component_name || l.component_code,
-                      qty_per_set: l.qty_per_set || 1,
-                      default_next_process: l.default_next_process || '',
-                    })),
-                  })}>
-                    <span className="font-mono font-semibold text-[#002B5B]">{b.style_key}</span>
-                    <span className="text-gray-500 ml-2">{(b.lines || []).map((l: any) => l.component_code).join(' + ')}</span>
-                  </button>
-                  <button onClick={() => { if (confirm(`Delete Set BOM ${b.style_key}?`)) deleteSetBomMut.mutate(b.style_key) }}
-                    className="text-red-500 text-xs">Delete</button>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-xl border p-4 space-y-3">
-            <h3 className="font-semibold text-gray-800">Set Match (Finishing → Packing)</h3>
-            <p className="text-xs text-gray-500">Complete sets = min(component avail at Finishing). Extras stay as component WIP.</p>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-xs text-gray-500">SO number *</label>
-                <input value={setMatchForm.so_number} onChange={e => setSetMatchForm(f => ({ ...f, so_number: e.target.value }))}
-                  className="w-full border rounded px-2 py-1.5 text-sm mt-1 font-mono" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500">Main size SKU *</label>
-                <input value={setMatchForm.main_sku} onChange={e => setSetMatchForm(f => ({ ...f, main_sku: e.target.value.toUpperCase() }))}
-                  placeholder="1001-XS" className="w-full border rounded px-2 py-1.5 text-sm mt-1 font-mono" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500">From process</label>
-                <select value={setMatchForm.from_process} onChange={e => setSetMatchForm(f => ({ ...f, from_process: e.target.value }))}
-                  className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                  {allProcesses.map(p => <option key={p}>{p}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="text-xs text-gray-500">Match qty</label>
-                <input type="number" value={setMatchForm.match_qty || ''} onChange={e => setSetMatchForm(f => ({ ...f, match_qty: +e.target.value }))}
-                  placeholder="max complete" className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={async () => {
-                  try {
-                    const res = await api.get('/production/set-match', {
-                      params: {
-                        so_number: setMatchForm.so_number,
-                        main_sku: setMatchForm.main_sku,
-                        from_process: setMatchForm.from_process,
-                      },
-                    })
-                    setSetMatchPreview(res.data)
-                    setSetMatchForm(f => ({ ...f, match_qty: res.data.complete_sets || 0 }))
-                  } catch (e) {
-                    alert(apiErrorMessage(e, 'Preview failed'))
-                    setSetMatchPreview(null)
-                  }
-                }}
-                disabled={!setMatchForm.so_number || !setMatchForm.main_sku}
-                className="px-3 py-1.5 text-xs border rounded-lg disabled:opacity-50">
-                Preview
-              </button>
-              <button
-                onClick={() => commitSetMatchMut.mutate({
-                  so_number: setMatchForm.so_number,
-                  main_sku: setMatchForm.main_sku,
-                  from_process: setMatchForm.from_process,
-                  to_process: 'Packing',
-                  match_qty: setMatchForm.match_qty || undefined,
-                })}
-                disabled={commitSetMatchMut.isPending || !setMatchForm.so_number || !setMatchForm.main_sku}
-                className="px-3 py-1.5 text-xs bg-green-700 text-white rounded-lg disabled:opacity-50">
-                {commitSetMatchMut.isPending ? 'Matching…' : 'Commit Set Match → Packing'}
-              </button>
-            </div>
-            {setMatchPreview && (
-              <div className="border rounded-lg p-3 space-y-2 bg-green-50/40">
-                <p className="text-sm font-semibold text-green-800">
-                  Complete sets available: {setMatchPreview.complete_sets}
-                </p>
-                <table className="w-full text-xs">
-                  <thead className="text-gray-500">
-                    <tr>
-                      <th className="text-left py-1">Component</th>
-                      <th className="text-right py-1">Avail</th>
-                      <th className="text-right py-1">Matched</th>
-                      <th className="text-right py-1">Extra WIP</th>
-                      <th className="text-right py-1">Shortfall</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(setMatchPreview.components || []).map((c: any) => (
-                      <tr key={c.component_code} className="border-t border-green-100">
-                        <td className="py-1 font-mono">{c.component_sku || c.component_code}</td>
-                        <td className="py-1 text-right">{c.available_qty}</td>
-                        <td className="py-1 text-right">{c.matched_qty}</td>
-                        <td className="py-1 text-right text-amber-700 font-semibold">{c.extra_qty}</td>
-                        <td className="py-1 text-right text-red-600">{c.shortfall_to_max_peer || 0}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </div>
+        <SetBomPanel processes={allProcesses} showSetMatch />
       )}
 
       {/* MRP TAB */}

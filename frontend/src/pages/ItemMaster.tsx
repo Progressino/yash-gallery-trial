@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { mayAccessErpAdmin, useAuth } from '../store/auth'
+import SetBomPanel, { parentStyleKeyFromSku } from '../components/SetBomPanel'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface ItemType    { id: number; name: string; code: string }
@@ -89,7 +90,7 @@ export default function ItemMaster() {
   const authUser = useAuth(s => s.user)
   const canAdjustStock = mayAccessErpAdmin(authUser)
   const [stockItem, setStockItem] = useState<{ id: number; code: string; name: string } | null>(null)
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'items' | 'bom' | 'routing' | 'import' | 'merchants' | 'packaging'>('items')
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'items' | 'bom' | 'sets' | 'routing' | 'import' | 'merchants' | 'packaging'>('items')
 
   // ── Meta query ────────────────────────────────────────────────────────────
   const { data: meta } = useQuery({
@@ -323,6 +324,9 @@ export default function ItemMaster() {
   // ══════════════════════════════════════════════════════════════════════════════
   const [bomSubTab,     setBomSubTab]     = useState<'builder' | 'list'>('builder')
   const [bomItemSearch, setBomItemSearch] = useState('')
+  const [setItemSearch, setSetItemSearch] = useState('')
+  const [setItemCode, setSetItemCode] = useState('')
+  const [setItemName, setSetItemName] = useState('')
   const [bomItemId,     setBomItemId]     = useState<number | null>(null)
   const [bomItemName,   setBomItemName]   = useState('')
   const [selectedBomId, setSelectedBomId] = useState<number | null>(null)
@@ -366,6 +370,16 @@ export default function ItemMaster() {
       return data
     },
     enabled:  compSearch.length >= 2,
+    staleTime: 30 * 1000,
+  })
+
+  const { data: setSearchResults = [] } = useQuery<Item[]>({
+    queryKey: ['item-search-sets', setItemSearch],
+    queryFn: async () => {
+      const { data } = await api.get(`/items/search?q=${encodeURIComponent(setItemSearch)}`)
+      return data
+    },
+    enabled: activeTab === 'sets' && setItemSearch.length >= 2,
     staleTime: 30 * 1000,
   })
 
@@ -675,6 +689,7 @@ const totalCost = useMemo(() =>
     ['dashboard', '📊 Dashboard'],
     ['items',     '📦 Items'],
     ['bom',       '🧩 BOM Builder'],
+    ['sets',      '👔 Set Components'],
     ['routing',   '⚙️ Routing'],
     ['import',    '📥 Import'],
     ['merchants', '🏪 Merchants'],
@@ -1903,6 +1918,77 @@ const totalCost = useMemo(() =>
               </div>
             </div>
             )}
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB — SET COMPONENTS (multi-piece sets: Top/Pant/Dupatta)
+              ================================================================ */}
+          {activeTab === 'sets' && (
+            <div className="space-y-4">
+              <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-sm text-blue-900">
+                <p className="font-semibold">Multi-component set production</p>
+                <p className="text-xs mt-1 text-blue-800">
+                  Define which garment pieces make up one set for a style. After <strong>Cutting Receive</strong> in Production,
+                  the system splits each size SKU into component SKUs (e.g. <span className="font-mono">1001YKBEIGE-XS-TOP</span>).
+                  Use <strong>Production → Sets</strong> for Set Match at Finishing.
+                </p>
+              </div>
+              <div className="flex gap-5 min-h-[420px]">
+                <div className="w-64 flex-shrink-0 space-y-3">
+                  <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Select style / size SKU</div>
+                  <input
+                    type="text"
+                    placeholder="Search e.g. 1001YKBEIGE…"
+                    value={setItemSearch}
+                    onChange={e => setSetItemSearch(e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]"
+                  />
+                  {setItemSearch.length >= 2 && setSearchResults.length > 0 && (
+                    <div className="border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-60 overflow-y-auto bg-white shadow-sm">
+                      {setSearchResults.map(it => (
+                        <button
+                          key={it.id}
+                          type="button"
+                          onClick={() => {
+                            setSetItemCode(it.item_code)
+                            setSetItemName(it.item_name)
+                            setSetItemSearch('')
+                          }}
+                          className="w-full text-left px-3 py-2 hover:bg-blue-50 transition-colors"
+                        >
+                          <div className="text-xs font-mono font-medium text-[#002B5B]">{it.item_code}</div>
+                          <div className="text-xs text-gray-500">{it.item_name}</div>
+                          <div className="text-[10px] text-gray-400 mt-0.5">
+                            Style key: <span className="font-mono">{parentStyleKeyFromSku(it.item_code)}</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {setItemCode && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-2 text-xs">
+                      <div className="font-mono font-semibold text-[#002B5B]">{setItemCode}</div>
+                      <div className="text-gray-600">{setItemName}</div>
+                      <div className="text-gray-500 mt-1">Set BOM key: <span className="font-mono">{parentStyleKeyFromSku(setItemCode)}</span></div>
+                    </div>
+                  )}
+                </div>
+                <div className="flex-1">
+                  {!setItemCode ? (
+                    <div className="flex items-center justify-center h-64 text-gray-400 text-sm border border-dashed border-gray-200 rounded-xl">
+                      Search and select a finished-good SKU to define its set components
+                    </div>
+                  ) : (
+                    <SetBomPanel
+                      key={setItemCode}
+                      initialStyleKey={setItemCode}
+                      initialStyleName={setItemName}
+                      showSetMatch={false}
+                    />
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
