@@ -14,9 +14,12 @@ import {
   waitForDailyAutoIngest, waitForReturnsImport, waitForSalesRebuild, waitForTier1Bulk, verifyDailyUpload,
   verifyDailyUploadWindow,
   dailyAutoSummaryFromCoverage, dailyAutoSummaryFromUpload, formatDailyAutoCompleteToast,
+  buildPostUploadCoverageNotice, formatPostUploadCoverageToast, extractIsoDatesFromFilenames,
+  cacheSyncTier3,
   type DailyUploadVerifyResponse,
   type DailyUploadVerifyWindowResponse,
   type CoverageResponse,
+  type PostUploadCoverageNotice,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   resetAllAppData, getDataQuality, getUploadReconciliation, invalidateDataQueries,
   type DailyUpload, type DailySummary, type UploadResponse, type UploadReconciliationReport,
@@ -499,6 +502,66 @@ export default function Upload() {
   const [verifyResult, setVerifyResult] = useState<DailyUploadVerifyResponse | null>(null)
   const [verifyWindow, setVerifyWindow] = useState<DailyUploadVerifyWindowResponse | null>(null)
   const [verifyBusy, setVerifyBusy] = useState(false)
+  const [postUploadNotice, setPostUploadNotice] = useState<PostUploadCoverageNotice | null>(null)
+
+  const invalidateSalesHistoryQueries = () => {
+    qc.invalidateQueries({ queryKey: ['sales-history-summary'] })
+    qc.invalidateQueries({ queryKey: ['sales-history-matrix'] })
+    qc.invalidateQueries({ queryKey: ['sales-history-sku'] })
+    qc.invalidateQueries({ queryKey: ['daily-verify-window'] })
+  }
+
+  const notifyPostUploadCoverage = async (
+    files: File[],
+    cov: CoverageResponse | null,
+  ) => {
+    const todayIso = new Date().toISOString().slice(0, 10)
+    const yesterday = new Date()
+    yesterday.setDate(yesterday.getDate() - 1)
+    const yesterdayIso = yesterday.toISOString().slice(0, 10)
+
+    const datesFromFiles = extractIsoDatesFromFilenames(files.map(f => f.name))
+    const datesFromResults = (cov?.daily_auto_ingest_file_results ?? [])
+      .filter(r => r.status === 'saved')
+      .flatMap(r => [r.date_from, r.date_to].filter((d): d is string => !!d && d.length >= 10))
+    const verifyDates = [...new Set([...datesFromFiles, ...datesFromResults, yesterdayIso, todayIso])].sort()
+
+    let win: DailyUploadVerifyWindowResponse
+    try {
+      win = await verifyDailyUploadWindow({ days: 7, endDate: todayIso })
+      setVerifyWindow(win)
+    } catch {
+      return
+    }
+
+    let dayVerify: DailyUploadVerifyResponse | null = null
+    const primaryDate = verifyDates[verifyDates.length - 1] || todayIso
+    try {
+      dayVerify = await verifyDailyUpload(primaryDate)
+      setVerifyResult(dayVerify)
+      setVerifyDate(primaryDate)
+    } catch {
+      /* verify optional */
+    }
+
+    let notice = buildPostUploadCoverageNotice(cov, win, dayVerify)
+    if (notice.tier3NotInSales.length) {
+      try {
+        await cacheSyncTier3()
+        const retry = await verifyDailyUpload(primaryDate)
+        setVerifyResult(retry)
+        notice = buildPostUploadCoverageNotice(cov, win, retry)
+      } catch {
+        /* user can tap Rebuild manually */
+      }
+    }
+
+    setPostUploadNotice(notice)
+    invalidateSalesHistoryQueries()
+
+    const toast = formatPostUploadCoverageToast(notice)
+    showToast(toast.type, toast.message, toast.type === 'error' ? 22_000 : 12_000)
+  }
 
   const runUploadVerify = async (dateOverride?: string) => {
     const day = (dateOverride || verifyDate).trim()
@@ -516,6 +579,7 @@ export default function Upload() {
       if (v.complete) {
         showToast('success', v.message, 10_000)
         await refresh({ light: true })
+        invalidateSalesHistoryQueries()
       } else if (missing.length || notInSales.length || (win.incomplete_count ?? 0) > 0) {
         showToast(
           'error',
@@ -532,9 +596,11 @@ export default function Upload() {
           16_000,
         )
         await refresh({ light: true })
+        invalidateSalesHistoryQueries()
       } else if (v.ok && v.sales_ready) {
         showToast('success', v.message, 10_000)
         await refresh({ light: true })
+        invalidateSalesHistoryQueries()
       } else if (v.ok) {
         showToast('success', `${v.message} Tap ↻ Rebuild if dashboard is still empty.`, 12_000)
       } else if ((v.tier3_upload_count ?? 0) > 0) {
@@ -614,19 +680,18 @@ export default function Upload() {
                   })
                 })
               }
-              if (res.sales_rebuild === 'pending') {
-                setBuildingMsg('Rebuilding combined sales…')
-                setChunkProgress(prev => {
-                  const total = prev?.total ?? 100
-                  const prevPct = prev?.pct ?? 96
-                  const pct = Math.max(96, prevPct)
-                  return {
-                    pct,
-                    sent: Math.round((total * pct) / 100),
-                    total,
-                    msg: 'Rebuilding combined sales…',
-                  }
-                })
+              // Always ensure combined sales reflect what was just saved to Tier-3.
+              const savedCount =
+                cov?.daily_auto_ingest_saved_files ??
+                cov?.daily_auto_ingest_detected_files ??
+                res.detected_files ??
+                salesFiles.length
+              if (
+                savedCount > 0 ||
+                res.sales_rebuild === 'pending' ||
+                (cov?.sales_rebuild ?? 'idle') === 'running'
+              ) {
+                setBuildingMsg('Updating Sales History…')
                 cov = await waitForSalesRebuild(msg => {
                   setBuildingMsg(msg)
                   setChunkProgress(prev => {
@@ -653,29 +718,7 @@ export default function Upload() {
               })
               setBuildingMsg('')
               finalizeDailyAutoUpload('daily', cov, res)
-              // Extract the most-recent date from uploaded filenames.
-              // Try ISO (YYYY-MM-DD) first; fall back to DD-MM-YY(YY) only if no ISO date found.
-              const isoMatch = files
-                .flatMap(f => [...f.name.matchAll(/(\d{4})-(\d{2})-(\d{2})/g)])
-                .map(m => `${m[1]}-${m[2]}-${m[3]}`)
-                .filter(d => d >= '2020-01-01' && d <= '2099-12-31')
-                .sort()
-                .pop()
-              const legacyMatch = !isoMatch && files
-                .map(f => f.name.match(/(\d{1,2})[-_./](\d{1,2})[-_./](\d{2,4})/))
-                .find(Boolean)
-              if (isoMatch) {
-                setVerifyDate(isoMatch)
-                void runUploadVerify(isoMatch)
-              } else if (legacyMatch) {
-                const [, d, m, y] = legacyMatch
-                const yr = y.length === 2 ? `20${y}` : y
-                const iso = `${yr}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
-                setVerifyDate(iso)
-                void runUploadVerify(iso)
-              } else if (verifyDate) {
-                void runUploadVerify(verifyDate)
-              }
+              await notifyPostUploadCoverage(salesFiles, cov)
             } catch (pollErr: unknown) {
               const msg = pollErr instanceof Error ? pollErr.message : 'Upload status unknown'
               if (/timed out/i.test(msg)) {
@@ -704,6 +747,9 @@ export default function Upload() {
             }
           } else {
             finalizeDailyAutoUpload('daily', null, res)
+            if (salesFiles.length) {
+              await notifyPostUploadCoverage(salesFiles, null)
+            }
           }
           await refresh()
         } else {
@@ -1710,6 +1756,63 @@ export default function Upload() {
             <p className="text-xs font-semibold text-[#002B5B] mb-2">Saved daily uploads (server)</p>
             <DailyHistory allowDelete={mayDeleteDailyFiles} />
           </div>
+
+          {postUploadNotice && (
+            <div
+              className={`rounded-xl border px-4 py-3 text-sm space-y-2 ${
+                postUploadNotice.incompleteDays.length || postUploadNotice.tier3NotInSales.length
+                  ? 'border-amber-300 bg-amber-50 text-amber-950'
+                  : 'border-green-300 bg-green-50 text-green-900'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <p className="font-semibold">
+                  {postUploadNotice.incompleteDays.length || postUploadNotice.tier3NotInSales.length
+                    ? 'Upload saved — some platforms still missing'
+                    : 'Upload reflected in Sales History'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setPostUploadNotice(null)}
+                  className="text-xs opacity-60 hover:opacity-100 shrink-0"
+                >
+                  Dismiss
+                </button>
+              </div>
+              {postUploadNotice.savedPlatforms.length > 0 && (
+                <p className="text-xs">
+                  Saved: <strong>{postUploadNotice.savedPlatforms.join(', ')}</strong>
+                  {postUploadNotice.salesRows != null && postUploadNotice.salesRows > 0
+                    ? ` · Combined sales: ${postUploadNotice.salesRows.toLocaleString()} rows`
+                    : ''}
+                </p>
+              )}
+              {postUploadNotice.incompleteDays.length > 0 && (
+                <ul className="text-xs list-disc pl-4 space-y-0.5">
+                  {postUploadNotice.incompleteDays.slice(-5).map(d => (
+                    <li key={d.date}>
+                      <strong>{d.date}</strong>: upload{' '}
+                      <strong>{d.missing_platforms.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}</strong>
+                      {d.present_platforms.length
+                        ? ` (already have ${d.present_platforms.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')})`
+                        : ''}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {postUploadNotice.tier3NotInSales.length > 0 && (
+                <p className="text-xs font-medium text-red-800">
+                  Uploaded but not yet visible in Sales History:{' '}
+                  {postUploadNotice.tier3NotInSales.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(', ')}.
+                  Try ↻ Rebuild on this page if totals stay empty.
+                </p>
+              )}
+              <p className="text-xs opacity-80">
+                Manual upload only — connect Marketplace API later for automatic daily pulls. Until then, upload all four
+                platform files for each date you need in Sales History.
+              </p>
+            </div>
+          )}
 
           <DailyDropzone
             uploading={loading['daily'] || loading['daily_reset']}

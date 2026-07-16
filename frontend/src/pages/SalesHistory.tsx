@@ -52,6 +52,8 @@ export default function SalesHistory() {
         days: HISTORY_WINDOW_DAYS,
         platform: platform === 'all' ? undefined : platform,
       }),
+    refetchOnWindowFocus: true,
+    staleTime: 15_000,
   })
 
   const matrixQ = useQuery({
@@ -62,6 +64,8 @@ export default function SalesHistory() {
         days: HISTORY_WINDOW_DAYS,
         platform: platform === 'all' ? undefined : platform,
       }),
+    refetchOnWindowFocus: true,
+    staleTime: 15_000,
   })
 
   const skuTimelineQ = useQuery({
@@ -189,7 +193,8 @@ export default function SalesHistory() {
             <Link to="/upload" className="font-medium underline">
               Upload → Daily order upload
             </Link>
-            , then use Verify upload or rebuild sales.
+            . After each upload, wait for the status banner on Upload — it lists what was saved and what is still missing.
+            Partial uploads (e.g. only Myntra) show here but combined totals stay low until all four platforms are uploaded.
           </p>
         </div>
       )}

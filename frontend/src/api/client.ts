@@ -135,6 +135,8 @@ export interface CoverageResponse {
     reason?: string
     platform?: string
     rows?: number
+    date_from?: string
+    date_to?: string
   }>
   /** Tier-1 bulk history ZIP/RAR (MTR, Myntra PPMP, …) — async parse */
   tier1_bulk_status?: 'idle' | 'running' | 'done' | 'error'
@@ -1796,6 +1798,122 @@ export type DailyUploadVerifyWindowResponse = {
     complete: boolean
   }>
   message: string
+}
+
+const CORE_PLATFORMS = ['amazon', 'flipkart', 'meesho', 'myntra'] as const
+
+export function formatPlatformLabel(platform: string): string {
+  const p = (platform || '').trim().toLowerCase()
+  const labels: Record<string, string> = {
+    amazon: 'Amazon',
+    flipkart: 'Flipkart',
+    meesho: 'Meesho',
+    myntra: 'Myntra',
+    snapdeal: 'Snapdeal',
+  }
+  return labels[p] || (p ? p.charAt(0).toUpperCase() + p.slice(1) : p)
+}
+
+/** Pull YYYY-MM-DD tokens from upload filenames (newest last). */
+export function extractIsoDatesFromFilenames(names: string[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of names) {
+    const name = String(raw || '')
+    for (const m of name.matchAll(/(\d{4})-(\d{2})-(\d{2})/g)) {
+      const iso = `${m[1]}-${m[2]}-${m[3]}`
+      if (iso >= '2020-01-01' && iso <= '2099-12-31' && !seen.has(iso)) {
+        seen.add(iso)
+        out.push(iso)
+      }
+    }
+    const legacy = name.match(/(\d{1,2})[-_./](\d{1,2})[-_./](\d{2,4})/)
+    if (legacy) {
+      const [, d, mo, y] = legacy
+      const yr = y.length === 2 ? `20${y}` : y
+      const iso = `${yr}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`
+      if (iso >= '2020-01-01' && iso <= '2099-12-31' && !seen.has(iso)) {
+        seen.add(iso)
+        out.push(iso)
+      }
+    }
+  }
+  return out.sort()
+}
+
+export type PostUploadCoverageNotice = {
+  savedPlatforms: string[]
+  savedFiles: number
+  salesRows?: number
+  incompleteDays: DailyUploadVerifyWindowResponse['incomplete_days']
+  tier3NotInSales: string[]
+  verifyDate?: string
+  verifyMessage?: string
+}
+
+/** Build user-facing post-upload status after Tier-3 ingest + sales rebuild. */
+export function buildPostUploadCoverageNotice(
+  cov: CoverageResponse | null,
+  win: DailyUploadVerifyWindowResponse,
+  dayVerify?: DailyUploadVerifyResponse | null,
+): PostUploadCoverageNotice {
+  const savedPlatforms = [
+    ...new Set(
+      (cov?.daily_auto_ingest_detected_platforms ?? [])
+        .map(p => String(p).split('(')[0].trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ]
+  return {
+    savedPlatforms,
+    savedFiles: cov?.daily_auto_ingest_saved_files ?? cov?.daily_auto_ingest_detected_files ?? 0,
+    salesRows: cov?.sales_rows,
+    incompleteDays: win.incomplete_days ?? [],
+    tier3NotInSales: dayVerify?.tier3_not_in_sales ?? [],
+    verifyDate: dayVerify?.date,
+    verifyMessage: dayVerify?.message,
+  }
+}
+
+export function formatPostUploadCoverageToast(notice: PostUploadCoverageNotice): {
+  type: 'success' | 'error'
+  message: string
+} {
+  const saved = notice.savedPlatforms.map(formatPlatformLabel)
+  const parts: string[] = []
+  if (notice.savedFiles > 0 && saved.length) {
+    parts.push(`Saved to server: ${saved.join(', ')} (${notice.savedFiles} file${notice.savedFiles === 1 ? '' : 's'}).`)
+  } else if (notice.savedFiles > 0) {
+    parts.push(`Saved ${notice.savedFiles} file(s) to server.`)
+  }
+  if (notice.salesRows != null && notice.salesRows > 0) {
+    parts.push(`Sales History: ${notice.salesRows.toLocaleString()} combined rows.`)
+  }
+  const recentGaps = (notice.incompleteDays ?? []).slice(-3)
+  if (recentGaps.length) {
+    for (const g of recentGaps) {
+      if (!g.missing_platforms?.length) continue
+      const have = g.present_platforms?.length
+        ? ` (have ${g.present_platforms.map(formatPlatformLabel).join(', ')})`
+        : ''
+      parts.push(
+        `${g.date}: still need ${g.missing_platforms.map(formatPlatformLabel).join(', ')}${have}.`,
+      )
+    }
+  }
+  if (notice.tier3NotInSales.length) {
+    parts.push(
+      `Uploaded but not yet in Sales History: ${notice.tier3NotInSales.map(formatPlatformLabel).join(', ')} — syncing now.`,
+    )
+  }
+  const hasGaps = recentGaps.some(g => (g.missing_platforms?.length ?? 0) > 0) || notice.tier3NotInSales.length > 0
+  if (!parts.length) {
+    return { type: 'success', message: 'Upload complete. Sales History will update shortly.' }
+  }
+  if (!hasGaps && notice.savedFiles > 0) {
+    return { type: 'success', message: parts.join(' ') }
+  }
+  return { type: 'error', message: parts.join(' ') }
 }
 
 export async function verifyDailyUpload(date: string): Promise<DailyUploadVerifyResponse> {

@@ -3696,12 +3696,21 @@ def _save_daily_file_tracked(
         reason = block or "Not saved to database"
         _record_file_skip(file_results, warnings, fname, reason, platform=platform)
         return False
+    date_from, date_to = "", ""
+    try:
+        from ..services.daily_store import _extract_date_range
+
+        date_from, date_to = _extract_date_range(df)
+    except Exception:
+        pass
     file_results.append(
         {
             "filename": fname,
             "status": "saved",
             "platform": platform,
             "rows": rows,
+            "date_from": date_from or None,
+            "date_to": date_to or None,
         }
     )
     detected.append(detected_label)
