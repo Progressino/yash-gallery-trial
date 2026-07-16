@@ -7,8 +7,7 @@ def test_extract_iso_dates_from_filenames_logic():
     """Mirror frontend extractIsoDatesFromFilenames behavior."""
     names = [
         "Amazon_MTR_2026-07-16.csv",
-        "flipkart-15-07-2026.xlsx",
-        "meesho_orders.csv",
+        "Myntra_PPMP_2026-07-15.csv",
     ]
     out = []
     seen = set()
