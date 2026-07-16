@@ -351,6 +351,113 @@ def inventory_snapshot_upload_epoch(uploaded_at: str) -> float:
         return 0.0
 
 
+def _snapshot_embeds_manual_overlay(df: pd.DataFrame | None) -> bool:
+    """True when the live snapshot already carries manual / not-in columns from upload."""
+    if df is None or getattr(df, "empty", True):
+        return False
+    try:
+        mit = 0.0
+        ni = 0.0
+        if "Manual_InTransit" in df.columns:
+            mit = float(pd.to_numeric(df["Manual_InTransit"], errors="coerce").fillna(0).sum())
+        if "Not_In_Inventory_Qty" in df.columns:
+            ni = float(pd.to_numeric(df["Not_In_Inventory_Qty"], errors="coerce").fillna(0).sum())
+        return mit > 0 or ni > 0
+    except Exception:
+        return False
+
+
+def sync_inventory_snapshot_from_postgres(sess: Any) -> bool:
+    """
+    Restore the newest inventory snapshot from normalized PostgreSQL tables.
+
+    When the session blob is too large to persist, OMS/marketplace columns can stay
+    stale while a separate manual in-transit overlay still applies — this reloads the
+    full snapshot that ``persist_inventory_dataframe`` saved at upload time.
+    """
+    if getattr(sess, "inventory_upload_status", "idle") == "running":
+        return False
+    try:
+        from ..db.forecast_ops_tables import load_current_inventory_snapshot
+    except Exception:
+        return False
+
+    bundle = load_current_inventory_snapshot()
+    if not bundle:
+        return False
+
+    df = bundle.get("df")
+    if df is None or getattr(df, "empty", True):
+        return False
+
+    pg_at = inventory_snapshot_upload_epoch(str(bundle.get("uploaded_at") or ""))
+    sess_at = inventory_snapshot_upload_epoch(
+        getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
+    )
+    warm_at = 0.0
+    try:
+        import backend.main as _main
+
+        warm_meta = (_main._warm_cache or {}).get(
+            getattr(_main, "_INVENTORY_META_WARM_KEY", "inventory_session_meta")
+        )
+        if isinstance(warm_meta, dict):
+            warm_at = inventory_snapshot_upload_epoch(
+                str(warm_meta.get("inventory_snapshot_uploaded_at") or "")
+            )
+    except Exception:
+        pass
+
+    newest_other = max(sess_at, warm_at)
+    if pg_at <= newest_other + 1e-6:
+        return False
+
+    frame = strip_fba_intransit_unless_enabled(df.copy())
+    sess.inventory_df_variant = frame
+    try:
+        from .helpers import get_parent_sku
+
+        inv_cols = [
+            c
+            for c in frame.columns
+            if c.endswith("_Inventory")
+            or c.endswith("_Live")
+            or c.endswith("_InTransit")
+            or c in ("Buffer_Stock", "Marketplace_Total", "Total_Inventory")
+        ]
+        parent = frame.copy()
+        parent["Parent_SKU"] = parent["OMS_SKU"].apply(get_parent_sku)
+        sess.inventory_df_parent = (
+            parent.groupby("Parent_SKU")[inv_cols]
+            .sum()
+            .reset_index()
+            .rename(columns={"Parent_SKU": "OMS_SKU"})
+        )
+    except Exception:
+        sess.inventory_df_parent = frame
+
+    dbg = dict(bundle.get("debug") or {})
+    sess.inventory_debug = dbg
+    if bundle.get("snapshot_date"):
+        sess.inventory_snapshot_date = str(bundle["snapshot_date"])[:10]
+    if bundle.get("snapshot_label"):
+        sess.inventory_snapshot_date_label = str(bundle["snapshot_label"])
+    if bundle.get("uploaded_at"):
+        sess.inventory_snapshot_uploaded_at = str(bundle["uploaded_at"])
+    sources = dbg.get("snapshot_date_sources")
+    if sources is not None:
+        sess.inventory_snapshot_date_sources = list(sources)
+
+    refresh_inventory_api_cache(sess)
+    try:
+        import backend.main as _main
+
+        _main.merge_inventory_into_warm_cache(sess)
+    except Exception:
+        pass
+    return True
+
+
 def sync_inventory_snapshot_from_warm(sess: Any) -> None:
     """
     Keep session and in-memory warm cache on the newest inventory snapshot.
@@ -360,6 +467,10 @@ def sync_inventory_snapshot_from_warm(sess: Any) -> None:
     """
     if getattr(sess, "inventory_upload_status", "idle") == "running":
         return
+    try:
+        sync_inventory_snapshot_from_postgres(sess)
+    except Exception:
+        pass
     try:
         import backend.main as _main
         import pandas as pd
@@ -395,22 +506,24 @@ def sync_inventory_snapshot_from_warm(sess: Any) -> None:
                 setattr(sess, key, frame)
         if warm_meta:
             apply_inventory_session_meta(sess, warm_meta)
-        try:
-            from .manual_intransit_sheet import ensure_manual_intransit_overlay_applied
+        if not _snapshot_embeds_manual_overlay(sess.inventory_df_variant):
+            try:
+                from .manual_intransit_sheet import ensure_manual_intransit_overlay_applied
 
-            ensure_manual_intransit_overlay_applied(sess)
-        except Exception:
-            pass
+                ensure_manual_intransit_overlay_applied(sess)
+            except Exception:
+                pass
         refresh_inventory_api_cache(sess)
         return
 
     if sess_has:
-        try:
-            from .manual_intransit_sheet import ensure_manual_intransit_overlay_applied
+        if not _snapshot_embeds_manual_overlay(sess.inventory_df_variant):
+            try:
+                from .manual_intransit_sheet import ensure_manual_intransit_overlay_applied
 
-            ensure_manual_intransit_overlay_applied(sess)
-        except Exception:
-            pass
+                ensure_manual_intransit_overlay_applied(sess)
+            except Exception:
+                pass
 
     if sess_has and (not warm_has or sess_at > warm_at + 1e-6):
         try:

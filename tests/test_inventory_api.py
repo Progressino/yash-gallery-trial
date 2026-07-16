@@ -135,6 +135,39 @@ def test_apply_inventory_snapshot_metadata_bumps_revision(inv_sess):
     assert inv_sess.inventory_snapshot_uploaded_at
 
 
+def test_sync_inventory_snapshot_from_postgres_restores_newer(inv_sess, monkeypatch):
+    from backend.services.inventory import sync_inventory_snapshot_from_postgres
+
+    inv_sess.inventory_snapshot_uploaded_at = "2026-07-15T08:00:00Z"
+    inv_sess.inventory_df_variant["OMS_Inventory"] = 1
+
+    newer = inv_sess.inventory_df_variant.copy()
+    newer["OMS_Inventory"] = 99
+    newer["Manual_InTransit"] = 5
+    newer["Not_In_Inventory_Qty"] = 3
+
+    bundle = {
+        "df": newer,
+        "snapshot_date": "2026-07-16",
+        "snapshot_label": "16 Jul 2026",
+        "uploaded_at": "2026-07-16T10:00:00Z",
+        "debug": {"oms": "120 SKUs"},
+    }
+
+    monkeypatch.setattr(
+        "backend.db.forecast_ops_tables.load_current_inventory_snapshot",
+        lambda: bundle,
+    )
+    monkeypatch.setattr(
+        "backend.main.merge_inventory_into_warm_cache",
+        lambda _s: None,
+    )
+
+    assert sync_inventory_snapshot_from_postgres(inv_sess) is True
+    assert int(inv_sess.inventory_df_variant["OMS_Inventory"].sum()) == 99 * 120
+    assert inv_sess.inventory_snapshot_uploaded_at == "2026-07-16T10:00:00Z"
+
+
 def test_restore_backup_after_missing_oms(inv_sess):
     """Backup/restore utility still works; but upload finalize now prefers
     marketplace-based snapshot when Total_Inventory > 0."""

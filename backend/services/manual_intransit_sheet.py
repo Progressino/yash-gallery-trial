@@ -339,6 +339,18 @@ def apply_manual_intransit_import(
 
 def ensure_manual_intransit_overlay_applied(sess) -> bool:
     """Restore manual in-transit sheet from warm cache/disk and merge into live inventory."""
+    from .inventory import _snapshot_embeds_manual_overlay, inventory_snapshot_upload_epoch
+
+    inv = getattr(sess, "inventory_df_variant", None)
+    snap_at = inventory_snapshot_upload_epoch(
+        getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
+    )
+    mit_at = inventory_snapshot_upload_epoch(
+        getattr(sess, "manual_intransit_uploaded_at", "") or ""
+    )
+    if _snapshot_embeds_manual_overlay(inv) and snap_at >= mit_at - 1.0:
+        return True
+
     overlay = getattr(sess, "manual_intransit_overlay_df", None)
     if overlay is None or getattr(overlay, "empty", True):
         try:

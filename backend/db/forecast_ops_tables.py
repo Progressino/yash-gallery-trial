@@ -278,7 +278,8 @@ def _copy_inventory_lines(conn, snapshot_id: int, rows: list[dict]) -> None:
                 )
 
 
-def load_inventory_dataframe() -> pd.DataFrame | None:
+def load_current_inventory_snapshot() -> dict | None:
+    """Newest normalized inventory snapshot (dataframe + metadata for session restore)."""
     if not normalized_tables_enabled():
         return None
     conn = _require_conn()
@@ -288,7 +289,8 @@ def load_inventory_dataframe() -> pd.DataFrame | None:
         with conn:
             snap = conn.execute(
                 """
-                SELECT id FROM forecast_inventory_snapshots
+                SELECT id, snapshot_date, snapshot_label, uploaded_at, debug
+                FROM forecast_inventory_snapshots
                 WHERE is_current = TRUE
                 ORDER BY uploaded_at DESC
                 LIMIT 1
@@ -340,10 +342,55 @@ def load_inventory_dataframe() -> pd.DataFrame | None:
                 if isinstance(extra, dict):
                     rec.update(extra)
             records.append(rec)
-        return pd.DataFrame(records)
+        df = pd.DataFrame(records)
+        uploaded_at = snap[3]
+        uploaded_iso = ""
+        if uploaded_at is not None:
+            try:
+                from datetime import timezone
+
+                if hasattr(uploaded_at, "astimezone"):
+                    uploaded_iso = (
+                        uploaded_at.astimezone(timezone.utc)
+                        .replace(microsecond=0)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                else:
+                    uploaded_iso = str(uploaded_at)
+            except Exception:
+                uploaded_iso = str(uploaded_at)
+        dbg = snap[4]
+        if isinstance(dbg, str):
+            try:
+                dbg = json.loads(dbg)
+            except Exception:
+                dbg = {}
+        if not isinstance(dbg, dict):
+            dbg = {}
+        snap_date = snap[1]
+        snap_label = snap[2]
+        return {
+            "df": df,
+            "snapshot_id": sid,
+            "snapshot_date": str(snap_date)[:10] if snap_date else None,
+            "snapshot_label": str(snap_label or "") or None,
+            "uploaded_at": uploaded_iso,
+            "debug": dbg,
+        }
     except Exception:
-        _log.exception("load_inventory_dataframe failed")
+        _log.exception("load_current_inventory_snapshot failed")
         return None
+
+
+def load_inventory_dataframe() -> pd.DataFrame | None:
+    bundle = load_current_inventory_snapshot()
+    if not bundle:
+        return None
+    df = bundle.get("df")
+    if df is None or getattr(df, "empty", True):
+        return None
+    return df
 
 
 def _first_col(df: pd.DataFrame, names: tuple[str, ...]) -> str | None:

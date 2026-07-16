@@ -2421,8 +2421,17 @@ def _schedule_inventory_github_cache_save(sess: AppSession) -> None:
 
 def _finish_inventory_server_save(sess: AppSession, session_id: str | None = None) -> None:
     """Sync warm + PG, then background GitHub (call after every successful inventory parse)."""
-    pg_ok = _persist_inventory_after_upload(sess, session_id)
-    if not pg_ok and session_id:
+    pg_table_ok = bool(getattr(sess, "_inventory_pg_snapshot_id", None))
+    pg_bundle_ok = False
+    for attempt in range(3):
+        pg_bundle_ok = _persist_inventory_after_upload(sess, session_id)
+        if pg_bundle_ok:
+            break
+        if attempt < 2:
+            import time
+
+            time.sleep(2.0 * (attempt + 1))
+    if not pg_bundle_ok and session_id and not pg_table_ok:
         warn = (
             "Inventory parsed but server save was delayed — open Inventory again in a few seconds "
             "or click Load Cache if totals look stale."
@@ -2433,6 +2442,18 @@ def _finish_inventory_server_save(sess: AppSession, session_id: str | None = Non
             merged.setdefault("warnings", [])
             if isinstance(merged["warnings"], list):
                 merged["warnings"] = list(dict.fromkeys([*merged["warnings"], warn]))
+            sess.inventory_upload_result = merged
+    elif not pg_bundle_ok and pg_table_ok:
+        note = (
+            "Full session copy is still syncing — stock totals are saved; refresh Inventory if "
+            "any column looks stale."
+        )
+        prev = getattr(sess, "inventory_upload_result", None) or {}
+        if isinstance(prev, dict):
+            merged = dict(prev)
+            merged.setdefault("warnings", [])
+            if isinstance(merged["warnings"], list):
+                merged["warnings"] = list(dict.fromkeys([*merged["warnings"], note]))
             sess.inventory_upload_result = merged
     _schedule_inventory_github_cache_save(sess)
 
@@ -2674,12 +2695,17 @@ def _inventory_apply_parse_result(
     try:
         from ..db.forecast_ops_tables import persist_inventory_dataframe
 
-        persist_inventory_dataframe(
+        sid = persist_inventory_dataframe(
             sess.inventory_df_variant,
             snapshot_date=getattr(sess, "inventory_snapshot_date", "") or None,
             snapshot_label=getattr(sess, "inventory_snapshot_date_label", "") or None,
-            debug=dict(getattr(sess, "inventory_debug", None) or {}),
+            debug={
+                **dict(getattr(sess, "inventory_debug", None) or {}),
+                "inventory_snapshot_uploaded_at": getattr(sess, "inventory_snapshot_uploaded_at", "") or "",
+            },
         )
+        if sid:
+            sess._inventory_pg_snapshot_id = sid
     except Exception:
         _log.exception("PostgreSQL inventory table persist failed")
     sess._inventory_pre_upload_backup = None
