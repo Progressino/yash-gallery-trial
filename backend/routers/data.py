@@ -3637,6 +3637,7 @@ def _build_coverage_response(sess: AppSession, *, light: bool = False) -> Covera
         sales_rebuild=getattr(sess, "sales_rebuild_status", "idle") or "idle",
         sales_rebuild_message=getattr(sess, "sales_rebuild_message", "") or "",
         sales_data_revision=int(getattr(sess, "sales_data_revision", 0) or 0),
+        inventory_data_revision=int(getattr(sess, "inventory_data_revision", 0) or 0),
         daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle",
         daily_auto_ingest_message=getattr(sess, "daily_auto_ingest_message", "") or "",
         daily_auto_ingest_detected_platforms=(

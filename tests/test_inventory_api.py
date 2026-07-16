@@ -126,6 +126,15 @@ def test_sync_inventory_prefers_newer_warm(inv_sess):
     )
 
 
+def test_apply_inventory_snapshot_metadata_bumps_revision(inv_sess):
+    from backend.services.inventory import apply_inventory_snapshot_metadata
+
+    inv_sess.inventory_data_revision = 2
+    apply_inventory_snapshot_metadata(inv_sess, [], {"snapshot_date": "2026-07-16"})
+    assert inv_sess.inventory_data_revision == 3
+    assert inv_sess.inventory_snapshot_uploaded_at
+
+
 def test_restore_backup_after_missing_oms(inv_sess):
     """Backup/restore utility still works; but upload finalize now prefers
     marketplace-based snapshot when Total_Inventory > 0."""

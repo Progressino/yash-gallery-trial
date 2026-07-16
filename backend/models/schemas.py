@@ -102,6 +102,7 @@ class CoverageResponse(BaseModel):
     sales_rebuild: str = "idle"
     sales_rebuild_message: str = ""
     sales_data_revision: int = 0
+    inventory_data_revision: int = 0
     # Tier-3 daily-auto background ingest (RAR / large multi-file) before sales rebuild
     daily_auto_ingest_status: str = "idle"
     daily_auto_ingest_message: str = ""

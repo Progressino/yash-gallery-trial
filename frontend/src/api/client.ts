@@ -114,6 +114,7 @@ export interface CoverageResponse {
   sales_rebuild?: 'idle' | 'running' | 'done' | 'error'
   sales_rebuild_message?: string
   sales_data_revision?: number
+  inventory_data_revision?: number
   /** Background full restore (Upload → Restore all from server) */
   session_restore_status?: 'idle' | 'running' | 'done' | 'error'
   session_restore_message?: string
@@ -1912,6 +1913,62 @@ export function formatPostUploadCoverageToast(notice: PostUploadCoverageNotice):
     return { type: 'success', message: parts.join(' ') }
   }
   return { type: 'error', message: parts.join(' ') }
+}
+
+export type PostInventoryUploadNotice = {
+  snapshotLabel?: string | null
+  uploadedAt?: string | null
+  skuRows?: number
+  savedSources: string[]
+  warnings: string[]
+  amzLatestReportDate?: string | null
+}
+
+/** Build user-facing post-upload status after snapshot inventory ingest. */
+export function buildPostInventoryUploadNotice(cov: CoverageResponse | null): PostInventoryUploadNotice {
+  const warnings = [
+    ...(cov?.inventory_upload_warnings ?? []),
+    ...(cov?.inventory_upload_file_results ?? [])
+      .filter(r => r.status === 'skipped')
+      .map(r => `${r.filename}: ${r.reason ?? 'skipped'}`),
+  ]
+  const amz = cov?.inventory_upload_amz_disclaimer as { latest_report_date?: string } | undefined
+  return {
+    snapshotLabel:
+      cov?.inventory_snapshot_date_label || cov?.inventory_snapshot_date || null,
+    uploadedAt: cov?.inventory_snapshot_uploaded_at ?? null,
+    skuRows: cov?.inventory_upload_rows ?? cov?.inventory_rows,
+    savedSources: [...(cov?.inventory_upload_sources ?? [])],
+    warnings: [...new Set(warnings.filter(Boolean))],
+    amzLatestReportDate: amz?.latest_report_date ?? null,
+  }
+}
+
+export function formatPostInventoryUploadToast(notice: PostInventoryUploadNotice): {
+  type: 'success' | 'error'
+  message: string
+} {
+  const parts: string[] = []
+  if (notice.snapshotLabel) {
+    parts.push(`Snapshot as of ${notice.snapshotLabel}.`)
+  }
+  if (notice.skuRows != null && notice.skuRows > 0) {
+    parts.push(`${notice.skuRows.toLocaleString()} SKUs loaded.`)
+  }
+  if (notice.savedSources.length) {
+    parts.push(`Sources: ${notice.savedSources.join('; ')}.`)
+  }
+  if (notice.warnings.length) {
+    parts.push(notice.warnings.slice(0, 3).join(' '))
+  }
+  if (notice.amzLatestReportDate) {
+    parts.push(`Amazon stock uses report date ${notice.amzLatestReportDate} (latest in file).`)
+  }
+  const hasIssues = notice.warnings.length > 0
+  if (!parts.length) {
+    return { type: 'success', message: 'Inventory updated — open Inventory to review totals.' }
+  }
+  return { type: hasIssues ? 'error' : 'success', message: parts.join(' ') }
 }
 
 export async function verifyDailyUpload(date: string): Promise<DailyUploadVerifyResponse> {

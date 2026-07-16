@@ -15,11 +15,13 @@ import {
   verifyDailyUploadWindow,
   dailyAutoSummaryFromCoverage, dailyAutoSummaryFromUpload, formatDailyAutoCompleteToast,
   buildPostUploadCoverageNotice, formatPostUploadCoverageToast, extractIsoDatesFromFilenames,
+  buildPostInventoryUploadNotice, formatPostInventoryUploadToast,
   cacheSyncTier3,
   type DailyUploadVerifyResponse,
   type DailyUploadVerifyWindowResponse,
   type CoverageResponse,
   type PostUploadCoverageNotice,
+  type PostInventoryUploadNotice,
   getDailySummary, getDailyUploads, deleteDailyUpload, clearPlatform,
   resetAllAppData, getDataQuality, getUploadReconciliation, invalidateDataQueries,
   type DailyUpload, type DailySummary, type UploadResponse, type UploadReconciliationReport,
@@ -503,6 +505,7 @@ export default function Upload() {
   const [verifyWindow, setVerifyWindow] = useState<DailyUploadVerifyWindowResponse | null>(null)
   const [verifyBusy, setVerifyBusy] = useState(false)
   const [postUploadNotice, setPostUploadNotice] = useState<PostUploadCoverageNotice | null>(null)
+  const [postInventoryNotice, setPostInventoryNotice] = useState<PostInventoryUploadNotice | null>(null)
 
   const invalidateSalesHistoryQueries = () => {
     qc.invalidateQueries({ queryKey: ['sales-history-summary'] })
@@ -561,6 +564,14 @@ export default function Upload() {
 
     const toast = formatPostUploadCoverageToast(notice)
     showToast(toast.type, toast.message, toast.type === 'error' ? 22_000 : 12_000)
+  }
+
+  const notifyPostInventoryUpload = (cov: CoverageResponse | null) => {
+    const notice = buildPostInventoryUploadNotice(cov)
+    setPostInventoryNotice(notice)
+    invalidateDataQueries(qc)
+    const toast = formatPostInventoryUploadToast(notice)
+    showToast(toast.type, toast.message, toast.type === 'error' ? 18_000 : 12_000)
   }
 
   const runUploadVerify = async (dateOverride?: string) => {
@@ -2028,6 +2039,57 @@ export default function Upload() {
               )}
             </p>
           )}
+          {postInventoryNotice && (
+            <div
+              className={`rounded-xl border px-4 py-3 text-sm space-y-2 ${
+                postInventoryNotice.warnings.length
+                  ? 'border-amber-300 bg-amber-50 text-amber-950'
+                  : 'border-green-300 bg-green-50 text-green-900'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <p className="font-semibold">
+                  {postInventoryNotice.warnings.length
+                    ? 'Inventory saved — some sources still missing'
+                    : 'Inventory reflected across the app'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setPostInventoryNotice(null)}
+                  className="text-xs opacity-60 hover:opacity-100 shrink-0"
+                >
+                  Dismiss
+                </button>
+              </div>
+              {postInventoryNotice.snapshotLabel && (
+                <p className="text-xs">
+                  Snapshot: <strong>{postInventoryNotice.snapshotLabel}</strong>
+                  {postInventoryNotice.skuRows != null && postInventoryNotice.skuRows > 0
+                    ? ` · ${postInventoryNotice.skuRows.toLocaleString()} SKUs`
+                    : ''}
+                </p>
+              )}
+              {postInventoryNotice.savedSources.length > 0 && (
+                <p className="text-xs">
+                  Loaded: <strong>{postInventoryNotice.savedSources.join(' · ')}</strong>
+                </p>
+              )}
+              {postInventoryNotice.warnings.length > 0 && (
+                <ul className="text-xs list-disc pl-4 space-y-0.5">
+                  {postInventoryNotice.warnings.slice(0, 6).map((w, i) => (
+                    <li key={`${i}-${w.slice(0, 40)}`}>{w}</li>
+                  ))}
+                </ul>
+              )}
+              {postInventoryNotice.amzLatestReportDate && (
+                <p className="text-xs text-amber-900/90">
+                  Amazon stock in this upload uses report date{' '}
+                  <strong>{postInventoryNotice.amzLatestReportDate}</strong> — upload a newer Amazon
+                  ledger if totals look old.
+                </p>
+              )}
+            </div>
+          )}
           {!coverage.sku_mapping && <Warn>SKU map must be loaded on the server (ask Admin if missing).</Warn>}
           {(coverage.inventory_upload_status === 'running' || invProgress || (loading['inv'] && !!buildingMsg)) && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 space-y-1.5">
@@ -2138,25 +2200,21 @@ export default function Upload() {
                         dropped: skipped.length,
                         fileResults: results,
                       })
-                      const srcLine = (cov.inventory_upload_sources ?? []).join(' · ')
-                      showToast(
-                        'success',
-                        `${cov.inventory_upload_message || 'Inventory updated.'}${srcLine ? ` (${srcLine})` : ''}`,
-                        skipped.length ? 14_000 : 10_000,
-                      )
                       setInventoryAmzDisclaimer(
                         (cov.inventory_upload_amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null,
                       )
+                      notifyPostInventoryUpload(cov)
                     } else {
                       setInventoryAmzDisclaimer((res.debug?.amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null)
                       const issues = (res.debug && 'warnings' in res.debug && Array.isArray(res.debug.warnings))
                         ? (res.debug.warnings as string[])
                         : []
                       captureGenericAlert('inv', issues)
-                      showToast('success', res.message)
+                      await refresh({ light: true })
+                      notifyPostInventoryUpload(useSession.getState())
+                      return
                     }
                     await refresh({ light: true })
-                    qc.invalidateQueries({ queryKey: ['inventory'] })
                   } else {
                     showToast(
                       'error',
@@ -2182,9 +2240,8 @@ export default function Upload() {
                     setBuildingMsg('')
                     setInvProgress(null)
                     setCoverage(cov)
-                    showToast('success', cov.inventory_upload_message || 'Inventory updated.')
+                    notifyPostInventoryUpload(cov)
                     await refresh({ light: true })
-                    qc.invalidateQueries({ queryKey: ['inventory'] })
                   } catch (pollErr: unknown) {
                     showToast(
                       'error',

@@ -93,6 +93,8 @@ class AppSession:
     sales_rebuild_started: float = 0.0  # monotonic time when rebuild started
     # Bumped after daily upload / sales rebuild so the UI can invalidate Intelligence + PO.
     sales_data_revision: int = 0
+    # Bumped after snapshot inventory upload so the UI refreshes Inventory + PO.
+    inventory_data_revision: int = 0
 
     # Background "Restore all from server" (warm + disk + Tier-3 + GitHub — avoids proxy 502).
     session_restore_status: str = "idle"  # idle | running | done | error

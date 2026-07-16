@@ -54,6 +54,7 @@ const empty: CoverageResponse = {
   sales_rebuild: 'idle',
   sales_rebuild_message: '',
   sales_data_revision: 0,
+  inventory_data_revision: 0,
   session_restore_status: 'idle',
   session_restore_message: '',
   session_restore_step: '',

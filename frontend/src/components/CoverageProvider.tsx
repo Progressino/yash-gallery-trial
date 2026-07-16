@@ -6,6 +6,10 @@ import { operationalDataComplete } from '../lib/localSessionHint'
 import { usePOFreshStore } from '../store/poFresh'
 import { useSession } from '../store/session'
 
+function poRecalcNote(existing: string | undefined, note: string): string {
+  return existing?.includes(note) ? existing : (existing ? `${existing} ` : '') + note
+}
+
 /** Single shared coverage poll — replaces per-page duplicate intervals. */
 export default function CoverageProvider({
   enabled,
@@ -17,8 +21,11 @@ export default function CoverageProvider({
   const setCoverage = useSession(s => s.setCoverage)
   const lastHydrateAt = useRef(0)
   const prevSalesRevision = useRef<number | null>(null)
+  const prevInventoryRevision = useRef<number | null>(null)
   const prevDailyIngest = useRef('idle')
   const prevSalesRebuild = useRef('idle')
+  const prevInvUpload = useRef('idle')
+  const prevDailyInvUpload = useRef('idle')
   const qc = useQueryClient()
 
   useQuery({
@@ -44,24 +51,47 @@ export default function CoverageProvider({
       setCoverage(c)
 
       const rev = c.sales_data_revision ?? 0
+      const invRev = c.inventory_data_revision ?? 0
       const ingest = c.daily_auto_ingest_status ?? 'idle'
       const rebuild = c.sales_rebuild ?? 'idle'
+      const invUpload = c.inventory_upload_status ?? 'idle'
+      const dailyInvUpload = c.daily_inventory_upload_status ?? 'idle'
       const ingestDone =
         prevDailyIngest.current === 'running' && ingest !== 'running' && ingest !== 'error'
       const rebuildDone =
         prevSalesRebuild.current === 'running' && rebuild !== 'running' && rebuild !== 'error'
       const revisionBumped =
         prevSalesRevision.current != null && rev > prevSalesRevision.current
+      const invRevisionBumped =
+        prevInventoryRevision.current != null && invRev > prevInventoryRevision.current
+      const invUploadDone =
+        prevInvUpload.current === 'running' &&
+        invUpload !== 'running' &&
+        invUpload !== 'error'
+      const dailyInvUploadDone =
+        prevDailyInvUpload.current === 'running' &&
+        dailyInvUpload !== 'running' &&
+        dailyInvUpload !== 'error'
 
-      if (revisionBumped || ingestDone || rebuildDone) {
+      if (
+        revisionBumped ||
+        ingestDone ||
+        rebuildDone ||
+        invRevisionBumped ||
+        invUploadDone ||
+        dailyInvUploadDone
+      ) {
         invalidateDataQueries(qc)
-        if (revisionBumped) {
-          const po = usePOFreshStore.getState()
-          if (po.result?.ok) {
-            const note = 'Daily sales updated — recalculate PO for latest ADS.'
-            const msg = po.result.message?.includes(note)
-              ? po.result.message
-              : (po.result.message ? `${po.result.message} ` : '') + note
+        const po = usePOFreshStore.getState()
+        if (po.result?.ok) {
+          let msg = po.result.message
+          if (revisionBumped || ingestDone || rebuildDone) {
+            msg = poRecalcNote(msg, 'Daily sales updated — recalculate PO for latest ADS.')
+          }
+          if (invRevisionBumped || invUploadDone || dailyInvUploadDone) {
+            msg = poRecalcNote(msg, 'Inventory updated — recalculate PO for latest stock.')
+          }
+          if (msg !== po.result.message) {
             po.setResult({ ...po.result, message: msg })
             po.setFromSharedCache(false)
           }
@@ -69,8 +99,11 @@ export default function CoverageProvider({
       }
 
       prevSalesRevision.current = rev
+      prevInventoryRevision.current = invRev
       prevDailyIngest.current = ingest
       prevSalesRebuild.current = rebuild
+      prevInvUpload.current = invUpload
+      prevDailyInvUpload.current = dailyInvUpload
       return c
     },
     enabled,
