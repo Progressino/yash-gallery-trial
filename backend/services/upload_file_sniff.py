@@ -31,7 +31,7 @@ _HISTORY_FILENAME_RE = re.compile(
     re.I,
 )
 _SNAPSHOT_FILENAME_RE = re.compile(
-    r"(^oms\b|\boms[\s_\-]|flipkart|myntra|amazon|ppmp|seller[\s_\-]*inventory|current[\s_\-]*inventory)",
+    r"(^oms\b|\boms[\s_\-]|inventory|flipkart|myntra|amazon|ppmp|seller[\s_\-]*inventory|current[\s_\-]*inventory)",
     re.I,
 )
 _RETURN_FILENAME_RE = re.compile(
@@ -220,9 +220,64 @@ def _score_snapshot_inventory(text: str, filename: str, date_cols: int) -> int:
     )
     if date_cols < 2 and ("item skucode" in text or "buffer stock" in text):
         score += 3
-    if fn.endswith(".rar") and "return" not in fn and "mtr" not in fn and "sales" not in fn_l:
+    if fn.endswith(".rar") and "return" not in fn and "mtr" not in fn and "sales" not in fn:
         score += 1
     return score
+
+
+def _rar_looks_like_snapshot_inventory(raw: bytes) -> bool:
+    """Peek RAR member names — daily Inventory*.rar usually packs OMS + marketplace CSVs."""
+    names: list[str] = []
+    try:
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        bsdtar = shutil.which("bsdtar")
+        if bsdtar:
+            tmpdir = tempfile.mkdtemp(prefix="sniff_rar_")
+            try:
+                rar_path = os.path.join(tmpdir, "peek.rar")
+                with open(rar_path, "wb") as f:
+                    f.write(raw[: min(len(raw), 80_000_000)])
+                listed = subprocess.run(
+                    [bsdtar, "tf", rar_path],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                )
+                names = [ln.strip() for ln in (listed.stdout or "").splitlines() if ln.strip()]
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+        else:
+            import rarfile
+
+            with rarfile.RarFile(io.BytesIO(raw)) as rf:
+                names = list(rf.namelist())
+    except Exception:
+        return False
+
+    joined = " ".join(n.replace("\\", "/").split("/")[-1].lower() for n in names)
+    hits = 0
+    for needle in (
+        "oms",
+        "current inventory",
+        "seller_inventory_report",
+        "combo",
+        "ending warehouse",
+        "msku",
+        "flipkart",
+        "myntra",
+        "amazon",
+    ):
+        if needle in joined:
+            hits += 1
+    # Numeric Amazon ledger dumps (e.g. 989762020650.csv) + OMS is enough.
+    if "oms" in joined and any(n.lower().endswith(".csv") for n in names):
+        hits += 1
+    return hits >= 2
 
 
 def _score_existing_po(text: str, filename: str) -> int:
@@ -279,7 +334,9 @@ def classify_upload_document(raw: bytes, filename: str = "") -> dict:
         if _SALES_FILENAME_RE.search(fn) or "mtr" in fn_l or re.search(r"\bsales\b", fn_l):
             return {"category": "daily_sales", "confidence": "high", "date_columns": 0}
         if "inventory" in fn_l or re.search(r"\binv(?:entory)?\b", fn_l):
-            return {"category": "snapshot_inventory", "confidence": "medium", "date_columns": 0}
+            return {"category": "snapshot_inventory", "confidence": "high", "date_columns": 0}
+        if _rar_looks_like_snapshot_inventory(raw):
+            return {"category": "snapshot_inventory", "confidence": "high", "date_columns": 0}
         # Generic RAR — let daily-auto / inventory-auto inspect archive contents.
         return {"category": "unknown", "confidence": "low", "date_columns": 0}
 

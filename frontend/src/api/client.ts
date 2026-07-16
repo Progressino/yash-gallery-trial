@@ -1920,15 +1920,17 @@ export type PostInventoryUploadNotice = {
   uploadedAt?: string | null
   skuRows?: number
   savedSources: string[]
+  detectedFiles: Array<{ filename: string; category: string; status: string }>
   warnings: string[]
   amzLatestReportDate?: string | null
 }
 
 /** Build user-facing post-upload status after snapshot inventory ingest. */
 export function buildPostInventoryUploadNotice(cov: CoverageResponse | null): PostInventoryUploadNotice {
+  const fileResults = cov?.inventory_upload_file_results ?? []
   const warnings = [
     ...(cov?.inventory_upload_warnings ?? []),
-    ...(cov?.inventory_upload_file_results ?? [])
+    ...fileResults
       .filter(r => r.status === 'skipped')
       .map(r => `${r.filename}: ${r.reason ?? 'skipped'}`),
   ]
@@ -1939,6 +1941,11 @@ export function buildPostInventoryUploadNotice(cov: CoverageResponse | null): Po
     uploadedAt: cov?.inventory_snapshot_uploaded_at ?? null,
     skuRows: cov?.inventory_upload_rows ?? cov?.inventory_rows,
     savedSources: [...(cov?.inventory_upload_sources ?? [])],
+    detectedFiles: fileResults.map(r => ({
+      filename: r.filename,
+      category: String(r.category || 'file'),
+      status: r.status,
+    })),
     warnings: [...new Set(warnings.filter(Boolean))],
     amzLatestReportDate: amz?.latest_report_date ?? null,
   }

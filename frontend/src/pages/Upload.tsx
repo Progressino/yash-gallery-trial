@@ -2013,7 +2013,7 @@ export default function Upload() {
 
         <UploadCard
           title="📦 Snapshot inventory"
-          subtitle="Today's stock only — OMS CSV/XLSX, Flipkart &amp; Myntra PPMP CSVs, Amazon RAR. Upload one snapshot per day to build the Inventory History matrix."
+          subtitle="Drop the daily Inventory RAR alone (or OMS + marketplace CSVs). The app auto-detects OMS, Amazon ledgers, Flipkart Current Inventory, Myntra Seller Inventory, and Combo files inside the archive — no need to split them."
           loaded={coverage.inventory}
           onClear={mayClearPlatform ? handleClear('inventory') : undefined}
           clearing={loading['clear_inventory']}
@@ -2072,6 +2072,19 @@ export default function Upload() {
               {postInventoryNotice.savedSources.length > 0 && (
                 <p className="text-xs">
                   Loaded: <strong>{postInventoryNotice.savedSources.join(' · ')}</strong>
+                </p>
+              )}
+              {postInventoryNotice.detectedFiles.length > 0 && (
+                <p className="text-xs">
+                  Auto-detected{' '}
+                  <strong>{postInventoryNotice.detectedFiles.filter(f => f.status === 'loaded').length}</strong>
+                  {' '}file(s) in upload:{' '}
+                  {postInventoryNotice.detectedFiles
+                    .filter(f => f.status === 'loaded')
+                    .slice(0, 8)
+                    .map(f => `${f.filename} (${f.category})`)
+                    .join(', ')}
+                  {postInventoryNotice.detectedFiles.filter(f => f.status === 'loaded').length > 8 ? '…' : ''}
                 </p>
               )}
               {postInventoryNotice.warnings.length > 0 && (
@@ -3469,7 +3482,7 @@ function InventoryDropzone({ disabled, uploading, onUpload }: {
             ? <p className="text-sm text-blue-600">Drop files here</p>
             : <p className="text-sm text-gray-500">
                 Drag & drop inventory files here, or <span className="text-blue-600 underline">browse</span>
-                <br /><span className="text-xs text-gray-400">OMS CSV, Flipkart CSV, Myntra CSV, Amazon RAR — auto-detected</span>
+                <br /><span className="text-xs text-gray-400">Prefer one daily Inventory RAR — OMS / Amazon / Flipkart / Myntra inside are auto-detected</span>
               </p>
         }
       </div>
