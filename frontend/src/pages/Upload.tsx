@@ -61,6 +61,9 @@ type InventoryAmazonDisclaimer = {
   raw_total_units?: number
   excluded_non_sellable_units?: number
   excluded_znne_units?: number
+  excluded_twwr_units?: number
+  excluded_virtual_location_units?: number
+  excluded_locations?: string[]
   excluded_older_date_units?: number
   latest_report_units?: number
   latest_report_date?: string
@@ -2280,8 +2283,14 @@ export default function Upload() {
                 Raw: {Number(inventoryAmzDisclaimer.raw_total_units ?? 0).toLocaleString()} ·
                 Non-sellable excluded: {Number(inventoryAmzDisclaimer.excluded_non_sellable_units ?? 0).toLocaleString()} ·
                 ZNNE excluded: {Number(inventoryAmzDisclaimer.excluded_znne_units ?? 0).toLocaleString()} ·
+                TWWR excluded: {Number(inventoryAmzDisclaimer.excluded_twwr_units ?? 0).toLocaleString()} ·
                 Older-date excluded: {Number(inventoryAmzDisclaimer.excluded_older_date_units ?? 0).toLocaleString()} ·
                 Included: {Number(inventoryAmzDisclaimer.latest_report_units ?? 0).toLocaleString()}
+              </p>
+              <p className="mt-1 text-amber-800/90">
+                Virtual locations skipped: ZNNE, TWWR (same as OMS Amazon Other Warehouse).
+                Ledger as-of date comes from the Amazon file Date column — if Amazon has not published
+                today&apos;s day yet, it will show the newest day present in the upload.
               </p>
             </div>
           )}

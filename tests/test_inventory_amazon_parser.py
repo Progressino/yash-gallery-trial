@@ -41,3 +41,32 @@ def test_parse_amz_csv_excludes_znne_location():
     out = _parse_amz_csv(csv_bytes, mapping={})
     assert int(out["Amazon_Inventory"].sum()) == 7
 
+
+def test_parse_amz_csv_excludes_twwr_location():
+    csv_bytes = _amz_csv(
+        [
+            ("2026-07-16", "1001YKBEIGE-M", "TWWR", 40),
+            ("2026-07-16", "1001YKBEIGE-M", "ZNNE", 50),
+            ("2026-07-16", "1001YKBEIGE-M", "BLR7", 9),
+        ]
+    )
+    out = _parse_amz_csv(csv_bytes, mapping={})
+    assert int(out["Amazon_Inventory"].sum()) == 9
+
+
+def test_analyze_amz_ledger_reports_twwr_exclusion():
+    from backend.services.inventory import _analyze_amz_ledger_filters
+
+    csv_bytes = _amz_csv(
+        [
+            ("2026-07-16", "1001YKBEIGE-M", "TWWR", 40),
+            ("2026-07-16", "1001YKBEIGE-M", "ZNNE", 50),
+            ("2026-07-16", "1001YKBEIGE-M", "BLR7", 9),
+        ]
+    )
+    metrics = _analyze_amz_ledger_filters(csv_bytes)
+    assert metrics["excluded_twwr_units"] == 40
+    assert metrics["excluded_znne_units"] == 50
+    assert metrics["latest_report_units"] == 9
+    assert metrics["latest_report_date"] == "2026-07-16"
+

@@ -2242,8 +2242,10 @@ def _detect_inventory_type(filename: str, content_bytes: bytes) -> str:
     """
     fn = filename.lower()
 
-    # RAR by magic bytes or extension
+    # RAR/ZIP by magic bytes or extension
     if content_bytes[:6] == _RAR_MAGIC or fn.endswith(".rar"):
+        return "rar"
+    if content_bytes[:4] == b"PK\x03\x04" and fn.endswith(".zip") and "inventory" in fn:
         return "rar"
 
     # Filename hints
@@ -2297,16 +2299,17 @@ def _detect_inventory_type(filename: str, content_bytes: bytes) -> str:
 
 def _classify_inventory_file_parts(
     file_parts: list[tuple[str, bytes]],
-) -> tuple[list[bytes], list[bytes] | None, list[bytes] | None, bytes | None, list[str]]:
+) -> tuple[list[bytes], list[bytes] | None, list[bytes] | None, bytes | list[bytes] | None, list[str]]:
     oms_bytes_list: list[bytes] = []
     fk_bytes_list: list[bytes] = []
     myntra_bytes_list: list[bytes] = []
-    amz_bytes = None
+    amz_rar: bytes | None = None
+    amz_csv_list: list[bytes] = []
     detected: list[str] = []
     for fname, raw in file_parts:
         inv_type = _detect_inventory_type(fname, raw)
         if inv_type == "rar":
-            amz_bytes = raw
+            amz_rar = raw
             detected.append(f"RAR archive ({fname})")
         elif inv_type == "flipkart":
             fk_bytes_list.append(raw)
@@ -2315,13 +2318,20 @@ def _classify_inventory_file_parts(
             myntra_bytes_list.append(raw)
             detected.append(f"Myntra ({fname})")
         elif inv_type == "amazon":
-            amz_bytes = raw
+            amz_csv_list.append(raw)
             detected.append(f"Amazon ({fname})")
         else:
             oms_bytes_list.append(raw)
             detected.append(f"OMS ({fname})")
     fk_bytes = fk_bytes_list or None
     myntra_bytes = myntra_bytes_list if myntra_bytes_list else None
+    # Prefer RAR (contains all ledgers). Otherwise pass every Amazon CSV.
+    if amz_rar is not None:
+        amz_bytes: bytes | list[bytes] | None = amz_rar
+    elif amz_csv_list:
+        amz_bytes = amz_csv_list if len(amz_csv_list) > 1 else amz_csv_list[0]
+    else:
+        amz_bytes = None
     return oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes, detected
 
 
@@ -2524,7 +2534,7 @@ def _inventory_parse_heavy(
     oms_bytes_list: list[bytes],
     fk_bytes: list[bytes] | None,
     myntra_bytes: list[bytes] | None,
-    amz_bytes: bytes | None,
+    amz_bytes: bytes | list[bytes] | None,
     sku_mapping: dict,
     warnings: list[str],
 ) -> tuple[Any, Any, dict]:
@@ -2779,9 +2789,12 @@ def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, 
         sess.inventory_upload_result = {"ok": False, "message": "No inventory files recognized."}
         return
 
-    if amz_bytes and amz_bytes[:6] == _RAR_MAGIC:
+    _amz_is_archive = False
+    if isinstance(amz_bytes, (bytes, bytearray)):
+        _amz_is_archive = amz_bytes[:6] == _RAR_MAGIC or amz_bytes[:4] == b"PK\x03\x04"
+    if _amz_is_archive:
         _set_inventory_upload_progress(
-            sess, 20, "Extracting RAR archive and reading inner CSV files…",
+            sess, 20, "Extracting archive and reading inner CSV files…",
         )
     else:
         _set_inventory_upload_progress(sess, 25, "Parsing marketplace inventory files…")
@@ -2950,35 +2963,9 @@ async def upload_inventory_auto(
             }
         )
 
-    oms_bytes_list: list[bytes] = []
-    fk_bytes_list: list[bytes] = []
-    myntra_bytes_list: list[bytes] = []
-    amz_bytes = None
-    detected: list[str] = []
-    direct_file_parts: list[tuple[str, bytes]] = []
-    for file in files:
-        raw = await file.read()
-        fname = file.filename or ""
-        direct_file_parts.append((fname or "upload", raw))
-        inv_type = _detect_inventory_type(fname, raw)
-        if inv_type == "rar":
-            amz_bytes = raw
-            detected.append(f"RAR archive ({fname})")
-        elif inv_type == "flipkart":
-            fk_bytes_list.append(raw)
-            detected.append(f"Flipkart ({fname})")
-        elif inv_type == "myntra":
-            myntra_bytes_list.append(raw)
-            detected.append(f"Myntra ({fname})")
-        elif inv_type == "amazon":
-            amz_bytes = raw
-            detected.append(f"Amazon ({fname})")
-        else:
-            oms_bytes_list.append(raw)
-            detected.append(f"OMS ({fname})")
-
-    fk_bytes = fk_bytes_list or None
-    myntra_bytes = myntra_bytes_list if myntra_bytes_list else None
+    oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes, detected = _classify_inventory_file_parts(
+        file_parts
+    )
     if not any([oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes]):
         return JSONResponse(content={"ok": False, "message": "No files provided."})
 
@@ -3006,7 +2993,7 @@ async def upload_inventory_auto(
                 df_parent = df_variant
             sess.inventory_df_variant = df_variant
             sess.inventory_df_parent = df_parent
-            apply_inventory_snapshot_metadata(sess, direct_file_parts, debug)
+            apply_inventory_snapshot_metadata(sess, file_parts, debug)
             refresh_inventory_api_cache(sess)
             _session_data_changed(sess)
             parts = [f"{len(df_variant):,} total SKUs"]

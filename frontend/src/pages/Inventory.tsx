@@ -434,8 +434,14 @@ export default function Inventory() {
         <div className="bg-amber-50 rounded-xl border border-amber-200 p-4 shadow-sm text-sm text-amber-900">
           <p className="font-semibold">Amazon inventory disclaimer</p>
           <p className="mt-1 text-xs">
-            Only latest 1 report day is used for Amazon inventory.
-            {amzDisclaimer.latest_report_date ? ` Latest date: ${String(amzDisclaimer.latest_report_date)}.` : ''}
+            Only the latest report day in the Amazon ledger file(s) is used (SELLABLE; ZNNE + TWWR skipped).
+            {amzDisclaimer.latest_report_date ? ` Ledger as-of: ${String(amzDisclaimer.latest_report_date)}.` : ''}
+            {(Number(amzDisclaimer.excluded_twwr_units) > 0 || Number(amzDisclaimer.excluded_znne_units) > 0) && (
+              <>
+                {' '}Excluded virtual stock: ZNNE {Number(amzDisclaimer.excluded_znne_units || 0).toLocaleString()},
+                TWWR {Number(amzDisclaimer.excluded_twwr_units || 0).toLocaleString()}.
+              </>
+            )}
           </p>
         </div>
       )}

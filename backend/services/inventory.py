@@ -801,7 +801,7 @@ def _manifest_add(manifest: list[dict], filename: str, *, category: str, status:
 
 def _extract_all_from_rar(rar_bytes: bytes) -> tuple[dict, list[dict]]:
     """
-    Extract all relevant inventory files from a RAR archive.
+    Extract all relevant inventory files from a RAR or ZIP archive.
     Returns (extracted_dict, manifest) where manifest lists every inner file and outcome.
     """
     result: dict = {
@@ -836,6 +836,21 @@ def _extract_all_from_rar(rar_bytes: bytes) -> tuple[dict, list[dict]]:
                 manifest, base, category="unknown", status="skipped",
                 reason="Could not classify inventory CSV (check columns or filename)",
             )
+
+    # ZIP (PK..) — common when users re-pack the daily inventory folder
+    if rar_bytes[:4] == b"PK\x03\x04":
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(rar_bytes)) as zf:
+            for name in zf.namelist():
+                if name.endswith("/"):
+                    continue
+                base = name.replace("\\", "/").split("/")[-1]
+                if not base or base.startswith("."):
+                    continue
+                data = zf.read(name)
+                _ingest_file(base, data)
+        return result, manifest
 
     # ── Try bsdtar subprocess (libarchive-tools — supports RAR4 & RAR5) ──
     bsdtar = shutil.which("bsdtar")
@@ -893,6 +908,16 @@ def _resolve_amz_sku(msku: str, mapping: Dict[str, str]) -> str:
     return map_to_oms_sku(stripped, mapping)
 
 
+# Virtual / non-physical Amazon locations — match OMS "Amazon Other Warehouse"
+# (ZNNE = accounting node; TWWR = virtual transfer warehouse).
+_AMAZON_EXCLUDED_LOCATIONS = frozenset({"ZNNE", "TWWR"})
+
+
+def _amazon_location_excluded(series: pd.Series) -> pd.Series:
+    """True where Location is a virtual FC we must not count as sellable stock."""
+    return series.astype(str).str.strip().str.upper().isin(_AMAZON_EXCLUDED_LOCATIONS)
+
+
 def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     """
     Amazon Inventory Ledger CSV (Summary view).
@@ -910,11 +935,9 @@ def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     if disp_col:
         df = df[df[disp_col].astype(str).str.strip().str.upper() == "SELLABLE"]
 
-    # ── Exclude ZNNE — Amazon virtual/accounting location, not physical warehouse stock ──
-    # ZNNE represents ~25,670 units that Amazon tracks internally but OMS excludes from
-    # "Amazon Other Warehouse".  All real FCs use 3-letter city codes (BLR7, MAA4, etc.).
+    # ── Exclude virtual locations (ZNNE, TWWR) — not physical warehouse stock ──
     if "Location" in df.columns:
-        df = df[df["Location"].astype(str).str.strip().str.upper() != "ZNNE"]
+        df = df.loc[~_amazon_location_excluded(df["Location"])].copy()
 
     # One-day snapshot only: keep rows from latest report date in this file.
     if "Date" in df.columns:
@@ -949,29 +972,41 @@ def _analyze_amz_ledger_filters(csv_bytes: bytes) -> dict:
         out["excluded_non_sellable_units"] = 0.0
 
     if "Location" in sell.columns:
-        no_znne = sell[sell["Location"].astype(str).str.strip().str.upper() != "ZNNE"].copy()
-        out["excluded_znne_units"] = float(sell["_bal"].sum() - no_znne["_bal"].sum())
+        loc_u = sell["Location"].astype(str).str.strip().str.upper()
+        excluded = sell.loc[_amazon_location_excluded(sell["Location"])]
+        kept = sell.loc[~_amazon_location_excluded(sell["Location"])].copy()
+        out["excluded_znne_units"] = float(
+            sell.loc[loc_u == "ZNNE", "_bal"].sum()
+        )
+        out["excluded_twwr_units"] = float(
+            sell.loc[loc_u == "TWWR", "_bal"].sum()
+        )
+        out["excluded_virtual_location_units"] = float(excluded["_bal"].sum())
+        no_virtual = kept
     else:
-        no_znne = sell.copy()
+        no_virtual = sell.copy()
         out["excluded_znne_units"] = 0.0
+        out["excluded_twwr_units"] = 0.0
+        out["excluded_virtual_location_units"] = 0.0
 
-    out["sellable_non_znne_units"] = float(no_znne["_bal"].sum())
+    out["sellable_non_znne_units"] = float(no_virtual["_bal"].sum())  # kept name for API compat
+    out["sellable_physical_units"] = float(no_virtual["_bal"].sum())
 
-    if "Date" in no_znne.columns:
-        d = pd.to_datetime(no_znne["Date"], errors="coerce", dayfirst=False)
+    if "Date" in no_virtual.columns:
+        d = pd.to_datetime(no_virtual["Date"], errors="coerce", dayfirst=False)
         if d.notna().any():
             latest = d.max()
-            latest_units = float(no_znne.loc[d == latest, "_bal"].sum())
+            latest_units = float(no_virtual.loc[d == latest, "_bal"].sum())
             out["latest_report_date"] = str(latest.date())
             out["latest_report_units"] = latest_units
-            out["excluded_older_date_units"] = float(no_znne["_bal"].sum() - latest_units)
+            out["excluded_older_date_units"] = float(no_virtual["_bal"].sum() - latest_units)
             out["date_count"] = int(d.dt.normalize().nunique())
         else:
-            out["latest_report_units"] = float(no_znne["_bal"].sum())
+            out["latest_report_units"] = float(no_virtual["_bal"].sum())
             out["excluded_older_date_units"] = 0.0
             out["date_count"] = 0
     else:
-        out["latest_report_units"] = float(no_znne["_bal"].sum())
+        out["latest_report_units"] = float(no_virtual["_bal"].sum())
         out["excluded_older_date_units"] = 0.0
         out["date_count"] = 0
 
@@ -1557,7 +1592,7 @@ def load_inventory_consolidated(
     oms_bytes: Optional[bytes | List[bytes]],
     fk_bytes: Optional[bytes | List[bytes]],
     myntra_bytes: Optional[bytes | List[bytes]],
-    amz_bytes: Optional[bytes],
+    amz_bytes: Optional[bytes | List[bytes]],
     mapping: Dict[str, str],
     group_by_parent: bool = False,
     return_debug: bool = False,
@@ -1565,7 +1600,7 @@ def load_inventory_consolidated(
     """
     Merge inventory from OMS, Flipkart, Myntra and Amazon/RAR sources.
     When amz_bytes is a RAR archive it is split into:
-      - Amazon CSV (SELLABLE + non-ZNNE)        → Amazon_Inventory
+      - Amazon CSV (SELLABLE + non-ZNNE/TWWR)   → Amazon_Inventory
       - FBA in-transit TSVs                      → FBA_InTransit
       - Myntra other-warehouse CSV               → Myntra_Other_Inventory
       - OMS inventory CSV (Inventory + Buffer)   → OMS_Inventory
@@ -1610,10 +1645,17 @@ def load_inventory_consolidated(
                 myntra_other_parts.append(p)
         debug["myntra_upload_cols"] = "via _parse_myntra_other"
 
-    # ── Amazon / RAR ─────────────────────────────────────────
+    # ── Amazon / RAR / ZIP ────────────────────────────────────
     if amz_bytes:
-        raw = amz_bytes
-        if raw[:6] == _RAR_MAGIC:
+        amz_inputs = amz_bytes if isinstance(amz_bytes, list) else [amz_bytes]
+        standalone_amz: list[bytes] = []
+        for raw in amz_inputs:
+            if not raw:
+                continue
+            is_archive = raw[:6] == _RAR_MAGIC or raw[:4] == b"PK\x03\x04"
+            if not is_archive:
+                standalone_amz.append(raw)
+                continue
             extracted, rar_manifest = _extract_all_from_rar(raw)
             debug["rar_manifest"] = rar_manifest
             debug["rar_files"] = {
@@ -1635,12 +1677,16 @@ def load_inventory_consolidated(
                 "raw_total_units": 0.0,
                 "excluded_non_sellable_units": 0.0,
                 "excluded_znne_units": 0.0,
+                "excluded_twwr_units": 0.0,
+                "excluded_virtual_location_units": 0.0,
                 "sellable_non_znne_units": 0.0,
                 "excluded_older_date_units": 0.0,
                 "latest_report_units": 0.0,
                 "raw_rows": 0,
                 "date_count": 0,
+                "excluded_locations": sorted(_AMAZON_EXCLUDED_LOCATIONS),
             }
+            report_dates: list[str] = []
             if amz_blobs:
                 _amz_peek = read_csv_safe(amz_blobs[0])
                 debug["amz_csv_cols"] = list(_amz_peek.columns) if not _amz_peek.empty else []
@@ -1658,22 +1704,28 @@ def load_inventory_consolidated(
                     debug["amz_sellable_total"] = int(_amz_sellable["_bal"].sum())
             for ab in amz_blobs:
                 metrics = _analyze_amz_ledger_filters(ab)
-                for k in ["raw_rows", "date_count"]:
-                    amz_disclaimer[k] += int(metrics.get(k, 0))
+                amz_disclaimer["raw_rows"] += int(metrics.get("raw_rows", 0))
                 for k in [
                     "raw_total_units",
                     "excluded_non_sellable_units",
                     "excluded_znne_units",
+                    "excluded_twwr_units",
+                    "excluded_virtual_location_units",
                     "sellable_non_znne_units",
                     "excluded_older_date_units",
                     "latest_report_units",
                 ]:
                     amz_disclaimer[k] += float(metrics.get(k, 0.0))
-                if metrics.get("latest_report_date"):
-                    amz_disclaimer["latest_report_date"] = metrics["latest_report_date"]
+                day = str(metrics.get("latest_report_date") or "").strip()[:10]
+                if day:
+                    report_dates.append(day)
                 p = _parse_amz_csv(ab, mapping)
                 if not p.empty:
                     amz_rar_parts.append(p)
+            if report_dates:
+                amz_disclaimer["latest_report_date"] = max(report_dates)
+                amz_disclaimer["report_dates"] = sorted(set(report_dates))
+                amz_disclaimer["date_count"] = len(set(report_dates))
             if amz_blobs:
                 debug["amz_disclaimer"] = amz_disclaimer
             if amz_rar_parts:
@@ -1682,7 +1734,7 @@ def load_inventory_consolidated(
                 inv_dfs.append(part)
                 debug["amz"] = f"{len(part)} SKUs ({len(amz_blobs)} ledger file(s))"
             elif amz_blobs:
-                debug["amz"] = "0 SKUs (ledger parse empty)"
+                debug["amz"] = "0 SKUs (ledger parse empty after SELLABLE / ZNNE / TWWR filters)"
 
             part, fba_dbg = _aggregate_fba_intransit_tsvs(extracted["fba_tsvs"], mapping)
             debug.update(fba_dbg)
@@ -1741,11 +1793,57 @@ def load_inventory_consolidated(
             else:
                 debug["combo_rar"] = "skipped (OMS file present — combo would double-count)"
 
-        else:
-            part = _parse_amz_csv(raw, mapping)
-            if not part.empty:
+        if standalone_amz:
+            amz_blobs, _ = _dedupe_identical_byte_payloads(standalone_amz)
+            amz_disclaimer = {
+                "raw_total_units": 0.0,
+                "excluded_non_sellable_units": 0.0,
+                "excluded_znne_units": 0.0,
+                "excluded_twwr_units": 0.0,
+                "excluded_virtual_location_units": 0.0,
+                "sellable_non_znne_units": 0.0,
+                "excluded_older_date_units": 0.0,
+                "latest_report_units": 0.0,
+                "raw_rows": 0,
+                "date_count": 0,
+                "excluded_locations": sorted(_AMAZON_EXCLUDED_LOCATIONS),
+            }
+            report_dates: list[str] = []
+            amz_parts: list[pd.DataFrame] = []
+            for ab in amz_blobs:
+                metrics = _analyze_amz_ledger_filters(ab)
+                amz_disclaimer["raw_rows"] += int(metrics.get("raw_rows", 0))
+                for k in [
+                    "raw_total_units",
+                    "excluded_non_sellable_units",
+                    "excluded_znne_units",
+                    "excluded_twwr_units",
+                    "excluded_virtual_location_units",
+                    "sellable_non_znne_units",
+                    "excluded_older_date_units",
+                    "latest_report_units",
+                ]:
+                    amz_disclaimer[k] += float(metrics.get(k, 0.0))
+                day = str(metrics.get("latest_report_date") or "").strip()[:10]
+                if day:
+                    report_dates.append(day)
+                p = _parse_amz_csv(ab, mapping)
+                if not p.empty:
+                    amz_parts.append(p)
+            if report_dates:
+                amz_disclaimer["latest_report_date"] = max(report_dates)
+                amz_disclaimer["report_dates"] = sorted(set(report_dates))
+                amz_disclaimer["date_count"] = len(set(report_dates))
+            debug["amz_disclaimer"] = amz_disclaimer
+            if amz_parts:
+                amz_cat = pd.concat(amz_parts, ignore_index=True)
+                part = amz_cat.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()
                 inv_dfs.append(part)
-            debug["amz_csv"] = f"{len(part)} SKUs"
+                debug["amz"] = f"{len(part)} SKUs ({len(amz_blobs)} ledger file(s))"
+                debug["amz_csv"] = debug["amz"]
+            else:
+                debug["amz"] = "0 SKUs (empty after SELLABLE / ZNNE / TWWR filters)"
+                debug["amz_csv"] = debug["amz"]
 
     # ── Single Myntra Other layer (standalone + RAR) ───────────────────────────
     if myntra_other_parts:
