@@ -586,6 +586,8 @@ def inventory_session_meta_bundle(sess: Any) -> dict[str, Any]:
         "inventory_snapshot_uploaded_at": str(
             getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
         ),
+        # Persist revision so hydrate / other sessions invalidate Inventory UI.
+        "inventory_data_revision": int(getattr(sess, "inventory_data_revision", 0) or 0),
     }
 
 
@@ -606,6 +608,15 @@ def apply_inventory_session_meta(sess: Any, meta: dict[str, Any] | None) -> None
     sources = meta.get("inventory_snapshot_date_sources")
     if sources is not None:
         sess.inventory_snapshot_date_sources = list(sources)
+    if meta.get("inventory_data_revision") is not None:
+        try:
+            warm_rev = int(meta.get("inventory_data_revision") or 0)
+        except (TypeError, ValueError):
+            warm_rev = 0
+        sess.inventory_data_revision = max(
+            int(getattr(sess, "inventory_data_revision", 0) or 0),
+            warm_rev,
+        )
     # When syncing from warm cache, strip any stale "OMS missing" warning from
     # inventory_upload_result if OMS is now present in the restored debug.
     if isinstance(dbg, dict) and oms_loaded_in_debug(dbg):

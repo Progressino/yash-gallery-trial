@@ -225,9 +225,12 @@ def test_restore_backup_after_missing_oms(inv_sess):
 
 
 def test_inventory_session_meta_roundtrip(inv_sess):
+    inv_sess.inventory_data_revision = 7
     meta = inventory_session_meta_bundle(inv_sess)
     from backend.session import AppSession
 
     empty = AppSession()
     apply_inventory_session_meta(empty, meta)
     assert empty.inventory_snapshot_date_label == inv_sess.inventory_snapshot_date_label
+    assert empty.inventory_data_revision == 7
+    assert meta.get("inventory_data_revision") == 7

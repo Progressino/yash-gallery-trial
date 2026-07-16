@@ -22,6 +22,7 @@ export default function CoverageProvider({
   const lastHydrateAt = useRef(0)
   const prevSalesRevision = useRef<number | null>(null)
   const prevInventoryRevision = useRef<number | null>(null)
+  const prevInvUploadedAt = useRef<string | null>(null)
   const prevDailyIngest = useRef('idle')
   const prevSalesRebuild = useRef('idle')
   const prevInvUpload = useRef('idle')
@@ -52,6 +53,7 @@ export default function CoverageProvider({
 
       const rev = c.sales_data_revision ?? 0
       const invRev = c.inventory_data_revision ?? 0
+      const invUploadedAt = c.inventory_snapshot_uploaded_at ?? ''
       const ingest = c.daily_auto_ingest_status ?? 'idle'
       const rebuild = c.sales_rebuild ?? 'idle'
       const invUpload = c.inventory_upload_status ?? 'idle'
@@ -64,6 +66,12 @@ export default function CoverageProvider({
         prevSalesRevision.current != null && rev > prevSalesRevision.current
       const invRevisionBumped =
         prevInventoryRevision.current != null && invRev > prevInventoryRevision.current
+      // Revision is often 0 after hydrate (not always persisted historically) — also
+      // watch uploaded_at so other tabs/sessions refresh when a new snapshot lands.
+      const invSnapshotChanged =
+        prevInvUploadedAt.current != null &&
+        Boolean(invUploadedAt) &&
+        invUploadedAt !== prevInvUploadedAt.current
       const invUploadDone =
         prevInvUpload.current === 'running' &&
         invUpload !== 'running' &&
@@ -78,6 +86,7 @@ export default function CoverageProvider({
         ingestDone ||
         rebuildDone ||
         invRevisionBumped ||
+        invSnapshotChanged ||
         invUploadDone ||
         dailyInvUploadDone
       ) {
@@ -88,7 +97,7 @@ export default function CoverageProvider({
           if (revisionBumped || ingestDone || rebuildDone) {
             msg = poRecalcNote(msg, 'Daily sales updated — recalculate PO for latest ADS.')
           }
-          if (invRevisionBumped || invUploadDone || dailyInvUploadDone) {
+          if (invRevisionBumped || invSnapshotChanged || invUploadDone || dailyInvUploadDone) {
             msg = poRecalcNote(msg, 'Inventory updated — recalculate PO for latest stock.')
           }
           if (msg !== po.result.message) {
@@ -100,6 +109,7 @@ export default function CoverageProvider({
 
       prevSalesRevision.current = rev
       prevInventoryRevision.current = invRev
+      prevInvUploadedAt.current = invUploadedAt
       prevDailyIngest.current = ingest
       prevSalesRebuild.current = rebuild
       prevInvUpload.current = invUpload
