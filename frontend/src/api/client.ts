@@ -1800,8 +1800,6 @@ export type DailyUploadVerifyWindowResponse = {
   message: string
 }
 
-const CORE_PLATFORMS = ['amazon', 'flipkart', 'meesho', 'myntra'] as const
-
 export function formatPlatformLabel(platform: string): string {
   const p = (platform || '').trim().toLowerCase()
   const labels: Record<string, string> = {
