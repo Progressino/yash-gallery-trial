@@ -386,10 +386,11 @@ def amazon_seller_net_units(
 
 def amazon_mtr_free_replacement_mask(df: pd.DataFrame) -> pd.Series:
     """
-    Amazon India free-replacement rows: invoice amount is explicitly zero (Seller Central MTR).
+    Amazon India free-replacement rows: MTR **Invoice Amount** is explicitly zero.
 
-    Rows with missing / blank amount (daily order exports without Product Amount) are
-  **not** treated as free replacements — they still count as paid shipments.
+    Daily FBA shipment exports use Product Amount (often 0.00) — that column is
+    intentionally not mapped to Invoice_Amount, so those rows stay as paid shipments.
+    Rows with missing / blank Invoice Amount are also not free replacements.
     """
     if df is None or getattr(df, "empty", True):
         return pd.Series(dtype=bool)

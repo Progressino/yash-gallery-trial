@@ -235,7 +235,10 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
     # Resolve column aliases (MTR / Order Report / FBA Shipment Report)
     _sku_col      = next((c for c in ["sku", "merchant sku"] if c in raw.columns), None)
     _order_id_col = next((c for c in ["order id", "amazon order id", "merchant order id"] if c in raw.columns), None)
-    _inv_amt_col  = next((c for c in ["invoice amount", "product amount", "order total", "item price"] if c in raw.columns), None)
+    # Free-replacement detection uses Invoice_Amount only. Daily FBA shipment
+    # reports expose "product amount" (often 0.00 on real shipments) — do not map
+    # that into Invoice_Amount or gross units undercount (e.g. 936 vs 966).
+    _inv_amt_col  = next((c for c in ["invoice amount"] if c in raw.columns), None)
     _state_col    = next((c for c in ["ship to state", "shipment to state", "ship state"] if c in raw.columns), None)
     _city_col     = next((c for c in ["shipment to city", "ship to city", "bill to city", "ship city"] if c in raw.columns), None)
     _seller_gstin_col = next((c for c in ["seller gstin", "seller gstin number", "seller gst registration no"] if c in raw.columns), None)

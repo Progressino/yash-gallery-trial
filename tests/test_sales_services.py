@@ -1656,6 +1656,25 @@ def test_amazon_missing_product_amount_still_counts_as_sale():
     assert (out["Transaction Type"] == "Shipment").all()
 
 
+def test_amazon_daily_product_amount_zero_still_counts_as_sale():
+    """FBA daily Product Amount 0.00 is not MTR Invoice Amount — still counts as Shipment."""
+    from backend.services.mtr import parse_mtr_csv
+    from backend.services.sales import _mtr_to_sales_df
+
+    csv = (
+        "Customer Shipment Date,Merchant SKU,Quantity,Amazon Order Id,Product Amount\n"
+        "2026-07-16,SKU-A,1,AMZ-1,0.00\n"
+        "2026-07-16,SKU-B,2,AMZ-2,513.34\n"
+        "2026-07-16,SKU-C,1,AMZ-3,0.00\n"
+    )
+    mtr_df, msg = parse_mtr_csv(csv.encode("utf-8"), "989977020651_YG Amazon 16-7-26.csv")
+    assert not mtr_df.empty
+    assert (mtr_df["Transaction_Type"].astype(str) == "Shipment").all()
+    out = _mtr_to_sales_df(mtr_df, {})
+    assert float(out["Units_Effective"].sum()) == 4.0
+    assert (out["Transaction Type"] == "Shipment").all()
+
+
 def test_amazon_free_replacement_zero_invoice_excluded_from_sales():
     """Zero-invoice Amazon shipments are free replacements — not paid sales."""
     from backend.services.sales import (
