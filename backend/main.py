@@ -941,6 +941,40 @@ def merge_inventory_into_warm_cache(sess) -> None:
     global _warm_cache, _warm_cache_loaded_at
     if not _warm_cache:
         _warm_cache = {}
+
+    # ── Downgrade guard ───────────────────────────────────────────────────────────
+    # Prod has no durable inventory store (ops_pg disabled; 144 MB session bundles
+    # exceed the PG limit), so the disk warm cache is the only source of truth. A
+    # concurrent request/background task holding an OLDER inventory frame must never
+    # overwrite a freshly-uploaded snapshot. Skip the publish when this session's
+    # snapshot is strictly older than what warm cache already holds.
+    try:
+        from .services.inventory import inventory_snapshot_upload_epoch
+
+        incoming_at = inventory_snapshot_upload_epoch(
+            getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
+        )
+        existing_meta = _warm_cache.get(_INVENTORY_META_WARM_KEY)
+        existing_at = inventory_snapshot_upload_epoch(
+            str((existing_meta or {}).get("inventory_snapshot_uploaded_at") or "")
+        ) if isinstance(existing_meta, dict) else 0.0
+        existing_variant = _warm_cache.get("inventory_df_variant")
+        existing_has = (
+            existing_variant is not None
+            and hasattr(existing_variant, "empty")
+            and not existing_variant.empty
+        )
+        if existing_has and incoming_at and existing_at and incoming_at < existing_at - 1e-6:
+            log.warning(
+                "merge_inventory_into_warm_cache: skipping stale snapshot "
+                "(incoming %s < warm %s) — keeping newer inventory in warm cache",
+                getattr(sess, "inventory_snapshot_uploaded_at", ""),
+                (existing_meta or {}).get("inventory_snapshot_uploaded_at"),
+            )
+            return
+    except Exception:
+        log.exception("inventory warm-cache downgrade guard failed (continuing)")
+
     try:
         from .services.manual_intransit_sheet import ensure_manual_intransit_overlay_applied
 
@@ -1501,6 +1535,32 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
                 saved.append(key)
             elif key == _INVENTORY_META_WARM_KEY and isinstance(val, dict):
                 path = os.path.join(_DISK_CACHE_DIR, "inventory_session_meta.json")
+                # Same downgrade guard as the inventory parquet: don't let a stale
+                # snapshot's meta overwrite a newer one (would desync label/debug from
+                # the persisted dataframe).
+                try:
+                    from .services.inventory import inventory_snapshot_upload_epoch
+
+                    incoming_at = inventory_snapshot_upload_epoch(
+                        str(val.get("inventory_snapshot_uploaded_at") or "")
+                    )
+                    disk_at = 0.0
+                    if os.path.exists(path):
+                        with open(path, encoding="utf-8") as _imf:
+                            _dm = json.load(_imf)
+                        disk_at = inventory_snapshot_upload_epoch(
+                            str((_dm or {}).get("inventory_snapshot_uploaded_at") or "")
+                        )
+                    if incoming_at and disk_at and incoming_at < disk_at - 1e-6:
+                        log.warning(
+                            "Warm-cache disk save blocked for inventory_session_meta "
+                            "(incoming %s older than on-disk %s)",
+                            val.get("inventory_snapshot_uploaded_at"),
+                            (_dm or {}).get("inventory_snapshot_uploaded_at"),
+                        )
+                        continue
+                except Exception:
+                    log.exception("inventory meta disk save downgrade guard failed")
                 with open(path, "w") as f:
                     json.dump(val, f, default=str)
                 saved.append(key)
@@ -1521,6 +1581,37 @@ def _save_warm_cache_to_disk(cache_dict: dict) -> None:
 
                 path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
                 new_rows = len(val)
+                # Inventory snapshot downgrade guard: never overwrite a newer on-disk
+                # snapshot with an older one. The only durable inventory store here is
+                # this disk cache, so a stale concurrent writer must not clobber a fresh
+                # upload. Compare against the on-disk inventory_session_meta.json.
+                if key in ("inventory_df_variant", "inventory_df_parent") and os.path.exists(path):
+                    try:
+                        from .services.inventory import inventory_snapshot_upload_epoch
+
+                        incoming_meta = cache_dict.get(_INVENTORY_META_WARM_KEY)
+                        incoming_at = inventory_snapshot_upload_epoch(
+                            str((incoming_meta or {}).get("inventory_snapshot_uploaded_at") or "")
+                        ) if isinstance(incoming_meta, dict) else 0.0
+                        disk_meta_path = os.path.join(_DISK_CACHE_DIR, "inventory_session_meta.json")
+                        disk_at = 0.0
+                        if os.path.exists(disk_meta_path):
+                            with open(disk_meta_path, encoding="utf-8") as _imf:
+                                _dm = json.load(_imf)
+                            disk_at = inventory_snapshot_upload_epoch(
+                                str((_dm or {}).get("inventory_snapshot_uploaded_at") or "")
+                            )
+                        if incoming_at and disk_at and incoming_at < disk_at - 1e-6:
+                            log.warning(
+                                "Warm-cache disk save blocked for %s "
+                                "(incoming snapshot %s older than on-disk %s)",
+                                key,
+                                (incoming_meta or {}).get("inventory_snapshot_uploaded_at"),
+                                (_dm or {}).get("inventory_snapshot_uploaded_at"),
+                            )
+                            continue
+                    except Exception:
+                        log.exception("inventory disk save downgrade guard failed")
                 if key == "daily_inventory_history_df" and os.path.exists(path):
                     try:
                         from .services.daily_inventory_history import (

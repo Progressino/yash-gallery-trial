@@ -168,8 +168,10 @@ def apply_inventory_snapshot_metadata(
     sess.inventory_snapshot_date = meta["snapshot_date"]
     sess.inventory_snapshot_date_label = meta["snapshot_date_label"]
     sess.inventory_snapshot_date_sources = list(meta["snapshot_date_sources"])
+    # Full-precision timestamp: two uploads in the same second must still be strictly
+    # ordered so the warm/disk downgrade guards can tell which snapshot is newer.
     sess.inventory_snapshot_uploaded_at = (
-        datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     )
     sess.inventory_data_revision = int(getattr(sess, "inventory_data_revision", 0) or 0) + 1
     return meta

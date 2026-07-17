@@ -234,3 +234,50 @@ def test_inventory_session_meta_roundtrip(inv_sess):
     assert empty.inventory_snapshot_date_label == inv_sess.inventory_snapshot_date_label
     assert empty.inventory_data_revision == 7
     assert meta.get("inventory_data_revision") == 7
+
+
+def test_merge_inventory_warm_cache_blocks_stale_snapshot(monkeypatch):
+    """A concurrent session with an OLDER snapshot must not clobber a fresh one.
+
+    Reproduces the prod bug where the disk warm cache (only durable store when
+    ops_pg is off and session bundles exceed the PG size limit) was overwritten by
+    a stale in-memory frame, freezing Inventory totals across uploads.
+    """
+    import backend.main as m
+    from backend.session import AppSession
+
+    fresh = pd.DataFrame(
+        {"OMS_SKU": ["A", "B"], "OMS_Inventory": [100, 100], "Total_Inventory": [100, 100]}
+    )
+    m._warm_cache = {
+        "inventory_df_variant": fresh.copy(),
+        "inventory_df_parent": fresh.copy(),
+        m._INVENTORY_META_WARM_KEY: {
+            "inventory_snapshot_uploaded_at": "2026-07-17T08:00:00.500000Z",
+            "inventory_snapshot_date_label": "17 Jul 2026",
+        },
+    }
+    # Don't let the overlay helper mutate the session frame during the test.
+    monkeypatch.setattr(m, "_save_warm_cache_to_disk", lambda *a, **k: None)
+
+    stale_sess = AppSession()
+    stale_sess.inventory_df_variant = pd.DataFrame(
+        {"OMS_SKU": ["A"], "OMS_Inventory": [1], "Total_Inventory": [1]}
+    )
+    stale_sess.inventory_df_parent = stale_sess.inventory_df_variant.copy()
+    stale_sess.inventory_snapshot_uploaded_at = "2026-07-16T08:00:00.000000Z"  # older
+
+    m.merge_inventory_into_warm_cache(stale_sess)
+
+    # Warm cache must still hold the fresh snapshot, not the stale one.
+    assert float(m._warm_cache["inventory_df_variant"]["OMS_Inventory"].sum()) == 200.0
+
+    # A genuinely newer snapshot must still be able to update warm cache.
+    newer_sess = AppSession()
+    newer_sess.inventory_df_variant = pd.DataFrame(
+        {"OMS_SKU": ["A", "B", "C"], "OMS_Inventory": [50, 50, 50], "Total_Inventory": [50, 50, 50]}
+    )
+    newer_sess.inventory_df_parent = newer_sess.inventory_df_variant.copy()
+    newer_sess.inventory_snapshot_uploaded_at = "2026-07-18T08:00:00.000000Z"  # newer
+    m.merge_inventory_into_warm_cache(newer_sess)
+    assert float(m._warm_cache["inventory_df_variant"]["OMS_Inventory"].sum()) == 150.0
