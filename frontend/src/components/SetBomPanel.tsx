@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
@@ -26,11 +26,19 @@ export function parentStyleKeyFromSku(sku: string): string {
   return s
 }
 
+type SetBomMaterial = {
+  material_code: string
+  material_name: string
+  quantity: number
+  unit: string
+}
+
 type SetBomLine = {
   component_code: string
   component_name: string
   qty_per_set: number
   default_next_process: string
+  materials: SetBomMaterial[]
 }
 
 type Props = {
@@ -52,9 +60,9 @@ export default function SetBomPanel({
     style_key: initialStyleKey,
     style_name: initialStyleName,
     lines: [
-      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching' },
-      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching' },
-      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery' },
+      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching', materials: [] },
+      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching', materials: [] },
+      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery', materials: [] },
     ] as SetBomLine[],
   })
   const [setMatchForm, setSetMatchForm] = useState({
@@ -111,6 +119,12 @@ export default function SetBomPanel({
             component_name: l.component_name || l.component_code,
             qty_per_set: l.qty_per_set || 1,
             default_next_process: l.default_next_process || '',
+            materials: (l.materials || []).map((m: any) => ({
+              material_code: m.material_code || '',
+              material_name: m.material_name || '',
+              quantity: Number(m.quantity) || 0,
+              unit: m.unit || 'MTR',
+            })),
           })),
         })
       } else {
@@ -131,10 +145,11 @@ export default function SetBomPanel({
   return (
     <div className={`grid grid-cols-1 ${showSetMatch ? 'lg:grid-cols-2' : ''} gap-4`}>
       <div className="bg-white rounded-xl border p-4 space-y-3">
-        <h3 className="font-semibold text-gray-800">Set BOM (component recipe)</h3>
+        <h3 className="font-semibold text-gray-800">Component BOM (Set recipe + materials)</h3>
         <p className="text-xs text-gray-500">
-          Define Top / Pant / Dupatta for a style parent (e.g. <span className="font-mono">1001YKBEIGE</span>).
-          After Cutting receive, size SKUs split into <span className="font-mono">1001YKBEIGE-XS-TOP</span> etc.
+          Define Top / Pant / Dupatta under the main style (e.g. <span className="font-mono">1001YKBEIGE</span>).
+          Cutting JOs are created <strong>per component</strong> (<span className="font-mono">1001YKBEIGE-XS-TOP</span> etc.)
+          with fabric issue from each component&apos;s material lines.
         </p>
         <div className="grid grid-cols-2 gap-2">
           <div>
@@ -168,7 +183,8 @@ export default function SetBomPanel({
             </thead>
             <tbody>
               {setBomForm.lines.map((ln, i) => (
-                <tr key={i} className="border-t">
+                <Fragment key={i}>
+                <tr className="border-t">
                   <td className="px-2 py-1">
                     <input
                       value={ln.component_code}
@@ -222,6 +238,93 @@ export default function SetBomPanel({
                     </button>
                   </td>
                 </tr>
+                <tr className="border-t bg-gray-50/80">
+                  <td colSpan={5} className="px-2 py-2">
+                    <p className="text-[10px] font-semibold text-gray-500 mb-1">Materials for {ln.component_code || 'component'}</p>
+                    <div className="space-y-1">
+                      {(ln.materials || []).map((mat, mi) => (
+                        <div key={mi} className="flex gap-1 items-center flex-wrap">
+                          <input
+                            value={mat.material_code}
+                            onChange={e => setSetBomForm(f => ({
+                              ...f,
+                              lines: f.lines.map((x, j) => j === i ? {
+                                ...x,
+                                materials: (x.materials || []).map((m, k) => k === mi ? { ...m, material_code: e.target.value.toUpperCase() } : m),
+                              } : x),
+                            }))}
+                            placeholder="Fabric code"
+                            className="border rounded px-1.5 py-0.5 font-mono text-[11px] w-28"
+                          />
+                          <input
+                            value={mat.material_name}
+                            onChange={e => setSetBomForm(f => ({
+                              ...f,
+                              lines: f.lines.map((x, j) => j === i ? {
+                                ...x,
+                                materials: (x.materials || []).map((m, k) => k === mi ? { ...m, material_name: e.target.value } : m),
+                              } : x),
+                            }))}
+                            placeholder="Name"
+                            className="border rounded px-1.5 py-0.5 text-[11px] flex-1 min-w-[80px]"
+                          />
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={mat.quantity}
+                            onChange={e => setSetBomForm(f => ({
+                              ...f,
+                              lines: f.lines.map((x, j) => j === i ? {
+                                ...x,
+                                materials: (x.materials || []).map((m, k) => k === mi ? { ...m, quantity: +e.target.value } : m),
+                              } : x),
+                            }))}
+                            placeholder="Qty/pc"
+                            className="border rounded px-1.5 py-0.5 text-[11px] w-20 text-right"
+                          />
+                          <input
+                            value={mat.unit}
+                            onChange={e => setSetBomForm(f => ({
+                              ...f,
+                              lines: f.lines.map((x, j) => j === i ? {
+                                ...x,
+                                materials: (x.materials || []).map((m, k) => k === mi ? { ...m, unit: e.target.value } : m),
+                              } : x),
+                            }))}
+                            className="border rounded px-1.5 py-0.5 text-[11px] w-12"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setSetBomForm(f => ({
+                              ...f,
+                              lines: f.lines.map((x, j) => j === i ? {
+                                ...x,
+                                materials: (x.materials || []).filter((_, k) => k !== mi),
+                              } : x),
+                            }))}
+                            className="text-red-400 text-xs px-1"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => setSetBomForm(f => ({
+                          ...f,
+                          lines: f.lines.map((x, j) => j === i ? {
+                            ...x,
+                            materials: [...(x.materials || []), { material_code: '', material_name: '', quantity: 0, unit: 'MTR' }],
+                          } : x),
+                        }))}
+                        className="text-[10px] text-[#002B5B] hover:underline"
+                      >
+                        + Material
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -230,7 +333,7 @@ export default function SetBomPanel({
           <button
             onClick={() => setSetBomForm(f => ({
               ...f,
-              lines: [...f.lines, { component_code: '', component_name: '', qty_per_set: 1, default_next_process: '' }],
+              lines: [...f.lines, { component_code: '', component_name: '', qty_per_set: 1, default_next_process: '', materials: [] }],
             }))}
             className="px-3 py-1.5 text-xs border rounded-lg"
           >
@@ -260,6 +363,12 @@ export default function SetBomPanel({
                     component_name: l.component_name || l.component_code,
                     qty_per_set: l.qty_per_set || 1,
                     default_next_process: l.default_next_process || '',
+                    materials: (l.materials || []).map((m: any) => ({
+                      material_code: m.material_code || '',
+                      material_name: m.material_name || '',
+                      quantity: Number(m.quantity) || 0,
+                      unit: m.unit || 'MTR',
+                    })),
                   })),
                 })}
               >

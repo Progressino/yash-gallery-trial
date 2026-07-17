@@ -240,6 +240,17 @@ def init_db():
         UNIQUE(header_id, component_code)
     );
 
+    -- Per-component material consumption (fabric, thread, etc.)
+    CREATE TABLE IF NOT EXISTS set_bom_material_lines (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        set_bom_line_id     INTEGER NOT NULL REFERENCES set_bom_lines(id) ON DELETE CASCADE,
+        material_code       TEXT NOT NULL,
+        material_name       TEXT DEFAULT '',
+        quantity            REAL NOT NULL DEFAULT 0,
+        unit                TEXT DEFAULT 'MTR',
+        sort_order          INTEGER DEFAULT 0
+    );
+
     -- Audit: Cutting receive → component stock split
     CREATE TABLE IF NOT EXISTS set_split_events (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -298,6 +309,9 @@ def init_db():
         ("jo_lines", "parent_sku", "TEXT DEFAULT ''"),
         ("jo_lines", "sku_role", "TEXT DEFAULT 'MAIN'"),
         ("jo_lines", "component_code", "TEXT DEFAULT ''"),
+        ("job_orders", "main_sku", "TEXT DEFAULT ''"),
+        ("job_orders", "component_code", "TEXT DEFAULT ''"),
+        ("job_orders", "sku_role", "TEXT DEFAULT 'MAIN'"),
     ]
     for table, col, decl in migrations:
         try:
@@ -624,7 +638,73 @@ def validate_jo_creation(process: str, so_number: str, sku: str, planned_qty: in
     return {'ok': True, 'available': available, 'message': ''}
 
 
-def create_jo(data: dict) -> str:
+def create_jo(data: dict) -> str | list[str]:
+    """Create one JO, or multiple component Cutting JOs when Set BOM applies."""
+    from ..services.component_bom import should_auto_create_component_jos
+
+    if should_auto_create_component_jos(data):
+        return create_component_cutting_jos(data)
+    return _create_single_jo(data)
+
+
+def create_component_cutting_jos(data: dict) -> list[str]:
+    """Explode a main-SKU Cutting plan into one JO per Set BOM component."""
+    from ..services.set_components import component_sku
+
+    main_sku = str(data.get("sku") or "").strip().upper()
+    bom = get_set_bom_for_sku(main_sku)
+    if not bom or not bom.get("lines"):
+        return [_create_single_jo(data)]
+
+    base_planned = int(data.get("planned_qty") or 0)
+    jo_numbers: list[str] = []
+    for ln in bom["lines"]:
+        code = ln["component_code"]
+        ratio = max(int(ln.get("qty_per_set") or 1), 1)
+        comp_qty = base_planned * ratio
+        csku = component_sku(main_sku, code)
+        comp_name = str(ln.get("component_name") or code).strip()
+        comp_data = dict(data)
+        comp_data.update(
+            {
+                "sku": csku,
+                "sku_name": f"{data.get('sku_name') or main_sku} {comp_name}".strip(),
+                "planned_qty": comp_qty,
+                "main_sku": main_sku,
+                "component_code": code,
+                "sku_role": "COMPONENT",
+                "create_component_jos": False,
+                "lines": [
+                    {
+                        "so_number": data.get("so_number", ""),
+                        "sku": csku,
+                        "sku_name": comp_name,
+                        "style": (data.get("lines") or [{}])[0].get("style", "")
+                        if data.get("lines")
+                        else "",
+                        "planned_qty": comp_qty,
+                        "parent_sku": main_sku,
+                        "component_code": code,
+                        "sku_role": "COMPONENT",
+                        "vendor_rate": float(data.get("vendor_rate") or 0),
+                        "remarks": data.get("remarks", ""),
+                    }
+                ],
+            }
+        )
+        mats = ln.get("materials") or []
+        if mats and not (comp_data.get("fabric_code") or "").strip():
+            first = mats[0]
+            comp_data["fabric_code"] = str(first.get("material_code") or "").strip()
+            comp_data["fabric_qty"] = round(
+                float(first.get("quantity") or 0) * comp_qty, 3
+            )
+            comp_data["fabric_unit"] = str(first.get("unit") or "MTR")
+        jo_numbers.append(_create_single_jo(comp_data))
+    return jo_numbers
+
+
+def _create_single_jo(data: dict) -> str:
     so_number = (data.get("so_number") or "").strip()
     fabric_code = (data.get("fabric_code") or "").strip()
     fabric_qty = float(data.get("fabric_qty") or 0)
@@ -638,8 +718,8 @@ def create_jo(data: dict) -> str:
         jo_number, jo_date, so_number, sku, sku_name, process, stage,
         exec_type, vendor_name, vendor_rate, so_qty, planned_qty, balance_qty,
         status, expected_completion, issued_to, remarks,
-        fabric_code, fabric_qty, fabric_unit, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+        fabric_code, fabric_qty, fabric_unit, main_sku, component_code, sku_role, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
         (num, data.get('jo_date') or datetime.now().strftime('%Y-%m-%d'),
          data.get('so_number',''), data.get('sku',''), data.get('sku_name',''),
          process, process,
@@ -649,18 +729,24 @@ def create_jo(data: dict) -> str:
          'Created', data.get('expected_completion',''),
          data.get('issued_to',''), data.get('remarks',''),
          data.get('fabric_code',''), float(data.get('fabric_qty') or 0),
-         data.get('fabric_unit','MTR')))
+         data.get('fabric_unit','MTR'),
+         str(data.get('main_sku') or '').strip().upper(),
+         str(data.get('component_code') or '').strip().upper(),
+         str(data.get('sku_role') or 'MAIN').strip().upper() or 'MAIN'))
     joid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in data.get('lines', []):
         pq = int(ln.get('planned_qty', 0))
-        conn.execute("""INSERT INTO jo_lines(jo_id,so_number,sku,sku_name,style,planned_qty,balance_qty,vendor_rate,remarks)
-            VALUES(?,?,?,?,?,?,?,?,?)""",
+        conn.execute("""INSERT INTO jo_lines(jo_id,so_number,sku,sku_name,style,planned_qty,balance_qty,vendor_rate,remarks,parent_sku,sku_role,component_code)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (joid, ln.get('so_number', data.get('so_number','')),
              ln.get('sku', data.get('sku','')),
              ln.get('sku_name', data.get('sku_name','')),
              ln.get('style',''), pq, pq,
              float(ln.get('vendor_rate') or 0),
-             ln.get('remarks','')))
+             ln.get('remarks',''),
+             str(ln.get('parent_sku') or data.get('main_sku') or '').strip().upper(),
+             str(ln.get('sku_role') or data.get('sku_role') or 'MAIN').strip().upper() or 'MAIN',
+             str(ln.get('component_code') or data.get('component_code') or '').strip().upper()))
     jo_snapshot = {
         "jo_date": data.get("jo_date") or datetime.now().strftime("%Y-%m-%d"),
         "so_number": data.get("so_number", ""),
@@ -671,6 +757,9 @@ def create_jo(data: dict) -> str:
         "fabric_code": data.get("fabric_code", ""),
         "fabric_qty": float(data.get("fabric_qty") or 0),
         "fabric_unit": data.get("fabric_unit", "MTR"),
+        "main_sku": str(data.get("main_sku") or "").strip().upper(),
+        "component_code": str(data.get("component_code") or "").strip().upper(),
+        "sku_role": str(data.get("sku_role") or "MAIN").strip().upper() or "MAIN",
     }
     line_snapshots = list(data.get("lines") or [])
     conn.commit()
@@ -1362,13 +1451,27 @@ def _set_bom_header_row(conn, style_key: str):
     ).fetchone()
 
 
+def _set_bom_material_lines(conn, set_bom_line_id: int) -> list:
+    rows = conn.execute(
+        """SELECT * FROM set_bom_material_lines WHERE set_bom_line_id=?
+           ORDER BY sort_order, id""",
+        (int(set_bom_line_id),),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _set_bom_lines(conn, header_id: int) -> list:
     rows = conn.execute(
         """SELECT * FROM set_bom_lines WHERE header_id=?
            ORDER BY sort_order, id""",
         (header_id,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        ln = dict(r)
+        ln["materials"] = _set_bom_material_lines(conn, ln["id"])
+        out.append(ln)
+    return out
 
 
 def _hydrate_set_bom(conn, header_row) -> Optional[dict]:
@@ -1455,6 +1558,17 @@ def upsert_set_bom(data: dict) -> dict:
                 "qty_per_set": qty,
                 "default_next_process": str(ln.get("default_next_process") or "").strip(),
                 "sort_order": int(ln.get("sort_order") if ln.get("sort_order") is not None else i),
+                "materials": [
+                    {
+                        "material_code": str(m.get("material_code") or "").strip().upper(),
+                        "material_name": str(m.get("material_name") or "").strip(),
+                        "quantity": float(m.get("quantity") or 0),
+                        "unit": str(m.get("unit") or "MTR").strip() or "MTR",
+                        "sort_order": int(m.get("sort_order") if m.get("sort_order") is not None else j),
+                    }
+                    for j, m in enumerate(ln.get("materials") or [])
+                    if str(m.get("material_code") or "").strip()
+                ],
             }
         )
     conn = _connect()
@@ -1495,6 +1609,21 @@ def upsert_set_bom(data: dict) -> dict:
                 ln["sort_order"],
             ),
         )
+        line_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        for mat in ln.get("materials") or []:
+            conn.execute(
+                """INSERT INTO set_bom_material_lines
+                   (set_bom_line_id, material_code, material_name, quantity, unit, sort_order)
+                   VALUES(?,?,?,?,?,?)""",
+                (
+                    line_id,
+                    mat["material_code"],
+                    mat["material_name"],
+                    mat["quantity"],
+                    mat["unit"],
+                    mat["sort_order"],
+                ),
+            )
     conn.commit()
     bom = _hydrate_set_bom(conn, conn.execute("SELECT * FROM set_bom_headers WHERE id=?", (hid,)).fetchone())
     conn.close()

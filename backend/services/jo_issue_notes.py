@@ -319,10 +319,40 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
     jo_process = (jo.get("process") or "").strip() or None
     material_lines: list[dict] = []
     seen: set[tuple] = set()
+
+    from ..services.set_components import parse_component_sku
+    from ..services.component_bom import explode_component_materials
+
+    comp_code = str(jo.get("component_code") or "").strip().upper()
+    main_sku = str(jo.get("main_sku") or "").strip().upper()
+    if not comp_code:
+        _parsed_main, parsed_comp = parse_component_sku(jo.get("sku", ""))
+        if parsed_comp:
+            comp_code = parsed_comp
+            if not main_sku:
+                main_sku = _parsed_main or ""
+
+    use_component_bom = bool(comp_code and main_sku)
+
     for fin in finished_items:
-        for m in explode_bom_materials(
-            fin["code"], fin["name"], fin["qty"], process=jo_process
-        ):
+        if use_component_bom:
+            mats = explode_component_materials(
+                main_sku,
+                comp_code,
+                fin["code"],
+                fin["name"],
+                fin["qty"],
+            )
+            if not mats and jo_process == "Cutting":
+                # Component JO with no Set BOM materials yet — fall back to main Item BOM
+                mats = explode_bom_materials(
+                    fin["code"], fin["name"], fin["qty"], process=jo_process
+                )
+        else:
+            mats = explode_bom_materials(
+                fin["code"], fin["name"], fin["qty"], process=jo_process
+            )
+        for m in mats:
             key = (fin["code"], m["material_code"])
             if key in seen:
                 for existing in material_lines:

@@ -933,7 +933,14 @@ export default function Production() {
       qc.invalidateQueries({ queryKey: ['mrp-commit-map'] })
       setModal(null)
       setNewLines([])
-      const inNum = res?.data?.issue_note?.in_number
+      const data = res?.data
+      if (data?.component_jos && Array.isArray(data.orders)) {
+        const nums = data.orders.map((o: any) => o.jo_number).filter(Boolean).join(', ')
+        setTab('issue-notes')
+        alert(`Created ${data.orders.length} component Cutting JO(s): ${nums}`)
+        return
+      }
+      const inNum = data?.issue_note?.in_number
       if (inNum) {
         setTab('issue-notes')
         alert(`Job order created. Material issue note ${inNum} generated from BOM.`)

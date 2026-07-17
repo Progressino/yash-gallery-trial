@@ -277,6 +277,8 @@ class JOIn(BaseModel):
     fabric_qty: Optional[float] = 0
     fabric_unit: Optional[str] = 'MTR'
     lines: List[JOLineIn] = []
+    # None = auto (component JOs when Set BOM exists); False = legacy single JO + receive split
+    create_component_jos: Optional[bool] = None
 
 class JOUpdate(BaseModel):
     status: Optional[str] = None
@@ -337,12 +339,21 @@ class PieceReceiptIn(BaseModel):
     split_components: Optional[bool] = True
 
 
+class SetBomMaterialIn(BaseModel):
+    material_code: str
+    material_name: Optional[str] = ''
+    quantity: float = 0
+    unit: Optional[str] = 'MTR'
+    sort_order: Optional[int] = 0
+
+
 class SetBomLineIn(BaseModel):
     component_code: str
     component_name: Optional[str] = ''
     qty_per_set: int = 1
     default_next_process: Optional[str] = ''
     sort_order: Optional[int] = 0
+    materials: Optional[List[SetBomMaterialIn]] = []
 
 
 class SetBomIn(BaseModel):
@@ -466,9 +477,31 @@ def post_jo(body: JOIn):
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
     try:
-        num = create_jo(data)
+        result = create_jo(data)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    if isinstance(result, list):
+        orders = []
+        for num in result:
+            jo_row = next((j for j in list_jos() if j.get("jo_number") == num), None)
+            issue_note = jo_issue_notes.get_issue_note_by_jo_id(jo_row["id"]) if jo_row else None
+            orders.append(
+                {
+                    "jo_number": num,
+                    "id": jo_row["id"] if jo_row else None,
+                    "sku": jo_row.get("sku") if jo_row else None,
+                    "component_code": jo_row.get("component_code") if jo_row else None,
+                    "issue_note": issue_note,
+                }
+            )
+        return {
+            "ok": True,
+            "component_jos": True,
+            "jo_numbers": result,
+            "orders": orders,
+            "message": f"Created {len(result)} component Cutting JO(s)",
+        }
+    num = result
     jo_row = next((j for j in list_jos() if j.get("jo_number") == num), None)
     issue_note = jo_issue_notes.get_issue_note_by_jo_id(jo_row["id"]) if jo_row else None
     return {"jo_number": num, "ok": True, "issue_note": issue_note}
@@ -537,8 +570,11 @@ async def import_jos(
             ],
         }
         try:
-            num = create_jo(data)
-            created.append(num)
+            result = create_jo(data)
+            if isinstance(result, list):
+                created.extend(result)
+            else:
+                created.append(result)
         except Exception as e:
             errors.append(f"Row {int(i) + 2} ({sku}): {e}")
     return {

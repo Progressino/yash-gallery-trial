@@ -1,14 +1,16 @@
-"""Multi-component set production — Set BOM, Cutting split, Finishing set-match.
+"""Multi-component set production — Component BOM, Cutting JOs, Finishing set-match.
 
-Flow
-----
-1. Main size SKU (e.g. ``1001YKBEIGE-XS``) runs through Cutting as today.
-2. On Cutting ``receive_pieces``, if a Set BOM exists for the style parent,
-   stock is split into component SKUs ``{main}-{COMP}`` (Top/Pant/Dupatta…).
-3. Components move independently through Issue / Receive / Pending / Reject.
-4. At Finishing, ``complete_sets = min(component_avail / ratio)``.
-5. ``commit_set_match`` moves matched sets onto the main SKU at Packing and
-   leaves extras as component WIP / shortfalls as pending.
+Flow (component-wise Cutting JOs — default when Set BOM exists)
+---------------------------------------------------------------
+1. Main size SKU (e.g. ``1001YKBEIGE-XS``) is used for sales / planning / FG.
+2. Set BOM defines components (TOP/PANT/DUPATTA) each with material consumption.
+3. Creating a Cutting JO for the main SKU auto-creates one JO per component
+   (``1001YKBEIGE-XS-TOP``, etc.) with issue notes from that component's materials.
+4. Components move independently through Issue / Receive / Pending / Reject.
+5. At Finishing, ``complete_sets = min(component_avail / ratio)``.
+6. ``commit_set_match`` moves matched sets onto the main SKU at Packing.
+
+Legacy flow (``create_component_jos=false``): single main Cutting JO, split on receive.
 """
 from __future__ import annotations
 

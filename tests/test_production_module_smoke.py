@@ -1569,10 +1569,12 @@ def test_cutting_split_and_set_match(isolated_module_dbs, client):
             "sku": "1001SET-XS",
             "process": "Cutting",
             "planned_qty": 100,
+            "create_component_jos": False,
             "lines": [{"sku": "1001SET-XS", "style": "XS", "planned_qty": 100}],
         },
     )
     assert r.status_code == 200, r.text
+    assert not r.json().get("component_jos"), r.json()
     jo = next(o for o in client.get("/api/production/orders").json() if o["jo_number"] == r.json()["jo_number"])
     line = jo["lines"][0]
 
@@ -1685,3 +1687,86 @@ def test_cutting_split_and_set_match(isolated_module_dbs, client):
         },
     )
     assert over.status_code == 400
+
+
+def test_component_cutting_jos_and_issue_note(isolated_module_dbs, client):
+    """Set BOM with component materials → auto component Cutting JOs + per-component issue notes."""
+    bom = client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "2002SET",
+            "style_name": "Component BOM Test",
+            "lines": [
+                {
+                    "component_code": "TOP",
+                    "component_name": "Top",
+                    "qty_per_set": 1,
+                    "materials": [
+                        {"material_code": "FAB-A", "material_name": "Fabric A", "quantity": 1.5, "unit": "MTR"},
+                    ],
+                },
+                {
+                    "component_code": "PANT",
+                    "component_name": "Pant",
+                    "qty_per_set": 1,
+                    "materials": [
+                        {"material_code": "FAB-B", "material_name": "Fabric B", "quantity": 1.1, "unit": "MTR"},
+                    ],
+                },
+            ],
+        },
+    )
+    assert bom.status_code == 200, bom.text
+    assert len(bom.json()["lines"][0].get("materials") or []) == 1
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-07-17",
+            "so_number": "SO-COMP-1",
+            "sku": "2002SET-M",
+            "process": "Cutting",
+            "planned_qty": 50,
+            "lines": [{"sku": "2002SET-M", "planned_qty": 50}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("component_jos") is True
+    assert len(body.get("jo_numbers") or []) == 2
+
+    orders = client.get("/api/production/orders").json()
+    comp_jos = [o for o in orders if o.get("so_number") == "SO-COMP-1" and o.get("sku_role") == "COMPONENT"]
+    assert len(comp_jos) == 2
+    skus = {o["sku"] for o in comp_jos}
+    assert "2002SET-M-TOP" in skus
+    assert "2002SET-M-PANT" in skus
+
+    top_jo = next(o for o in comp_jos if o["component_code"] == "TOP")
+    note = client.get(f"/api/production/orders/{top_jo['id']}/issue-note").json()
+    mats = {ln["material_code"]: ln for ln in note.get("lines") or []}
+    assert "FAB-A" in mats
+    assert float(mats["FAB-A"]["required_qty"]) == pytest.approx(75.0, abs=0.01)
+
+    pant_jo = next(o for o in comp_jos if o["component_code"] == "PANT")
+    note2 = client.get(f"/api/production/orders/{pant_jo['id']}/issue-note").json()
+    mats2 = {ln["material_code"]: ln for ln in note2.get("lines") or []}
+    assert "FAB-B" in mats2
+    assert "FAB-A" not in mats2
+
+    rec = client.post(
+        f"/api/production/orders/{top_jo['id']}/receive-pieces",
+        json={
+            "received_qty": 50,
+            "process": "Cutting",
+            "sku": "2002SET-M-TOP",
+            "jo_line_id": top_jo["lines"][0]["id"],
+        },
+    )
+    assert rec.status_code == 200, rec.text
+    assert rec.json().get("split") is None
+    st = client.get(
+        "/api/production/process-stock",
+        params={"so_number": "SO-COMP-1", "sku": "2002SET-M-TOP"},
+    ).json()
+    assert int(st.get("Cutting", {}).get("available", 0)) == 50
