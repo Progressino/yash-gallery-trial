@@ -1180,8 +1180,13 @@ export default function Dashboard() {
         setParitySyncError(res.message || 'Tier-3 sync failed')
         return
       }
+      // Wait briefly for background sales_rebuild to start, then refresh once.
+      // Do not clear caches in a loop — that kept the dashboard on "Refining…".
+      await new Promise(r => setTimeout(r, 1500))
+      void qc.invalidateQueries({ queryKey: ['coverage-poll'] })
       void qc.invalidateQueries({ queryKey: ['dashboard-summary'] })
       void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
+      void qc.invalidateQueries({ queryKey: ['intelligence-bundle-full'] })
       void qc.invalidateQueries({ queryKey: ['data-parity'] })
     } catch (e) {
       setParitySyncError(e instanceof Error ? e.message : 'Tier-3 sync failed to start')
@@ -1329,13 +1334,6 @@ export default function Dashboard() {
     if (dashboardReady) hydrateRequested.current = false
   }, [dashboardReady])
 
-  useEffect(() => {
-    if (!parityReport?.tier3_sync_mismatch) return
-    clearIntelligenceCache()
-    void qc.invalidateQueries({ queryKey: ['dashboard-summary'] })
-    void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
-  }, [parityReport?.tier3_sync_mismatch, qc])
-
   const cachedBundleHint = useMemo(() => {
     const fresh = readIntelligenceCache(dateStart, dateEnd, salesBasis, serverCacheVersion)
     if (fresh && bundleHasDisplayData(fresh)) return { bundle: fresh, expired: false, versionMismatch: false }
@@ -1467,7 +1465,7 @@ export default function Dashboard() {
     (intelligenceCore?.status !== 'warming' || !intelligenceCore) &&
     (bundleHasDisplayData(intelligenceCore) || summaryUsable)
 
-  const { data: intelligenceFull } = useQuery<IntelligenceBundle>({
+  const { data: intelligenceFull, isFetched: fullBundleFetched, isFetching: fetchingFull } = useQuery<IntelligenceBundle>({
     queryKey: ['intelligence-bundle-full', dateStart, dateEnd, topSkuLimit, salesBasis],
     queryFn: async () => {
       const { data } = await api.get<IntelligenceBundle>(
@@ -1483,6 +1481,13 @@ export default function Dashboard() {
     staleTime: 300_000,
     retry: 1,
   })
+
+  // After a full refine attempt finishes, stop treating the window as "still refining"
+  // even if the server still labels the payload partial (best available totals).
+  const refineSettled =
+    !needsFullBundle ||
+    (fullBundleFetched && !fetchingFull) ||
+    (Boolean(intelligenceFull) && intelligenceFull?.data_completeness === 'full')
 
   const { data: intelligenceExtras } = useQuery<IntelligenceBundle>({
     queryKey: ['intelligence-bundle-extras', dateStart, dateEnd, topSkuLimit, salesBasis],
@@ -1533,7 +1538,8 @@ export default function Dashboard() {
   ])
 
   const bundleWarming = intelligenceBundle?.status === 'warming'
-  const bundlePartial = intelligenceBundle?.data_completeness === 'partial'
+  const bundlePartial =
+    intelligenceBundle?.data_completeness === 'partial' && !refineSettled
   const hasDisplayData = bundleHasDisplayData(intelligenceBundle)
   const hasCachedDisplay = Boolean(
     cachedBundleHint && bundleHasDisplayData(cachedBundleHint.bundle),

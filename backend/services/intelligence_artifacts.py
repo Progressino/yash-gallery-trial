@@ -263,13 +263,18 @@ def load_artifact(
 
 
 def _build_hot_payload(sess, start_date: str, end_date: str, limit: int) -> dict[str, Any] | None:
-    from ..routers.data import _build_intelligence_bundle_payload_from_tier3
+    from ..routers.data import (
+        _build_intelligence_bundle_payload_from_tier3,
+        _tier3_only_undercounts_bulk,
+    )
     from .dashboard_summary import _compact_platforms
 
+    s = start_date[:10]
+    e = end_date[:10]
     tier3 = _build_intelligence_bundle_payload_from_tier3(
         sess,
-        start_date[:10],
-        end_date[:10],
+        s,
+        e,
         int(limit),
         "gross",
         include_extras=False,
@@ -277,13 +282,18 @@ def _build_hot_payload(sess, start_date: str, end_date: str, limit: int) -> dict
     )
     if not tier3 or not tier3.get("platform_summary"):
         return None
+    units = int((tier3.get("sales_summary") or {}).get("total_units") or 0)
+    # Only mark partial when Tier-3 clearly undercounts bulk history. Hardcoding
+    # "partial" left the dashboard stuck on "Refining totals…" forever because
+    # mode=fast and mode=full both serve this hot artifact first.
+    completeness = "partial" if _tier3_only_undercounts_bulk(units, s, e) else "full"
     return {
         "source": "tier3_sqlite",
         "platforms": _compact_platforms(tier3.get("platform_summary") or []),
         "platform_summary": tier3.get("platform_summary") or [],
         "top_skus": tier3.get("top_skus") or [],
         "sales_summary": tier3.get("sales_summary") or {},
-        "data_completeness": "partial",
+        "data_completeness": completeness,
     }
 
 
@@ -544,8 +554,13 @@ def load_deep_bundle_for_request(
     *,
     limit: int = 10,
     include_extras: bool = False,
+    require_complete: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Deep path for ``/intelligence-bundle`` when extras/full analytics requested."""
+    """Deep path for ``/intelligence-bundle`` when extras/full analytics requested.
+
+    When ``require_complete`` is True (mode=full), skip partial hot artifacts so the
+    request path can gap-fill and settle the dashboard instead of looping on ~totals.
+    """
     kind = KIND_DEEP if include_extras else KIND_HOT
     payload, meta = load_artifact(start_date, end_date, kind, allow_stale=True)
     if payload:
@@ -558,9 +573,24 @@ def load_deep_bundle_for_request(
                 include_extras=include_extras,
             )
         if kind == KIND_HOT and "platform_summary" in payload:
+            completeness = str(payload.get("data_completeness") or "partial")
+            # Heal legacy hot artifacts that were hardcoded as partial.
+            if completeness == "partial":
+                try:
+                    from ..routers.data import _tier3_only_undercounts_bulk
+
+                    units = int((payload.get("sales_summary") or {}).get("total_units") or 0)
+                    if units > 0 and not _tier3_only_undercounts_bulk(
+                        units, start_date[:10], end_date[:10]
+                    ):
+                        completeness = "full"
+                except Exception:
+                    pass
+            if require_complete and completeness == "partial":
+                return None, {**meta, "skipped_partial_hot": True}
             bundle = {
                 "status": "ready",
-                "data_completeness": payload.get("data_completeness", "partial"),
+                "data_completeness": completeness,
                 "sales_summary": payload.get("sales_summary") or {},
                 "platform_summary": payload.get("platform_summary") or [],
                 "top_skus": payload.get("top_skus") or [],
@@ -571,5 +601,8 @@ def load_deep_bundle_for_request(
             }
             return bundle, meta
         if kind == KIND_DEEP:
+            completeness = str(payload.get("data_completeness") or "full")
+            if require_complete and completeness == "partial":
+                return None, {**meta, "skipped_partial_deep": True}
             return payload, meta
     return None, meta

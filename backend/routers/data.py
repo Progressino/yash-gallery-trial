@@ -4601,6 +4601,8 @@ def _intelligence_bundle_sync(
         sess._intelligence_bundle_cache = bundle_cache
 
     # Prebuilt artifact (hot/deep) — no SQLite on request path when warm.
+    # mode=full skips partial hot artifacts so gap-fill can settle "Refining totals…".
+    mode_early = (mode or "").strip().lower()
     if has_dates and len(s_win) == 10 and len(e_win) == 10:
         try:
             from ..services.intelligence_artifacts import load_deep_bundle_for_request
@@ -4611,6 +4613,7 @@ def _intelligence_bundle_sync(
                 e_win,
                 limit=int(limit),
                 include_extras=bool(include_extras),
+                require_complete=(mode_early == "full"),
             )
             if artifact is not None:
                 out = dict(artifact)

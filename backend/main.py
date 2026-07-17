@@ -1937,6 +1937,7 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
 
     Returns (ok, loaded_dict). ok=False means disk cache is absent, stale, or corrupt."""
     import os, json
+    from pathlib import Path
     try:
         manifest_path = os.path.join(_DISK_CACHE_DIR, "_manifest.json")
         if not os.path.exists(manifest_path):
@@ -2034,7 +2035,7 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
                         report.get("actions"),
                     )
                     try:
-                        hist_path = _DISK_CACHE_DIR / "daily_inventory_history_df.parquet"
+                        hist_path = Path(_DISK_CACHE_DIR) / "daily_inventory_history_df.parquet"
                         _coerce_df_for_parquet(repaired).to_parquet(hist_path, index=False)
                     except Exception:
                         log.exception("persist integrity repair on Phase-0 load failed")
