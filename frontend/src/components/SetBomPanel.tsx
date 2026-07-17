@@ -33,6 +33,100 @@ type SetBomMaterial = {
   unit: string
 }
 
+type ItemSearchHit = {
+  id: number
+  item_code: string
+  item_name: string
+  item_type_code?: string
+  uom?: string
+}
+
+const MATERIAL_ITEM_TYPES = new Set(['RM', 'GF', 'SFG', 'ACC', 'PKG', 'FUEL'])
+
+function MaterialPicker({
+  materialCode,
+  materialName,
+  onSelect,
+  onClear,
+}: {
+  materialCode: string
+  materialName: string
+  onSelect: (code: string, name: string, unit: string) => void
+  onClear: () => void
+}) {
+  const [q, setQ] = useState('')
+  const { data: rawResults = [] } = useQuery<ItemSearchHit[]>({
+    queryKey: ['item-search-set-bom-material', q],
+    queryFn: async () => {
+      const { data } = await api.get(`/items/search?q=${encodeURIComponent(q)}`)
+      return data
+    },
+    enabled: q.trim().length >= 2,
+    staleTime: 30_000,
+  })
+  const results = rawResults.filter(
+    it => !it.item_type_code || MATERIAL_ITEM_TYPES.has(String(it.item_type_code).toUpperCase()),
+  )
+
+  if (materialCode) {
+    return (
+      <div className="flex items-center gap-1 min-w-[200px] flex-1">
+        <div className="flex-1 bg-blue-50 border border-blue-200 rounded px-2 py-1 text-[11px]">
+          <div className="font-mono font-medium text-[#002B5B]">{materialCode}</div>
+          {materialName && materialName !== materialCode && (
+            <div className="text-gray-500 truncate">{materialName}</div>
+          )}
+        </div>
+        <button type="button" onClick={onClear} className="text-gray-400 hover:text-red-500 text-xs px-1">
+          ✕
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="relative min-w-[200px] flex-1">
+      <input
+        type="text"
+        value={q}
+        onChange={e => setQ(e.target.value)}
+        placeholder="Search material / fabric…"
+        className="w-full border rounded px-1.5 py-0.5 text-[11px]"
+      />
+      {q.trim().length >= 2 && results.length > 0 && (
+        <div className="absolute z-20 top-full left-0 right-0 mt-0.5 border border-gray-200 rounded-lg divide-y divide-gray-100 max-h-40 overflow-y-auto bg-white shadow-lg">
+          {results.map(it => (
+            <button
+              key={it.id}
+              type="button"
+              onClick={() => {
+                onSelect(
+                  String(it.item_code || '').toUpperCase(),
+                  String(it.item_name || '').trim(),
+                  String(it.uom || 'MTR').toUpperCase() || 'MTR',
+                )
+                setQ('')
+              }}
+              className="w-full text-left px-2 py-1.5 hover:bg-blue-50 transition-colors"
+            >
+              <div className="text-[11px] font-mono font-medium text-[#002B5B]">{it.item_code}</div>
+              <div className="text-[10px] text-gray-500">
+                {it.item_name}
+                {it.item_type_code ? ` · ${it.item_type_code}` : ''}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+      {q.trim().length >= 2 && results.length === 0 && (
+        <div className="absolute z-20 top-full left-0 right-0 mt-0.5 border border-gray-200 rounded-lg bg-white shadow-lg px-2 py-1.5 text-[10px] text-gray-400">
+          No materials found — try another code or name
+        </div>
+      )}
+    </div>
+  )
+}
+
 type SetBomLine = {
   component_code: string
   component_name: string
@@ -244,29 +338,32 @@ export default function SetBomPanel({
                     <div className="space-y-1">
                       {(ln.materials || []).map((mat, mi) => (
                         <div key={mi} className="flex gap-1 items-center flex-wrap">
-                          <input
-                            value={mat.material_code}
-                            onChange={e => setSetBomForm(f => ({
+                          <MaterialPicker
+                            materialCode={mat.material_code}
+                            materialName={mat.material_name}
+                            onSelect={(code, name, unit) => setSetBomForm(f => ({
                               ...f,
                               lines: f.lines.map((x, j) => j === i ? {
                                 ...x,
-                                materials: (x.materials || []).map((m, k) => k === mi ? { ...m, material_code: e.target.value.toUpperCase() } : m),
+                                materials: (x.materials || []).map((m, k) => k === mi ? {
+                                  ...m,
+                                  material_code: code,
+                                  material_name: name,
+                                  unit: m.unit || unit,
+                                } : m),
                               } : x),
                             }))}
-                            placeholder="Fabric code"
-                            className="border rounded px-1.5 py-0.5 font-mono text-[11px] w-28"
-                          />
-                          <input
-                            value={mat.material_name}
-                            onChange={e => setSetBomForm(f => ({
+                            onClear={() => setSetBomForm(f => ({
                               ...f,
                               lines: f.lines.map((x, j) => j === i ? {
                                 ...x,
-                                materials: (x.materials || []).map((m, k) => k === mi ? { ...m, material_name: e.target.value } : m),
+                                materials: (x.materials || []).map((m, k) => k === mi ? {
+                                  ...m,
+                                  material_code: '',
+                                  material_name: '',
+                                } : m),
                               } : x),
                             }))}
-                            placeholder="Name"
-                            className="border rounded px-1.5 py-0.5 text-[11px] flex-1 min-w-[80px]"
                           />
                           <input
                             type="number"
@@ -282,7 +379,7 @@ export default function SetBomPanel({
                             placeholder="Qty/pc"
                             className="border rounded px-1.5 py-0.5 text-[11px] w-20 text-right"
                           />
-                          <input
+                          <select
                             value={mat.unit}
                             onChange={e => setSetBomForm(f => ({
                               ...f,
@@ -291,8 +388,12 @@ export default function SetBomPanel({
                                 materials: (x.materials || []).map((m, k) => k === mi ? { ...m, unit: e.target.value } : m),
                               } : x),
                             }))}
-                            className="border rounded px-1.5 py-0.5 text-[11px] w-12"
-                          />
+                            className="border rounded px-1.5 py-0.5 text-[11px] w-16"
+                          >
+                            {['MTR', 'KG', 'PCS', 'LTR', 'ROLL', 'SET'].map(u => (
+                              <option key={u} value={u}>{u}</option>
+                            ))}
+                          </select>
                           <button
                             type="button"
                             onClick={() => setSetBomForm(f => ({
