@@ -17,7 +17,6 @@ import api, {
   getIntelligenceReadiness,
   getIntelligenceVersion,
   invalidateDataQueries,
-  waitForSalesRebuild,
   type DashboardSummaryResponse,
 } from '../api/client'
 import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, startOfMonthIsoIST, startOfWeekIsoIST, todayIsoIST } from '../lib/reportingDates'
@@ -1187,8 +1186,8 @@ export default function Dashboard() {
         setParitySyncError(res.message || 'Tier-3 sync failed')
         return
       }
-      setParityReloadMessage(res.message || 'Syncing Tier-3 uploads…')
-      const cov = await waitForSalesRebuild(msg => setParityReloadMessage(msg))
+      setParityReloadMessage(res.message || 'Merging daily uploads…')
+      const cov = await getCoverage({ light: true, timeout: 60_000 })
       useSession.getState().setCoverage(cov)
       invalidateDataQueries(qc)
       await qc.refetchQueries({ queryKey: ['data-parity'] })

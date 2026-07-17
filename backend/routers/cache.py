@@ -26,33 +26,26 @@ _log = logging.getLogger(__name__)
 _tier3_manual_sync_queued: set[str] = set()
 
 
-def _run_manual_tier3_sync_worker(session_id: str) -> None:
-    """Background Tier-3 merge for /cache/sync-tier3 (can take several minutes on large catalogs)."""
-    from ..routers.upload import (
-        _finalize_sales_data_refresh,
-        _rebuild_sales_sync,
-        _resolve_upload_session,
-    )
+def _apply_tier3_sync_to_session(sess) -> tuple[bool, str, int]:
+    """Merge Tier-3 SQLite into session and rebuild sales_df. Returns (ok, message, sales_rows)."""
+    from ..routers.upload import _finalize_sales_data_refresh, _rebuild_sales_sync
     from ..routers.data import _invalidate_intelligence_bundle_cache
     from ..services.tier3_session_merge import merge_tier3_light
     import backend.main as _main
 
-    sess = None
+    if sess is None:
+        return False, "No session", 0
+    sess.sales_rebuild_status = "running"
+    sess.sales_rebuild_message = "Syncing Tier-3 uploads into session…"
     try:
-        sess = _resolve_upload_session(session_id)
-        if sess is None:
-            _log.warning("sync-tier3 worker: session %s not found", session_id[:8])
-            return
-        sess.sales_rebuild_status = "running"
-        sess.sales_rebuild_message = "Syncing Tier-3 uploads into session…"
         with sess._daily_restore_lock:
             merge_tier3_light(sess)
             ok, msg = _rebuild_sales_sync(sess, refresh_sqlite=False)
         if not ok:
             sess.sales_rebuild_status = "error"
             sess.sales_rebuild_message = msg or "Tier-3 sync failed"
-            return
-        n_sales = len(sess.sales_df) if not sess.sales_df.empty else 0
+            return False, sess.sales_rebuild_message, 0
+        n_sales = len(sess.sales_df) if not getattr(sess.sales_df, "empty", True) else 0
         sess._quarterly_cache.clear()
         try:
             _main.publish_warm_cache_from_session(sess)
@@ -70,14 +63,34 @@ def _run_manual_tier3_sync_worker(session_id: str) -> None:
         sess.sales_rebuild_message = (
             f"Merged latest daily uploads from Tier-3. {msg} ({n_sales:,} sales rows)"
         )
+        return True, sess.sales_rebuild_message, n_sales
     except Exception as e:
-        _log.exception("background sync-tier3 failed")
-        if sess is not None:
-            sess.sales_rebuild_status = "error"
-            sess.sales_rebuild_message = str(e)
+        _log.exception("sync-tier3 failed")
+        sess.sales_rebuild_status = "error"
+        sess.sales_rebuild_message = str(e)
+        return False, str(e), 0
     finally:
-        if sess is not None and sess.sales_rebuild_status == "running":
+        if getattr(sess, "sales_rebuild_status", "idle") == "running":
             sess.sales_rebuild_status = "idle"
+
+
+def _run_manual_tier3_sync_worker(session_id: str) -> None:
+    """Background Tier-3 merge for legacy callers — prefer inline _apply_tier3_sync_to_session."""
+    from ..routers.upload import _resolve_upload_session
+
+    try:
+        sess = _resolve_upload_session(session_id)
+        if sess is None:
+            _log.warning("sync-tier3 worker: session %s not found", session_id[:8])
+            return
+        _apply_tier3_sync_to_session(sess)
+        try:
+            from ..db.forecast_session_pg import persist_session_bundle_thread_safe
+
+            persist_session_bundle_thread_safe(session_id, sess)
+        except Exception:
+            _log.exception("PostgreSQL persist after background sync-tier3 failed")
+    finally:
         _tier3_manual_sync_queued.discard(session_id)
 
 
@@ -911,9 +924,11 @@ def cache_reload_fresh(request: Request, background_tasks: BackgroundTasks):
 @router.post("/sync-tier3", response_model=CacheReloadResponse)
 def cache_sync_tier3(request: Request):
     """
-    Lightweight Tier-3 merge: sync recent SQLite daily uploads into the current
-    session and rebuild sales_df — NO GitHub download, no full session wipe.
-    Runs in the background so the dashboard stays responsive.
+    Merge recent Tier-3 SQLite daily uploads into the **current** session and rebuild
+    sales_df — NO GitHub download, no full session wipe.
+
+    Runs inline on the request session so multi-worker hosts do not lose the merge on
+    a background worker that holds a different in-memory session copy.
     """
     sess = request.state.session
     if sess is None:
@@ -925,7 +940,7 @@ def cache_sync_tier3(request: Request):
     if getattr(sess, "sales_rebuild_status", "idle") == "running":
         return CacheReloadResponse(
             ok=True,
-            message="Sales sync already running in background — charts refresh when complete.",
+            message="Sales sync already running — charts refresh when complete.",
             sales_rows=n_sales,
         )
     if sid and sid in _tier3_manual_sync_queued:
@@ -937,44 +952,18 @@ def cache_sync_tier3(request: Request):
 
     if sid:
         _tier3_manual_sync_queued.add(str(sid))
-        # Flip running immediately so /coverage reflects activity before the worker starts.
-        sess.sales_rebuild_status = "running"
-        sess.sales_rebuild_message = "Syncing Tier-3 uploads into session…"
-        from ..concurrency import AUX_EXECUTOR
-
-        AUX_EXECUTOR.submit(_run_manual_tier3_sync_worker, str(sid))
-    else:
-        try:
-            from ..routers.upload import _sync_session_platforms_from_sqlite, _rebuild_sales_sync
-            from ..routers.data import _invalidate_intelligence_bundle_cache
-            import backend.main as _main
-
-            with sess._daily_restore_lock:
-                _sync_session_platforms_from_sqlite(sess, months=6)
-                ok, msg = _rebuild_sales_sync(sess, refresh_sqlite=False)
-            if not ok:
-                return CacheReloadResponse(ok=False, message=msg, sales_rows=0)
-            n_sales = len(sess.sales_df) if not sess.sales_df.empty else 0
-            sess._quarterly_cache.clear()
+    try:
+        ok, msg, n_sales = _apply_tier3_sync_to_session(sess)
+        if sid:
             try:
-                _main.publish_warm_cache_from_session(sess)
-            except Exception:
-                pass
-            try:
-                _invalidate_intelligence_bundle_cache()
-            except Exception:
-                pass
-            return CacheReloadResponse(
-                ok=True,
-                message=f"Merged latest daily uploads from Tier-3. {msg}",
-                sales_rows=n_sales,
-            )
-        except Exception as e:
-            _log.exception("sync-tier3 failed")
-            return CacheReloadResponse(ok=False, message=str(e), sales_rows=0)
+                from ..db.forecast_session_pg import persist_session_bundle_thread_safe
 
-    return CacheReloadResponse(
-        ok=True,
-        message="Tier-3 sync started in background — dashboard refreshes automatically when complete.",
-        sales_rows=n_sales,
-    )
+                persist_session_bundle_thread_safe(str(sid), sess)
+            except Exception:
+                _log.exception("PostgreSQL persist after sync-tier3 failed")
+        if not ok:
+            return CacheReloadResponse(ok=False, message=msg, sales_rows=n_sales)
+        return CacheReloadResponse(ok=True, message=msg, sales_rows=n_sales)
+    finally:
+        if sid:
+            _tier3_manual_sync_queued.discard(str(sid))
