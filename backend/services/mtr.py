@@ -430,12 +430,15 @@ def _amazon_fba_aggregate_order_lines(df: pd.DataFrame, *, has_order_id: bool) -
 
     sum_cols = [
         c for c in (
-            "Quantity", "Invoice_Amount", "Total_Tax", "CGST", "SGST", "IGST",
+            "Quantity", "Total_Tax", "CGST", "SGST", "IGST",
             "Tax_Exclusive_Gross", "Item_Price",
         ) if c in work.columns
     ]
+    # Invoice_Amount: use first, never sum. Summing all-NaN FBA Product-Amount gaps
+    # becomes 0.0 and wrongly re-labels every row as FreeReplacement.
     first_cols = [
         c for c in (
+            "Invoice_Amount",
             "Report_Type", "Ship_To_State", "Ship_To_City", "Place_Of_Supply", "Warehouse_Id", "Fulfillment",
             "Payment_Method", "Invoice_Number", "Buyer_Name", "Customer_Name_Alt", "Buyer_GSTIN", "IRN_Status",
             "Product_Name", "Ship_From_State", "Bill_From_State", "Location_Line", "Invoice_Date_Text",
