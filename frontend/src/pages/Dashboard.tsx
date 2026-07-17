@@ -17,6 +17,7 @@ import api, {
   getIntelligenceReadiness,
   getIntelligenceVersion,
   invalidateDataQueries,
+  waitForSalesRebuild,
   type DashboardSummaryResponse,
 } from '../api/client'
 import { addDaysIsoIST, daysAgoIsoIST, reportingSpanDays, startOfMonthIsoIST, startOfWeekIsoIST, todayIsoIST } from '../lib/reportingDates'
@@ -1171,8 +1172,14 @@ export default function Dashboard() {
   }, [returnsImport, qc])
 
   const [paritySyncError, setParitySyncError] = useState<string | null>(null)
+  const [parityReloading, setParityReloading] = useState(false)
+  const [parityReloadMessage, setParityReloadMessage] = useState<string | null>(null)
   const handleParityReload = async () => {
+    if (parityReloading || salesRebuildRunning) return
     setParitySyncError(null)
+    setParityReloadMessage(null)
+    setParityReloading(true)
+    setParityReloadMessage('Starting Tier-3 merge…')
     clearIntelligenceCache()
     try {
       const res = await cacheSyncTier3()
@@ -1180,16 +1187,20 @@ export default function Dashboard() {
         setParitySyncError(res.message || 'Tier-3 sync failed')
         return
       }
-      // Wait briefly for background sales_rebuild to start, then refresh once.
-      // Do not clear caches in a loop — that kept the dashboard on "Refining…".
-      await new Promise(r => setTimeout(r, 1500))
-      void qc.invalidateQueries({ queryKey: ['coverage-poll'] })
-      void qc.invalidateQueries({ queryKey: ['dashboard-summary'] })
-      void qc.invalidateQueries({ queryKey: ['intelligence-bundle'] })
-      void qc.invalidateQueries({ queryKey: ['intelligence-bundle-full'] })
-      void qc.invalidateQueries({ queryKey: ['data-parity'] })
+      setParityReloadMessage(res.message || 'Syncing Tier-3 uploads…')
+      const cov = await waitForSalesRebuild(msg => setParityReloadMessage(msg))
+      useSession.getState().setCoverage(cov)
+      invalidateDataQueries(qc)
+      await qc.refetchQueries({ queryKey: ['data-parity'] })
+      await qc.refetchQueries({ queryKey: ['dashboard-summary'] })
+      await qc.refetchQueries({ queryKey: ['intelligence-bundle'] })
+      setParityReloadMessage(
+        cov.sales_rebuild_message || 'Daily uploads merged — dashboard refreshed.',
+      )
     } catch (e) {
       setParitySyncError(e instanceof Error ? e.message : 'Tier-3 sync failed to start')
+    } finally {
+      setParityReloading(false)
     }
   }
 
@@ -1925,15 +1936,21 @@ export default function Dashboard() {
           {parityReport.warnings.map((w, i) => (
             <p key={i}>{w}</p>
           ))}
+          {parityReloadMessage ? (
+            <p className="text-blue-800 text-xs">{parityReloadMessage}</p>
+          ) : null}
           {paritySyncError ? (
             <p className="text-red-700 text-xs">{paritySyncError}</p>
           ) : null}
           <button
+            type="button"
             onClick={() => void handleParityReload()}
-            disabled={salesRebuildRunning}
+            disabled={parityReloading || salesRebuildRunning}
             className="mt-1 inline-flex items-center gap-1.5 rounded-md bg-amber-100 border border-amber-300 px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-200 disabled:opacity-50 transition-colors"
           >
-            {salesRebuildRunning ? '↻ Syncing in background…' : '↻ Reload data now'}
+            {parityReloading || salesRebuildRunning
+              ? '↻ Syncing daily uploads…'
+              : '↻ Reload data now'}
           </button>
         </div>
       ) : null}

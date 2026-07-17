@@ -375,7 +375,8 @@ def build_parity_report(sess, *, planning_date: str | None = None) -> dict[str, 
     tier3_files = sum(int((tier3.get(p) or {}).get("file_count") or 0) for p in tier3)
     sales_through = effective_sales_through(sess)
     warnings: list[str] = []
-    if tier3_files > 0 and tier3_token_mismatch(sess):
+    token_mismatch = tier3_token_mismatch(sess)
+    if tier3_files > 0 and token_mismatch:
         warnings.append(
             "Tier-3 daily uploads exist but are not fully merged into this session — "
             "Intelligence and PO may disagree until data reloads."
@@ -387,7 +388,9 @@ def build_parity_report(sess, *, planning_date: str | None = None) -> dict[str, 
             f"Existing PO sheet looks stale ({ep_fn or 'unknown'}) — production uses "
             "Po 17-Jun-26.xlsx; reload warm cache or re-upload for matching PO totals."
         )
-    if session_platform_shorter_than_tier3(sess):
+  # Only warn when Tier-3 is not yet merged into this session — after Reload data now
+  # (merge_tier3_light + mark_tier3_sync_applied) the banner should clear.
+    if session_platform_shorter_than_tier3(sess) and token_mismatch:
         warnings.append(
             "Session platform history is shorter than Tier-3 SQLite — use Reload from server "
             "or run PO calculate to merge recent dailies."

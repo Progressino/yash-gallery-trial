@@ -29,23 +29,27 @@ _tier3_manual_sync_queued: set[str] = set()
 def _run_manual_tier3_sync_worker(session_id: str) -> None:
     """Background Tier-3 merge for /cache/sync-tier3 (can take several minutes on large catalogs)."""
     from ..routers.upload import (
+        _finalize_sales_data_refresh,
         _rebuild_sales_sync,
         _resolve_upload_session,
-        _sync_session_platforms_from_sqlite,
     )
     from ..routers.data import _invalidate_intelligence_bundle_cache
+    from ..services.tier3_session_merge import merge_tier3_light
     import backend.main as _main
 
-    sess = _resolve_upload_session(session_id)
-    if sess is None:
-        return
-    sess.sales_rebuild_status = "running"
-    sess.sales_rebuild_message = "Syncing Tier-3 uploads into session…"
+    sess = None
     try:
+        sess = _resolve_upload_session(session_id)
+        if sess is None:
+            _log.warning("sync-tier3 worker: session %s not found", session_id[:8])
+            return
+        sess.sales_rebuild_status = "running"
+        sess.sales_rebuild_message = "Syncing Tier-3 uploads into session…"
         with sess._daily_restore_lock:
-            _sync_session_platforms_from_sqlite(sess, months=6)
+            merge_tier3_light(sess)
             ok, msg = _rebuild_sales_sync(sess, refresh_sqlite=False)
         if not ok:
+            sess.sales_rebuild_status = "error"
             sess.sales_rebuild_message = msg or "Tier-3 sync failed"
             return
         n_sales = len(sess.sales_df) if not sess.sales_df.empty else 0
@@ -59,17 +63,21 @@ def _run_manual_tier3_sync_worker(session_id: str) -> None:
         except Exception:
             pass
         try:
-            from ..routers.upload import _finalize_sales_data_refresh
-
             _finalize_sales_data_refresh(sess)
         except Exception:
             pass
-        sess.sales_rebuild_message = f"Merged latest daily uploads from Tier-3. {msg} ({n_sales:,} sales rows)"
+        sess.sales_rebuild_status = "done"
+        sess.sales_rebuild_message = (
+            f"Merged latest daily uploads from Tier-3. {msg} ({n_sales:,} sales rows)"
+        )
     except Exception as e:
         _log.exception("background sync-tier3 failed")
-        sess.sales_rebuild_message = str(e)
+        if sess is not None:
+            sess.sales_rebuild_status = "error"
+            sess.sales_rebuild_message = str(e)
     finally:
-        sess.sales_rebuild_status = "idle"
+        if sess is not None and sess.sales_rebuild_status == "running":
+            sess.sales_rebuild_status = "idle"
         _tier3_manual_sync_queued.discard(session_id)
 
 
@@ -929,6 +937,9 @@ def cache_sync_tier3(request: Request):
 
     if sid:
         _tier3_manual_sync_queued.add(str(sid))
+        # Flip running immediately so /coverage reflects activity before the worker starts.
+        sess.sales_rebuild_status = "running"
+        sess.sales_rebuild_message = "Syncing Tier-3 uploads into session…"
         from ..concurrency import AUX_EXECUTOR
 
         AUX_EXECUTOR.submit(_run_manual_tier3_sync_worker, str(sid))

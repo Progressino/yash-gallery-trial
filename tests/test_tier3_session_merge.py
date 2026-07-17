@@ -19,6 +19,27 @@ def test_tier3_token_mismatch_detects_new_upload(monkeypatch):
     assert t3.platforms_with_tier3_token_mismatch(sess) == ["amazon"]
 
 
+def test_build_parity_report_skips_shorter_warning_when_tokens_synced(monkeypatch):
+    sess = AppSession()
+    monkeypatch.setattr("backend.services.daily_store.get_summary", lambda: {"amazon": {"file_count": 5}})
+    monkeypatch.setattr("backend.services.daily_store.get_tier3_sync_token", lambda: {"amazon": "1"})
+    monkeypatch.setattr(t3, "tier3_token_mismatch", lambda _s: False)
+    monkeypatch.setattr(t3, "session_platform_shorter_than_tier3", lambda _s: True)
+    monkeypatch.setattr(t3, "effective_sales_through", lambda _s: "2026-07-17")
+    monkeypatch.setattr(t3, "sales_data_gap_needs_warning", lambda *_a: False)
+
+    report = t3.build_parity_report(sess, planning_date="2026-07-17")
+    assert not any("shorter than Tier-3" in w for w in report["warnings"])
+
+
+def test_sync_tier3_worker_clears_queue_when_session_missing():
+    from backend.routers import cache as cache_router
+
+    cache_router._tier3_manual_sync_queued.add("missing-session")
+    cache_router._run_manual_tier3_sync_worker("missing-session")
+    assert "missing-session" not in cache_router._tier3_manual_sync_queued
+
+
 def test_build_parity_report_warns_when_tier3_empty_but_session_has_sales(monkeypatch):
     sess = AppSession()
     sess.sales_df = pd.DataFrame(
