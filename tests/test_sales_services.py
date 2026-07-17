@@ -267,8 +267,8 @@ def test_dedup_keeps_refund_sharing_order_with_invoice_shipment():
     assert int(out[out["Transaction_Type"] == "Refund"]["Quantity"].sum()) == 1
 
 
-def test_dedup_amazon_fba_collapses_clone_rows_and_sums_split_qty():
-    """FBA Customer Shipment: exact clones removed, then qty summed per order line."""
+def test_dedup_amazon_fba_sums_identical_qty_lines_as_multi_unit():
+    """FBA Customer Shipment: identical Quantity=1 rows are multi-units — sum them."""
     d = pd.DataFrame(
         {
             "Invoice_Number": ["", "", ""],
@@ -295,7 +295,28 @@ def test_dedup_amazon_fba_collapses_clone_rows_and_sums_split_qty():
     )
     out = dedup_amazon_mtr_dataframe(d)
     assert len(out) == 1
-    assert float(out["Quantity"].iloc[0]) == 3.0
+    assert float(out["Quantity"].iloc[0]) == 4.0
+
+
+def test_amazon_july16_daily_rar_totals_966_after_dedup():
+    """Sales 16-Jul-26 YG+Akiko+USA+UAE Amazon dailies → 966 shipment units after FBA aggregate."""
+    from pathlib import Path
+    from backend.services.mtr import parse_mtr_csv, dedup_amazon_mtr_dataframe
+
+    root = Path("/tmp/sales16jul/Sales 16-Jul-26")
+    if not root.is_dir():
+        import pytest
+        pytest.skip("Sales 16-Jul-26 extract not present")
+    dfs = []
+    for p in sorted(root.glob("*Amazon*.csv")):
+        df, _ = parse_mtr_csv(p.read_bytes(), p.name)
+        dfs.append(df)
+    comb = pd.concat(dfs, ignore_index=True)
+    out = dedup_amazon_mtr_dataframe(comb)
+    qty = pd.to_numeric(out["Quantity"], errors="coerce").fillna(0)
+    txn = out["Transaction_Type"].astype(str)
+    assert int(qty[txn.eq("Shipment")].sum()) == 966
+    assert int(qty[txn.eq("FreeReplacement")].sum()) == 0
 
 
 def test_build_sales_df_amazon_with_mapping():
