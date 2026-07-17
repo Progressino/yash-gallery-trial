@@ -75,18 +75,49 @@ def _apply_tier3_sync_to_session(sess) -> tuple[bool, str, int]:
 
 
 def _run_manual_tier3_sync_worker(session_id: str) -> None:
-    """Background Tier-3 merge for legacy callers — prefer inline _apply_tier3_sync_to_session."""
+    """Background Tier-3 merge — load session from PostgreSQL, sync, persist back."""
     from ..routers.upload import _resolve_upload_session
 
+    sess = None
     try:
-        sess = _resolve_upload_session(session_id)
+        try:
+            from ..db.forecast_session_pg import load_session_from_pg, pg_session_persist_enabled
+
+            if pg_session_persist_enabled():
+                sess = load_session_from_pg(session_id)
+        except Exception:
+            _log.exception("PostgreSQL load before sync-tier3 failed")
+        if sess is None:
+            sess = _resolve_upload_session(session_id)
         if sess is None:
             _log.warning("sync-tier3 worker: session %s not found", session_id[:8])
             return
+        try:
+            from ..db.forecast_session_pg import write_session_rebuild_status_pg
+
+            write_session_rebuild_status_pg(
+                session_id, "running", "Syncing Tier-3 uploads into session…"
+            )
+        except Exception:
+            pass
+        try:
+            import backend.main as _main
+
+            _main.try_attach_shared_frames_fast(sess)
+        except Exception:
+            pass
         _apply_tier3_sync_to_session(sess)
         try:
-            from ..db.forecast_session_pg import persist_session_bundle_thread_safe
+            from ..db.forecast_session_pg import (
+                persist_session_bundle_thread_safe,
+                write_session_rebuild_status_pg,
+            )
 
+            write_session_rebuild_status_pg(
+                session_id,
+                getattr(sess, "sales_rebuild_status", "idle") or "idle",
+                getattr(sess, "sales_rebuild_message", "") or "",
+            )
             persist_session_bundle_thread_safe(session_id, sess)
         except Exception:
             _log.exception("PostgreSQL persist after background sync-tier3 failed")
@@ -924,11 +955,11 @@ def cache_reload_fresh(request: Request, background_tasks: BackgroundTasks):
 @router.post("/sync-tier3", response_model=CacheReloadResponse)
 def cache_sync_tier3(request: Request):
     """
-    Merge recent Tier-3 SQLite daily uploads into the **current** session and rebuild
-    sales_df — NO GitHub download, no full session wipe.
+    Merge recent Tier-3 SQLite daily uploads into the session and rebuild sales_df.
 
-    Runs inline on the request session so multi-worker hosts do not lose the merge on
-    a background worker that holds a different in-memory session copy.
+    Returns immediately and runs the heavy merge in a background thread. The current
+    session is persisted to PostgreSQL first so multi-worker hosts and coverage
+    polls see ``sales_rebuild_status=running`` while work is in flight.
     """
     sess = request.state.session
     if sess is None:
@@ -950,20 +981,35 @@ def cache_sync_tier3(request: Request):
             sales_rows=n_sales,
         )
 
+    try:
+        import backend.main as _main
+
+        _main.try_attach_shared_frames_fast(sess)
+    except Exception:
+        pass
+
+    sess.sales_rebuild_status = "running"
+    sess.sales_rebuild_message = "Syncing Tier-3 uploads into session…"
+    if sid:
+        try:
+            from ..db.forecast_session_pg import write_session_rebuild_status_pg
+
+            write_session_rebuild_status_pg(str(sid), "running", sess.sales_rebuild_message)
+        except Exception:
+            _log.exception("PostgreSQL rebuild-status write before sync-tier3 failed")
+
     if sid:
         _tier3_manual_sync_queued.add(str(sid))
-    try:
-        ok, msg, n_sales = _apply_tier3_sync_to_session(sess)
-        if sid:
-            try:
-                from ..db.forecast_session_pg import persist_session_bundle_thread_safe
+        from ..concurrency import AUX_EXECUTOR
 
-                persist_session_bundle_thread_safe(str(sid), sess)
-            except Exception:
-                _log.exception("PostgreSQL persist after sync-tier3 failed")
-        if not ok:
-            return CacheReloadResponse(ok=False, message=msg, sales_rows=n_sales)
-        return CacheReloadResponse(ok=True, message=msg, sales_rows=n_sales)
-    finally:
-        if sid:
-            _tier3_manual_sync_queued.discard(str(sid))
+        AUX_EXECUTOR.submit(_run_manual_tier3_sync_worker, str(sid))
+        return CacheReloadResponse(
+            ok=True,
+            message="Tier-3 sync started — dashboard refreshes automatically when complete.",
+            sales_rows=n_sales,
+        )
+
+    ok, msg, n_sales = _apply_tier3_sync_to_session(sess)
+    if not ok:
+        return CacheReloadResponse(ok=False, message=msg, sales_rows=n_sales)
+    return CacheReloadResponse(ok=True, message=msg, sales_rows=n_sales)

@@ -78,6 +78,8 @@ _META_JSON_FIELDS = (
     "po_calculate_existing_po_generation",
     "daily_restored",
     "pause_auto_data_restore",
+    "sales_rebuild_status",
+    "sales_rebuild_message",
 )
 
 _table_ready = False
@@ -127,6 +129,14 @@ def init_db() -> None:
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
+            conn.execute(
+                "ALTER TABLE forecast_app_sessions "
+                "ADD COLUMN IF NOT EXISTS sales_rebuild_status TEXT DEFAULT 'idle'"
+            )
+            conn.execute(
+                "ALTER TABLE forecast_app_sessions "
+                "ADD COLUMN IF NOT EXISTS sales_rebuild_message TEXT DEFAULT ''"
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_forecast_app_sessions_updated "
                 "ON forecast_app_sessions (updated_at DESC)"
@@ -205,6 +215,10 @@ def _hydrate_session_from_bundle(data: bytes):
                         setattr(sess, name, int(val) if val is not None else 0)
                     except (TypeError, ValueError):
                         setattr(sess, name, 0)
+                elif name in ("sales_rebuild_status",):
+                    setattr(sess, name, str(val or "idle"))
+                elif name in ("sales_rebuild_message",):
+                    setattr(sess, name, str(val or ""))
                 elif name in (
                     "daily_sales_sources",
                     "load_warnings",
@@ -299,12 +313,22 @@ def persist_session_bundle(session_id: str, sess) -> bool:
         with conn:
             conn.execute(
                 """
-                INSERT INTO forecast_app_sessions (session_id, bundle, updated_at)
-                VALUES (%s, %s, NOW())
+                INSERT INTO forecast_app_sessions (
+                    session_id, bundle, sales_rebuild_status, sales_rebuild_message, updated_at
+                )
+                VALUES (%s, %s, %s, %s, NOW())
                 ON CONFLICT (session_id) DO UPDATE
-                SET bundle = EXCLUDED.bundle, updated_at = NOW()
+                SET bundle = EXCLUDED.bundle,
+                    sales_rebuild_status = EXCLUDED.sales_rebuild_status,
+                    sales_rebuild_message = EXCLUDED.sales_rebuild_message,
+                    updated_at = NOW()
                 """,
-                (session_id, blob),
+                (
+                    session_id,
+                    blob,
+                    getattr(sess, "sales_rebuild_status", "idle") or "idle",
+                    getattr(sess, "sales_rebuild_message", "") or "",
+                ),
             )
         setattr(sess, "_last_pg_save_ts", time.monotonic())
         return True
@@ -343,6 +367,54 @@ def prune_old_sessions(*, keep: int = 15) -> int:
     except Exception:
         _log.exception("prune_old_sessions failed")
         return 0
+
+
+def read_session_rebuild_status_pg(session_id: str) -> tuple[str, str]:
+    """Fast cross-worker read of sales rebuild job state (no bundle hydrate)."""
+    if not session_id or not _table_ready:
+        return "idle", ""
+    conn = _require_conn()
+    if conn is None:
+        return "idle", ""
+    try:
+        with conn:
+            row = conn.execute(
+                """
+                SELECT sales_rebuild_status, sales_rebuild_message
+                FROM forecast_app_sessions
+                WHERE session_id = %s
+                """,
+                (session_id,),
+            ).fetchone()
+        if not row:
+            return "idle", ""
+        return str(row[0] or "idle"), str(row[1] or "")
+    except Exception:
+        _log.exception("read_session_rebuild_status_pg failed")
+        return "idle", ""
+
+
+def write_session_rebuild_status_pg(session_id: str, status: str, message: str) -> None:
+    """Fast cross-worker write of sales rebuild job state (no full bundle serialize)."""
+    if not session_id or not _table_ready:
+        return
+    conn = _require_conn()
+    if conn is None:
+        return
+    try:
+        with conn:
+            conn.execute(
+                """
+                UPDATE forecast_app_sessions
+                SET sales_rebuild_status = %s,
+                    sales_rebuild_message = %s,
+                    updated_at = NOW()
+                WHERE session_id = %s
+                """,
+                (status or "idle", message or "", session_id),
+            )
+    except Exception:
+        _log.exception("write_session_rebuild_status_pg failed")
 
 
 def delete_session_bundle(session_id: str) -> None:

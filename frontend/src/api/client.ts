@@ -2472,7 +2472,7 @@ export async function cacheReloadFresh(): Promise<{ ok: boolean; message: string
 
 /** Lightweight: sync Tier-3 SQLite into session + rebuild sales. No GitHub download. */
 export async function cacheSyncTier3(): Promise<{ ok: boolean; message: string; sales_rows?: number }> {
-  const { data } = await api.post('/cache/sync-tier3', undefined, { timeout: 300_000 })
+  const { data } = await api.post('/cache/sync-tier3', undefined, { timeout: 60_000 })
   return data
 }
 

@@ -3367,6 +3367,23 @@ def _shared_frames_operational(sess: AppSession) -> bool:
         return False
 
 
+def _overlay_rebuild_status_from_pg(sess: AppSession, session_id: str) -> None:
+    """Light polls use in-RAM sessions — overlay rebuild job state from PostgreSQL."""
+    if not session_id:
+        return
+    try:
+        from ..db.forecast_session_pg import pg_session_persist_enabled, read_session_rebuild_status_pg
+
+        if not pg_session_persist_enabled():
+            return
+        st, msg = read_session_rebuild_status_pg(session_id)
+        if st in ("running", "error", "done"):
+            sess.sales_rebuild_status = st
+            sess.sales_rebuild_message = msg
+    except Exception:
+        pass
+
+
 def _build_coverage_response(sess: AppSession, *, light: bool = False) -> CoverageResponse:
     """Build coverage flags from current session state (no restore side effects)."""
     import pandas as pd
@@ -4162,18 +4179,32 @@ def get_job_status(request: Request):
     from ..concurrency import upload_memory_lock_held
 
     sess = getattr(request.state, "session", None)
+    sid = getattr(request.state, "session_id", None) or request.cookies.get("session_id") or ""
+    sales_rebuild_status = "idle"
+    if sess is not None:
+        sales_rebuild_status = getattr(sess, "sales_rebuild_status", "idle") or "idle"
+    if sid:
+        try:
+            from ..db.forecast_session_pg import pg_session_persist_enabled, read_session_rebuild_status_pg
+
+            if pg_session_persist_enabled():
+                pg_st, _ = read_session_rebuild_status_pg(sid)
+                if pg_st in ("running", "error", "done"):
+                    sales_rebuild_status = pg_st
+        except Exception:
+            pass
     return JobStatusResponse(
         server_time=datetime.now(timezone.utc).isoformat(),
         warm_cache=bool(_main._warm_cache),
         warm_cache_generation=int(getattr(_main, "_warm_cache_generation", 0) or 0),
         upload_memory_lock_held=upload_memory_lock_held(),
-        daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle",
-        sales_rebuild_status=getattr(sess, "sales_rebuild_status", "idle") or "idle",
-        session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle",
-        inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle",
-        daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle",
-        tier1_bulk_status=getattr(sess, "tier1_bulk_status", "idle") or "idle",
-        tier1_bulk_message=getattr(sess, "tier1_bulk_message", "") or "",
+        daily_auto_ingest_status=getattr(sess, "daily_auto_ingest_status", "idle") or "idle" if sess else "idle",
+        sales_rebuild_status=sales_rebuild_status,
+        session_restore_status=getattr(sess, "session_restore_status", "idle") or "idle" if sess else "idle",
+        inventory_upload_status=getattr(sess, "inventory_upload_status", "idle") or "idle" if sess else "idle",
+        daily_inventory_upload_status=getattr(sess, "daily_inventory_upload_status", "idle") or "idle" if sess else "idle",
+        tier1_bulk_status=getattr(sess, "tier1_bulk_status", "idle") or "idle" if sess else "idle",
+        tier1_bulk_message=getattr(sess, "tier1_bulk_message", "") or "" if sess else "",
     )
 
 
@@ -4188,6 +4219,8 @@ async def get_coverage(request: Request, light: bool = False):
 def _get_coverage_sync(request: Request, light: bool = False) -> CoverageResponse:
     sess = _sess(request)
     sid = getattr(request.state, "session_id", None) or ""
+    if light and sid:
+        _overlay_rebuild_status_from_pg(sess, sid)
     try:
         from ..routers.upload import clear_stale_background_jobs
 
