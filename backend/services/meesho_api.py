@@ -18,7 +18,7 @@ import pandas as pd
 import requests
 
 from .helpers import clean_line_id_series, map_to_oms_sku
-from .meesho import _meesho_status_implies_refund, _norm_meesho_size
+from .meesho import _meesho_credit_entry_txn, _norm_meesho_size
 
 log = logging.getLogger("erp.meesho_api")
 
@@ -66,12 +66,7 @@ def test_meesho_connection(client_id: str, client_secret: str, supplier_id: str)
 # ── Status mapping ────────────────────────────────────────────────────────────
 
 def _meesho_txn_type(status: str) -> str:
-    if _meesho_status_implies_refund(status):
-        return "Refund"
-    s = str(status).upper().strip()
-    if "CANCEL" in s:
-        return "Cancel"
-    return "Shipment"
+    return _meesho_credit_entry_txn(status)
 
 
 # ── Orders fetch ──────────────────────────────────────────────────────────────

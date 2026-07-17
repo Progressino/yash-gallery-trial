@@ -60,10 +60,13 @@ def _downcast_mtr(df: pd.DataFrame) -> pd.DataFrame:
               "IRN_Status", "Month", "Month_Label", "Source_File"]:
         if c in df.columns:
             df[c] = df[c].astype("category")
-    for c in ["Quantity", "Invoice_Amount", "Total_Tax", "CGST", "SGST", "IGST",
+    for c in ["Quantity", "Total_Tax", "CGST", "SGST", "IGST",
               "Tax_Exclusive_Gross", "Item_Price", "GST_Rate"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("float32")
+    if "Invoice_Amount" in df.columns:
+        # Preserve NaN — missing Product Amount on daily exports is not a free replacement.
+        df["Invoice_Amount"] = pd.to_numeric(df["Invoice_Amount"], errors="coerce").astype("float32")
     return df
 
 
@@ -200,10 +203,14 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
                 if name in raw.columns
                 else pd.Series("", index=raw.index, dtype=str))
 
-    def gn(name):
-        return (pd.to_numeric(raw[name], errors="coerce").fillna(0).astype("float32")
-                if name in raw.columns
-                else pd.Series(0.0, index=raw.index, dtype="float32"))
+    def gn(name, *, fill_blank: bool = True):
+        if name not in raw.columns:
+            fill = 0.0 if fill_blank else float("nan")
+            return pd.Series(fill, index=raw.index, dtype="float32")
+        ser = pd.to_numeric(raw[name], errors="coerce")
+        if fill_blank:
+            ser = ser.fillna(0)
+        return ser.astype("float32")
 
     def gcol(*names: str) -> pd.Series:
         for name in names:
@@ -293,7 +300,11 @@ def parse_mtr_csv(csv_bytes: bytes, source_file: str) -> Tuple[pd.DataFrame, str
         "Transaction_Type": txn_std,
         "SKU":              g(_sku_col) if _sku_col else pd.Series("", index=raw.index, dtype=str),
         "Quantity":         gn("quantity"),
-        "Invoice_Amount":   gn(_inv_amt_col) if _inv_amt_col else pd.Series(0.0, index=raw.index, dtype="float32"),
+        "Invoice_Amount":   (
+            gn(_inv_amt_col, fill_blank=False)
+            if _inv_amt_col
+            else pd.Series(float("nan"), index=raw.index, dtype="float32")
+        ),
         "Total_Tax":        gn("total tax amount"),
         "CGST":             gn("cgst tax"),
         "SGST":             gn("sgst tax"),

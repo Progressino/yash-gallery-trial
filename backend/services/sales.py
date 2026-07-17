@@ -386,10 +386,10 @@ def amazon_seller_net_units(
 
 def amazon_mtr_free_replacement_mask(df: pd.DataFrame) -> pd.Series:
     """
-    Amazon India free-replacement rows: invoice amount is zero (Seller Central MTR).
+    Amazon India free-replacement rows: invoice amount is explicitly zero (Seller Central MTR).
 
-    These are not paid sales — counting them as Shipment inflates units (e.g. 1379YKGREEN).
-    Real gift-card orders still carry a non-zero invoice amount.
+    Rows with missing / blank amount (daily order exports without Product Amount) are
+  **not** treated as free replacements — they still count as paid shipments.
     """
     if df is None or getattr(df, "empty", True):
         return pd.Series(dtype=bool)
@@ -399,8 +399,8 @@ def amazon_mtr_free_replacement_mask(df: pd.DataFrame) -> pd.Series:
     )
     if not amt_col:
         return pd.Series(False, index=df.index)
-    amt = pd.to_numeric(df[amt_col], errors="coerce").fillna(0.0)
-    return amt.abs() <= 0.01
+    amt = pd.to_numeric(df[amt_col], errors="coerce")
+    return amt.notna() & (amt.abs() <= 0.01)
 
 
 def amazon_mtr_invoice_offset_pair_mask(df: pd.DataFrame) -> pd.Series:

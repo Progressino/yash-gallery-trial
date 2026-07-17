@@ -72,6 +72,27 @@ def _meesho_status_implies_refund(status) -> bool:
     return any(x in s for x in ("RETURN", "RTO", "REVERSE", "REFUND"))
 
 
+def _meesho_credit_entry_txn(status) -> str:
+    """
+    Daily sales parse matrix for ``Reason for Credit Entry`` (or ``order status``).
+
+    | Status        | Sale? | TxnType   |
+    |---------------|-------|-----------|
+    | DELIVERED     | Yes   | Shipment  |
+    | HOLD          | Yes   | Shipment  |
+    | READY_TO_SHIP | Yes   | Shipment  |
+    | SHIPPED       | Yes   | Shipment  |
+    | CANCELLED     | No    | Cancel    |
+    | RETURNED/RTO  | No    | Refund    |
+    """
+    if _meesho_status_implies_refund(status):
+        return "Refund"
+    u = str(status).strip().upper()
+    if "CANCEL" in u:
+        return "Cancel"
+    return "Shipment"
+
+
 def _clean_meesho_cell(value) -> str:
     """Strip Excel float noise (1158.0 → 1158) and null tokens; keep listing case for mapping."""
     if value is None:
@@ -552,15 +573,7 @@ def _parse_meesho_inner_zip(inner_zf) -> pd.DataFrame:
             else:
                 df = df.loc[has_sku].copy()
 
-                def _meesho_txn(s):
-                    if _meesho_status_implies_refund(s):
-                        return "Refund"
-                    s2 = str(s).lower()
-                    if "cancel" in s2:
-                        return "Cancel"
-                    return "Shipment"
-
-                df["_TxnType"] = df.get("order_status", "").apply(_meesho_txn)
+                df["_TxnType"] = df.get("order_status", "").apply(_meesho_credit_entry_txn)
                 df["_Month"] = None
                 rows.append(df[["_Date", "_TxnType", "_Qty", "_Rev", "_State", "_OrderId", "_SKU", "_Month"]])
 
@@ -738,14 +751,6 @@ def parse_meesho_order_export_xlsx(file_bytes: bytes) -> Tuple[pd.DataFrame, str
         if not bad.any():
             break
 
-    def _txn(s) -> str:
-        if _meesho_status_implies_refund(s):
-            return "Refund"
-        u = str(s).strip().upper()
-        if "CANCEL" in u:
-            return "Cancel"
-        return "Shipment"
-
     rev = (
         pd.to_numeric(df[rev_c], errors="coerce").fillna(0).astype("float32")
         if rev_c is not None
@@ -753,7 +758,7 @@ def parse_meesho_order_export_xlsx(file_bytes: bytes) -> Tuple[pd.DataFrame, str
     )
     oid_raw = df[order_c].fillna("").astype(str) if order_c is not None else pd.Series("", index=df.index)
     oid_raw = clean_line_id_series(oid_raw)
-    txn_ser = df[txn_c].map(_txn)
+    txn_ser = df[txn_c].map(_meesho_credit_entry_txn)
     dt_key = pd.to_datetime(df[date_c], errors="coerce").dt.strftime("%Y%m%d")
     sku_key = _clean_meesho_str_series(sku_series).astype(str)
     q_key = pd.to_numeric(df[qty_c], errors="coerce").fillna(1).astype(str)
@@ -823,14 +828,9 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     # Status: "reason for credit entry" (DELIVERED/RETURNED/RTO/CANCELLED) or "order status"
     status_col = next((c for c in df.columns if "reason" in c or "order status" in c
                        or c == "status"), None)
-    def _txn(s):
-        if _meesho_status_implies_refund(s):
-            return "Refund"
-        s2 = str(s).lower().strip()
-        if "cancel" in s2:
-            return "Cancel"
-        return "Shipment"
-    df["_TxnType"] = df[status_col].apply(_txn) if status_col else "Shipment"
+    df["_TxnType"] = (
+        df[status_col].apply(_meesho_credit_entry_txn) if status_col else "Shipment"
+    )
 
     # Quantity
     qty_col = next((c for c in df.columns if c == "quantity"), None)

@@ -614,6 +614,8 @@ def test_meesho_csv_txn_types_ship_refund_cancel():
         "order date,reason for credit entry,sku,quantity,sub order no\n"
         "2026-04-14,SHIPPED,A1,1,S1\n"
         "2026-04-14,READY_TO_SHIP,A2,1,S2\n"
+        "2026-04-14,DELIVERED,A5,1,S5\n"
+        "2026-04-14,HOLD,A6,1,S6\n"
         "2026-04-14,CANCELLED,A3,1,S3\n"
         "2026-04-14,RETURNED,A4,1,S4\n"
     )
@@ -622,7 +624,7 @@ def test_meesho_csv_txn_types_ship_refund_cancel():
     ship = out[out["TxnType"] == "Shipment"]["Quantity"].sum()
     ref = out[out["TxnType"] == "Refund"]["Quantity"].sum()
     can = out[out["TxnType"] == "Cancel"]["Quantity"].sum()
-    assert float(ship) == 2.0
+    assert float(ship) == 4.0
     assert float(ref) == 1.0
     assert float(can) == 1.0
 
@@ -1635,6 +1637,23 @@ def test_amazon_mtr_cancel_excluded_from_net_units():
     )
     out = _mtr_to_sales_df(mtr_df, {})
     assert float(out["Units_Effective"].sum()) == 1.0
+
+
+def test_amazon_missing_product_amount_still_counts_as_sale():
+    """Daily Amazon exports without Product Amount still count units as Shipment."""
+    from backend.services.mtr import parse_mtr_csv
+    from backend.services.sales import _mtr_to_sales_df
+
+    csv = (
+        "customer shipment date,merchant sku,quantity,amazon order id\n"
+        "2026-06-01,SKU-A,2,AMZ-1\n"
+        "2026-06-02,SKU-B,1,AMZ-2\n"
+    )
+    mtr_df, msg = parse_mtr_csv(csv.encode("utf-8"), "fba-shipments.csv")
+    assert not mtr_df.empty
+    out = _mtr_to_sales_df(mtr_df, {})
+    assert float(out["Units_Effective"].sum()) == 3.0
+    assert (out["Transaction Type"] == "Shipment").all()
 
 
 def test_amazon_free_replacement_zero_invoice_excluded_from_sales():
