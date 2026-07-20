@@ -141,6 +141,22 @@ def _invalidate_intelligence_bundle_cache() -> None:
     """Clear RAM bundle cache and queue proactive artifact rebuild for standard windows."""
     global _INTELLIGENCE_BUNDLE_CACHE_GEN
     _GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
+
+    # Also delete persisted disk cache files for the process-wide bundle cache.
+    # Otherwise unit tests (and real deployments after upload-driven staleness)
+    # can reload old JSON and re-serve incorrect totals until TTL expiry.
+    try:
+        if os.path.isdir(_INTEL_BUNDLE_DISK_DIR):
+            for name in os.listdir(_INTEL_BUNDLE_DISK_DIR):
+                if not (name.startswith("intel_bundle_") and name.endswith(".json")):
+                    continue
+                try:
+                    os.remove(os.path.join(_INTEL_BUNDLE_DISK_DIR, name))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     schedule_intelligence_bundle_precompute()
     try:
         from ..services.intelligence_artifacts import prebuild_standard_artifacts, schedule_artifact_build, standard_intelligence_windows, KIND_HOT, KIND_DEEP
@@ -4652,10 +4668,16 @@ def _intelligence_bundle_sync(
                 out = dict(artifact)
                 out["version"] = str(ameta.get("current_version") or ameta.get("version") or "")
                 out["stale"] = bool(ameta.get("stale"))
-                if ameta.get("stale"):
-                    out["message"] = "Showing prebuilt totals — refreshing in background…"
-                _bundle_cache_store(cache_key, bundle_cache, out)
-                return out
+                # Stale-while-revalidate is useful for charts, but for single-day
+                # Intelligence reads (which users compare against upload matrices),
+                # serving stale prebuilt totals can be observably wrong (e.g. a whole
+                # platform marked unloaded even though Tier-3 is correct).
+                #
+                # When the artifact is stale, fall through to the Tier-3 / gap-fill
+                # path so this request returns correct numbers.
+                if not ameta.get("stale"):
+                    _bundle_cache_store(cache_key, bundle_cache, out)
+                    return out
         except Exception:
             pass
 

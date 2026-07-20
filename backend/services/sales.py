@@ -1756,6 +1756,21 @@ def _compute_platform_metrics(
         if d.empty:
             return stub
 
+        # Flipkart exports use TxnType:
+        # - Shipment (positive)
+        # - Cancel (cancellation rows; should subtract like Refund)
+        # - ReturnCancel (return cancellation; should add back like Shipment)
+        #
+        # Normalize these so downstream metrics (shipments/refunds, net units,
+        # monthly pivots, daily chart points) treat Cancel as Refund and
+        # ReturnCancel as Shipment.
+        if platform_name == "Flipkart" and txn_col in d.columns:
+            txn_norm = d[txn_col].astype(str).str.strip()
+            l = txn_norm.str.lower()
+            txn_norm = txn_norm.mask(l.eq("returncancel"), ship_val)
+            txn_norm = txn_norm.mask(l.eq("cancel"), refund_val)
+            d[txn_col] = txn_norm
+
         d_blob = d
         if start_date or end_date:
             d_win = _filter_by_reporting_days(d, "_Date", start_date, end_date)
@@ -1998,6 +2013,10 @@ def _unified_platform_summary_one(
         return out
 
     txn = s["Transaction Type"].astype(str).str.strip()
+    if platform_name == "Flipkart":
+        l = txn.str.lower()
+        txn = txn.mask(l.eq("returncancel"), "Shipment")
+        txn = txn.mask(l.eq("cancel"), "Refund")
     qty = pd.to_numeric(s["Quantity"], errors="coerce").fillna(0)
     shipped_mask = txn == "Shipment"
     refund_mask = txn == "Refund"
