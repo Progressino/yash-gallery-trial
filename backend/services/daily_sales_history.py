@@ -409,5 +409,10 @@ def build_sales_history_sales_df(
     out = _build_platform_sales_df(sess, frame_overrides=overrides)
     if out is None or out.empty:
         return pd.DataFrame()
+    if "Source" in out.columns:
+        src = out["Source"].astype(str).str.strip().str.lower()
+        miss = out["Source"].isna() | src.isin(("", "nan", "none"))
+        if miss.any() and "mtr_df" in overrides:
+            out.loc[miss, "Source"] = "Amazon"
     out = _dedup_sales_linekey_rows(out)
     return _downcast_sales(out)
