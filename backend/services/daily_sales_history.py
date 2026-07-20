@@ -68,10 +68,27 @@ def sales_history_view_end_date(sales_df: pd.DataFrame | None, end_date: str | N
             return _as_naive_day(end_date)
         except Exception:
             pass
-    # Always anchor the view to today so the 30-day window shows the most
-    # recent period. If recent uploads are missing, those dates will appear
-    # empty and flagged by the upload-coverage warnings.
-    return _as_naive_day(today_ist_timestamp())
+    # Sales for "today" are uploaded tomorrow — default the matrix to yesterday (IST).
+    return _as_naive_day(today_ist_timestamp()) - pd.Timedelta(days=1)
+
+
+def sales_history_window_bounds(
+    *,
+    days: int | None = None,
+    end_date: str | None = None,
+    start_date: str | None = None,
+    sales_df: pd.DataFrame | None = None,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    end = _as_naive_day(sales_history_view_end_date(sales_df, end_date))
+    start_raw = (start_date or "").strip()[:10]
+    if len(start_raw) == 10:
+        start = _as_naive_day(start_raw)
+        if start > end:
+            start, end = end, start
+        return start, end
+    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
+    start = end - pd.Timedelta(days=max(0, span - 1))
+    return start, end
 
 
 def filter_sales_history_window(
@@ -79,14 +96,15 @@ def filter_sales_history_window(
     *,
     days: int | None = None,
     end_date: str | None = None,
+    start_date: str | None = None,
     platform: str | None = None,
 ) -> pd.DataFrame:
     tall = _normalize_sales_tall(sales_df)
     if tall.empty:
         return tall
-    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
-    end = _as_naive_day(sales_history_view_end_date(sales_df, end_date))
-    start = end - pd.Timedelta(days=max(0, span - 1))
+    start, end = sales_history_window_bounds(
+        days=days, end_date=end_date, start_date=start_date, sales_df=sales_df
+    )
     mask = (tall["Date"] >= start) & (tall["Date"] <= end)
     sub = tall.loc[mask].copy()
     plat = (platform or "").strip()
@@ -107,14 +125,15 @@ def sales_history_upload_coverage(
     *,
     days: int | None = None,
     end_date: str | None = None,
+    start_date: str | None = None,
     sales_df: pd.DataFrame | None = None,
 ) -> dict:
     """Per-day Tier-3 upload gaps for core marketplaces in the view window."""
     from .daily_store import get_upload_report_day_coverage
 
-    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
-    end = sales_history_view_end_date(sales_df, end_date)
-    start = end - pd.Timedelta(days=max(0, span - 1))
+    start, end = sales_history_window_bounds(
+        days=days, end_date=end_date, start_date=start_date, sales_df=sales_df
+    )
     coverage = get_upload_report_day_coverage()
     gaps: list[dict] = []
     for d in pd.date_range(start, end, freq="D"):
@@ -146,14 +165,15 @@ def sales_history_summary(
     *,
     days: int | None = None,
     end_date: str | None = None,
+    start_date: str | None = None,
     platform: str | None = None,
 ) -> dict:
     view = filter_sales_history_window(
-        sales_df, days=days, end_date=end_date, platform=platform
+        sales_df, days=days, end_date=end_date, start_date=start_date, platform=platform
     )
     if view.empty:
         coverage = sales_history_upload_coverage(
-            days=days, end_date=end_date, sales_df=sales_df
+            days=days, end_date=end_date, start_date=start_date, sales_df=sales_df
         )
         return {
             "loaded": False,
@@ -171,7 +191,7 @@ def sales_history_summary(
         txns=("Units", "count"),
     )
     coverage = sales_history_upload_coverage(
-        days=days, end_date=end_date, sales_df=sales_df
+        days=days, end_date=end_date, start_date=start_date, sales_df=sales_df
     )
     return {
         "loaded": True,
@@ -196,6 +216,7 @@ def sales_history_wide_matrix(
     offset: int = 0,
     days: int | None = None,
     end_date: str | None = None,
+    start_date: str | None = None,
     platform: str | None = None,
 ) -> dict:
     """Pivot net daily units (Units_Effective) to SKU rows × date columns."""
@@ -214,14 +235,15 @@ def sales_history_wide_matrix(
         "platforms": sales_platforms_available(sales_df),
     }
     view = filter_sales_history_window(
-        sales_df, days=days, end_date=end_date, platform=platform
+        sales_df, days=days, end_date=end_date, start_date=start_date, platform=platform
     )
     if view.empty:
         return empty
 
-    span = int(days if days is not None else _DEFAULT_VIEW_DAYS)
-    end = sales_history_view_end_date(sales_df, end_date)
-    start = end - pd.Timedelta(days=max(0, span - 1))
+    start, end = sales_history_window_bounds(
+        days=days, end_date=end_date, start_date=start_date, sales_df=sales_df
+    )
+    span = int((end - start).days) + 1
     dates_sorted = list(pd.date_range(start, end, freq="D"))
     date_strs = [str(pd.Timestamp(d).date()) for d in dates_sorted]
 
@@ -276,7 +298,9 @@ def sales_history_wide_matrix(
         for sku, row in pivot.iterrows()
     ]
     coverage = (
-        sales_history_upload_coverage(days=days, end_date=end_date, sales_df=sales_df)
+        sales_history_upload_coverage(
+            days=days, end_date=end_date, start_date=start_date, sales_df=sales_df
+        )
         if offset == 0
         else {"core_platforms": list(_CORE_PLATFORMS), "coverage_gaps": []}
     )
@@ -345,3 +369,50 @@ def sales_history_for_sku(
         "window_start": rows[0]["date"] if rows else "",
         "window_end": rows[-1]["date"] if rows else "",
     }
+
+
+def build_sales_history_sales_df(
+    sess,
+    *,
+    days: int | None = None,
+    end_date: str | None = None,
+    start_date: str | None = None,
+) -> pd.DataFrame:
+    """
+    Build unified sales for the Sales History window from Tier-3 uploads (deduped),
+    not the session warm-cache sales_df (which can double-count re-uploaded days).
+    """
+    import pandas as pd
+
+    from .daily_store import load_platform_data_for_report_range
+    from .sales import build_sales_df
+
+    start, end = sales_history_window_bounds(
+        days=days, end_date=end_date, start_date=start_date, sales_df=None
+    )
+    s0, s1 = str(start.date()), str(end.date())
+    specs = (
+        ("amazon", "mtr_df"),
+        ("myntra", "myntra_df"),
+        ("meesho", "meesho_df"),
+        ("flipkart", "flipkart_df"),
+        ("snapdeal", "snapdeal_df"),
+    )
+    frames: dict[str, pd.DataFrame] = {}
+    any_loaded = False
+    for pk, attr in specs:
+        df = load_platform_data_for_report_range(pk, s0, s1, dedup=True)
+        if df is not None and not df.empty:
+            frames[attr] = df
+            any_loaded = True
+    if not any_loaded:
+        return pd.DataFrame()
+    sku_map = getattr(sess, "sku_mapping", None) or {}
+    return build_sales_df(
+        frames.get("mtr_df", pd.DataFrame()),
+        frames.get("myntra_df", pd.DataFrame()),
+        frames.get("meesho_df", pd.DataFrame()),
+        frames.get("flipkart_df", pd.DataFrame()),
+        sku_map,
+        snapdeal_df=frames.get("snapdeal_df"),
+    )

@@ -7,10 +7,18 @@ import {
   getPoDailySalesHistorySummary,
 } from '../api/client'
 import { useSession } from '../store/session'
-import { todayIsoIST } from '../lib/reportingDates'
+import { todayIsoIST, daysAgoIsoIST, addDaysIsoIST, reportingSpanDays } from '../lib/reportingDates'
 
 const PAGE_SIZE = 100
-const HISTORY_WINDOW_DAYS = 30
+const DEFAULT_WINDOW_DAYS = 30
+
+function defaultHistoryEndDate() {
+  return daysAgoIsoIST(1)
+}
+
+function defaultHistoryStartDate(endIso: string, windowDays: number) {
+  return addDaysIsoIST(endIso, -(windowDays - 1))
+}
 
 function downloadCsv(filename: string, headers: string[], rows: string[][]) {
   const lines = [headers.join(','), ...rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(','))]
@@ -41,39 +49,52 @@ export default function SalesHistory() {
   const [platform, setPlatform] = useState('all')
   const [skuFilter, setSkuFilter] = useState('')
   const [skuQuery, setSkuQuery] = useState('')
-  const [skuWindow, setSkuWindow] = useState(30)
+  const [skuWindow, setSkuWindow] = useState(DEFAULT_WINDOW_DAYS)
   const [page, setPage] = useState(0)
   const [exporting, setExporting] = useState(false)
+  const [endDate, setEndDate] = useState(defaultHistoryEndDate)
+  const [startDate, setStartDate] = useState(() =>
+    defaultHistoryStartDate(defaultHistoryEndDate(), DEFAULT_WINDOW_DAYS),
+  )
+
+  const windowDays = useMemo(() => {
+    const span = reportingSpanDays(startDate, endDate)
+    return span ?? DEFAULT_WINDOW_DAYS
+  }, [startDate, endDate])
+
+  const historyOpts = useMemo(
+    () => ({
+      days: windowDays,
+      endDate,
+      startDate,
+      platform: platform === 'all' ? undefined : platform,
+    }),
+    [windowDays, endDate, startDate, platform],
+  )
 
   const summaryQ = useQuery({
-    queryKey: ['sales-history-summary', HISTORY_WINDOW_DAYS, platform],
-    queryFn: async () =>
-      getPoDailySalesHistorySummary({
-        days: HISTORY_WINDOW_DAYS,
-        platform: platform === 'all' ? undefined : platform,
-      }),
+    queryKey: ['sales-history-summary', historyOpts],
+    queryFn: async () => getPoDailySalesHistorySummary(historyOpts),
     refetchOnWindowFocus: true,
     staleTime: 15_000,
   })
 
   const matrixQ = useQuery({
-    queryKey: ['sales-history-matrix', skuFilter, page, HISTORY_WINDOW_DAYS, platform],
-    retry: 1,
+    queryKey: ['sales-history-matrix', skuFilter, page, historyOpts],
+    retry: 2,
     queryFn: async () =>
-      getPoDailySalesHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE, {
-        days: HISTORY_WINDOW_DAYS,
-        platform: platform === 'all' ? undefined : platform,
-      }),
+      getPoDailySalesHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE, historyOpts),
     refetchOnWindowFocus: true,
     staleTime: 15_000,
   })
 
   const skuTimelineQ = useQuery({
-    queryKey: ['sales-history-sku', skuQuery, skuWindow, platform],
+    queryKey: ['sales-history-sku', skuQuery, skuWindow, platform, endDate],
     enabled: mode === 'sku' && skuQuery.trim().length >= 3,
     queryFn: async () =>
       getPoDailySalesHistorySku(skuQuery.trim(), skuWindow, {
         platform: platform === 'all' ? undefined : platform,
+        endDate,
       }),
   })
 
@@ -94,10 +115,7 @@ export default function SalesHistory() {
   const handleExportMatrix = async () => {
     setExporting(true)
     try {
-      const data = await getPoDailySalesHistoryMatrix(skuFilter, 15000, 0, {
-        days: HISTORY_WINDOW_DAYS,
-        platform: platform === 'all' ? undefined : platform,
-      })
+      const data = await getPoDailySalesHistoryMatrix(skuFilter, 15000, 0, historyOpts)
       const hdr = ['SKU', ...data.dates]
       const body = data.rows.map(r => [r.sku, ...r.units.map(u => String(u))])
       const label = [platform !== 'all' ? platform : null, skuFilter.trim() || null].filter(Boolean).join('-')
@@ -147,13 +165,58 @@ export default function SalesHistory() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">📈 Daily Sales History</h1>
           <p className="text-sm text-gray-600 mt-1 max-w-2xl">
-            Last {HISTORY_WINDOW_DAYS} days of net units sold per SKU (shipments minus returns from daily
-            uploads). Use this matrix to verify daily sales files were ingested correctly before PO calculate.
+            Net units sold per SKU (shipments minus returns from daily uploads). Default window ends
+            yesterday (IST) — today&apos;s sales file is uploaded the next day. Pick dates below to
+            verify any range before PO calculate.
           </p>
         </div>
         <Link to="/upload" className="text-sm font-medium text-indigo-700 hover:underline shrink-0">
           Upload daily sales →
         </Link>
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-wrap gap-4 items-end">
+        <label className="text-sm">
+          <span className="block text-gray-600 mb-1">From</span>
+          <input
+            type="date"
+            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+            value={startDate}
+            max={endDate}
+            onChange={e => {
+              setStartDate(e.target.value)
+              setPage(0)
+            }}
+          />
+        </label>
+        <label className="text-sm">
+          <span className="block text-gray-600 mb-1">To</span>
+          <input
+            type="date"
+            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+            value={endDate}
+            max={daysAgoIsoIST(1)}
+            onChange={e => {
+              setEndDate(e.target.value)
+              setPage(0)
+            }}
+          />
+        </label>
+        <button
+          type="button"
+          className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-300 hover:bg-gray-50"
+          onClick={() => {
+            const end = defaultHistoryEndDate()
+            setEndDate(end)
+            setStartDate(defaultHistoryStartDate(end, DEFAULT_WINDOW_DAYS))
+            setPage(0)
+          }}
+        >
+          Last {DEFAULT_WINDOW_DAYS} days
+        </button>
+        <span className="text-xs text-gray-500 pb-1">
+          {windowDays} day{windowDays === 1 ? '' : 's'} · Today (IST): {todayIsoIST()}
+        </span>
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl p-4 text-sm text-gray-700 flex flex-wrap gap-x-6 gap-y-1">
@@ -171,7 +234,6 @@ export default function SalesHistory() {
             <strong>net units:</strong> {summaryQ.data.total_units?.toLocaleString() ?? '—'}
           </span>
         )}
-        <span className="text-gray-500">Today (IST): {todayIsoIST()}</span>
       </div>
 
       {significantGaps.length > 0 && platform === 'all' && (
@@ -289,7 +351,16 @@ export default function SalesHistory() {
           {matrixQ.isLoading ? (
             <p className="p-4 text-sm text-gray-500">Loading sales matrix…</p>
           ) : matrixQ.isError ? (
-            <p className="p-4 text-sm text-red-700">Matrix load failed — try refreshing.</p>
+            <p className="p-4 text-sm text-red-700">
+              Matrix load failed — try refreshing or narrow the date range.
+              <button
+                type="button"
+                className="ml-2 underline font-medium"
+                onClick={() => void matrixQ.refetch()}
+              >
+                Retry
+              </button>
+            </p>
           ) : !dates.length ? (
             <p className="p-4 text-sm text-gray-500">No sales history in this window.</p>
           ) : (

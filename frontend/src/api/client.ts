@@ -1166,7 +1166,12 @@ export type SalesHistoryCoverageGap = {
 
 export type SalesHistoryMatrixRow = { sku: string; units: number[] }
 
-export async function getPoDailySalesHistorySummary(opts?: { days?: number; endDate?: string; platform?: string }) {
+export async function getPoDailySalesHistorySummary(opts?: {
+  days?: number
+  endDate?: string
+  startDate?: string
+  platform?: string
+}) {
   const { data } = await api.get<{
     ok: boolean
     loaded?: boolean
@@ -1185,6 +1190,7 @@ export async function getPoDailySalesHistorySummary(opts?: { days?: number; endD
     params: {
       days: opts?.days ?? 30,
       ...(opts?.endDate ? { end_date: opts.endDate } : {}),
+      ...(opts?.startDate ? { start_date: opts.startDate } : {}),
       ...(opts?.platform ? { platform: opts.platform } : {}),
     },
     timeout: 60_000,
@@ -1196,7 +1202,7 @@ export async function getPoDailySalesHistoryMatrix(
   q = '',
   limit = 150,
   offset = 0,
-  opts?: { days?: number; endDate?: string; platform?: string },
+  opts?: { days?: number; endDate?: string; startDate?: string; platform?: string },
 ) {
   const { data } = await api.get<{
     ok: boolean
@@ -1220,6 +1226,7 @@ export async function getPoDailySalesHistoryMatrix(
       offset,
       days: opts?.days ?? 30,
       ...(opts?.endDate ? { end_date: opts.endDate } : {}),
+      ...(opts?.startDate ? { start_date: opts.startDate } : {}),
       ...(opts?.platform ? { platform: opts.platform } : {}),
     },
     timeout: 120_000,
@@ -1230,7 +1237,7 @@ export async function getPoDailySalesHistoryMatrix(
 export async function getPoDailySalesHistorySku(
   sku: string,
   windowDays = 30,
-  opts?: { platform?: string },
+  opts?: { platform?: string; endDate?: string },
 ) {
   const { data } = await api.get<{
     ok: boolean
@@ -1245,6 +1252,7 @@ export async function getPoDailySalesHistorySku(
     params: {
       sku,
       window_days: windowDays,
+      ...(opts?.endDate ? { end_date: opts.endDate } : {}),
       ...(opts?.platform ? { platform: opts.platform } : {}),
     },
   })

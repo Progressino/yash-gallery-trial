@@ -86,8 +86,26 @@ def test_sales_history_wide_matrix_aggregates_net_units():
     assert plat["rows"][0]["units"] == [2.0, 0.0]
 
 
-def test_sales_history_summary_default_end_date_handles_tz_aware_today():
-    """Regression: IST-aware 'today' must not crash vs naive TxnDate columns."""
+def test_sales_history_summary_default_end_date_excludes_today_ist():
+    """Default window ends yesterday IST — today's sales upload is always next day."""
+    today = pd.Timestamp.now(tz="Asia/Kolkata").normalize().tz_localize(None)
+    yesterday = today - pd.Timedelta(days=1)
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A", "SKU-A"],
+            "TxnDate": [today, yesterday],
+            "Units_Effective": [99.0, 2.0],
+            "Source": ["Amazon", "Amazon"],
+            "Transaction Type": ["Shipment", "Shipment"],
+        }
+    )
+    summary = sales_history_summary(sales, days=7)
+    assert summary["loaded"] is True
+    assert summary["total_units"] == 2.0
+    assert summary["max_date"] == str(yesterday.date())
+
+
+def test_sales_history_summary_explicit_end_includes_today_row():
     today = pd.Timestamp.now(tz="Asia/Kolkata").normalize().tz_localize(None)
     sales = pd.DataFrame(
         {
@@ -98,7 +116,7 @@ def test_sales_history_summary_default_end_date_handles_tz_aware_today():
             "Transaction Type": ["Shipment"],
         }
     )
-    summary = sales_history_summary(sales, days=7)  # no end_date → uses today IST
+    summary = sales_history_summary(sales, days=1, end_date=str(today.date()))
     assert summary["loaded"] is True
     assert summary["total_units"] == 2.0
 

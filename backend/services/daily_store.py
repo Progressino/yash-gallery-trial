@@ -33,6 +33,30 @@ _DSR_TAIL_FOR_PLATFORM = {
     "snapdeal": "Snapdeal",
 }
 
+
+def _upload_source_basename(filename: str) -> str:
+    """Inner CSV name inside a daily folder (ignores Sales 10-jul vs 11-jul wrapper path)."""
+    norm = (filename or "").replace("\\", "/").strip()
+    return norm.rsplit("/", 1)[-1].casefold() if norm else ""
+
+
+def _coalesce_tier3_upload_rows(rows: List[Tuple[str, bytes]]) -> List[Tuple[str, bytes]]:
+    """
+    When the same inner file was uploaded twice under different daily folders, keep only
+    the latest row (``ORDER BY file_date ASC`` — last wins per basename).
+    """
+    if not rows or len(rows) < 2:
+        return rows
+    picked: Dict[str, Tuple[str, bytes]] = {}
+    orphan = 0
+    for filename, blob in rows:
+        base = _upload_source_basename(filename)
+        key = base if base else f"__orphan_{orphan}"
+        if not base:
+            orphan += 1
+        picked[key] = (filename, blob)
+    return list(picked.values())
+
 # Meesho LineKeys from TCS / ERP export / CSV fallbacks (not marketplace sub-order ids).
 _MEE_SYN_LINEKEY = re.compile(r"^(MEETCS\||MEEEXP\||MEECSV\|)", re.I)
 # Flipkart Order Export synthetic ids: product_Sku_YYYYMMDD (no pipes). earn_more uses FKEM|…
@@ -1018,7 +1042,7 @@ def load_platform_data(
         if daily_uploads_pg_read():
             pg_rows = pg_load_platform_rows(platform, months=months, max_files=_limit)
             if pg_rows:
-                rows = pg_rows
+                rows = _coalesce_tier3_upload_rows(pg_rows)
     except Exception:
         pass
 
@@ -1039,6 +1063,7 @@ def load_platform_data(
         if _limit is not None and len(rows) > _limit:
             rows = rows[-_limit:]
     conn.close()
+    rows = _coalesce_tier3_upload_rows(rows)
 
     dfs = []
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
@@ -1471,7 +1496,9 @@ def load_platform_data_for_report_range(
         from ..db.forecast_ops_pg import daily_uploads_pg_read, pg_load_platform_rows_for_range
 
         if daily_uploads_pg_read():
-            rows = pg_load_platform_rows_for_range(platform, s0, s1)
+            pg_rows = pg_load_platform_rows_for_range(platform, s0, s1)
+            if pg_rows:
+                rows = _coalesce_tier3_upload_rows(pg_rows)
     except Exception:
         pass
 
@@ -1489,6 +1516,8 @@ def load_platform_data_for_report_range(
             (platform, s1, s0),
         ).fetchall()
         conn.close()
+
+    rows = _coalesce_tier3_upload_rows(rows)
 
     dfs: list[pd.DataFrame] = []
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)

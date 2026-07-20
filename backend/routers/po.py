@@ -220,6 +220,27 @@ def _sales_df_for_read(sess) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def _sales_df_for_history_read(
+    sess,
+    *,
+    days: int = 30,
+    end_date: Optional[str] = None,
+    start_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """Tier-3 window slice for Daily Sales History (accurate daily totals)."""
+    from ..services.daily_sales_history import build_sales_history_sales_df
+
+    try:
+        tier3 = build_sales_history_sales_df(
+            sess, days=days, end_date=end_date, start_date=start_date
+        )
+        if tier3 is not None and not tier3.empty:
+            return tier3
+    except Exception:
+        logging.getLogger(__name__).exception("build_sales_history_sales_df failed")
+    return _sales_df_for_read(sess)
+
+
 @router.get("/readiness")
 def po_readiness(request: Request):
     """Lightweight PO page gate — data ready for calculate, not all background jobs finished."""
@@ -883,6 +904,7 @@ async def po_get_daily_sales_history(
     request: Request,
     days: int = 30,
     end_date: Optional[str] = None,
+    start_date: Optional[str] = None,
     platform: Optional[str] = None,
 ):
     """Summary of persisted daily sales in the ADS-style window."""
@@ -894,11 +916,17 @@ async def po_get_daily_sales_history(
         return {"ok": False, "loaded": False}
 
     def _work() -> dict:
-        sales = _sales_df_for_read(sess)
+        sales = _sales_df_for_history_read(
+            sess,
+            days=min(max(1, int(days)), 120),
+            end_date=end_date,
+            start_date=start_date,
+        )
         summary = sales_history_summary(
             sales,
             days=min(max(1, int(days)), 120),
             end_date=end_date,
+            start_date=start_date,
             platform=platform,
         )
         return {"ok": True, **summary}
@@ -914,6 +942,7 @@ async def po_daily_sales_history_matrix(
     offset: int = 0,
     days: int = 30,
     end_date: Optional[str] = None,
+    start_date: Optional[str] = None,
     platform: Optional[str] = None,
 ):
     """Excel-style wide matrix: SKU rows × date columns of net daily units."""
@@ -925,7 +954,12 @@ async def po_daily_sales_history_matrix(
         return {"ok": False, "message": "No session"}
 
     def _work() -> dict:
-        sales = _sales_df_for_read(sess)
+        sales = _sales_df_for_history_read(
+            sess,
+            days=min(max(1, int(days)), 120),
+            end_date=end_date,
+            start_date=start_date,
+        )
         out = sales_history_wide_matrix(
             sales,
             q=q,
@@ -933,6 +967,7 @@ async def po_daily_sales_history_matrix(
             offset=max(0, int(offset)),
             days=min(max(1, int(days)), 120),
             end_date=end_date,
+            start_date=start_date,
             platform=platform,
         )
         out["ok"] = True
@@ -955,7 +990,11 @@ def po_get_daily_sales_history_for_sku(
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
-    sales = _sales_df_for_read(sess)
+    sales = _sales_df_for_history_read(
+        sess,
+        days=min(max(1, int(window_days)), 120),
+        end_date=end_date,
+    )
     out = sales_history_for_sku(
         sales,
         sku,
