@@ -1074,7 +1074,11 @@ export default function Production() {
     setNewLines(ls => [...ls, {
       so_number: newForm.so_number,
       sku: line.sku || '',
-      ...
+      sku_name: line.sku_name || line.item_name || '',
+      style: '',
+      planned_qty: line.qty || 0,
+      vendor_rate: newForm.vendor_rate || 0,
+      remarks: '',
     }])
     if (line.sku) {
       setNewForm(f => ({ ...f, sku: f.sku || line.sku }))
