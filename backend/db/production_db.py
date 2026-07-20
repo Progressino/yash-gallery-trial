@@ -640,7 +640,47 @@ def validate_jo_creation(process: str, so_number: str, sku: str, planned_qty: in
 
 def create_jo(data: dict) -> str | list[str]:
     """Create one JO, or multiple component Cutting JOs when Set BOM applies."""
-    from ..services.component_bom import should_auto_create_component_jos
+    from ..services.component_bom import (
+        resolve_cutting_main_sku,
+        should_auto_create_component_jos,
+    )
+    from ..services.set_components import parse_component_sku
+
+    data = dict(data)
+    main = resolve_cutting_main_sku(data)
+    if main:
+        data["sku"] = main
+
+    active_lines = [
+        dict(ln)
+        for ln in (data.get("lines") or [])
+        if int(ln.get("planned_qty") or 0) > 0 and str(ln.get("sku") or "").strip()
+    ]
+
+    def _payload_for_line(ln: dict) -> dict:
+        s = str(ln.get("sku") or data.get("sku") or "").strip().upper()
+        main_sku, comp = parse_component_sku(s)
+        if comp:
+            raise ValueError(
+                f"Cannot create a Cutting JO on component SKU {s}; use the main size SKU (e.g. {main_sku})."
+            )
+        pl = dict(data)
+        pl["sku"] = main_sku or s
+        pl["planned_qty"] = int(ln.get("planned_qty") or pl.get("planned_qty") or 0)
+        pl["lines"] = [{**ln, "sku": pl["sku"], "planned_qty": pl["planned_qty"]}]
+        return pl
+
+    if active_lines:
+        probe = _payload_for_line(active_lines[0])
+        if should_auto_create_component_jos(probe):
+            if len(active_lines) == 1:
+                return create_component_cutting_jos(probe)
+            nums: list[str] = []
+            for ln in active_lines:
+                nums.extend(create_component_cutting_jos(_payload_for_line(ln)))
+            return nums
+        if len(active_lines) > 1:
+            return [_create_single_jo(_payload_for_line(ln)) for ln in active_lines]
 
     if should_auto_create_component_jos(data):
         return create_component_cutting_jos(data)
@@ -649,10 +689,11 @@ def create_jo(data: dict) -> str | list[str]:
 
 def create_component_cutting_jos(data: dict) -> list[str]:
     """Explode a main-SKU Cutting plan into one JO per Set BOM component."""
+    from ..services.component_bom import effective_set_bom_for_cutting, resolve_cutting_main_sku
     from ..services.set_components import component_sku
 
-    main_sku = str(data.get("sku") or "").strip().upper()
-    bom = get_set_bom_for_sku(main_sku)
+    main_sku = resolve_cutting_main_sku(data) or str(data.get("sku") or "").strip().upper()
+    bom = effective_set_bom_for_cutting(main_sku)
     if not bom or not bom.get("lines"):
         return [_create_single_jo(data)]
 

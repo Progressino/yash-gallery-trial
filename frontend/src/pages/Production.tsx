@@ -915,6 +915,13 @@ export default function Production() {
     enabled: !!newForm.so_number && !!newForm.sku && newForm.process !== 'Cutting',
   })
 
+  const cuttingMainSku = (newForm.sku || newLines[0]?.sku || '').trim()
+  const { data: cuttingSetBomInfo } = useQuery({
+    queryKey: ['set-bom-for-sku', cuttingMainSku],
+    queryFn: () => api.get(`/production/set-bom-for-sku/${encodeURIComponent(cuttingMainSku)}`).then(r => r.data),
+    enabled: modal === 'new-jo' && newForm.process === 'Cutting' && cuttingMainSku.length > 0,
+  })
+
   const invalidateAll = () => {
     qc.invalidateQueries({ queryKey: ['prod-stats'] })
     qc.invalidateQueries({ queryKey: ['jos-process'] })
@@ -1067,12 +1074,11 @@ export default function Production() {
     setNewLines(ls => [...ls, {
       so_number: newForm.so_number,
       sku: line.sku || '',
-      sku_name: line.sku_name || line.item_name || '',
-      style: '',
-      planned_qty: line.qty || 0,
-      vendor_rate: newForm.vendor_rate || 0,
-      remarks: '',
+      ...
     }])
+    if (line.sku) {
+      setNewForm(f => ({ ...f, sku: f.sku || line.sku }))
+    }
     // Cutting: auto-fill fabric from BOM (live — includes fabric QC'd after SO was created)
     if (newForm.process === 'Cutting' && line.sku) {
       try {
@@ -1898,6 +1904,15 @@ export default function Production() {
                 </>
               )}
             </div>
+
+            {newForm.process === 'Cutting' && cuttingSetBomInfo?.has_set_bom && cuttingMainSku && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                <p className="font-semibold">Multi-component set — creates separate Cutting JOs</p>
+                <p className="mt-1 font-mono">
+                  {(cuttingSetBomInfo.bom?.lines || []).map((l: { component_code: string }) => `${cuttingMainSku}-${l.component_code}`).join(' · ')}
+                </p>
+              </div>
+            )}
 
             {/* Validation message */}
             {newForm.process !== 'Cutting' && newForm.so_number && newForm.sku && joValidation && (

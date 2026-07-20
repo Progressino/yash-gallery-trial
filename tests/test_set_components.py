@@ -30,3 +30,11 @@ def test_set_component_helpers():
     assert by_code["DUPATTA"]["extra_qty"] == 1
     assert by_code["PANT"]["extra_qty"] == 0
     assert style_key_for_set_bom("1001YKBEIGE-XS")
+
+
+def test_resolve_cutting_main_sku_from_lines_only():
+    from backend.services.component_bom import resolve_cutting_main_sku
+
+    assert resolve_cutting_main_sku({"lines": [{"sku": "1001-XS", "planned_qty": 10}]}) == "1001-XS"
+    assert resolve_cutting_main_sku({"sku": "1001-XS", "lines": []}) == "1001-XS"
+    assert resolve_cutting_main_sku({"sku": "1001-XS-TOP"}) == "1001-XS"

@@ -1929,8 +1929,8 @@ const totalCost = useMemo(() =>
               <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-sm text-blue-900">
                 <p className="font-semibold">Multi-component set production</p>
                 <p className="text-xs mt-1 text-blue-800">
-                  Define which garment pieces make up one set for a style. After <strong>Cutting Receive</strong> in Production,
-                  the system splits each size SKU into component SKUs (e.g. <span className="font-mono">1001YKBEIGE-XS-TOP</span>).
+                  Define which garment pieces make up one set for a style. When you create a <strong>Cutting</strong> job order for a size SKU,
+                  the system creates one JO per component (e.g. <span className="font-mono">1001YKBEIGE-XS-TOP</span>, <span className="font-mono">…-PANT</span>, <span className="font-mono">…-DUPATTA</span>).
                   Use <strong>Production → Sets</strong> for Set Match at Finishing.
                 </p>
               </div>

@@ -658,7 +658,9 @@ def get_set_bom_detail(style_key: str):
 
 @router.get("/set-bom-for-sku/{sku:path}")
 def get_set_bom_by_sku(sku: str):
-    bom = get_set_bom_for_sku(sku)
+    from ..services.component_bom import effective_set_bom_for_cutting
+
+    bom = effective_set_bom_for_cutting(sku) or get_set_bom_for_sku(sku)
     return {"sku": sku, "bom": bom, "has_set_bom": bool(bom and bom.get("lines"))}
 
 
