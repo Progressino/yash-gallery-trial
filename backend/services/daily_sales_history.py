@@ -385,7 +385,8 @@ def build_sales_history_sales_df(
     import pandas as pd
 
     from .daily_store import load_platform_data_for_report_range
-    from .sales import build_sales_df
+    from .po_calculate_run import _build_platform_sales_df
+    from .sales import _dedup_sales_linekey_rows, _downcast_sales
 
     start, end = sales_history_window_bounds(
         days=days, end_date=end_date, start_date=start_date, sales_df=None
@@ -398,21 +399,15 @@ def build_sales_history_sales_df(
         ("flipkart", "flipkart_df"),
         ("snapdeal", "snapdeal_df"),
     )
-    frames: dict[str, pd.DataFrame] = {}
-    any_loaded = False
+    overrides: dict[str, pd.DataFrame] = {}
     for pk, attr in specs:
         df = load_platform_data_for_report_range(pk, s0, s1, dedup=True)
         if df is not None and not df.empty:
-            frames[attr] = df
-            any_loaded = True
-    if not any_loaded:
+            overrides[attr] = df
+    if not overrides:
         return pd.DataFrame()
-    sku_map = getattr(sess, "sku_mapping", None) or {}
-    return build_sales_df(
-        frames.get("mtr_df", pd.DataFrame()),
-        frames.get("myntra_df", pd.DataFrame()),
-        frames.get("meesho_df", pd.DataFrame()),
-        frames.get("flipkart_df", pd.DataFrame()),
-        sku_map,
-        snapdeal_df=frames.get("snapdeal_df"),
-    )
+    out = _build_platform_sales_df(sess, frame_overrides=overrides)
+    if out is None or out.empty:
+        return pd.DataFrame()
+    out = _dedup_sales_linekey_rows(out)
+    return _downcast_sales(out)
