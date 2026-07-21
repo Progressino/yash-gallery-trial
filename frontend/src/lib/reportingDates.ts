@@ -58,3 +58,26 @@ export function salesDataGapNeedsWarning(
   if (lag == null) return false
   return lag > maxExpectedLagDays
 }
+
+/** Deploy/build time from API or Docker (ISO UTC) → readable IST date + time for sidebar. */
+export function formatBuildDeployedAt(iso: string): string {
+  const raw = (iso || '').trim()
+  if (!raw) return ''
+  const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : `${raw}Z`
+  const d = new Date(normalized)
+  if (Number.isNaN(d.getTime())) return raw.slice(0, 16).replace('T', ' ')
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: IST,
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  }).format(d)
+}
+
+export function formatBuildVersionLabel(sha: string, builtAt?: string): string {
+  const built = builtAt ? formatBuildDeployedAt(builtAt) : ''
+  return built ? `${sha} · ${built}` : sha
+}

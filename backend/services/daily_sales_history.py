@@ -39,6 +39,13 @@ def _normalize_sales_tall(sales_df: pd.DataFrame | None) -> pd.DataFrame:
     txn_col = "Transaction Type" if "Transaction Type" in s.columns else "TxnType"
     if sku_col not in s.columns or date_col not in s.columns or eff_col not in s.columns:
         return pd.DataFrame(columns=["OMS_SKU", "Date", "Units", "Source", "TxnType"])
+    # Combo listings are fanned out to component SKUs for PO demand, with the
+    # listing row retained. Sales History must match the uploaded files, so the
+    # synthetic component copies (_Combo_Fan=True) are excluded here.
+    if "_Combo_Fan" in s.columns:
+        fan = s["_Combo_Fan"].fillna(False).astype(bool)
+        if fan.any():
+            s = s.loc[~fan]
     dates = pd.to_datetime(s[date_col], errors="coerce")
     # Drop timezone so window filters never mix aware Timestamp with naive columns.
     try:
@@ -114,11 +121,126 @@ def filter_sales_history_window(
     return sub.reset_index(drop=True)
 
 
+_CORE_PLATFORM_LABELS = {
+    "amazon": "Amazon",
+    "flipkart": "Flipkart",
+    "meesho": "Meesho",
+    "myntra": "Myntra",
+    "snapdeal": "Snapdeal",
+}
+
+
+def _source_label_ok(label: str) -> bool:
+    s = (label or "").strip().lower()
+    return bool(s) and s not in ("nan", "none", "null", "nat")
+
+
 def sales_platforms_available(sales_df: pd.DataFrame | None) -> list[str]:
     tall = _normalize_sales_tall(sales_df)
     if tall.empty:
         return []
-    return sorted({str(x) for x in tall["Source"].astype(str).str.strip().unique() if str(x).strip()})
+    out: set[str] = set()
+    for x in tall["Source"].astype(str).str.strip().unique():
+        if _source_label_ok(str(x)):
+            out.add(str(x).strip())
+    return sorted(out, key=lambda s: s.lower())
+
+
+def sales_history_platform_filters(
+    sales_df: pd.DataFrame | None,
+    *,
+    days: int | None = None,
+    end_date: str | None = None,
+    start_date: str | None = None,
+) -> list[str]:
+    """Platforms for UI tabs: Tier-3 uploads in window plus any sources in sales rows."""
+    from .daily_store import get_upload_report_day_coverage
+
+    start, end = sales_history_window_bounds(
+        days=days, end_date=end_date, start_date=start_date, sales_df=sales_df
+    )
+    coverage = get_upload_report_day_coverage()
+    out: set[str] = set(sales_platforms_available(sales_df))
+    for pk, label in _CORE_PLATFORM_LABELS.items():
+        days_set = coverage.get(pk) or set()
+        for d in pd.date_range(start, end, freq="D"):
+            if str(pd.Timestamp(d).date()) in days_set:
+                out.add(label)
+                break
+    return sorted(out, key=lambda s: s.lower())
+
+
+def sales_history_data_quality_checks(
+    sales_df: pd.DataFrame | None,
+    *,
+    days: int | None = None,
+    end_date: str | None = None,
+    start_date: str | None = None,
+    max_days: int = 3,
+) -> list[dict]:
+    """
+    Automatic spot checks: for recent days with Amazon Tier-3 uploads, compare
+    matrix net units (Sales History build) to a fresh Tier-3 re-read.
+    """
+    from .daily_store import get_upload_report_day_coverage, load_platform_data_for_report_range
+    from .sales import _compute_platform_metrics
+
+    if sales_df is None or getattr(sales_df, "empty", True):
+        return []
+
+    start, end = sales_history_window_bounds(
+        days=days, end_date=end_date, start_date=start_date, sales_df=sales_df
+    )
+    coverage = get_upload_report_day_coverage()
+    amazon_days = sorted(coverage.get("amazon") or set())
+    in_window: list[str] = []
+    for iso in amazon_days:
+        try:
+            d = pd.Timestamp(iso)
+        except Exception:
+            continue
+        if start <= d <= end:
+            in_window.append(iso)
+    if not in_window:
+        return []
+
+    checks: list[dict] = []
+    for iso in in_window[-max(1, int(max_days)) :]:
+        df = load_platform_data_for_report_range("amazon", iso, iso, dedup=True)
+        if df is None or df.empty:
+            continue
+        metrics = _compute_platform_metrics(
+            df,
+            "Amazon",
+            "SKU",
+            "Transaction_Type",
+            start_date=iso,
+            end_date=iso,
+            headline_only=True,
+        )
+        expected = float(metrics.get("net_units") or 0)
+        view = filter_sales_history_window(
+            sales_df,
+            days=days,
+            end_date=end_date,
+            start_date=start_date,
+            platform="Amazon",
+        )
+        day = pd.Timestamp(iso).normalize()
+        actual = float(view.loc[view["Date"] == day, "Units"].sum())
+        delta = round(actual - expected, 2)
+        checks.append(
+            {
+                "date": iso,
+                "platform": "Amazon",
+                "check": "tier3_vs_sales_history",
+                "ok": abs(delta) < 0.5,
+                "expected_net_units": expected,
+                "matrix_net_units": actual,
+                "delta": delta,
+            }
+        )
+    return checks
 
 
 def sales_history_upload_coverage(
@@ -182,7 +304,9 @@ def sales_history_summary(
             "days": 0,
             "min_date": "",
             "max_date": "",
-            "platforms": sales_platforms_available(sales_df),
+            "platforms": sales_history_platform_filters(
+            sales_df, days=days, end_date=end_date, start_date=start_date
+        ),
             **coverage,
         }
     daily = view.groupby("Date", as_index=False).agg(
@@ -193,7 +317,10 @@ def sales_history_summary(
     coverage = sales_history_upload_coverage(
         days=days, end_date=end_date, start_date=start_date, sales_df=sales_df
     )
-    return {
+    auto_checks = sales_history_data_quality_checks(
+        sales_df, days=days, end_date=end_date, start_date=start_date
+    )
+    base = {
         "loaded": True,
         "rows": int(len(view)),
         "skus": int(view["OMS_SKU"].nunique()),
@@ -202,10 +329,15 @@ def sales_history_summary(
         "max_date": str(view["Date"].max().date()),
         "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
         "window_end": str(sales_history_view_end_date(sales_df, end_date).date()),
-        "platforms": sales_platforms_available(sales_df),
+        "platforms": sales_history_platform_filters(
+            sales_df, days=days, end_date=end_date, start_date=start_date
+        ),
         "total_units": float(view["Units"].sum()),
+        "auto_checks": auto_checks,
+        "auto_checks_ok": all(c.get("ok") for c in auto_checks) if auto_checks else True,
         **coverage,
     }
+    return base
 
 
 def sales_history_wide_matrix(
@@ -232,7 +364,9 @@ def sales_history_wide_matrix(
         "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
         "window_end": str(end_date or today_ist_timestamp().date()),
         "platform": platform,
-        "platforms": sales_platforms_available(sales_df),
+        "platforms": sales_history_platform_filters(
+            sales_df, days=days, end_date=end_date, start_date=start_date
+        ),
     }
     view = filter_sales_history_window(
         sales_df, days=days, end_date=end_date, start_date=start_date, platform=platform
@@ -315,7 +449,9 @@ def sales_history_wide_matrix(
         "window_days": span,
         "window_end": date_strs[-1] if date_strs else str(end.date()),
         "platform": platform,
-        "platforms": sales_platforms_available(sales_df),
+        "platforms": sales_history_platform_filters(
+            sales_df, days=days, end_date=end_date, start_date=start_date
+        ),
         **coverage,
     }
 
@@ -414,5 +550,14 @@ def build_sales_history_sales_df(
         miss = out["Source"].isna() | src.isin(("", "nan", "none"))
         if miss.any() and "mtr_df" in overrides:
             out.loc[miss, "Source"] = "Amazon"
+    # Sales History mirrors the uploaded files: zero-amount Amazon shipments
+    # (reclassified to FreeReplacement with Units_Effective 0 for PO math)
+    # are physical shipments in the daily files — count their units here.
+    if {"Transaction Type", "Units_Effective", "Quantity"}.issubset(out.columns):
+        fr = out["Transaction Type"].astype(str).str.strip().eq("FreeReplacement")
+        if fr.any():
+            out.loc[fr, "Units_Effective"] = pd.to_numeric(
+                out.loc[fr, "Quantity"], errors="coerce"
+            ).fillna(0)
     out = _dedup_sales_linekey_rows(out)
     return _downcast_sales(out)

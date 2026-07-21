@@ -40,10 +40,18 @@ def _upload_source_basename(filename: str) -> str:
     return norm.rsplit("/", 1)[-1].casefold() if norm else ""
 
 
-def _coalesce_tier3_upload_rows(rows: List[Tuple[str, bytes]]) -> List[Tuple[str, bytes]]:
+def _coalesce_tier3_upload_rows(
+    rows: List[Tuple[str, bytes]],
+    *,
+    platform: str | None = None,
+) -> List[Tuple[str, bytes]]:
     """
     When the same inner file was uploaded twice under different daily folders, keep only
     the latest row (``ORDER BY file_date ASC`` — last wins per basename).
+
+    Amazon: also drop twin exports (e.g. ``984227020626.csv`` at RAR root and the same
+    shipment file under ``Sales 18-22-6-26/…_YG Amazon …``) that share an identical
+    per-day shipment signature.
     """
     if not rows or len(rows) < 2:
         return rows
@@ -55,7 +63,105 @@ def _coalesce_tier3_upload_rows(rows: List[Tuple[str, bytes]]) -> List[Tuple[str
         if not base:
             orphan += 1
         picked[key] = (filename, blob)
-    return list(picked.values())
+    out = list(picked.values())
+    if (platform or "").strip().lower() == "amazon":
+        out = _coalesce_amazon_export_twins(out)
+    return out
+
+
+def _infer_amazon_segment_from_filename(filename: str) -> str:
+    fn = (filename or "").casefold()
+    if "akiko" in fn:
+        return "Akiko"
+    if "uae" in fn:
+        return "UAE"
+    if "usa" in fn:
+        return "USA"
+    if " yg" in fn or "_yg" in fn or "yg " in fn or fn.startswith("yg"):
+        return "YG"
+    return ""
+
+
+def _amazon_shipment_qty_by_day(blob: bytes) -> dict[str, int]:
+    try:
+        d = pd.read_parquet(io.BytesIO(blob))
+    except Exception:
+        return {}
+    if d.empty or "Date" not in d.columns:
+        return {}
+    txn = d["Transaction_Type"].astype(str).str.strip() if "Transaction_Type" in d.columns else ""
+    ship = d[txn.eq("Shipment")] if len(txn) else d.iloc[0:0]
+    if ship.empty:
+        return {}
+    days = pd.to_datetime(ship["Date"], errors="coerce").dt.normalize()
+    qty = pd.to_numeric(ship["Quantity"], errors="coerce").fillna(0)
+    out: dict[str, int] = {}
+    for day, q in zip(days, qty):
+        if pd.isna(day):
+            continue
+        iso = str(pd.Timestamp(day).date())
+        out[iso] = out.get(iso, 0) + int(q)
+    return out
+
+
+def _amazon_upload_preference(filename: str) -> int:
+    """Higher = prefer keeping this blob when it duplicates another export."""
+    fn = filename or ""
+    score = 0
+    if "/" in fn.replace("\\", "/"):
+        score += 10
+    if "amazon" in fn.casefold():
+        score += 5
+    base = _upload_source_basename(fn)
+    if base and re.fullmatch(r"\d+\.csv", base, flags=re.I):
+        score -= 20
+    return score
+
+
+def _coalesce_amazon_export_twins(rows: List[Tuple[str, bytes]]) -> List[Tuple[str, bytes]]:
+    if len(rows) < 2:
+        return rows
+    specs: list[tuple[str, bytes, dict[str, int], int]] = []
+    for filename, blob in rows:
+        specs.append(
+            (
+                filename,
+                blob,
+                _amazon_shipment_qty_by_day(blob),
+                _amazon_upload_preference(filename),
+            )
+        )
+    numeric_drop: set[str] = set()
+    numeric = [
+        s
+        for s in specs
+        if re.fullmatch(r"\d+\.csv", _upload_source_basename(s[0]) or "", flags=re.I)
+    ]
+    named = [s for s in specs if s[0] not in {n[0] for n in numeric}]
+    for nfn, _nblob, nmap, _ in numeric:
+        if not nmap:
+            continue
+        for ofn, _oblob, omap, _ in named:
+            if not omap:
+                continue
+            # Twin export: same account's data re-exported at a different time.
+            # All of the numeric file's days must fall inside the named file's
+            # day range, and at most one shared day may differ in units (the
+            # export cut-off day keeps accruing orders between exports).
+            n_days = sorted(nmap)
+            o_days = sorted(omap)
+            if n_days[0] < o_days[0] or n_days[-1] > o_days[-1]:
+                continue
+            shared = [day for day in n_days if day in omap]
+            if len(shared) < max(2, len(n_days) - 1):
+                continue
+            matches = sum(1 for day in shared if omap[day] == nmap[day])
+            if matches >= len(shared) - 1 and matches >= 2:
+                numeric_drop.add(nfn)
+                break
+    if not numeric_drop:
+        return rows
+    return [(fn, blob) for fn, blob in rows if fn not in numeric_drop]
 
 # Meesho LineKeys from TCS / ERP export / CSV fallbacks (not marketplace sub-order ids).
 _MEE_SYN_LINEKEY = re.compile(r"^(MEETCS\||MEEEXP\||MEECSV\|)", re.I)
@@ -1042,7 +1148,7 @@ def load_platform_data(
         if daily_uploads_pg_read():
             pg_rows = pg_load_platform_rows(platform, months=months, max_files=_limit)
             if pg_rows:
-                rows = _coalesce_tier3_upload_rows(pg_rows)
+                rows = _coalesce_tier3_upload_rows(pg_rows, platform=platform)
     except Exception:
         pass
 
@@ -1063,7 +1169,7 @@ def load_platform_data(
         if _limit is not None and len(rows) > _limit:
             rows = rows[-_limit:]
     conn.close()
-    rows = _coalesce_tier3_upload_rows(rows)
+    rows = _coalesce_tier3_upload_rows(rows, platform=platform)
 
     dfs = []
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
@@ -1486,7 +1592,7 @@ def load_platform_data_for_report_range(
     if s1 < s0:
         s0, s1 = s1, s0
 
-    cache_key = (platform, s0, s1, bool(dedup), bool(columns_only))
+    cache_key = (platform, s0, s1, bool(dedup), bool(columns_only), 5)
     cached = _tier3_range_cache_get(cache_key)
     if cached is not None:
         return cached
@@ -1498,7 +1604,7 @@ def load_platform_data_for_report_range(
         if daily_uploads_pg_read():
             pg_rows = pg_load_platform_rows_for_range(platform, s0, s1)
             if pg_rows:
-                rows = _coalesce_tier3_upload_rows(pg_rows)
+                rows = _coalesce_tier3_upload_rows(pg_rows, platform=platform)
     except Exception:
         pass
 
@@ -1517,7 +1623,7 @@ def load_platform_data_for_report_range(
         ).fetchall()
         conn.close()
 
-    rows = _coalesce_tier3_upload_rows(rows)
+    rows = _coalesce_tier3_upload_rows(rows, platform=platform)
 
     dfs: list[pd.DataFrame] = []
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)

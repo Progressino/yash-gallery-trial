@@ -10,6 +10,7 @@ from backend.services.daily_inventory_history import (
 )
 from backend.services.daily_sales_history import (
     sales_history_for_sku,
+    sales_history_platform_filters,
     sales_history_summary,
     sales_history_upload_coverage,
     sales_history_wide_matrix,
@@ -150,6 +151,29 @@ def test_sales_history_upload_coverage_lists_missing_platforms(monkeypatch):
     assert "coverage_gaps" in wide
 
 
+def test_sales_history_platform_filters_tier3_amazon_and_no_nan(monkeypatch):
+    monkeypatch.setattr(
+        "backend.services.daily_store.get_upload_report_day_coverage",
+        lambda: {
+            "amazon": {"2026-06-02"},
+            "flipkart": set(),
+            "meesho": set(),
+            "myntra": set(),
+        },
+    )
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A"],
+            "TxnDate": pd.to_datetime(["2026-06-02"]),
+            "Units_Effective": [1.0],
+            "Source": ["nan"],
+        }
+    )
+    plats = sales_history_platform_filters(sales, days=2, end_date="2026-06-02")
+    assert "Amazon" in plats
+    assert all(p.strip().lower() not in ("nan", "none") for p in plats)
+
+
 def test_sales_history_for_sku_timeline():
     sales = pd.DataFrame(
         {
@@ -162,3 +186,20 @@ def test_sales_history_for_sku_timeline():
     out = sales_history_for_sku(sales, "SKU-A", window_days=2, end_date="2026-06-02")
     assert out["net_units"] == 5.0
     assert len(out["rows"]) == 2
+
+
+def test_sales_history_excludes_combo_fan_component_rows():
+    """Combo fan copies (_Combo_Fan=True) must not inflate Sales History units."""
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1037DPT19WHITE-4XL", "1037YKBLUE-4XL", "DPT19WHITE"],
+            "TxnDate": pd.to_datetime(["2026-07-17"] * 3),
+            "Transaction Type": ["Shipment"] * 3,
+            "Quantity": [1.0, 1.0, 1.0],
+            "Units_Effective": [1.0, 1.0, 1.0],
+            "Source": ["Amazon"] * 3,
+            "_Combo_Fan": [False, True, True],
+        }
+    )
+    wide = sales_history_wide_matrix(sales, days=1, end_date="2026-07-17", platform="Amazon")
+    assert wide["date_totals"] == [1.0]

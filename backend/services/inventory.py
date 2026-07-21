@@ -326,6 +326,29 @@ def refresh_inventory_api_cache(sess: Any) -> None:
     dbg = getattr(sess, "inventory_debug", None) or {}
     sess.inventory_api_totals = inventory_column_totals(df)
     sess.inventory_api_marketplaces = inventory_marketplace_breakdown(df, dbg)
+    sess.inventory_auto_checks = inventory_snapshot_auto_checks(dbg, sess.inventory_api_totals)
+
+
+def inventory_snapshot_auto_checks(debug: dict | None, totals: dict | None) -> list[dict]:
+    """Compare parsed Amazon ledger headline to merged snapshot column (self-check for UI)."""
+    dbg = debug or {}
+    totals = totals or {}
+    checks: list[dict] = []
+    amz = dbg.get("amz_disclaimer") or {}
+    expected = float(amz.get("sellable_non_znne_units") or amz.get("latest_report_units") or 0)
+    actual = float(totals.get("Amazon_Inventory") or 0)
+    if expected > 0:
+        delta = round(actual - expected, 2)
+        checks.append(
+            {
+                "check": "amazon_ledger_vs_snapshot",
+                "ok": abs(delta) < 1.0,
+                "expected_amazon_units": expected,
+                "snapshot_amazon_units": actual,
+                "delta": delta,
+            }
+        )
+    return checks
 
 
 def backup_inventory_before_upload(sess: Any) -> None:
@@ -1899,7 +1922,11 @@ def load_inventory_consolidated(
             if c in oms_part.columns and oms_part[c].sum() > 0
         }
         if oms_mkt_cols:
-            debug["oms_provides_marketplace"] = sorted(oms_mkt_cols)
+            # Amazon FC ledger (when parsed) must not be dropped — OMS "Other Warehouse" is often a subset.
+            if debug.get("amz") and not str(debug.get("amz", "")).startswith("0 SKUs"):
+                oms_mkt_cols.discard("Amazon_Inventory")
+            if oms_mkt_cols:
+                debug["oms_provides_marketplace"] = sorted(oms_mkt_cols)
             for i in range(1, len(inv_dfs)):
                 drop = [c for c in oms_mkt_cols if c in inv_dfs[i].columns]
                 if drop:
@@ -1930,6 +1957,8 @@ def load_inventory_consolidated(
     consolidated = inv_dfs[0]
     for d in inv_dfs[1:]:
         consolidated = pd.merge(consolidated, d, on="OMS_SKU", how="outer")
+
+    consolidated = _coalesce_inventory_merge_suffixes(consolidated)
 
     inv_cols = inventory_source_columns(consolidated)
     if inv_cols:
@@ -2046,6 +2075,35 @@ def oms_returns_to_overlay(
     if not parts:
         return pd.DataFrame()
     return pd.concat(parts, ignore_index=True)
+
+
+def _coalesce_inventory_merge_suffixes(df: pd.DataFrame) -> pd.DataFrame:
+    """Merge pandas ``*_x`` / ``*_y`` columns from outer joins into one layer per channel."""
+    if df is None or df.empty:
+        return df
+    import numpy as np
+
+    out = df.copy()
+    bases: set[str] = set()
+    for c in out.columns:
+        if c.endswith("_x"):
+            bases.add(c[:-2])
+        elif c.endswith("_y"):
+            bases.add(c[:-2])
+    for base in sorted(bases):
+        cx, cy = f"{base}_x", f"{base}_y"
+        if cx in out.columns and cy in out.columns:
+            a = pd.to_numeric(out[cx], errors="coerce").fillna(0)
+            b = pd.to_numeric(out[cy], errors="coerce").fillna(0)
+            # Amazon FC ledger vs OMS "Other Warehouse" — take higher per SKU (ledger is complete FC sellable).
+            combined = np.maximum(a.to_numpy(), b.to_numpy())
+            out[base] = combined
+            out = out.drop(columns=[cx, cy])
+        elif cx in out.columns:
+            out = out.rename(columns={cx: base})
+        elif cy in out.columns:
+            out = out.rename(columns={cy: base})
+    return out
 
 
 def recompute_inventory_totals(df: pd.DataFrame) -> pd.DataFrame:

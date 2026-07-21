@@ -9,6 +9,7 @@ import type { ModuleKey } from '../lib/modules'
 import { FixedTopLoadingBar } from './LoadingProgressBar'
 import { clearLocalSessionHint, formatLocalHintAge, readLocalSessionHint } from '../lib/localSessionHint'
 import { isErpModulePath } from '../lib/erpModulePaths'
+import { formatBuildDeployedAt } from '../lib/reportingDates'
 
 type NavItem = { to: string; label: string; module: ModuleKey; short?: string }
 
@@ -272,11 +273,12 @@ export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const embeddedSha = (import.meta.env.VITE_APP_GIT_SHA as string | undefined)?.trim()
   const embeddedBuilt = (import.meta.env.VITE_APP_BUILT_AT as string | undefined)?.trim()
-  const embeddedVersion =
-    embeddedSha && embeddedSha !== 'dev'
-      ? `${embeddedSha}${embeddedBuilt ? ` · ${embeddedBuilt.slice(0, 10)}` : ''}`
-      : null
-  const [appVersion, setAppVersion] = useState<string | null>(embeddedVersion)
+  const [buildSha, setBuildSha] = useState<string | null>(
+    embeddedSha && embeddedSha !== 'dev' ? embeddedSha : null,
+  )
+  const [buildDeployedAt, setBuildDeployedAt] = useState<string | null>(
+    embeddedBuilt ? formatBuildDeployedAt(embeddedBuilt) : null,
+  )
   const localHint = readLocalSessionHint()
   const navScrollRef = useRef<HTMLElement>(null)
   const [navCanScroll, setNavCanScroll] = useState(false)
@@ -306,8 +308,8 @@ export default function Layout() {
           if (cancelled) return
           const sha = r.data.git_sha || r.data.label || r.data.version
           if (!sha || sha === 'dev') return
-          const built = r.data.built_at ? ` · ${r.data.built_at.slice(0, 10)}` : ''
-          setAppVersion(`${sha}${built}`)
+          setBuildSha(sha)
+          setBuildDeployedAt(r.data.built_at ? formatBuildDeployedAt(r.data.built_at) : null)
         })
         .catch(() => {
           if (!cancelled && attempt < 4) {
@@ -580,10 +582,23 @@ export default function Layout() {
               <span className="text-[10px] text-slate-500 font-medium truncate">Progressino</span>
             </div>
             <div
-              className="text-[11px] font-mono text-slate-700 bg-white border border-slate-300 rounded px-2 py-1 truncate"
-              title={appVersion ? `Build ${appVersion}` : 'Loading build…'}
+              className="text-[10px] font-mono text-slate-700 bg-white border border-slate-300 rounded px-2 py-1 leading-snug"
+              title={
+                buildSha
+                  ? `Build ${buildSha}${buildDeployedAt ? ` · ${buildDeployedAt}` : ''}`
+                  : 'Loading build…'
+              }
             >
-              {appVersion ? `Build ${appVersion}` : 'Build …'}
+              {buildSha ? (
+                <>
+                  <div className="font-semibold text-slate-800">Build {buildSha}</div>
+                  {buildDeployedAt ? (
+                    <div className="text-slate-600 mt-0.5 whitespace-normal">{buildDeployedAt}</div>
+                  ) : null}
+                </>
+              ) : (
+                'Build …'
+              )}
             </div>
           </div>
         </div>

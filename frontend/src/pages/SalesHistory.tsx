@@ -103,7 +103,9 @@ export default function SalesHistory() {
     matrixQ.data?.loaded ||
     (coverage.sales_rows ?? 0) > 0 ||
     (coverage.daily_orders ?? false)
-  const platforms = summaryQ.data?.platforms ?? matrixQ.data?.platforms ?? []
+  const platforms = (summaryQ.data?.platforms ?? matrixQ.data?.platforms ?? []).filter(
+    p => p.trim() && !['nan', 'none', 'null'].includes(p.trim().toLowerCase()),
+  )
   const dates = matrixQ.data?.dates ?? []
   const dateTotals = matrixQ.data?.date_totals ?? []
   const matrixRows = matrixQ.data?.rows ?? []
@@ -153,6 +155,8 @@ export default function SalesHistory() {
       ),
     [coverageGaps],
   )
+
+  const failedAutoChecks = (summaryQ.data?.auto_checks ?? []).filter(c => !c.ok)
 
   const rangeLabel = useMemo(() => {
     if (!dates.length) return ''
@@ -257,6 +261,24 @@ export default function SalesHistory() {
             </Link>
             . After each upload, wait for the status banner on Upload — it lists what was saved and what is still missing.
             Partial uploads (e.g. only Myntra) show here but combined totals stay low until all four platforms are uploaded.
+          </p>
+        </div>
+      )}
+
+      {failedAutoChecks.length > 0 && (
+        <div className="rounded-xl border border-red-300 bg-red-50 p-4 text-sm text-red-950 space-y-2">
+          <p className="font-semibold">Automatic data check failed — matrix does not match Tier-3 uploads</p>
+          <ul className="list-disc pl-5 space-y-1 font-mono text-xs">
+            {failedAutoChecks.map(c => (
+              <li key={`${c.date}-${c.platform}`}>
+                {c.date} {c.platform}: matrix {c.matrix_net_units} vs upload {c.expected_net_units} (Δ{' '}
+                {c.delta})
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs text-red-800">
+            Re-upload the daily order files for those dates or use Upload → reload from server. PO calculations use the
+            same Tier-3 source — fix uploads before raising POs.
           </p>
         </div>
       )}

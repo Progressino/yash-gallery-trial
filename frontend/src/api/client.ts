@@ -1186,6 +1186,16 @@ export async function getPoDailySalesHistorySummary(opts?: {
     total_units?: number
     core_platforms?: string[]
     coverage_gaps?: SalesHistoryCoverageGap[]
+    auto_checks?: Array<{
+      date: string
+      platform: string
+      check: string
+      ok: boolean
+      expected_net_units?: number
+      matrix_net_units?: number
+      delta?: number
+    }>
+    auto_checks_ok?: boolean
   }>('/po/daily-sales-history', {
     params: {
       days: opts?.days ?? 30,

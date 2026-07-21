@@ -55,6 +55,7 @@ from ..services.inventory import (
     inventory_snapshot_meta_for_api,
     oms_loaded_in_debug,
     refresh_inventory_api_cache,
+    inventory_snapshot_auto_checks,
     sync_inventory_snapshot_from_warm,
 )
 
@@ -62,7 +63,7 @@ router = APIRouter()
 
 # Process-wide Intelligence bundle cache (PG-restore shells share the same Tier-3 window).
 # Bump when bundle shape/semantics change (invalidates persisted intel_bundle_*.json keys).
-_INTELLIGENCE_BUNDLE_CACHE_GEN = "v3"
+_INTELLIGENCE_BUNDLE_CACHE_GEN = "v7"
 _GLOBAL_INTELLIGENCE_BUNDLE_CACHE: dict = {}
 
 # How long a cached bundle is served without recomputation. Real data changes
@@ -1252,6 +1253,18 @@ def _platform_df_for_intelligence_bundle(
     if len(s) != 10 or len(e) != 10:
         return raw
 
+    try:
+        from ..services.daily_store import platforms_with_uploads_in_range
+
+        if platform_key in platforms_with_uploads_in_range(s, e):
+            t3_only = load_platform_data_for_report_range(
+                platform_key, s, e, dedup=True, columns_only=False
+            )
+            if t3_only is not None and not t3_only.empty:
+                return t3_only
+    except Exception:
+        pass
+
     in_w = _filter_platform_df_by_window(raw, s, e)
     disk = _warm_disk_platform_frame(attr, s, e)
     in_disk = _filter_platform_df_by_window(disk, s, e) if not disk.empty else pd.DataFrame()
@@ -2180,7 +2193,19 @@ def _build_intelligence_bundle_payload_from_session(
     win_gated = _slice_sales_for_bundle(gated_sales, s, e)
     sales_slice = win_gated
 
-    if not win_gated.empty:
+    from ..services.daily_store import platforms_with_uploads_in_range
+
+    tier3_uploaded = bool(platforms_with_uploads_in_range(s, e))
+    t3_tuple = (
+        _tier3_direct_has_units(s, e, sess, limit, basis)
+        if tier3_uploaded
+        else None
+    )
+    if t3_tuple is not None and int(t3_tuple[0].get("total_units") or 0) > 0:
+        platform_summary = list(t3_tuple[1])
+        if t3_tuple[3] is not None and not getattr(t3_tuple[3], "empty", True):
+            sales_slice = t3_tuple[3]
+    elif not win_gated.empty:
         platform_summary = get_platform_summary(
             mtr_b,
             myntra_b,
@@ -6034,6 +6059,7 @@ def get_inventory(
         "marketplaces": marketplaces,
         "missing_marketplace_hints": inventory_missing_marketplace_warnings(dbg),
         "inventory_upload_warnings": upload_warnings,
+        "auto_checks": getattr(sess, "inventory_auto_checks", None) or inventory_snapshot_auto_checks(dbg, totals),
         "manual_intransit_loaded": not getattr(sess, "manual_intransit_overlay_df", pd.DataFrame()).empty,
         "manual_intransit_units": int(
             pd.to_numeric(
