@@ -2109,6 +2109,35 @@ export async function getCoverage(opts?: {
   }
 }
 
+export type DataHealthCheck = {
+  id: string
+  area: 'sales' | 'inventory' | string
+  title: string
+  ok: boolean
+  severity: 'ok' | 'fail' | 'warn' | string
+  detail: string
+  data?: Record<string, unknown>
+}
+
+export type DataHealthReport = {
+  status?: string
+  generated_at?: string
+  age_sec?: number
+  ok: boolean
+  fail_count: number
+  warn_count: number
+  checks: DataHealthCheck[]
+}
+
+export async function getDataHealthChecks(opts?: { refresh?: boolean }): Promise<DataHealthReport> {
+  const params = opts?.refresh ? { refresh: '1' } : undefined
+  const { data } = await api.get<DataHealthReport>('/data/health-checks', {
+    params,
+    timeout: opts?.refresh ? 180_000 : 30_000,
+  })
+  return data
+}
+
 export type DataParityReport = {
   ok: boolean
   planning_date: string

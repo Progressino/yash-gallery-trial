@@ -111,6 +111,12 @@ def _finalize_sales_data_refresh(sess: AppSession) -> None:
         mark_tier3_sync_applied(sess)
     except Exception:
         _log.exception("tier3 sync token apply after sales refresh failed")
+    try:
+        from ..services.data_health import schedule_data_health_refresh
+
+        schedule_data_health_refresh("sales-upload")
+    except Exception:
+        _log.exception("data-health refresh schedule after sales refresh failed")
 
 
 def _upload_quality_from_merge(
@@ -2466,6 +2472,12 @@ def _finish_inventory_server_save(sess: AppSession, session_id: str | None = Non
                 merged["warnings"] = list(dict.fromkeys([*merged["warnings"], note]))
             sess.inventory_upload_result = merged
     _schedule_inventory_github_cache_save(sess)
+    try:
+        from ..services.data_health import schedule_data_health_refresh
+
+        schedule_data_health_refresh("inventory-upload")
+    except Exception:
+        _log.exception("data-health refresh schedule after inventory upload failed")
 
 
 def _build_inventory_upload_payload(

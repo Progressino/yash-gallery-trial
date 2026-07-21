@@ -7,6 +7,7 @@ import api from '../api/client'
 import { useAuth, mayResetSharedData, mayUploadHistorical, canAccessModule, isHrmOnlyUser } from '../store/auth'
 import type { ModuleKey } from '../lib/modules'
 import { FixedTopLoadingBar } from './LoadingProgressBar'
+import DataHealthBanner from './DataHealthBanner'
 import { clearLocalSessionHint, formatLocalHintAge, readLocalSessionHint } from '../lib/localSessionHint'
 import { isErpModulePath } from '../lib/erpModulePaths'
 import { formatBuildDeployedAt } from '../lib/reportingDates'
@@ -618,6 +619,7 @@ export default function Layout() {
         </header>
 
         <main className="flex-1 overflow-y-auto bg-gray-50 p-4 md:p-6 min-h-0">
+          <DataHealthBanner />
           <Outlet />
         </main>
       </div>

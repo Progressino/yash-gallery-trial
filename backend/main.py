@@ -3187,6 +3187,25 @@ async def _session_eviction_loop() -> None:
             log.exception("session eviction failed")
 
 
+async def _data_health_scheduler() -> None:
+    """Run the automated data-health suite shortly after boot, then every 6h."""
+    from .services.data_health import run_data_health_checks
+
+    interval = int(_os_main.environ.get("DATA_HEALTH_INTERVAL_SEC", str(6 * 3600)))
+    await asyncio.sleep(int(_os_main.environ.get("DATA_HEALTH_BOOT_DELAY_SEC", "240")))
+    while True:
+        try:
+            result = await run_aux(run_data_health_checks)
+            if result and not result.get("ok"):
+                log.warning(
+                    "data-health: %d FAILED check(s) — see /api/data/health-checks",
+                    result.get("fail_count"),
+                )
+        except Exception:
+            log.exception("scheduled data-health run failed")
+        await asyncio.sleep(max(600, interval))
+
+
 def _bootstrap_ops_pg_from_sqlite() -> None:
     """Seed PostgreSQL Tier-3 + shared snapshot when PG is empty (PG remains source of truth)."""
     try:
@@ -3228,10 +3247,12 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(_warm_cache_scheduler())
     rollup_task = asyncio.create_task(_sku_sales_rollup_scheduler())
     evict_task = asyncio.create_task(_session_eviction_loop())
+    health_task = asyncio.create_task(_data_health_scheduler())
     yield
     task.cancel()
     rollup_task.cancel()
     evict_task.cancel()
+    health_task.cancel()
     try:
         from .db.pg_pool import close_all_pools
 

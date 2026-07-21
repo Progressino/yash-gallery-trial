@@ -5980,6 +5980,29 @@ def flipkart_analytics(request: Request):
 
 # ── Inventory ─────────────────────────────────────────────────
 
+@router.get("/health-checks")
+def get_data_health_checks(refresh: int = 0):
+    """
+    Automated data-health suite: duplicate sales uploads, Sales History matrix
+    vs Tier-3 files, inventory component math, ledger parity, swings, and
+    manual in-transit staleness. Cached (refreshed after uploads and on a
+    schedule); pass refresh=1 to force a re-run.
+    """
+    from ..services.data_health import (
+        get_cached_data_health,
+        run_data_health_checks,
+        schedule_data_health_refresh,
+    )
+
+    if not refresh:
+        cached = get_cached_data_health()
+        if cached is not None:
+            return cached
+        schedule_data_health_refresh("api-cold-cache")
+        return {"status": "running", "ok": True, "checks": [], "fail_count": 0, "warn_count": 0}
+    return run_data_health_checks()
+
+
 @router.get("/inventory")
 def get_inventory(
     request: Request,

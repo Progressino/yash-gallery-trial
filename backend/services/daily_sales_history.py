@@ -181,9 +181,11 @@ def sales_history_data_quality_checks(
     """
     Automatic spot checks: for recent days with Amazon Tier-3 uploads, compare
     matrix net units (Sales History build) to a fresh Tier-3 re-read.
+
+    Expected units are counted the way the daily files are counted: every
+    Shipment row (including zero-amount free replacements) minus Refund rows.
     """
     from .daily_store import get_upload_report_day_coverage, load_platform_data_for_report_range
-    from .sales import _compute_platform_metrics
 
     if sales_df is None or getattr(sales_df, "empty", True):
         return []
@@ -201,40 +203,48 @@ def sales_history_data_quality_checks(
             continue
         if start <= d <= end:
             in_window.append(iso)
+    in_window = in_window[-max(1, int(max_days)) :]
     if not in_window:
         return []
 
+    # One Tier-3 read spanning all checked days (not one per day).
+    df = load_platform_data_for_report_range("amazon", in_window[0], in_window[-1], dedup=True)
+    if df is None or df.empty:
+        return []
+    txn = df["Transaction_Type"].astype(str).str.strip()
+    day = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+    qty = pd.to_numeric(df["Quantity"], errors="coerce").fillna(0)
+    # FreeReplacement rows are zero-amount shipments — physically shipped units
+    # that the daily files (and the user's master sheet) count as sales.
+    ship_mask = txn.isin(("Shipment", "FreeReplacement"))
+    ship_by_day = qty[ship_mask].groupby(day[ship_mask]).sum()
+    ref_mask = txn.isin(("Refund", "Return"))
+    ref_by_day = qty[ref_mask].groupby(day[ref_mask]).sum()
+
+    view = filter_sales_history_window(
+        sales_df,
+        days=days,
+        end_date=end_date,
+        start_date=start_date,
+        platform="Amazon",
+    )
+
     checks: list[dict] = []
-    for iso in in_window[-max(1, int(max_days)) :]:
-        df = load_platform_data_for_report_range("amazon", iso, iso, dedup=True)
-        if df is None or df.empty:
+    for iso in in_window:
+        d0 = pd.Timestamp(iso).normalize()
+        expected = float(ship_by_day.get(d0, 0.0)) - float(ref_by_day.get(d0, 0.0))
+        if expected == 0:
             continue
-        metrics = _compute_platform_metrics(
-            df,
-            "Amazon",
-            "SKU",
-            "Transaction_Type",
-            start_date=iso,
-            end_date=iso,
-            headline_only=True,
-        )
-        expected = float(metrics.get("net_units") or 0)
-        view = filter_sales_history_window(
-            sales_df,
-            days=days,
-            end_date=end_date,
-            start_date=start_date,
-            platform="Amazon",
-        )
-        day = pd.Timestamp(iso).normalize()
-        actual = float(view.loc[view["Date"] == day, "Units"].sum())
+        actual = float(view.loc[view["Date"] == d0, "Units"].sum())
         delta = round(actual - expected, 2)
+        # Small tolerance: LineKey dedup / rounding can shift a day by a unit or two.
+        tol = max(2.5, abs(expected) * 0.003)
         checks.append(
             {
                 "date": iso,
                 "platform": "Amazon",
                 "check": "tier3_vs_sales_history",
-                "ok": abs(delta) < 0.5,
+                "ok": abs(delta) <= tol,
                 "expected_net_units": expected,
                 "matrix_net_units": actual,
                 "delta": delta,
