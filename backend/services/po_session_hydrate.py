@@ -754,36 +754,62 @@ _PO_PLATFORM_ATTRS = (
     "snapdeal_df",
 )
 
+_MIN_PLATFORM_ROWS_FOR_PO = 1000
 
-def _hydrate_platform_frames_from_disk_for_po(sess) -> None:
-    """PO-session-only warm cache skips platform RAM; read parquets for ADS when empty.
 
-    Skip when unified ``sales_df`` is already large enough — ADS prefers that path and
-    loading every platform parquet doubles peak RAM (common OOM on Calculate PO).
-    """
+def ensure_platform_bulk_frames_in_warm_cache() -> None:
+    """Top up Tier-1 platform parquets for PO quarterly / LY when PO-session-only skipped them."""
     import backend.main as _main
 
-    if not _main.warm_cache_po_session_only():
-        return
-    if _df_row_count(getattr(sess, "sales_df", None)) >= 50_000:
-        return
-    if any(
-        _df_row_count(getattr(sess, attr, None)) > 0 for attr in _PO_PLATFORM_ATTRS
-    ):
-        return
+    from .shared_frames import warm_frame
+
     disk = _warm_cache_dir()
+    if _main._warm_cache is None:
+        _main._warm_cache = {}
+    loaded = []
     for attr in _PO_PLATFORM_ATTRS:
+        if len(warm_frame(attr)) >= _MIN_PLATFORM_ROWS_FOR_PO:
+            continue
         path = disk / f"{attr}.parquet"
         if not path.is_file():
             continue
         try:
             df = pd.read_parquet(path)
         except Exception:
-            _log.exception("PO hydrate: failed reading %s", path)
+            _log.exception("PO hydrate: failed reading platform parquet %s", path)
             continue
         if df is not None and not df.empty:
-            setattr(sess, attr, df)
-            _log.info("PO hydrate: loaded %s from disk (%s rows)", attr, len(df))
+            _main._warm_cache[attr] = df
+            loaded.append(f"{attr}:{len(df)}")
+    if loaded:
+        _log.info("PO hydrate: loaded platform bulk frames into warm cache (%s)", ", ".join(loaded))
+
+
+def _hydrate_platform_frames_from_disk_for_po(sess) -> None:
+    """Attach platform history for quarterly / slow ADS when session is PO-session-only.
+
+    Unified ``sales_df`` covers recent ADS via PG materialization, but LY floors and
+    quarterly columns still need per-platform Tier-1 frames. Load into warm cache once,
+    then attach to the session (shared refs when enabled).
+    """
+    import backend.main as _main
+
+    from .shared_frames import warm_frame
+
+    ensure_platform_bulk_frames_in_warm_cache()
+
+    if any(_df_row_count(getattr(sess, attr, None)) > 0 for attr in _PO_PLATFORM_ATTRS):
+        return
+
+    for attr in _PO_PLATFORM_ATTRS:
+        wf = warm_frame(attr)
+        if _df_row_count(wf) <= 0:
+            continue
+        if _share_warm_frame_in_po_session_only(attr):
+            setattr(sess, attr, wf)
+        else:
+            setattr(sess, attr, wf.copy())
+        _log.info("PO hydrate: attached %s to session (%s rows)", attr, len(wf))
 
 
 def hydrate_po_session_for_calculate(sess) -> dict[str, int]:

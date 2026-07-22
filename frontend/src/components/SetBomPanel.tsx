@@ -132,6 +132,8 @@ type SetBomLine = {
   component_name: string
   qty_per_set: number
   default_next_process: string
+  routing: string
+  requires_embroidery: boolean
   materials: SetBomMaterial[]
 }
 
@@ -153,10 +155,12 @@ export default function SetBomPanel({
   const [setBomForm, setSetBomForm] = useState({
     style_key: initialStyleKey,
     style_name: initialStyleName,
+    stitching_requires_complete_set: true,
+    bundle_gate_process: 'Cutting',
     lines: [
-      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching', materials: [] },
-      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching', materials: [] },
-      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery', materials: [] },
+      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, materials: [] },
+      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, materials: [] },
+      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery', routing: 'Cutting>Embroidery>Cutting>Stitching', requires_embroidery: true, materials: [] },
     ] as SetBomLine[],
   })
   const [setMatchForm, setSetMatchForm] = useState({
@@ -166,6 +170,7 @@ export default function SetBomPanel({
     match_qty: 0,
   })
   const [setMatchPreview, setSetMatchPreview] = useState<any>(null)
+  const [wipBoard, setWipBoard] = useState<any>(null)
 
   const { data: setBoms = [] } = useQuery({
     queryKey: ['set-boms'],
@@ -208,11 +213,15 @@ export default function SetBomPanel({
         setSetBomForm({
           style_key: bom.style_key,
           style_name: bom.style_name || styleName,
+          stitching_requires_complete_set: bom.stitching_requires_complete_set !== 0 && bom.stitching_requires_complete_set !== false,
+          bundle_gate_process: bom.bundle_gate_process || 'Cutting',
           lines: bom.lines.map((l: any) => ({
             component_code: l.component_code,
             component_name: l.component_name || l.component_code,
             qty_per_set: l.qty_per_set || 1,
             default_next_process: l.default_next_process || '',
+            routing: l.routing || '',
+            requires_embroidery: Boolean(l.requires_embroidery) || String(l.routing || '').includes('Embroidery'),
             materials: (l.materials || []).map((m: any) => ({
               material_code: m.material_code || '',
               material_name: m.material_name || '',
@@ -263,6 +272,26 @@ export default function SetBomPanel({
               className="w-full border rounded px-2 py-1.5 text-sm mt-1"
             />
           </div>
+          <div className="col-span-2 flex flex-wrap gap-3 items-center text-xs text-gray-700">
+            <label className="inline-flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={setBomForm.stitching_requires_complete_set}
+                onChange={e => setSetBomForm(f => ({ ...f, stitching_requires_complete_set: e.target.checked }))}
+              />
+              Stitching requires complete bundle
+            </label>
+            <label className="inline-flex items-center gap-1.5">
+              Bundle gate
+              <select
+                value={setBomForm.bundle_gate_process}
+                onChange={e => setSetBomForm(f => ({ ...f, bundle_gate_process: e.target.value }))}
+                className="border rounded px-1.5 py-0.5"
+              >
+                {processes.map(p => <option key={p}>{p}</option>)}
+              </select>
+            </label>
+          </div>
         </div>
         <div className="border rounded-lg overflow-hidden">
           <table className="w-full text-xs">
@@ -271,7 +300,8 @@ export default function SetBomPanel({
                 <th className="text-left px-2 py-1.5">Code</th>
                 <th className="text-left px-2 py-1.5">Name</th>
                 <th className="text-right px-2 py-1.5">Qty/set</th>
-                <th className="text-left px-2 py-1.5">Next process</th>
+                <th className="text-left px-2 py-1.5">Routing (partial WIP)</th>
+                <th className="text-left px-2 py-1.5">Next</th>
                 <th className="px-2 py-1.5" />
               </tr>
             </thead>
@@ -311,11 +341,36 @@ export default function SetBomPanel({
                     />
                   </td>
                   <td className="px-2 py-1">
+                    <input
+                      value={ln.routing || ''}
+                      onChange={e => setSetBomForm(f => ({
+                        ...f,
+                        lines: f.lines.map((x, j) => j === i ? {
+                          ...x,
+                          routing: e.target.value,
+                          requires_embroidery: e.target.value.includes('Embroidery'),
+                        } : x),
+                      }))}
+                      placeholder="Cutting>Embroidery>Cutting>Stitching"
+                      className="w-full border rounded px-1.5 py-0.5 font-mono text-[10px]"
+                      title="Component-level route. Embroidery between Cutting hops = temporary child WIP."
+                    />
+                  </td>
+                  <td className="px-2 py-1">
                     <select
                       value={ln.default_next_process}
                       onChange={e => setSetBomForm(f => ({
                         ...f,
-                        lines: f.lines.map((x, j) => j === i ? { ...x, default_next_process: e.target.value } : x),
+                        lines: f.lines.map((x, j) => j === i ? {
+                          ...x,
+                          default_next_process: e.target.value,
+                          routing: x.routing || (e.target.value === 'Embroidery'
+                            ? 'Cutting>Embroidery>Cutting>Stitching'
+                            : e.target.value
+                              ? `Cutting>${e.target.value}`
+                              : x.routing),
+                          requires_embroidery: e.target.value === 'Embroidery' || (x.routing || '').includes('Embroidery'),
+                        } : x),
                       }))}
                       className="w-full border rounded px-1.5 py-0.5"
                     >
@@ -333,7 +388,7 @@ export default function SetBomPanel({
                   </td>
                 </tr>
                 <tr className="border-t bg-gray-50/80">
-                  <td colSpan={5} className="px-2 py-2">
+                  <td colSpan={6} className="px-2 py-2">
                     <p className="text-[10px] font-semibold text-gray-500 mb-1">Materials for {ln.component_code || 'component'}</p>
                     <div className="space-y-1">
                       {(ln.materials || []).map((mat, mi) => (
@@ -434,7 +489,7 @@ export default function SetBomPanel({
           <button
             onClick={() => setSetBomForm(f => ({
               ...f,
-              lines: [...f.lines, { component_code: '', component_name: '', qty_per_set: 1, default_next_process: '', materials: [] }],
+              lines: [...f.lines, { component_code: '', component_name: '', qty_per_set: 1, default_next_process: '', routing: '', requires_embroidery: false, materials: [] }],
             }))}
             className="px-3 py-1.5 text-xs border rounded-lg"
           >
@@ -459,11 +514,15 @@ export default function SetBomPanel({
                 onClick={() => setSetBomForm({
                   style_key: b.style_key,
                   style_name: b.style_name || '',
+                  stitching_requires_complete_set: b.stitching_requires_complete_set !== 0 && b.stitching_requires_complete_set !== false,
+                  bundle_gate_process: b.bundle_gate_process || 'Cutting',
                   lines: (b.lines || []).map((l: any) => ({
                     component_code: l.component_code,
                     component_name: l.component_name || l.component_code,
                     qty_per_set: l.qty_per_set || 1,
                     default_next_process: l.default_next_process || '',
+                    routing: l.routing || '',
+                    requires_embroidery: Boolean(l.requires_embroidery),
                     materials: (l.materials || []).map((m: any) => ({
                       material_code: m.material_code || '',
                       material_name: m.material_name || '',
@@ -490,7 +549,70 @@ export default function SetBomPanel({
 
       {showSetMatch && (
         <div className="bg-white rounded-xl border p-4 space-y-3">
-          <h3 className="font-semibold text-gray-800">Set Match (Finishing → Packing)</h3>
+          <h3 className="font-semibold text-gray-800">Partial WIP board (bundle gate)</h3>
+          <p className="text-xs text-gray-500">
+            Embroidery is a temporary child of Cutting. Stitching stays blocked until all panels return and the bundle is complete.
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs text-gray-500">SO number</label>
+              <input
+                value={setMatchForm.so_number}
+                onChange={e => setSetMatchForm(f => ({ ...f, so_number: e.target.value }))}
+                className="w-full border rounded px-2 py-1.5 text-sm mt-1 font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-gray-500">Main size SKU</label>
+              <input
+                value={setMatchForm.main_sku}
+                onChange={e => setSetMatchForm(f => ({ ...f, main_sku: e.target.value.toUpperCase() }))}
+                className="w-full border rounded px-2 py-1.5 text-sm mt-1 font-mono"
+              />
+            </div>
+          </div>
+          <button
+            type="button"
+            className="px-3 py-1.5 text-xs rounded bg-[#002B5B] text-white"
+            onClick={async () => {
+              try {
+                const res = await api.get('/production/wip-board', {
+                  params: { so_number: setMatchForm.so_number, main_sku: setMatchForm.main_sku },
+                })
+                setWipBoard(res.data)
+              } catch (e) {
+                alert(apiErrorMessage(e, 'WIP board failed'))
+              }
+            }}
+          >
+            Refresh WIP board
+          </button>
+          {wipBoard && (
+            <div className="text-xs space-y-2">
+              <p className={wipBoard.bundle_complete ? 'text-emerald-700 font-semibold' : 'text-amber-700 font-semibold'}>
+                {wipBoard.message}
+              </p>
+              <table className="w-full border text-[11px]">
+                <thead className="bg-gray-50 text-gray-500">
+                  <tr>
+                    <th className="text-left px-2 py-1">Item</th>
+                    <th className="text-left px-2 py-1">Location</th>
+                    <th className="text-left px-2 py-1">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(wipBoard.items || []).map((row: any) => (
+                    <tr key={row.component_sku} className="border-t">
+                      <td className="px-2 py-1 font-mono">{row.item}</td>
+                      <td className="px-2 py-1">{row.current_location}</td>
+                      <td className="px-2 py-1">{row.status}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <h3 className="font-semibold text-gray-800 pt-2">Set Match (Finishing → Packing)</h3>
           <p className="text-xs text-gray-500">Complete sets = min(component avail at Finishing). Extras stay as component WIP.</p>
           <div className="grid grid-cols-2 gap-2">
             <div>

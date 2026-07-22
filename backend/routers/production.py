@@ -20,6 +20,7 @@ from ..db.production_db import (
     list_reservations, create_reservation, release_reservation, get_reserved_qty,
     list_set_boms, get_set_bom, get_set_bom_for_sku, upsert_set_bom, delete_set_bom,
     preview_set_match, commit_set_match, list_set_split_events, list_set_match_events,
+    get_component_routing, preview_bundle_ready, get_partial_wip_board,
 )
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
@@ -352,6 +353,8 @@ class SetBomLineIn(BaseModel):
     component_name: Optional[str] = ''
     qty_per_set: int = 1
     default_next_process: Optional[str] = ''
+    routing: Optional[str] = ''  # e.g. Cutting>Embroidery>Cutting>Stitching
+    requires_embroidery: Optional[bool] = False
     sort_order: Optional[int] = 0
     materials: Optional[List[SetBomMaterialIn]] = []
 
@@ -361,6 +364,8 @@ class SetBomIn(BaseModel):
     style_name: Optional[str] = ''
     remarks: Optional[str] = ''
     active: Optional[bool] = True
+    stitching_requires_complete_set: Optional[bool] = True
+    bundle_gate_process: Optional[str] = 'Cutting'
     lines: List[SetBomLineIn]
 
 
@@ -405,8 +410,29 @@ def get_processes():
 
 @router.get("/item-routing/{sku}")
 def get_routing(sku: str):
-    """Get process routing for a specific SKU."""
-    return {'sku': sku, 'routing': get_item_routing(sku)}
+    """Get process routing for a specific SKU (honors component-level Set BOM routing)."""
+    return {
+        "sku": sku,
+        "routing": get_component_routing(sku),
+        "item_routing": get_item_routing(sku),
+        "next_after_cutting": get_next_process(sku, "Cutting"),
+    }
+
+
+@router.get("/bundle-ready")
+def get_bundle_ready(so_number: str, main_sku: str):
+    """Stitching gate preview — complete cut bundle + embroidery done?"""
+    if not so_number or not main_sku:
+        raise HTTPException(400, "so_number and main_sku are required")
+    return preview_bundle_ready(so_number, main_sku)
+
+
+@router.get("/wip-board")
+def get_wip_board(so_number: str, main_sku: str):
+    """Panel-level WIP locations and statuses for partial operation routing."""
+    if not so_number or not main_sku:
+        raise HTTPException(400, "so_number and main_sku are required")
+    return get_partial_wip_board(so_number, main_sku)
 
 
 # ── Ready to Process ───────────────────────────────────────────────────────────

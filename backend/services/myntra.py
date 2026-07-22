@@ -51,14 +51,29 @@ def _myntra_seller_single_report_day(filename: str) -> pd.Timestamp | None:
     (``..._2026-07-20_2026-07-20_...``). When start and end are the same day,
     every row in the file (validated via ``created on``) belongs on that report day.
     """
+    win = _myntra_seller_report_window(filename)
+    if win is None:
+        return None
+    start, end = win
+    if start != end:
+        return None
+    return start
+
+
+def _myntra_seller_report_window(filename: str) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """Inclusive ``created on`` window from ``Seller_Orders_Report_…_start_end_`` filename."""
     s = str(filename or "").lower().replace("-", "_")
     if "seller_orders_report" not in s:
         return None
     m = _ISO_RANGE_IN_NAME_RE.search(str(filename))
-    if not m or m.group(1) != m.group(2):
+    if not m:
         return None
     try:
-        return pd.Timestamp(m.group(1)).normalize()
+        start = pd.Timestamp(m.group(1)).normalize()
+        end = pd.Timestamp(m.group(2)).normalize()
+        if end < start:
+            start, end = end, start
+        return start, end
     except Exception:
         return None
 
@@ -434,8 +449,14 @@ def _parse_myntra_csv(
     df.columns = df.columns.str.strip().str.lower()
 
     date_col = _myntra_created_on_column(df.columns)
+    bucket_single_report_day = True
     if date_col is None:
-        return pd.DataFrame(), "No created on column found (Myntra daily sales use created on only)"
+        # PPMP / archive CSVs inside monthly ZIPs use order_created_date, not Seller Orders layout.
+        if "order_created_date" in df.columns:
+            date_col = "order_created_date"
+            bucket_single_report_day = False
+        else:
+            return pd.DataFrame(), "No created on column found (Myntra daily sales use created on only)"
 
     created_on = _parse_myntra_datetime_series(df[date_col])
     df = df.loc[created_on.notna()].copy()
@@ -444,10 +465,23 @@ def _parse_myntra_csv(
         return pd.DataFrame(), "All created on values invalid or missing"
 
     report_day = _myntra_seller_single_report_day(filename)
-    if report_day is not None:
+    if report_day is not None and bucket_single_report_day:
+        rd = pd.Timestamp(report_day).normalize()
+        co_day = created_on.loc[df.index].dt.normalize()
+        df = df.loc[co_day == rd].copy()
+        if df.empty:
+            return pd.DataFrame(), "No rows with created on matching report day"
         df["_Date"] = report_day
     else:
-        df["_Date"] = created_on.loc[df.index].dt.normalize()
+        co_day = created_on.loc[df.index].dt.normalize()
+        win = _myntra_seller_report_window(filename)
+        if win is not None and bucket_single_report_day:
+            w0, w1 = win
+            df = df.loc[(co_day >= w0) & (co_day <= w1)].copy()
+            if df.empty:
+                return pd.DataFrame(), "No rows with created on inside report filename window"
+            co_day = created_on.loc[df.index].dt.normalize()
+        df["_Date"] = co_day
 
     id_cols = _ordered_myntra_identifier_columns(list(df.columns))
     if not id_cols:
@@ -661,9 +695,11 @@ def myntra_to_sales_rows(myntra_df: pd.DataFrame) -> pd.DataFrame:
         "TxnDate":          myntra_df["Date"],
         "Transaction Type": myntra_df["TxnType"],
         "Quantity":         myntra_df["Quantity"],
-        "Units_Effective":  np.where(myntra_df["TxnType"] == "Refund", -myntra_df["Quantity"],
-                            np.where(myntra_df["TxnType"] == "Cancel", -myntra_df["Quantity"],
-                                     myntra_df["Quantity"])),
+        "Units_Effective":  np.where(
+            myntra_df["TxnType"] == "Refund",
+            -myntra_df["Quantity"],
+            myntra_df["Quantity"],
+        ),
         "Source":           "Myntra",
         "OrderId":          oid,
         "LineKey":          lk_out,

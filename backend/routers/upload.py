@@ -3711,12 +3711,13 @@ def _save_daily_file_tracked(
     file_results: list[dict],
     detected_label: str,
     sess: AppSession | None = None,
+    raw_bytes: bytes | None = None,
 ) -> bool:
     """Persist to Tier-3 SQLite and record outcome. Returns True when saved."""
     if df is None or df.empty:
         _record_file_skip(file_results, warnings, fname, "No data extracted", platform=platform)
         return False
-    _fd, rows, block = save_daily_file(platform, fname, df)
+    _fd, rows, block = save_daily_file(platform, fname, df, raw_bytes=raw_bytes)
     if block or rows <= 0:
         reason = block or "Not saved to database"
         _record_file_skip(file_results, warnings, fname, reason, platform=platform)
@@ -3938,6 +3939,7 @@ def _process_daily_auto_sync(
                             detected=detected, warnings=warnings, file_results=file_results,
                             detected_label=f"Myntra ({fname})",
                             sess=sess,
+                            raw_bytes=raw if not fname.lower().endswith(".zip") else None,
                         ):
                             _apply_parsed_slice("myntra", df, fname, defer_queue)
                             if msg != "OK":

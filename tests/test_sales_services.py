@@ -805,6 +805,61 @@ def test_myntra_jul20_brand_row_counts_created_on_only():
     assert (pd.to_datetime(yg["Date"]).dt.normalize() == d0).all()
 
 
+def test_myntra_single_day_file_drops_rows_not_on_report_day():
+    from backend.services.myntra import _parse_myntra_csv
+
+    lines = [
+        "created on,shipped on,order status,order line id,seller sku code,myntra sku code,quantity",
+        "2026-07-20 10:00:00,2026-07-21 15:00:00,SHIPPED,L0,SK0,Y0,1",
+        "2026-07-19 10:00:00,2026-07-20 15:00:00,SHIPPED,L1,SK1,Y1,1",
+    ]
+    df, _ = _parse_myntra_csv(
+        "\n".join(lines).encode(),
+        "Seller_Orders_Report_36841_2026-07-20_2026-07-20_YG Myntra 20-7-26.csv",
+        {},
+    )
+    assert len(df) == 1
+
+
+def test_myntra_multiday_filename_window_excludes_spill_days():
+    """17–19 report must not keep rows whose created on falls on 2026-07-20."""
+    from backend.services.myntra import _parse_myntra_csv
+
+    lines = [
+        "created on,shipped on,order status,order line id,seller sku code,myntra sku code,quantity",
+        "2026-07-19 10:00:00,2026-07-19 15:00:00,SHIPPED,L0,SK0,Y0,1",
+        "2026-07-20 10:00:00,2026-07-20 15:00:00,SHIPPED,L1,SK1,Y1,1",
+    ]
+    df, _ = _parse_myntra_csv(
+        "\n".join(lines).encode(),
+        "Seller_Orders_Report_36841_2026-07-17_2026-07-19_YG Myntra.csv",
+        {},
+    )
+    assert len(df) == 1
+    assert pd.Timestamp(df["Date"].iloc[0]).normalize() == pd.Timestamp("2026-07-19").normalize()
+
+
+def test_myntra_tier3_filter_drops_multiday_spill_on_single_day_authority():
+    from backend.services.daily_store import _filter_myntra_tier3_upload_frame
+
+    multi = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2026-07-19", "2026-07-20"]),
+            "Quantity": [1.0, 1.0],
+            "TxnType": ["Shipment", "Shipment"],
+            "OMS_SKU": ["A", "B"],
+        }
+    )
+    auth = {pd.Timestamp("2026-07-20").normalize()}
+    out = _filter_myntra_tier3_upload_frame(
+        "Seller_Orders_Report_19498_2026-07-17_2026-07-19_Other Brand.csv",
+        multi,
+        auth_days=auth,
+    )
+    assert len(out) == 1
+    assert out["Date"].iloc[0].date().isoformat() == "2026-07-19"
+
+
 def test_myntra_csv_prefers_order_line_id_over_store_order_id():
     """Seller report column order puts store order id before line id; line id must win for dedup."""
     from backend.services.myntra import _parse_myntra_csv
@@ -2006,7 +2061,8 @@ def test_sales_df_to_daily_amazon_cancel_neutral():
     assert int(daily["net_units"].sum()) == 10
 
 
-def test_myntra_cancel_reduces_net_units():
+def test_myntra_cancel_does_not_reduce_net_units_daily_seller():
+    """Daily seller CSVs are sales-only; Cancel in legacy parquet is not treated as Refund."""
     from backend.services.myntra import myntra_to_sales_rows
 
     myn = pd.DataFrame(
@@ -2020,7 +2076,7 @@ def test_myntra_cancel_reduces_net_units():
         }
     )
     sales = myntra_to_sales_rows(myn)
-    assert float(sales["Units_Effective"].sum()) == 0.0
+    assert float(sales["Units_Effective"].sum()) == 2.0
 
 
 def test_meesho_cancel_reduces_net_units():

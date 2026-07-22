@@ -312,12 +312,28 @@ def init_db():
         ("job_orders", "main_sku", "TEXT DEFAULT ''"),
         ("job_orders", "component_code", "TEXT DEFAULT ''"),
         ("job_orders", "sku_role", "TEXT DEFAULT 'MAIN'"),
+        # Operation-based routing / partial WIP
+        ("set_bom_headers", "stitching_requires_complete_set", "INTEGER DEFAULT 1"),
+        ("set_bom_headers", "bundle_gate_process", "TEXT DEFAULT 'Cutting'"),
+        ("set_bom_lines", "routing", "TEXT DEFAULT ''"),
+        ("set_bom_lines", "requires_embroidery", "INTEGER DEFAULT 0"),
     ]
     for table, col, decl in migrations:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-        except:
+        except Exception:
             pass
+    # Ensure Embroidery exists as a process step in item master (best-effort).
+    try:
+        ic = _item_connect()
+        ic.execute(
+            "INSERT OR IGNORE INTO routing_steps (name, description, sort_order) VALUES (?,?,?)",
+            ("Embroidery", "Partial panel / fabric embroidery (child of Cutting)", 15),
+        )
+        ic.commit()
+        ic.close()
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -358,13 +374,48 @@ def get_item_routing(sku: str) -> list:
         return ['Cutting', 'Stitching', 'Finishing']
 
 
+def get_component_routing(sku: str) -> list:
+    """Ordered process path for a SKU, honoring Set BOM component routing when present."""
+    from ..services.operation_routing import resolve_component_routing
+    from ..services.set_components import parse_component_sku
+
+    item_path = get_item_routing(sku)
+    main, comp = parse_component_sku(sku)
+    if not comp:
+        return item_path
+    bom = get_set_bom_for_sku(main or sku)
+    if not bom:
+        return item_path
+    for ln in bom.get("lines") or []:
+        if str(ln.get("component_code") or "").strip().upper() != str(comp).upper():
+            continue
+        return resolve_component_routing(
+            routing=ln.get("routing"),
+            default_next_process=ln.get("default_next_process"),
+            item_routing=item_path,
+        )
+    return item_path
+
+
 def get_next_process(sku: str, current_process: str) -> Optional[str]:
-    """Get next process in routing for an item."""
-    routing = get_item_routing(sku)
+    """Next process for a SKU — uses component-level routing when Set BOM defines it."""
+    from ..services.operation_routing import next_process_in_path, normalize_process_name
+
+    path = get_component_routing(sku)
+    cur = normalize_process_name(current_process)
+    # Returning from Embroidery to Cutting: next after Cutting is Stitching (post-embroidery hop).
+    if cur == "Cutting" and "Embroidery" in path:
+        post = next_process_in_path(path, "Cutting", after_process="Embroidery")
+        pre = next_process_in_path(path, "Cutting")
+        # Default child hop is Embroidery; callers issuing after return pass to_process=Stitching.
+        return pre or post
+    nxt = next_process_in_path(path, current_process)
+    if nxt:
+        return nxt
     try:
-        idx = routing.index(current_process)
-        if idx + 1 < len(routing):
-            return routing[idx + 1]
+        idx = [normalize_process_name(p) for p in path].index(cur)
+        if idx + 1 < len(path):
+            return path[idx + 1]
     except ValueError:
         pass
     return None
@@ -1598,6 +1649,8 @@ def upsert_set_bom(data: dict) -> dict:
                 "component_name": str(ln.get("component_name") or code).strip(),
                 "qty_per_set": qty,
                 "default_next_process": str(ln.get("default_next_process") or "").strip(),
+                "routing": str(ln.get("routing") or "").strip(),
+                "requires_embroidery": 1 if ln.get("requires_embroidery") else 0,
                 "sort_order": int(ln.get("sort_order") if ln.get("sort_order") is not None else i),
                 "materials": [
                     {
@@ -1620,33 +1673,55 @@ def upsert_set_bom(data: dict) -> dict:
     style_name = str(data.get("style_name") or "").strip()
     remarks = str(data.get("remarks") or "").strip()
     active = 1 if data.get("active", True) else 0
+    stitching_gate = 1 if data.get("stitching_requires_complete_set", True) else 0
+    bundle_gate = str(data.get("bundle_gate_process") or "Cutting").strip() or "Cutting"
     if existing:
         hid = int(existing["id"])
         conn.execute(
             """UPDATE set_bom_headers
-               SET style_name=?, active=?, remarks=?, updated_at=?
+               SET style_name=?, active=?, remarks=?, updated_at=?,
+                   stitching_requires_complete_set=?, bundle_gate_process=?
                WHERE id=?""",
-            (style_name, active, remarks, now, hid),
+            (style_name, active, remarks, now, stitching_gate, bundle_gate, hid),
         )
         conn.execute("DELETE FROM set_bom_lines WHERE header_id=?", (hid,))
     else:
         conn.execute(
-            """INSERT INTO set_bom_headers(style_key, style_name, active, remarks, created_at, updated_at)
-               VALUES(?,?,?,?,?,?)""",
-            (style_key, style_name, active, remarks, now, now),
+            """INSERT INTO set_bom_headers(
+                   style_key, style_name, active, remarks, created_at, updated_at,
+                   stitching_requires_complete_set, bundle_gate_process)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (style_key, style_name, active, remarks, now, now, stitching_gate, bundle_gate),
         )
         hid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
     for ln in cleaned:
+        # Derive routing from default_next_process when routing blank.
+        routing = ln["routing"]
+        if not routing and ln["default_next_process"]:
+            from ..services.operation_routing import resolve_component_routing, routing_path_to_string
+
+            routing = routing_path_to_string(
+                resolve_component_routing(
+                    default_next_process=ln["default_next_process"],
+                    item_routing=["Cutting", "Stitching", "Finishing"],
+                )
+            )
+        requires_emb = ln["requires_embroidery"]
+        if not requires_emb and "Embroidery" in routing:
+            requires_emb = 1
         conn.execute(
             """INSERT INTO set_bom_lines
-               (header_id, component_code, component_name, qty_per_set, default_next_process, sort_order)
-               VALUES(?,?,?,?,?,?)""",
+               (header_id, component_code, component_name, qty_per_set,
+                default_next_process, routing, requires_embroidery, sort_order)
+               VALUES(?,?,?,?,?,?,?,?)""",
             (
                 hid,
                 ln["component_code"],
                 ln["component_name"],
                 ln["qty_per_set"],
                 ln["default_next_process"],
+                routing,
+                requires_emb,
                 ln["sort_order"],
             ),
         )
@@ -1692,11 +1767,13 @@ def _was_set_split(conn, so_number: str, main_sku: str) -> bool:
 
 
 def _assert_set_issue_allowed(conn, so_number: str, sku: str, from_process: str, to_process: str) -> None:
+    from ..services.operation_routing import normalize_process_name
     from ..services.set_components import parse_component_sku
 
     sku_u = str(sku or "").strip().upper()
-    to_p = str(to_process or "").strip()
-    _main, comp = parse_component_sku(sku_u)
+    to_p = normalize_process_name(to_process)
+    from_p = normalize_process_name(from_process)
+    main, comp = parse_component_sku(sku_u)
     if to_p == "Packing":
         if comp:
             raise ValueError(
@@ -1706,6 +1783,23 @@ def _assert_set_issue_allowed(conn, so_number: str, sku: str, from_process: str,
         if _was_set_split(conn, so_number, sku_u):
             raise ValueError(
                 "This style was split into components — use Set Match to move complete sets to Packing"
+            )
+
+    # Stitching dependency: all mandatory panels available + embroidery complete.
+    if to_p == "Stitching" and from_p != "Stitching":
+        style_sku = main or sku_u
+        bom = get_set_bom_for_sku(style_sku)
+        if not bom or not bom.get("lines"):
+            return
+        if not int(bom.get("stitching_requires_complete_set") if bom.get("stitching_requires_complete_set") is not None else 1):
+            return
+        # Component-level issue OR main SKU issue both need a complete bundle.
+        ready = preview_bundle_ready(so_number, style_sku, conn=conn)
+        if not ready.get("bundle_complete"):
+            msg = ready.get("message") or "Bundle incomplete"
+            raise ValueError(
+                f"Stitching blocked — {msg}. "
+                "All mandatory panels must be at the gate process with embroidery complete."
             )
 
 
@@ -1719,6 +1813,114 @@ def _assert_set_receive_allowed(conn, so_number: str, sku: str, process: str) ->
         raise ValueError(
             "For split set styles, Packing stock is created via Set Match — cannot receive Packing on main SKU"
         )
+
+
+def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
+    """WIP board + stitching gate: are all panels back and the cut bundle complete?"""
+    from ..services.operation_routing import compute_bundle_readiness, resolve_component_routing
+    from ..services.set_components import component_sku, parse_component_sku
+
+    own_conn = conn is None
+    if own_conn:
+        conn = _connect()
+    try:
+        main = str(main_sku or "").strip().upper()
+        parsed, _ = parse_component_sku(main)
+        if parsed:
+            main = parsed
+        bom = get_set_bom_for_sku(main)
+        if not bom or not bom.get("lines"):
+            return {
+                "bundle_complete": True,
+                "complete_sets": 0,
+                "gate_process": "Cutting",
+                "components": [],
+                "blockers": [],
+                "message": "No Set BOM — stitching gate not enforced",
+                "so_number": so_number,
+                "main_sku": main,
+            }
+        gate = str(bom.get("bundle_gate_process") or "Cutting").strip() or "Cutting"
+        comps = []
+        for ln in bom["lines"]:
+            code = ln["component_code"]
+            csku = component_sku(main, code)
+            path = resolve_component_routing(
+                routing=ln.get("routing"),
+                default_next_process=ln.get("default_next_process"),
+                item_routing=["Cutting", "Stitching", "Finishing"],
+            )
+            gate_row = conn.execute(
+                "SELECT COALESCE(available_qty,0) AS q FROM process_stock WHERE so_number=? AND sku=? AND process=?",
+                (so_number, csku, gate),
+            ).fetchone()
+            emb_row = conn.execute(
+                "SELECT COALESCE(available_qty,0) AS q FROM process_stock WHERE so_number=? AND sku=? AND process=?",
+                (so_number, csku, "Embroidery"),
+            ).fetchone()
+            avail_gate = int(gate_row["q"] if gate_row else 0)
+            emb_out = int(emb_row["q"] if emb_row else 0)
+            # Prefer Embroidery as current location when stock sits there.
+            location = "Embroidery" if emb_out > 0 else (gate if avail_gate > 0 else "")
+            if not location:
+                # Scan other process stocks for display.
+                stocks = conn.execute(
+                    "SELECT process, available_qty FROM process_stock WHERE so_number=? AND sku=? AND available_qty>0",
+                    (so_number, csku),
+                ).fetchall()
+                if stocks:
+                    location = str(stocks[0]["process"])
+            comps.append(
+                {
+                    "component_code": code,
+                    "component_name": ln.get("component_name") or code,
+                    "component_sku": csku,
+                    "qty_per_set": ln.get("qty_per_set") or 1,
+                    "available_at_gate": avail_gate,
+                    "embroidery_outstanding": emb_out,
+                    "location": location,
+                    "routing": path,
+                }
+            )
+        out = compute_bundle_readiness(comps, gate_process=gate)
+        out["so_number"] = so_number
+        out["main_sku"] = main
+        out["stitching_requires_complete_set"] = bool(
+            int(bom.get("stitching_requires_complete_set") if bom.get("stitching_requires_complete_set") is not None else 1)
+        )
+        return out
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def get_partial_wip_board(so_number: str, main_sku: str) -> dict:
+    """Panel-level WIP locations/status for the Production UI."""
+    ready = preview_bundle_ready(so_number, main_sku)
+    return {
+        "so_number": so_number,
+        "main_sku": str(main_sku or "").strip().upper(),
+        "bundle_complete": ready.get("bundle_complete"),
+        "complete_sets": ready.get("complete_sets"),
+        "gate_process": ready.get("gate_process"),
+        "message": ready.get("message"),
+        "stitching_requires_complete_set": ready.get("stitching_requires_complete_set"),
+        "items": [
+            {
+                "item": c.get("component_name") or c.get("component_code"),
+                "component_code": c.get("component_code"),
+                "component_sku": c.get("component_sku"),
+                "current_location": c.get("location") or "—",
+                "status": c.get("status"),
+                "available_at_gate": c.get("available_at_gate"),
+                "embroidery_outstanding": c.get("embroidery_outstanding"),
+                "routing": c.get("routing"),
+                "ready": c.get("ready"),
+            }
+            for c in ready.get("components") or []
+        ],
+        "blockers": ready.get("blockers") or [],
+    }
 
 
 def _split_cutting_receive(

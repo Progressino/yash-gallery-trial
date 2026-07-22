@@ -29,9 +29,10 @@ _DEFAULT_SIZE_GROUPS = [
 _DEFAULT_ROUTING = [
     ("Cutting",   "Fabric cutting as per pattern", 1),
     ("Printing",  "Screen / digital printing",     2),
-    ("Stitching", "Assembly and stitching",        3),
-    ("Finishing", "Quality check and ironing",     4),
-    ("Packing",   "Tagging and packing",           5),
+    ("Embroidery","Partial panel / fabric embroidery", 3),
+    ("Stitching", "Assembly and stitching",        4),
+    ("Finishing", "Quality check and ironing",     5),
+    ("Packing",   "Tagging and packing",           6),
 ]
 
 

@@ -240,6 +240,10 @@ def _get_conn() -> sqlite3.Connection:
         conn.execute("ALTER TABLE daily_uploads ADD COLUMN date_to DATE")
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE daily_uploads ADD COLUMN data_raw BLOB")
+    except Exception:
+        pass
 
     # Table: dates permanently removed by migrations; Phase-2 GitHub-cache merge
     # also strips these so stale rows don't sneak back from the GitHub cache.
@@ -900,6 +904,44 @@ def _apply_platform_sales_status_policy(df: pd.DataFrame, platform: str) -> pd.D
     return out
 
 
+def _myntra_authoritative_single_days_from_filenames(filenames: list[str]) -> set:
+    from .myntra import _myntra_seller_single_report_day
+
+    out: set = set()
+    for fn in filenames:
+        d = _myntra_seller_single_report_day(fn)
+        if d is not None:
+            out.add(d.normalize())
+    return out
+
+
+def _filter_myntra_tier3_upload_frame(
+    filename: str,
+    df: pd.DataFrame,
+    *,
+    auth_days: set,
+) -> pd.DataFrame:
+    """
+    Multi-day Seller Orders files must not contribute rows outside their filename window.
+    When a single-day report exists for calendar day D, drop rows dated D from multi-day blobs
+  (those sales belong to the single-day export only).
+    """
+    from .myntra import _myntra_seller_report_window, _myntra_seller_single_report_day
+
+    if df is None or df.empty or "Date" not in df.columns:
+        return df
+    d = df.copy()
+    dt = pd.to_datetime(d["Date"], errors="coerce").dt.normalize()
+    win = _myntra_seller_report_window(filename)
+    if win is not None and _myntra_seller_single_report_day(filename) is None:
+        w0, w1 = win
+        d = d.loc[(dt >= w0) & (dt <= w1)].copy()
+        dt = pd.to_datetime(d["Date"], errors="coerce").dt.normalize()
+    if auth_days and _myntra_seller_single_report_day(filename) is None:
+        d = d.loc[~dt.isin(list(auth_days))].copy()
+    return d
+
+
 def _dedup_platform_df(df: pd.DataFrame, platform: str, *, is_merge: bool = False) -> pd.DataFrame:
     """
     Deduplicate a concatenated platform DataFrame to remove inflated rows
@@ -1019,6 +1061,8 @@ def save_daily_file(
     platform: str,
     filename: str,
     df: pd.DataFrame,
+    *,
+    raw_bytes: bytes | None = None,
 ) -> Tuple[str, int, Optional[str]]:
     """
     Persist a daily upload.
@@ -1113,11 +1157,19 @@ def save_daily_file(
         (platform, filename),
     )
 
-    conn.execute(
-        "INSERT INTO daily_uploads (platform, file_date, filename, rows, data_parquet, date_from, date_to) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (platform, file_date, filename, len(df), parquet_bytes, date_from, date_to),
-    )
+    if raw_bytes is not None:
+        conn.execute(
+            "INSERT INTO daily_uploads "
+            "(platform, file_date, filename, rows, data_parquet, date_from, date_to, data_raw) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (platform, file_date, filename, len(df), parquet_bytes, date_from, date_to, raw_bytes),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO daily_uploads (platform, file_date, filename, rows, data_parquet, date_from, date_to) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (platform, file_date, filename, len(df), parquet_bytes, date_from, date_to),
+        )
     # Trim: keep only the latest N blobs per platform (see DAILY_UPLOADS_MAX_PER_PLATFORM).
     cap = _max_files_per_platform()
     conn.execute(
@@ -1213,6 +1265,10 @@ def load_platform_data(
     conn.close()
     rows = _coalesce_tier3_upload_rows(rows, platform=platform)
 
+    auth_days: set = set()
+    if platform == "myntra":
+        auth_days = _myntra_authoritative_single_days_from_filenames([r[0] for r in rows])
+
     dfs = []
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
     cutoff_ts = None
@@ -1247,6 +1303,8 @@ def load_platform_data(
                 if dt_col is not None:
                     _dt = pd.to_datetime(d[dt_col], errors="coerce")
                     d = d[_dt >= cutoff_ts]
+            if platform == "myntra" and not d.empty:
+                d = _filter_myntra_tier3_upload_frame(filename, d, auth_days=auth_days)
             if not d.empty:
                 dfs.append(d)
         except Exception:
@@ -1672,6 +1730,10 @@ def load_platform_data_for_report_range(
 
     rows = _coalesce_tier3_upload_rows(rows, platform=platform)
 
+    auth_days: set = set()
+    if platform == "myntra":
+        auth_days = _myntra_authoritative_single_days_from_filenames([r[0] for r in rows])
+
     dfs: list[pd.DataFrame] = []
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
     want_cols = _PLATFORM_METRICS_COLUMNS.get(platform) if columns_only else None
@@ -1698,6 +1760,8 @@ def load_platform_data_for_report_range(
                         )
                         if miss.any():
                             d.loc[miss, "DSR_Segment"] = label
+            if platform == "myntra" and not d.empty:
+                d = _filter_myntra_tier3_upload_frame(filename, d, auth_days=auth_days)
             if not d.empty:
                 dfs.append(d)
         except Exception:
