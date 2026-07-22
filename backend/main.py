@@ -393,6 +393,13 @@ def publish_warm_cache_from_session(sess) -> None:
                 _warm_cache[key] = merge_inventory_history(warm_df, sess_df)
             continue
 
+        # Inventory snapshots must never use the row-count replace below —
+        # an older session with equal/more SKU rows was overwriting a fresh
+        # upload's frame while leaving the newer inventory_session_meta in
+        # place (UI showed the new date, totals stayed on the previous day).
+        if key in _INVENTORY_WARM_KEYS:
+            continue
+
         if hasattr(val, "empty"):
             sess_df = val if isinstance(val, pd.DataFrame) else pd.DataFrame()
             warm_df = _warm_cache.get(key)
@@ -405,6 +412,14 @@ def publish_warm_cache_from_session(sess) -> None:
             continue
 
         _warm_cache[key] = val
+
+    # Atomic inventory publish: timestamp-guarded frame + meta together.
+    inv = getattr(sess, "inventory_df_variant", None)
+    if inv is not None and hasattr(inv, "empty") and not inv.empty:
+        try:
+            merge_inventory_into_warm_cache(sess)
+        except Exception:
+            log.exception("publish_warm_cache: inventory merge failed")
 
     _warm_cache_loaded_at = datetime.now(IST)
     try:
@@ -2956,8 +2971,11 @@ def _copy_warm_cache_to_session(sess) -> bool:
         setattr(sess, key, val)
     for _pk, _pv in _warm_plat_updates.items():
         _warm_cache[_pk] = _pv
+    # Only stamp warm inventory meta onto the session when we actually took
+    # the inventory frame from warm. Otherwise a session that kept its own
+    # newer snapshot would get an older (or desynced) date/label.
     meta = _warm_cache.get(_INVENTORY_META_WARM_KEY)
-    if meta:
+    if meta and not sess_inv_newer:
         try:
             from .services.inventory import apply_inventory_session_meta, ensure_inventory_snapshot_metadata
 

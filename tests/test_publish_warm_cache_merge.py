@@ -10,18 +10,48 @@ def _reset_warm() -> None:
     main_mod._warm_cache = {}
 
 
-def test_publish_warm_cache_merges_platforms_instead_of_replacing():
+def test_publish_warm_cache_does_not_clobber_newer_inventory_by_row_count():
+    """Regression: older session with more SKU rows must not overwrite a fresh upload.
+
+    Prod symptom: UI showed the new snapshot date (meta) while OMS/Amazon totals
+    stayed on the previous day's numbers (frame replaced by row-count publish).
+    """
     _reset_warm()
-    main_mod._warm_cache["myntra_df"] = _tier3_line_df("myntra", 190)
+    fresh = pd.DataFrame(
+        {
+            "OMS_SKU": ["A", "B"],
+            "OMS_Inventory": [10, 20],
+            "Amazon_Inventory": [5, 5],
+            "Total_Inventory": [15, 25],
+        }
+    )
+    main_mod._warm_cache["inventory_df_variant"] = fresh.copy()
+    main_mod._warm_cache["inventory_df_parent"] = fresh.copy()
+    main_mod._warm_cache[main_mod._INVENTORY_META_WARM_KEY] = {
+        "inventory_snapshot_uploaded_at": "2026-07-21T12:00:00.000000Z",
+        "inventory_snapshot_date_label": "21 Jul 2026",
+    }
 
-    sess = AppSession()
-    sess.myntra_df = _tier3_line_df("myntra", 84, start=5000)
+    stale = AppSession()
+    stale.inventory_df_variant = pd.DataFrame(
+        {
+            "OMS_SKU": ["A", "B", "C"],
+            "OMS_Inventory": [100, 100, 100],
+            "Amazon_Inventory": [40, 40, 40],
+            "Total_Inventory": [140, 140, 140],
+        }
+    )
+    stale.inventory_df_parent = stale.inventory_df_variant.copy()
+    stale.inventory_snapshot_uploaded_at = "2026-07-20T12:00:00.000000Z"
 
-    main_mod.publish_warm_cache_from_session(sess)
+    main_mod.publish_warm_cache_from_session(stale)
 
-    merged = main_mod._warm_cache["myntra_df"]
-    assert len(merged) >= 190
-    assert len(merged) != 84
+    warm = main_mod._warm_cache["inventory_df_variant"]
+    assert float(warm["OMS_Inventory"].sum()) == 30.0
+    assert float(warm["Amazon_Inventory"].sum()) == 10.0
+    assert main_mod._warm_cache[main_mod._INVENTORY_META_WARM_KEY][
+        "inventory_snapshot_uploaded_at"
+    ].startswith("2026-07-21")
 
 
 def test_publish_does_not_shrink_warm_cache_to_partial_session():

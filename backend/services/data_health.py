@@ -287,10 +287,71 @@ def _inventory_amazon_ledger_check(inv: pd.DataFrame) -> dict:
         else 0.0
     )
     delta = round(actual - expected, 1)
+    ok = abs(delta) < 1.0
+    detail = f"Ledger {int(expected)} vs snapshot {int(actual)} (Δ {delta})."
+    if not ok:
+        snap = str(meta.get("inventory_snapshot_date_label") or meta.get("inventory_snapshot_date") or "")
+        detail += (
+            f" Snapshot label says {snap or 'updated'} but totals are from an older file — "
+            f"re-upload the inventory RAR (the app should auto-heal after this deploy)."
+        )
     return _check(
-        check_id, area, title, abs(delta) < 1.0,
-        f"Ledger {int(expected)} vs snapshot {int(actual)} (Δ {delta}).",
+        check_id, area, title, ok, detail,
         data={"expected": expected, "actual": actual, "delta": delta},
+    )
+
+
+def _inventory_meta_frame_desync_check(inv: pd.DataFrame) -> dict:
+    """Catch the specific race: new snapshot date/meta with old OMS totals."""
+    check_id, area, title = (
+        "inventory_meta_frame_desync",
+        "inventory",
+        "Inventory date label matches OMS totals",
+    )
+    meta_p = _warm_dir() / "inventory_session_meta.json"
+    if not meta_p.is_file():
+        return _check(check_id, area, title, True, "No snapshot metadata — skipped.")
+    meta = json.loads(meta_p.read_text())
+    dbg = meta.get("inventory_debug") or {}
+    oms_dbg = str(dbg.get("oms") or "")
+    # oms debug looks like "14978 SKUs" — use amz_disclaimer + sources instead.
+    # Prefer comparing Amazon ledger (reliable) already covered above; here compare
+    # OMS when the debug string embeds a unit total, else use source filename date.
+    sources = meta.get("inventory_snapshot_date_sources") or []
+    uploaded_at = str(meta.get("inventory_snapshot_uploaded_at") or "")
+    snap_date = str(meta.get("inventory_snapshot_date") or "")
+    if not uploaded_at or not snap_date:
+        return _check(check_id, area, title, True, "Snapshot metadata incomplete — skipped.")
+    # If Amazon ledger check would fail, this desync is the same root cause —
+    # surface it with an actionable message about the upload race.
+    amz = dbg.get("amz_disclaimer") or {}
+    expected_amz = float(amz.get("sellable_non_znne_units") or amz.get("latest_report_units") or 0)
+    actual_amz = (
+        float(pd.to_numeric(inv["Amazon_Inventory"], errors="coerce").fillna(0).sum())
+        if "Amazon_Inventory" in inv.columns
+        else 0.0
+    )
+    if expected_amz > 0 and abs(actual_amz - expected_amz) >= 1.0:
+        return _check(
+            check_id, area, title, False,
+            (
+                f"Warm-cache desync: meta says {snap_date} "
+                f"({', '.join(str(s) for s in sources[:3]) or 'upload'}) "
+                f"but Amazon units are still {int(actual_amz)} (ledger {int(expected_amz)}). "
+                f"A concurrent session overwrote the numbers after upload."
+            ),
+            data={
+                "snapshot_date": snap_date,
+                "uploaded_at": uploaded_at,
+                "expected_amazon": expected_amz,
+                "actual_amazon": actual_amz,
+                "oms_dbg": oms_dbg,
+            },
+        )
+    return _check(
+        check_id, area, title, True,
+        f"Snapshot {snap_date} matches ledger totals.",
+        data={"snapshot_date": snap_date, "uploaded_at": uploaded_at},
     )
 
 
@@ -377,6 +438,7 @@ def _inventory_checks() -> list[dict]:
     for fn in (
         lambda: _inventory_component_sum_check(inv),
         lambda: _inventory_amazon_ledger_check(inv),
+        lambda: _inventory_meta_frame_desync_check(inv),
         lambda: _inventory_swing_check(inv),
         _inventory_manual_overlay_check,
     ):

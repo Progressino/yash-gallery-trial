@@ -505,6 +505,26 @@ def sync_inventory_snapshot_from_warm(sess: Any) -> None:
     warm = getattr(_main, "_warm_cache", None) or {}
     meta_key = getattr(_main, "_INVENTORY_META_WARM_KEY", "inventory_session_meta")
     warm_meta = warm.get(meta_key) if isinstance(warm.get(meta_key), dict) else {}
+    # Frame can load from parquet while meta stays empty (manifest race / partial
+    # top-up). Always rehydrate meta from disk when missing so the UI gets the
+    # snapshot date/sources and the timestamp guard has something to compare.
+    if not warm_meta:
+        try:
+            import json
+            from pathlib import Path
+
+            meta_path = Path(
+                getattr(_main, "_DISK_CACHE_DIR", "/data/warm_cache")
+            ) / "inventory_session_meta.json"
+            if meta_path.is_file():
+                disk_meta = json.loads(meta_path.read_text())
+                if isinstance(disk_meta, dict) and disk_meta:
+                    warm[meta_key] = disk_meta
+                    warm_meta = disk_meta
+                    if getattr(_main, "_warm_cache", None) is not None:
+                        _main._warm_cache[meta_key] = disk_meta
+        except Exception:
+            pass
     warm_at = inventory_snapshot_upload_epoch(
         str((warm_meta or {}).get("inventory_snapshot_uploaded_at") or "")
     )
@@ -520,6 +540,23 @@ def sync_inventory_snapshot_from_warm(sess: Any) -> None:
     )
     sess_df = getattr(sess, "inventory_df_variant", None)
     sess_has = sess_df is not None and hasattr(sess_df, "empty") and not sess_df.empty
+
+    # Prefer warm frame when Amazon ledger in warm meta disagrees with the session
+    # frame — classic desync after publish_warm_cache overwrote numbers only.
+    if warm_has and sess_has and warm_meta:
+        try:
+            amz = (warm_meta.get("inventory_debug") or {}).get("amz_disclaimer") or {}
+            expected = float(
+                amz.get("sellable_non_znne_units") or amz.get("latest_report_units") or 0
+            )
+            if expected > 0 and "Amazon_Inventory" in sess_df.columns:
+                actual = float(
+                    pd.to_numeric(sess_df["Amazon_Inventory"], errors="coerce").fillna(0).sum()
+                )
+                if abs(actual - expected) >= 1.0:
+                    sess_at = 0.0  # force warm to win below
+        except Exception:
+            pass
 
     if warm_has and (not sess_has or warm_at > sess_at + 1e-6):
         for key in ("inventory_df_variant", "inventory_df_parent"):
