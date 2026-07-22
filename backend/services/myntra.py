@@ -45,6 +45,24 @@ def _parse_myntra_datetime_series(series: pd.Series) -> pd.Series:
     return out
 
 
+def _myntra_seller_single_report_day(filename: str) -> pd.Timestamp | None:
+    """
+    Myntra daily Seller Orders exports name the report window in the filename
+    (``..._2026-07-20_2026-07-20_...``). When start and end are the same day,
+    every row in the file (validated via ``created on``) belongs on that report day.
+    """
+    s = str(filename or "").lower().replace("-", "_")
+    if "seller_orders_report" not in s:
+        return None
+    m = _ISO_RANGE_IN_NAME_RE.search(str(filename))
+    if not m or m.group(1) != m.group(2):
+        return None
+    try:
+        return pd.Timestamp(m.group(1)).normalize()
+    except Exception:
+        return None
+
+
 def _myntra_filename_date_fallback(filename: str) -> pd.Timestamp | None:
     """
     Seller exports can contain time-only values (e.g. ``20:02.0``) in date columns.
@@ -419,11 +437,17 @@ def _parse_myntra_csv(
     if date_col is None:
         return pd.DataFrame(), "No created on column found (Myntra daily sales use created on only)"
 
-    df["_Date"] = _parse_myntra_datetime_series(df[date_col])
-    df = df.dropna(subset=["_Date"])
+    created_on = _parse_myntra_datetime_series(df[date_col])
+    df = df.loc[created_on.notna()].copy()
     _dropped_invalid_date = max(0, _rows_in - len(df))
     if df.empty:
         return pd.DataFrame(), "All created on values invalid or missing"
+
+    report_day = _myntra_seller_single_report_day(filename)
+    if report_day is not None:
+        df["_Date"] = report_day
+    else:
+        df["_Date"] = created_on.loc[df.index].dt.normalize()
 
     id_cols = _ordered_myntra_identifier_columns(list(df.columns))
     if not id_cols:
@@ -473,37 +497,13 @@ def _parse_myntra_csv(
         if _fallback:
             status_col = _fallback[0]
 
-    # ── Dedicated reverse_order_status column (Myntra PPMP key return signal) ──
-    # PPMP files have BOTH forward_order_status AND reverse_order_status.
-    # A row with a non-empty reverse_order_status means it is a return —
-    # regardless of what forward_order_status says (often "DELIVERED").
-    reverse_col = next(
-        (c for c in df.columns if c == "reverse_order_status"
-         or ("reverse" in c and "order" in c and "status" in c)),
-        None,
-    )
+    _raw_status = df[status_col].fillna("").astype(str).str.strip() if status_col else ""
 
-    def _myntra_txn(s):
-        """
-        Daily sales: no status filter — every seller-order row counts as a sale
-        (date-wise / SKU-wise). Status codes (SH/WP/PK/C/RTO/CANCEL/…) are kept
-        on RawStatus for audit only.
-        """
-        return "Shipment"
-
-    # Step 1: classify from the detected forward status column
-    df["_TxnType"] = df[status_col].apply(_myntra_txn) if status_col else "Shipment"
-
-    # Step 1b: RT files are customer-return files — every row is a Refund.
-    # The filename starts with "RT " (e.g. "RT April-2024.csv").
-    # These are return uploads, not daily seller order sales.
+    # Daily Seller Orders CSVs are forward sales only; returns are separate RT uploads.
     if filename.upper().startswith("RT "):
         df["_TxnType"] = "Refund"
-
-    # Step 2: reverse_order_status is NOT applied as a sales filter for daily
-    # uploads — ops want all seller-order lines counted by date and SKU.
-    # (Dedicated RT return files are handled above.)
-    _ = reverse_col
+    else:
+        df["_TxnType"] = "Shipment"
 
     state_col  = next((c for c in df.columns if c in [
         "state", "customer_delivery_state_code", "buyer state", "ship state",
@@ -526,7 +526,6 @@ def _parse_myntra_csv(
         "store order id",
     )
     order_col = next((c for c in _order_id_priority if c in df.columns), None)
-    _raw_status = df[status_col].fillna("").astype(str).str.strip() if status_col else ""
 
     line_keys = _myntra_line_dedup_series(df)
     oid_fb = (

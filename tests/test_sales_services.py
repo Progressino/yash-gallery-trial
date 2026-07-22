@@ -790,12 +790,12 @@ def test_myntra_jul20_brand_row_counts_created_on_only():
 
     other, _ = _parse_myntra_csv(
         _rows(270, "2026-07-20", "2026-07-21").encode(),
-        "Other Brand Myntra 20-7-26.csv",
+        "Seller_Orders_Report_19498_2026-07-20_2026-07-20_Other Brand Myntra 20-7-26.csv",
         {},
     )
     yg, _ = _parse_myntra_csv(
         _rows(126, "2026-07-20", "2026-07-21").encode(),
-        "YG Myntra 20-7-26.csv",
+        "Seller_Orders_Report_36841_2026-07-20_2026-07-20_YG Myntra 20-7-26.csv",
         {},
     )
     d0 = pd.Timestamp("2026-07-20").normalize()
