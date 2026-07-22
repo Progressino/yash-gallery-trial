@@ -63,7 +63,7 @@ router = APIRouter()
 
 # Process-wide Intelligence bundle cache (PG-restore shells share the same Tier-3 window).
 # Bump when bundle shape/semantics change (invalidates persisted intel_bundle_*.json keys).
-_INTELLIGENCE_BUNDLE_CACHE_GEN = "v7"
+_INTELLIGENCE_BUNDLE_CACHE_GEN = "v8"
 _GLOBAL_INTELLIGENCE_BUNDLE_CACHE: dict = {}
 
 # How long a cached bundle is served without recomputation. Real data changes

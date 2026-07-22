@@ -863,6 +863,43 @@ def _dedup_shipment_superseded_by_same_day_refund(d: pd.DataFrame) -> pd.DataFra
     return d.drop(index=drop_idx, errors="ignore").drop(columns=["_merge_gen"], errors="ignore").reset_index(drop=True)
 
 
+def _apply_platform_sales_status_policy(df: pd.DataFrame, platform: str) -> pd.DataFrame:
+    """
+    Enforce product rules on already-stored Tier-3 rows (and fresh parses):
+
+    - **Myntra**: no status filter for daily sales — every order line counts as
+      Shipment (date-wise / SKU-wise). Cancel/Refund classifications from older
+      parsers are remapped to Shipment. Dedicated ``RT …`` return files (if any)
+      are still Refund only when the filename starts with ``RT `` at parse time;
+      stored rows from those files are uncommon in Tier-3.
+    - **Meesho**: PENDING (and other open-order statuses) must count as Shipment.
+    """
+    if df is None or getattr(df, "empty", True) or "TxnType" not in df.columns:
+        return df
+    plat = (platform or "").strip().lower()
+    out = df
+    txn = out["TxnType"].astype(str).str.strip()
+
+    if plat == "myntra":
+        flip = txn.isin(("Cancel", "Refund"))
+        if flip.any():
+            out = out.copy()
+            out.loc[flip, "TxnType"] = "Shipment"
+        return out
+
+    if plat == "meesho" and "RawStatus" in out.columns:
+        rs = out["RawStatus"].astype(str).str.strip().str.upper()
+        pending = rs.str.contains("PEND", na=False)
+        not_ship = ~txn.eq("Shipment")
+        flip = pending & not_ship
+        if flip.any():
+            out = out.copy()
+            out.loc[flip, "TxnType"] = "Shipment"
+        return out
+
+    return out
+
+
 def _dedup_platform_df(df: pd.DataFrame, platform: str, *, is_merge: bool = False) -> pd.DataFrame:
     """
     Deduplicate a concatenated platform DataFrame to remove inflated rows
@@ -889,6 +926,7 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str, *, is_merge: bool = Fals
     """
     if df.empty:
         return df
+    df = _apply_platform_sales_status_policy(df, platform)
     try:
         if platform == "amazon" and "Invoice_Number" in df.columns and "Order_Id" in df.columns:
             from .mtr import dedup_amazon_mtr_dataframe
@@ -934,6 +972,10 @@ def _dedup_platform_df(df: pd.DataFrame, platform: str, *, is_merge: bool = Fals
                     key_s = ["_ded_id"]
                     if txn_col and txn_col in ws.columns:
                         key_s.append(txn_col)
+                    # Myntra daily sales are date-wise (no status filter) — keep the
+                    # calendar day so ship-day and a later status update remain separate.
+                    if platform == "myntra" and "_ded_date" in ws.columns:
+                        key_s.append("_ded_date")
                     # Flipkart LineKey is often marketplace Order ID shared by multiple line SKUs —
                     # include SKU so we do not collapse multi-item orders to one row.
                     if platform == "flipkart" and sku_col and sku_col in ws.columns:
@@ -1592,7 +1634,7 @@ def load_platform_data_for_report_range(
     if s1 < s0:
         s0, s1 = s1, s0
 
-    cache_key = (platform, s0, s1, bool(dedup), bool(columns_only), 5)
+    cache_key = (platform, s0, s1, bool(dedup), bool(columns_only), 6)
     cached = _tier3_range_cache_get(cache_key)
     if cached is not None:
         return cached

@@ -74,22 +74,43 @@ def _meesho_status_implies_refund(status) -> bool:
 
 def _meesho_credit_entry_txn(status) -> str:
     """
-    Daily sales parse matrix for ``Reason for Credit Entry`` (or ``order status``).
+    Daily sales parse matrix for ``order status`` / ``Reason for Credit Entry``.
 
     | Status        | Sale? | TxnType   |
     |---------------|-------|-----------|
+    | PENDING       | Yes   | Shipment  |
     | DELIVERED     | Yes   | Shipment  |
     | HOLD          | Yes   | Shipment  |
     | READY_TO_SHIP | Yes   | Shipment  |
     | SHIPPED       | Yes   | Shipment  |
     | CANCELLED     | No    | Cancel    |
     | RETURNED/RTO  | No    | Refund    |
+
+    Pending orders are open sales and must be included in daily sales figures.
     """
     if _meesho_status_implies_refund(status):
         return "Refund"
     u = str(status).strip().upper()
     if "CANCEL" in u:
         return "Cancel"
+    # Explicit sale statuses (PENDING is required — fall-through alone is easy to regress).
+    if (
+        not u
+        or u in ("NAN", "NONE", "NULL")
+        or "PEND" in u
+        or u in (
+            "DELIVERED",
+            "HOLD",
+            "READY_TO_SHIP",
+            "SHIPPED",
+            "PACKED",
+            "DISPATCHED",
+            "OUT_FOR_DELIVERY",
+        )
+        or "SHIP" in u
+        or "DELIVER" in u
+    ):
+        return "Shipment"
     return "Shipment"
 
 
@@ -825,9 +846,17 @@ def parse_meesho_csv(csv_bytes: bytes) -> Tuple[pd.DataFrame, str]:
     if df.empty:
         return pd.DataFrame(), "All dates invalid"
 
-    # Status: "reason for credit entry" (DELIVERED/RETURNED/RTO/CANCELLED) or "order status"
-    status_col = next((c for c in df.columns if "reason" in c or "order status" in c
-                       or c == "status"), None)
+    # Status: prefer order status (has PENDING / READY_TO_SHIP) over credit-entry
+    # reason, which is often blank or return-oriented on open orders.
+    status_col = next(
+        (c for c in df.columns if c in ("order status", "order_status") or "order status" in c),
+        None,
+    )
+    if not status_col:
+        status_col = next(
+            (c for c in df.columns if "reason" in c or c == "status"),
+            None,
+        )
     df["_TxnType"] = (
         df[status_col].apply(_meesho_credit_entry_txn) if status_col else "Shipment"
     )

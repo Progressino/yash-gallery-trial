@@ -650,6 +650,25 @@ def test_meesho_csv_txn_types_ship_refund_cancel():
     assert float(can) == 1.0
 
 
+def test_meesho_pending_counts_as_shipment():
+    """PENDING / ORDER_PENDING must be included in daily sales (Shipment)."""
+    from backend.services.meesho import _meesho_credit_entry_txn, parse_meesho_csv
+
+    assert _meesho_credit_entry_txn("PENDING") == "Shipment"
+    assert _meesho_credit_entry_txn("ORDER_PENDING") == "Shipment"
+    csv = (
+        "order date,order status,sku,quantity,sub order no\n"
+        "2026-07-20,PENDING,A1,2,S1\n"
+        "2026-07-20,SHIPPED,A2,1,S2\n"
+        "2026-07-20,CANCELLED,A3,1,S3\n"
+    )
+    out, msg = parse_meesho_csv(csv.encode("utf-8"))
+    assert msg == "OK"
+    ship = out[out["TxnType"] == "Shipment"]
+    assert float(ship["Quantity"].sum()) == 3.0
+    assert set(ship["RawStatus"].astype(str).str.upper()) == {"PENDING", "SHIPPED"}
+
+
 def test_meesho_csv_linekey_prefers_sub_order_over_packet_id():
     from backend.services.meesho import parse_meesho_csv
 
@@ -755,14 +774,30 @@ def test_myntra_reverse_status_placeholder_does_not_force_refund():
     assert df["TxnType"].tolist() == ["Shipment"]
 
 
-def test_myntra_reverse_status_returned_forces_refund():
+def test_myntra_reverse_status_returned_counts_as_shipment_no_status_filter():
+    """Daily Myntra sales: no status filter — reverse_order_status does not drop units."""
     from backend.services.myntra import _parse_myntra_csv
 
     csv = (
         "created on,order status,reverse_order_status,order line id,seller sku code,myntra sku code,quantity\n"
         "2026-03-10,DELIVERED,RETURNED,L1,SK1,Y1,5\n"
+        "2026-03-10,CANCELLED,,L2,SK2,Y2,3\n"
+        "2026-03-10,RTO,,L3,SK3,Y3,2\n"
     )
     df, msg = _parse_myntra_csv(csv.encode("utf-8"), "seller.csv", {})
+    assert "OK" in msg
+    assert df["TxnType"].tolist() == ["Shipment", "Shipment", "Shipment"]
+    assert float(df["Quantity"].sum()) == 10.0
+
+
+def test_myntra_rt_filename_still_refund():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,order status,order line id,seller sku code,myntra sku code,quantity\n"
+        "2026-03-10,C,L1,SK1,Y1,5\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "RT April-2026.csv", {})
     assert "OK" in msg
     assert df["TxnType"].tolist() == ["Refund"]
 
@@ -921,8 +956,8 @@ def test_flipkart_overlay_prefers_order_export_over_earn_more_when_all_synthetic
     assert "FKEM" not in str(out["LineKey"].iloc[0])
 
 
-def test_myntra_cross_export_same_substance_different_linekey_collapses():
-    """PPMP vs seller id columns can differ for the same line — must not double gross units."""
+def test_myntra_cross_export_distinct_linekeys_kept():
+    """Distinct real Myntra LineKeys are distinct sales — do not collapse by attributes alone."""
     from backend.services.daily_store import _dedup_platform_df
     import pandas as pd
 
@@ -943,11 +978,12 @@ def test_myntra_cross_export_same_substance_different_linekey_collapses():
         }
     )
     out = _dedup_platform_df(d, "myntra")
-    assert len(out) == 1
+    assert len(out) == 2
+    assert float(out["Quantity"].sum()) == 2.0
 
 
-def test_build_sales_df_applies_platform_dedup_before_myntra_to_sales():
-    """Callers may pass concatenated Tier-3 frames without merge_platform_data."""
+def test_build_sales_df_keeps_distinct_myntra_linekeys():
+    """Callers may pass concatenated Tier-3 frames — distinct line ids stay as separate sales."""
     import pandas as pd
 
     myntra = pd.DataFrame(
@@ -973,8 +1009,8 @@ def test_build_sales_df_applies_platform_dedup_before_myntra_to_sales():
         pd.DataFrame(),
         {},
     )
-    assert len(out) == 1
-    assert int(out["Quantity"].sum()) == 1
+    assert len(out) == 2
+    assert int(out["Quantity"].sum()) == 2
 
 
 def test_merge_platform_data_stamps_dsr_from_source_filename():
@@ -1147,7 +1183,7 @@ def test_myntra_parent_shadow_keeps_unrelated_orders_same_fingerprint():
 
 
 def test_myntra_same_day_refund_drops_stale_shipment_after_merge():
-    """PPMP RTO is one row; Tier-3 merge must not keep a stale Shipment + Refund for the same line."""
+    """No status filter: RTO remaps to Shipment; same line same day collapses to one sale row."""
     from backend.services.daily_store import merge_platform_data
     import pandas as pd
 
@@ -1175,7 +1211,8 @@ def test_myntra_same_day_refund_drops_stale_shipment_after_merge():
     )
     out = merge_platform_data(stale_ship, rto_refund, "myntra")
     assert len(out) == 1
-    assert out["TxnType"].iloc[0] == "Refund"
+    assert out["TxnType"].iloc[0] == "Shipment"
+    assert float(out["Quantity"].iloc[0]) == 1.0
 
 
 def test_myntra_shipment_and_refund_different_days_keeps_both():
@@ -1205,11 +1242,13 @@ def test_myntra_shipment_and_refund_different_days_keeps_both():
         }
     )
     out = merge_platform_data(ship, ret, "myntra")
+    # Different calendar days stay as two sale rows (both remapped to Shipment).
     assert len(out) == 2
+    assert set(out["TxnType"]) == {"Shipment"}
 
 
-def test_myntra_same_day_shipment_and_refund_same_batch_keeps_both_for_gross():
-    """Seller export can show Shipment + Refund same day — gross MTR must count both."""
+def test_myntra_same_day_status_variants_collapse_to_one_sale_row():
+    """SH + RTO on the same line/day → one Shipment after no-status-filter policy."""
     from backend.services.daily_store import merge_platform_data
     import pandas as pd
 
@@ -1225,8 +1264,8 @@ def test_myntra_same_day_shipment_and_refund_same_batch_keeps_both_for_gross():
         }
     )
     out = merge_platform_data(pd.DataFrame(), batch, "myntra")
-    assert len(out) == 2
-    assert set(out["TxnType"]) == {"Shipment", "Refund"}
+    assert len(out) == 1
+    assert out["TxnType"].iloc[0] == "Shipment"
 
 
 def test_flipkart_strong_dedup_keeps_two_skus_same_order_id():

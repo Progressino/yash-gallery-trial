@@ -499,27 +499,11 @@ def _parse_myntra_csv(
     )
 
     def _myntra_txn(s):
-        s = str(s).strip().upper()
-        if s in ("FORWARD", "FWD"):
-            return "Shipment"
-        if s in ("REVERSE", "REV", "RVP"):                    # RVP = Reverse Pickup
-            return "Refund"
-        if not is_non_rto_forward_milestone_status(s) and (
-                "RETURN" in s or "REVERSE" in s or s.startswith("RTO")
-                or s.startswith("RTD") or s.startswith("RVP")
-                or s in ("R", "RS", "RD", "RTOD", "RVP", "RTN", "RSHIP")):
-            return "Refund"
-        # "F" and "IC" frequently appear in seller exports while quantities still need to be
-        # counted in gross month/day checks done by ops; treat both as Shipment.
-        # Keep explicit textual cancels and FAILED as cancel.
-        if s in ("F", "IC"):
-            return "Shipment"
-        if "CANCEL" in s or s in ("FAILED",):
-            return "Cancel"
-        if s in ("C", "SH", "PK", "D", "S", "SHIPPED", "CONFIRMED", "DELIVERED",
-                 "PACKED", "PACKING_IN_PROGRESS", "READY_FOR_DISPATCH",
-                 "MANIFESTED", "OUT_FOR_DELIVERY", "WP"):
-            return "Shipment"
+        """
+        Daily sales: no status filter — every seller-order row counts as a sale
+        (date-wise / SKU-wise). Status codes (SH/WP/PK/C/RTO/CANCEL/…) are kept
+        on RawStatus for audit only.
+        """
         return "Shipment"
 
     # Step 1: classify from the detected forward status column
@@ -527,23 +511,14 @@ def _parse_myntra_csv(
 
     # Step 1b: RT files are customer-return files — every row is a Refund.
     # The filename starts with "RT " (e.g. "RT April-2024.csv").
-    # These files have order_status=C (delivered) but fr_is_refunded=1, so the
-    # normal status-based classification wrongly marks them as Shipments.
+    # These are return uploads, not daily seller order sales.
     if filename.upper().startswith("RT "):
         df["_TxnType"] = "Refund"
 
-    # Step 2: if reverse_order_status exists, override rows that explicitly signal
-    # reverse/return states. Do not treat arbitrary non-empty values as returns.
-    if reverse_col is not None:
-        _rev_vals = (
-            df[reverse_col]
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-        _is_return = _rev_vals.map(_myntra_reverse_status_is_refund)
-        df.loc[_is_return, "_TxnType"] = "Refund"
+    # Step 2: reverse_order_status is NOT applied as a sales filter for daily
+    # uploads — ops want all seller-order lines counted by date and SKU.
+    # (Dedicated RT return files are handled above.)
+    _ = reverse_col
 
     state_col  = next((c for c in df.columns if c in [
         "state", "customer_delivery_state_code", "buyer state", "ship state",
