@@ -394,12 +394,19 @@ def apply_manual_intransit_overlay_to_inventory(sess) -> None:
 
     merged = recompute_inventory_totals(merged)
 
-    # Keep SKUs that have on-hand stock OR manual in-transit / not-in-inventory qty.
-    keep = (
-        merged["Total_Inventory"].gt(0)
-        | merged["Manual_InTransit"].gt(0)
-        | merged["Not_In_Inventory_Qty"].gt(0)
-    )
+    # Keep SKUs with any physical stock (including negative OMS rows that are
+    # part of the Unicommerce Inventory total) OR manual overlay qty.
+    from .inventory import inventory_source_columns
+
+    src = inventory_source_columns(merged)
+    if src:
+        keep = merged[src].fillna(0).abs().sum(axis=1).gt(0)
+    else:
+        keep = (
+            merged["Total_Inventory"].ne(0)
+            | merged["Manual_InTransit"].gt(0)
+            | merged["Not_In_Inventory_Qty"].gt(0)
+        )
     sess.inventory_df_variant = merged.loc[keep].reset_index(drop=True)
 
     parent = getattr(sess, "inventory_df_parent", None)

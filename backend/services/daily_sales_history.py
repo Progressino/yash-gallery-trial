@@ -517,6 +517,34 @@ def sales_history_for_sku(
     }
 
 
+def _apply_daily_sales_history_txn_fixup(out: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tier-3 SQLite/PostgreSQL stores parsed platform parquets from upload time.
+    When daily-sales rules change (e.g. Myntra no status filter), remap legacy
+    Cancel/RTO rows so Sales History matches fresh CSV parses without re-upload.
+    """
+    if out is None or out.empty:
+        return out
+    need = {"Source", "Transaction Type", "Quantity", "Units_Effective"} <= set(out.columns)
+    if not need:
+        return out
+    out = out.copy()
+    src = out["Source"].astype(str).str.strip().str.lower()
+    txn = out["Transaction Type"].astype(str).str.strip()
+    qty = pd.to_numeric(out["Quantity"], errors="coerce").fillna(0)
+    daily = src.isin({"myntra", "meesho"})
+    if not daily.any():
+        return out
+    refund = txn.isin(("Refund", "Return"))
+    gross = daily & ~refund
+    out.loc[gross, "Transaction Type"] = "Shipment"
+    out.loc[gross, "Units_Effective"] = qty.loc[gross]
+    ref_rows = daily & refund
+    if ref_rows.any():
+        out.loc[ref_rows, "Units_Effective"] = -qty.loc[ref_rows].abs()
+    return out
+
+
 def build_sales_history_sales_df(
     sess,
     *,
@@ -569,5 +597,6 @@ def build_sales_history_sales_df(
             out.loc[fr, "Units_Effective"] = pd.to_numeric(
                 out.loc[fr, "Quantity"], errors="coerce"
             ).fillna(0)
+    out = _apply_daily_sales_history_txn_fixup(out)
     out = _dedup_sales_linekey_rows(out)
     return _downcast_sales(out)

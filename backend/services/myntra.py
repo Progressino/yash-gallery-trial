@@ -393,6 +393,14 @@ def _myntra_reverse_status_is_refund(val: str) -> bool:
     )
 
 
+def _myntra_created_on_column(columns) -> str | None:
+    """Daily Myntra seller reports bucket sales on ``created on`` only."""
+    for c in columns:
+        if str(c).strip().lower() == "created on":
+            return c
+    return None
+
+
 def _parse_myntra_csv(
     csv_bytes: bytes, filename: str, mapping: Dict[str, str]
 ) -> Tuple[pd.DataFrame, str]:
@@ -407,38 +415,15 @@ def _parse_myntra_csv(
 
     df.columns = df.columns.str.strip().str.lower()
 
-    # PPMP: "order_created_date"; Seller Orders Report: "created on" or "order date"
-    date_col = next((c for c in df.columns if
-                     "order_created_date" in c or "order_date" in c or
-                     c in ("created date", "created_date", "order date", "purchase date",
-                           "created on")), None)
-    # Generic fallback: any column whose name ends with "date" or "on" containing "creat"
-    if not date_col:
-        date_col = next((c for c in df.columns if c.endswith("date") or c.endswith("_date")), None)
-    if not date_col:
-        return pd.DataFrame(), "No date column found"
+    date_col = _myntra_created_on_column(df.columns)
+    if date_col is None:
+        return pd.DataFrame(), "No created on column found (Myntra daily sales use created on only)"
 
     df["_Date"] = _parse_myntra_datetime_series(df[date_col])
-    null_mask = df["_Date"].isna()
-    if null_mask.any():
-        df.loc[null_mask, "_Date"] = pd.to_datetime(
-            df.loc[null_mask, date_col].astype(str), format="%Y%m%d", errors="coerce"
-        )
-    # Some seller CSVs have time-only values in created-on/shipped-on; recover month/day
-    # from filename date range so rows are not dropped as invalid.
-    if df["_Date"].isna().any():
-        _hint = _myntra_filename_date_fallback(filename)
-        if _hint is not None:
-            df["_Date"] = df["_Date"].fillna(_hint)
-
-    # Default to order-created date for stable month totals. Dispatch-date bucketing is
-    # available via MYNTRA_USE_DISPATCH_DATE=1 when explicitly needed.
-    if _myntra_use_dispatch_date():
-        df["_Date"] = _coalesce_myntra_dispatch_over_order_date(df, df["_Date"])
     df = df.dropna(subset=["_Date"])
     _dropped_invalid_date = max(0, _rows_in - len(df))
     if df.empty:
-        return pd.DataFrame(), "All dates invalid"
+        return pd.DataFrame(), "All created on values invalid or missing"
 
     id_cols = _ordered_myntra_identifier_columns(list(df.columns))
     if not id_cols:

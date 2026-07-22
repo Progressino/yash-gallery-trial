@@ -1371,6 +1371,10 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
         return pd.DataFrame()
     sku_col   = next((c for c in df.columns if "seller sku" in c.lower()), None)
     style_col = next((c for c in df.columns if "style" in c.lower() and "id" in c.lower()), None)
+    sku_code_col = next(
+        (c for c in df.columns if str(c).strip().lower() == "sku code"),
+        None,
+    )
     # Use "inventory count" (total warehouse stock) — matches OMS Myntra Other Warehouse figure.
     # "sellable inventory count" is per-listing stock (lower); "inventory count" is the physical count.
     inv_col = next((c for c in df.columns if c.lower().strip() == "inventory count"), None)
@@ -1396,6 +1400,12 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
                 # Only use if it resolved to a non-numeric OMS SKU
                 if result and not result.isdigit():
                     return result
+        # Last resort: keep unmapped rows under Myntra ``sku code`` so the warehouse
+        # total matches the ops sheet (dropping them under-counts Other Warehouse).
+        if sku_code_col:
+            val = str(row.get(sku_code_col, "")).strip()
+            if val and val.lower() not in ("nan", "") and not val.isdigit():
+                return val.upper()
         return ""
 
     wh_col = next(
@@ -1440,8 +1450,9 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
         (c for c in df.columns if c.strip().lower() in ("buffer stock", "buffer_stock", "bufferstock", "buffer")),
         None,
     )
-    # Inventory Blocked — stock reserved for pending orders; included in OMS total
-    # because it is physical stock in the warehouse (relevant for PO planning).
+    # Inventory Blocked is reserved stock — keep it out of OMS_Inventory so the
+    # OMS column matches the Unicommerce ``Inventory`` total on the ops sheet
+    # (OMS + Combo is computed by merging the combo CSV separately).
     inv_blocked_col = next(
         (c for c in df.columns if c.strip().lower() in ("inventory blocked", "inventory_blocked", "blocked inventory")),
         None,
@@ -1487,6 +1498,8 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
     agg_cols = {"OMS_Inventory": ("Inventory", "sum")}
     if buf_col:
         agg_cols["Buffer_Stock"] = (buf_col, "sum")
+    if inv_blocked_col:
+        agg_cols["Inventory_Blocked"] = (inv_blocked_col, "sum")
     for out_col, keywords in _MKTPLACE:
         for kw in keywords:
             if kw in col_lower:
@@ -1498,14 +1511,13 @@ def _parse_oms_csv(csv_bytes: bytes) -> pd.DataFrame:
                 agg_cols[out_col] = (col_lower[kw], "sum")
                 break
 
-    # Convert to numeric before groupby
+    # Convert to numeric before groupby — OMS_Inventory = Inventory only (sheet parity).
     df["OMS_Inventory"] = pd.to_numeric(df["Inventory"], errors="coerce").fillna(0)
     if inv_blocked_col:
-        blocked = pd.to_numeric(df[inv_blocked_col], errors="coerce").fillna(0)
-        df["OMS_Inventory"] = df["OMS_Inventory"] + blocked
+        df["Inventory_Blocked"] = pd.to_numeric(df[inv_blocked_col], errors="coerce").fillna(0)
     if buf_col:
         df["Buffer_Stock"] = pd.to_numeric(df[buf_col], errors="coerce").fillna(0)
-    for out_col, (src_col, _) in {k: v for k, v in agg_cols.items() if k not in ("OMS_Inventory", "Buffer_Stock")}.items():
+    for out_col, (src_col, _) in {k: v for k, v in agg_cols.items() if k not in ("OMS_Inventory", "Buffer_Stock", "Inventory_Blocked")}.items():
         df[out_col] = pd.to_numeric(df[src_col], errors="coerce").fillna(0)
 
     numeric_cols = list(agg_cols.keys())
@@ -1850,21 +1862,23 @@ def load_inventory_consolidated(
             else:
                 debug["oms_rar"] = "skipped (separate OMS file takes precedence)"
 
-            # Combo SKUs are a FALLBACK for when no OMS CSV is present — if an OMS CSV was found
-            # (either as a separate upload or inside the RAR), combo is skipped to avoid
-            # double-counting physical inventory that is already represented in the OMS rows.
-            _has_oms = bool(oms_bytes) or bool(_rar_oms_blobs)
-            if not _has_oms:
-                combo_blobs, combo_dedup = _dedupe_identical_byte_payloads(extracted["combo_csvs"])
-                debug["combo_rar_deduped_identical"] = combo_dedup
-                for cb in combo_blobs:
-                    p = _parse_combo_csv(cb)
-                    if not p.empty:
-                        oms_parts.append(p)
-                if combo_blobs:
-                    debug["combo_rar"] = f"{len(combo_blobs)} combo file(s) merged"
-            else:
-                debug["combo_rar"] = "skipped (OMS file present — combo would double-count)"
+            # Combo SKUs CSV lists packed sets that are NOT rows on the OMS CSV.
+            # Always merge them (OMS Inventory + Combo Qty) so totals match the ops sheet
+            # (e.g. 169004 + 3111 = 172115). Identical byte payloads are already deduped.
+            combo_blobs, combo_dedup = _dedupe_identical_byte_payloads(extracted["combo_csvs"])
+            debug["combo_rar_deduped_identical"] = combo_dedup
+            combo_units = 0
+            for cb in combo_blobs:
+                p = _parse_combo_csv(cb)
+                if not p.empty:
+                    oms_parts.append(p)
+                    combo_units += int(pd.to_numeric(p["OMS_Inventory"], errors="coerce").fillna(0).sum())
+            if combo_blobs:
+                debug["combo_rar"] = (
+                    f"{len(combo_blobs)} combo file(s) merged (+{combo_units} units onto OMS)"
+                )
+            elif extracted.get("combo_csvs") is not None:
+                debug["combo_rar"] = "0 combo files"
 
         if standalone_amz:
             amz_blobs, _ = _dedupe_identical_byte_payloads(standalone_amz)
@@ -1921,8 +1935,11 @@ def load_inventory_consolidated(
     # ── Single Myntra Other layer (standalone + RAR) ───────────────────────────
     if myntra_other_parts:
         m_all = pd.concat(myntra_other_parts, ignore_index=True)
-        # Full PPMP snapshots overlap — max per SKU, not sum (avoids 2× totals from duplicate exports).
-        part = m_all.groupby("OMS_SKU")["Myntra_Other_Inventory"].max().reset_index()
+        # Each Seller_Inventory_Report is a different brand/account warehouse.
+        # Sum per SKU across accounts to match the ops sheet "Myntra Other Warehouse"
+        # total (e.g. 997 + 1201 = 2198). Exact duplicate file bytes are already
+        # removed by ``_dedupe_identical_byte_payloads`` before parse.
+        part = m_all.groupby("OMS_SKU")["Myntra_Other_Inventory"].sum().reset_index()
         inv_dfs.append(part)
         debug["myntra"] = f"{len(part)} SKUs ({len(myntra_other_parts)} file payload(s) merged)"
     else:
@@ -2013,7 +2030,14 @@ def load_inventory_consolidated(
             .rename(columns={"Parent_SKU": "OMS_SKU"})
         )
 
-    result = consolidated[consolidated["Total_Inventory"] > 0].reset_index(drop=True)
+    # Keep negative OMS rows so Inventory column sum matches Unicommerce (negatives
+    # are part of the ops-sheet OMS total). Drop only all-zero rows.
+    _src = inventory_source_columns(consolidated)
+    if _src:
+        _keep = consolidated[_src].fillna(0).abs().sum(axis=1) > 0
+        result = consolidated[_keep].reset_index(drop=True)
+    else:
+        result = consolidated[consolidated["Total_Inventory"] != 0].reset_index(drop=True)
     result = strip_fba_intransit_unless_enabled(result)
     if debug.get("actual_inventory_workbook") and hasattr(result, "attrs"):
         result.attrs["actual_inventory_workbook"] = True
@@ -2202,4 +2226,8 @@ def merge_inventory_update(existing: pd.DataFrame, update: pd.DataFrame) -> pd.D
     # Recompute totals
     result = recompute_inventory_totals(result)
 
-    return result[result["Total_Inventory"] > 0].reset_index(drop=True)
+    _src = inventory_source_columns(result)
+    if _src:
+        _keep = result[_src].fillna(0).abs().sum(axis=1) > 0
+        return result[_keep].reset_index(drop=True)
+    return result[result["Total_Inventory"] != 0].reset_index(drop=True)

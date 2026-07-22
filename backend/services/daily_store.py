@@ -1615,6 +1615,11 @@ def _tier3_range_cache_put(key: tuple, df: pd.DataFrame) -> None:
     _tier3_range_cache[key] = (time.time(), df.copy())
 
 
+def clear_tier3_range_cache() -> None:
+    """Drop in-process Tier-3 range slices (after sales-parse rule changes)."""
+    _tier3_range_cache.clear()
+
+
 def load_platform_data_for_report_range(
     platform: str,
     start_date: str,

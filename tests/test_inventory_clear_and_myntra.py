@@ -29,14 +29,15 @@ def test_clear_inventory_snapshot_empties_session():
     assert sess.inventory_upload_status == "idle"
 
 
-def test_myntra_duplicate_snapshots_use_max_not_sum():
+def test_myntra_account_files_sum_per_sku():
+    """Different Myntra seller-account reports are summed (sheet parity), not maxed."""
     mapping = {"SKU-A": "SKU-A"}
     csv_hi = b"seller sku code,inventory count\nSKU-A,180\n"
     csv_lo = b"seller sku code,inventory count\nSKU-A,90\n"
     parts = [_parse_myntra_other(csv_hi, mapping), _parse_myntra_other(csv_lo, mapping)]
     m_all = pd.concat(parts, ignore_index=True)
-    part = m_all.groupby("OMS_SKU")["Myntra_Other_Inventory"].max().reset_index()
-    assert int(part["Myntra_Other_Inventory"].iloc[0]) == 180
+    part = m_all.groupby("OMS_SKU")["Myntra_Other_Inventory"].sum().reset_index()
+    assert int(part["Myntra_Other_Inventory"].iloc[0]) == 270
 
 
 def test_myntra_warehouse_filter_other_only():
@@ -75,12 +76,12 @@ def test_clear_inventory_platform_endpoint(client, session_for_client, monkeypat
     assert not sess.sales_df.empty
 
 
-def test_load_inventory_myntra_parts_max_across_files():
+def test_load_inventory_myntra_parts_sum_across_files():
     mapping = {"SKU-A": "SKU-A"}
     csv1 = b"seller sku code,inventory count\nSKU-A,100\n"
     csv2 = b"seller sku code,inventory count\nSKU-A,40\n"
     df, dbg = load_inventory_consolidated(
         None, None, [csv1, csv2], None, mapping, return_debug=True
     )
-    assert int(df["Myntra_Other_Inventory"].sum()) == 100
+    assert int(df["Myntra_Other_Inventory"].sum()) == 140
     assert "2 file payload" in dbg.get("myntra", "")

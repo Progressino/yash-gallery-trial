@@ -705,7 +705,7 @@ def test_myntra_csv_prefers_dispatch_date_when_present(monkeypatch):
     )
     df, msg = _parse_myntra_csv(csv.encode("utf-8"), "t.csv", {})
     assert "OK" in msg
-    assert pd.Timestamp(df["Date"].iloc[0]).normalize() == pd.Timestamp("2026-03-31").normalize()
+    assert pd.Timestamp(df["Date"].iloc[0]).normalize() == pd.Timestamp("2026-03-29").normalize()
 
 
 def test_myntra_csv_defaults_to_order_date_when_dispatch_present():
@@ -733,18 +733,76 @@ def test_myntra_csv_parses_day_first_dates_for_monthly_buckets():
     assert d == pd.Timestamp("2026-03-05")
 
 
-def test_myntra_csv_uses_filename_range_when_created_on_is_time_only():
+def test_myntra_csv_ignores_shipped_on_for_sale_date():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "created on,shipped on,order status,order line id,seller sku code,myntra sku code,quantity\n"
+        "2026-07-20 10:00:00,2026-07-21 12:00:00,SHIPPED,L1,SK1,Y1,1\n"
+        "2026-07-20 11:00:00,2026-07-22 12:00:00,SHIPPED,L2,SK2,Y2,1\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "seller.csv", {})
+    assert "OK" in msg
+    assert len(df) == 2
+    days = pd.to_datetime(df["Date"]).dt.normalize().unique()
+    assert len(days) == 1
+    assert pd.Timestamp(days[0]).date() == pd.Timestamp("2026-07-20").date()
+
+
+def test_myntra_csv_drops_rows_without_valid_created_on():
     from backend.services.myntra import _parse_myntra_csv
 
     csv = (
         "created on,order status,order line id,seller sku code,myntra sku code,quantity\n"
         "20:02.0,C,L1,SK1,Y1,7\n"
     )
-    fn = "Seller_Orders_Report_36841_2026-03-01_2026-03-30_YG Myntra Mar-26.csv"
+    fn = "Seller_Orders_Report_36841_2026-07-20_2026-07-20_YG Myntra 20-7-26.csv"
     df, msg = _parse_myntra_csv(csv.encode("utf-8"), fn, {})
-    assert "OK" in msg
-    assert len(df) == 1
-    assert pd.Timestamp(df["Date"].iloc[0]).normalize() == pd.Timestamp("2026-03-30")
+    assert df.empty
+    assert "created on" in msg.lower() or "invalid" in msg.lower()
+
+
+def test_myntra_csv_requires_created_on_column():
+    from backend.services.myntra import _parse_myntra_csv
+
+    csv = (
+        "shipped on,order status,order line id,seller sku code,myntra sku code,quantity\n"
+        "2026-07-20,SHIPPED,L1,SK1,Y1,1\n"
+    )
+    df, msg = _parse_myntra_csv(csv.encode("utf-8"), "seller.csv", {})
+    assert df.empty
+    assert "created on" in msg.lower()
+
+
+def test_myntra_jul20_brand_row_counts_created_on_only():
+    """Regression: 20-Jul-26 seller exports — Other Brand 270 rows, YG 126 on created on."""
+    from backend.services.myntra import _parse_myntra_csv
+
+    def _rows(n: int, day: str, shipped_day: str) -> str:
+        lines = [
+            "created on,shipped on,order status,order line id,seller sku code,myntra sku code,quantity"
+        ]
+        for i in range(n):
+            lines.append(
+                f"{day} 10:00:00,{shipped_day} 15:00:00,SHIPPED,L{i},SK{i},Y{i},1"
+            )
+        return "\n".join(lines) + "\n"
+
+    other, _ = _parse_myntra_csv(
+        _rows(270, "2026-07-20", "2026-07-21").encode(),
+        "Other Brand Myntra 20-7-26.csv",
+        {},
+    )
+    yg, _ = _parse_myntra_csv(
+        _rows(126, "2026-07-20", "2026-07-21").encode(),
+        "YG Myntra 20-7-26.csv",
+        {},
+    )
+    d0 = pd.Timestamp("2026-07-20").normalize()
+    assert len(other) == 270
+    assert len(yg) == 126
+    assert (pd.to_datetime(other["Date"]).dt.normalize() == d0).all()
+    assert (pd.to_datetime(yg["Date"]).dt.normalize() == d0).all()
 
 
 def test_myntra_csv_prefers_order_line_id_over_store_order_id():
