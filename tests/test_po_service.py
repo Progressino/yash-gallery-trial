@@ -3993,11 +3993,9 @@ def test_ship150_span_fallback_when_no_inventory_history():
 
 
 def test_blank_inventory_cells_are_missing_not_oos():
-    """Real-world bug: warehouse skips snapshots on Sundays. Blank cells were
-    being read as Qty=0 → counted as OOS days, dragging Eff_Days down by 2.
-
-    Blanks must be treated as "no snapshot taken" and dropped, so the global
-    sheet coverage (28 days when 2 Sundays are missing) drives the scaling.
+    """Warehouse skips snapshots on Sundays (blank cells). Blanks must not be
+    stored as Qty=0 (that would mark OOS). After forward-fill (same as Inv History
+    matrix), Friday's on-hand carries through Sunday so Eff_Days stays full-window.
     """
     import io
     from openpyxl import Workbook
@@ -4042,7 +4040,8 @@ def test_blank_inventory_cells_are_missing_not_oos():
     end = pd.Timestamp("2026-05-12")
     assert coverage_days_within(df, start, end) == 28
     eff = effective_days_from_history(df, start, end)
-    assert int(eff.iloc[0]["Eff_Days_Inventory"]) == 28
+    # Forward-fill carries weekday stock across blank Sundays → full 30d in-stock.
+    assert int(eff.iloc[0]["Eff_Days_Inventory"]) == 30
 
     sales = pd.DataFrame(
         [
@@ -4070,11 +4069,10 @@ def test_blank_inventory_cells_are_missing_not_oos():
         inventory_history_df=df,
     )
     row = out.iloc[0]
-    assert int(row["Eff_Days_Inventory"]) == 28
+    assert int(row["Eff_Days_Inventory"]) == 30
     assert int(row["Inv_Coverage_Days"]) == 28
-    assert int(row["Eff_Days"]) == 28, (
-        f"28 in-stock days in 28 covered snapshot days → Eff_Days=28; "
-        f"got Eff_Days={row['Eff_Days']}"
+    assert int(row["Eff_Days"]) == 30, (
+        f"blank Sundays forward-filled → Eff_Days=30; got Eff_Days={row['Eff_Days']}"
     )
 
 

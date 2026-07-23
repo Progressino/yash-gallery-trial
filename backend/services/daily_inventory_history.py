@@ -1290,8 +1290,8 @@ def refresh_inventory_history_rollforward(
             if qty is not None:
                 work["Qty"] = qty.values
                 work = work[work["OMS_SKU"].str.len() > 0]
-                hist_skus = set(merged["OMS_SKU"].astype(str).str.strip().str.upper())
-                work = work[work["OMS_SKU"].isin(hist_skus)]
+                # Keep all snapshot SKUs — new styles must appear on Inv History
+                # the same day they land in the OMS upload.
                 if not work.empty:
                     # Store OMS-aligned snapshot qty as blank-channel rows so the
                     # history matrix stays on the same series as the uploaded OMS sheet.
@@ -1657,6 +1657,11 @@ def effective_days_from_history(
     By default ``min_qty == IN_STOCK_MIN_QTY`` (1.0) — any positive on-hand
     counts toward Eff_Days.
 
+    Per-SKU gaps between snapshots are forward-filled across the calendar window
+    (same as Inventory History matrix ``ffill``), so Eff_Days matches the matrix
+    Days column. Leading days before a SKU's first observation stay missing and
+    do not count. Explicit Qty=0 days still count as out-of-stock.
+
     Returns: ``OMS_SKU``, ``Eff_Days_Inventory`` (int).
     """
     inv_history = combine_inventory_channels(inv_history)
@@ -1675,18 +1680,28 @@ def effective_days_from_history(
     sub = df.loc[mask].copy()
     if sub.empty:
         return pd.DataFrame(columns=["OMS_SKU", "Eff_Days_Inventory"])
+    sub["Date"] = sub["Date"].dt.normalize()
+    sub["OMS_SKU"] = sub["OMS_SKU"].astype(str).str.strip().str.upper()
     sub["Qty"] = pd.to_numeric(sub["Qty"], errors="coerce")
-    # Drop "no snapshot" rows so we never count blank cells as out-of-stock days.
+    # Drop "no snapshot" rows so we never treat blanks as explicit OOS zeros.
     sub = sub.dropna(subset=["Qty"])
+    sub = sub[sub["OMS_SKU"].str.len() > 0]
     if sub.empty:
         return pd.DataFrame(columns=["OMS_SKU", "Eff_Days_Inventory"])
-    sub["_has_stock"] = (sub["Qty"] >= float(min_qty)).astype(int)
+    daily = sub.groupby(["OMS_SKU", "Date"], as_index=False, sort=False)["Qty"].max()
+    cal = pd.date_range(cs, ce, freq="D")
+    pivot = daily.pivot(index="OMS_SKU", columns="Date", values="Qty")
+    pivot = pivot.reindex(columns=cal)
+    # Match Inv History matrix: carry last known on-hand across missing days.
+    # Leading NaNs (before first observation) stay NaN and do not count as stock.
+    pivot = pivot.ffill(axis=1)
+    in_stock = pivot.ge(float(min_qty)).fillna(False)
     out = (
-        sub.groupby("OMS_SKU", as_index=False)["_has_stock"]
-        .sum()
-        .rename(columns={"_has_stock": "Eff_Days_Inventory"})
+        in_stock.sum(axis=1)
+        .astype(int)
+        .rename("Eff_Days_Inventory")
+        .reset_index()
     )
-    out["Eff_Days_Inventory"] = out["Eff_Days_Inventory"].astype(int)
     return out
 
 
@@ -2877,8 +2892,39 @@ def ensure_daily_inventory_coverage_light(sess) -> bool:
     """Attach daily inventory matrix from warm cache for coverage / staleness checks."""
     from .shared_frames import frame_row_count, session_uses_shared_frames
 
+    def _warm_history_newer_than_session() -> bool:
+        try:
+            import backend.main as _main
+
+            wc = (_main._warm_cache or {}).get("daily_inventory_history_df")
+            meta = (_main._warm_cache or {}).get(_main._DAILY_INV_META_WARM_KEY) or {}
+            if wc is None or getattr(wc, "empty", True):
+                return False
+            warm_max = str(
+                meta.get("daily_inventory_history_max_date")
+                or meta.get("daily_inventory_history_matrix_max_date")
+                or ""
+            ).strip()[:10]
+            if not warm_max:
+                warm_max = str(inventory_history_max_date(wc) or "")[:10]
+            sess_max = str(
+                getattr(sess, "daily_inventory_history_max_date", "")
+                or getattr(sess, "daily_inventory_history_matrix_max_date", "")
+                or ""
+            ).strip()[:10]
+            if not sess_max:
+                sdf = getattr(sess, "daily_inventory_history_df", None)
+                if sdf is not None and not getattr(sdf, "empty", True):
+                    sess_max = str(inventory_history_max_date(sdf) or "")[:10]
+            return bool(warm_max) and (not sess_max or warm_max > sess_max)
+        except Exception:
+            return False
+
+    # Stale shared pointer: warm already has a newer day (e.g. Jul 22 upload)
+    # but this session still holds yesterday's matrix.
     if session_uses_shared_frames(sess) and frame_row_count("daily_inventory_history_df", sess) > 0:
-        return True
+        if not _warm_history_newer_than_session():
+            return True
     try:
         import backend.main as _main
 

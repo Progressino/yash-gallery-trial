@@ -119,6 +119,26 @@ def _finalize_sales_data_refresh(sess: AppSession) -> None:
         _log.exception("data-health refresh schedule after sales refresh failed")
 
 
+def _finalize_inventory_data_refresh(sess: AppSession) -> None:
+    """
+    After a snapshot inventory upload — bust PO / Intelligence caches and signal
+    coverage so every tab/session refreshes without a manual Load Cache.
+    """
+    sess.daily_restored = True
+    try:
+        from ..services.po_shared_cache import invalidate_po_after_sales_or_returns_change
+
+        invalidate_po_after_sales_or_returns_change(sess)
+    except Exception:
+        _log.exception("PO/intelligence cache invalidation after inventory refresh failed")
+    try:
+        from ..services.data_health import schedule_data_health_refresh
+
+        schedule_data_health_refresh("inventory-upload")
+    except Exception:
+        _log.exception("data-health refresh schedule after inventory refresh failed")
+
+
 def _upload_quality_from_merge(
     *,
     parsed_rows: int,
@@ -2695,6 +2715,14 @@ def _inventory_apply_parse_result(
 
     apply_inventory_snapshot_metadata(sess, file_parts, debug)
     try:
+        from ..services.po_session_hydrate import ensure_inventory_history_authoritative_for_read
+
+        # Upload sessions often have empty history; without this, append no-ops
+        # (empty_history) and Inv History stays on the previous day.
+        ensure_inventory_history_authoritative_for_read(sess)
+    except Exception:
+        _log.exception("hydrate inventory history before snapshot append failed")
+    try:
         from ..services.daily_inventory_history import append_snapshot_inventory_to_history
 
         hist = append_snapshot_inventory_to_history(sess)
@@ -2704,13 +2732,21 @@ def _inventory_apply_parse_result(
                 hist.get("snapshot_date"),
                 hist.get("rows"),
             )
-        if hist.get("appended") or hist.get("rolled_forward"):
-            try:
-                import backend.main as _main
+        elif hist.get("reason"):
+            _log.warning(
+                "Daily snapshot history append skipped: %s",
+                hist.get("reason"),
+            )
+        # Always sync sidecar when we have history on the session (even if this
+        # day's column was already present) so disk/warm match the upload.
+        try:
+            import backend.main as _main
 
+            hist_df = getattr(sess, "daily_inventory_history_df", None)
+            if hist_df is not None and not getattr(hist_df, "empty", True):
                 _main.sync_daily_inventory_history_sidecar(sess)
-            except Exception:
-                _log.exception("sync_daily_inventory_history_sidecar failed")
+        except Exception:
+            _log.exception("sync_daily_inventory_history_sidecar failed")
     except Exception:
         _log.exception("append_snapshot_inventory_to_history failed")
     refresh_inventory_api_cache(sess)
@@ -2732,6 +2768,7 @@ def _inventory_apply_parse_result(
         _log.exception("PostgreSQL inventory table persist failed")
     sess._inventory_pre_upload_backup = None
     _session_data_changed(sess)
+    _finalize_inventory_data_refresh(sess)
     payload = _build_inventory_upload_payload(
         df_variant=df_variant,
         debug=sess.inventory_debug,
@@ -3006,8 +3043,21 @@ async def upload_inventory_auto(
             sess.inventory_df_variant = df_variant
             sess.inventory_df_parent = df_parent
             apply_inventory_snapshot_metadata(sess, file_parts, debug)
+            try:
+                from ..services.po_session_hydrate import ensure_inventory_history_authoritative_for_read
+                from ..services.daily_inventory_history import append_snapshot_inventory_to_history
+                import backend.main as _main
+
+                ensure_inventory_history_authoritative_for_read(sess)
+                append_snapshot_inventory_to_history(sess)
+                hist_df = getattr(sess, "daily_inventory_history_df", None)
+                if hist_df is not None and not getattr(hist_df, "empty", True):
+                    _main.sync_daily_inventory_history_sidecar(sess)
+            except Exception:
+                _log.exception("legacy inventory-auto history append failed")
             refresh_inventory_api_cache(sess)
             _session_data_changed(sess)
+            _finalize_inventory_data_refresh(sess)
             parts = [f"{len(df_variant):,} total SKUs"]
             snap = sess.inventory_snapshot_date_label or sess.inventory_snapshot_date
             if snap:
@@ -3070,8 +3120,21 @@ async def upload_inventory(
             sess.inventory_df_variant = df_variant
             sess.inventory_df_parent = df_parent
             apply_inventory_snapshot_metadata(sess, [], debug)
+            try:
+                from ..services.po_session_hydrate import ensure_inventory_history_authoritative_for_read
+                from ..services.daily_inventory_history import append_snapshot_inventory_to_history
+                import backend.main as _main
+
+                ensure_inventory_history_authoritative_for_read(sess)
+                append_snapshot_inventory_to_history(sess)
+                hist_df = getattr(sess, "daily_inventory_history_df", None)
+                if hist_df is not None and not getattr(hist_df, "empty", True):
+                    _main.sync_daily_inventory_history_sidecar(sess)
+            except Exception:
+                _log.exception("legacy /inventory history append failed")
             refresh_inventory_api_cache(sess)
             _session_data_changed(sess)
+            _finalize_inventory_data_refresh(sess)
             parts = [f"{len(df_variant):,} total SKUs"]
             for src, info in debug.items():
                 parts.append(f"{src}: {info}")

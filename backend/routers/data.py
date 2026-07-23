@@ -3370,6 +3370,12 @@ def _apply_light_coverage_hydrate(sess: AppSession) -> None:
             _main.try_attach_shared_frames_fast(sess)
             if _shared_frames_operational(sess):
                 _mark_tier3_sync_applied(sess)
+            # Inventory snapshot meta (date / uploaded_at / revision) must follow warm
+            # even on the hot path — otherwise other tabs never see a new upload.
+            try:
+                sync_inventory_snapshot_from_warm(sess)
+            except Exception:
+                pass
             return
 
         _main._repair_disk_manifest_from_loose_parquets()
@@ -3385,6 +3391,10 @@ def _apply_light_coverage_hydrate(sess: AppSession) -> None:
         _main.try_attach_shared_frames_fast(sess)
         if _shared_frames_operational(sess):
             _mark_tier3_sync_applied(sess)
+        try:
+            sync_inventory_snapshot_from_warm(sess)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -6024,23 +6034,24 @@ def get_inventory(
             "rows": [],
             "total_rows": 0,
             "offset": 0,
-            "limit": max(1, min(int(limit), 5000)),
+            "limit": max(1, min(int(limit), 50000)),
         }
 
     _restore_inventory_from_warm(sess)
     from ..services.inventory import inventory_variant_for_api
 
     raw_df = sess.inventory_df_variant
+    # Strip FBA for the API response only — do not write back into the session.
+    # Mutating the live frame on every GET caused silent warm-cache republishes
+    # that looked like inventory "changing" with no upload.
     df = inventory_variant_for_api(raw_df) if not raw_df.empty else raw_df
-    if df is not raw_df and not df.empty:
-        sess.inventory_df_variant = df
     if df.empty:
         return {
             "loaded": False,
             "rows": [],
             "total_rows": 0,
             "offset": 0,
-            "limit": max(1, min(int(limit), 5000)),
+            "limit": max(1, min(int(limit), 50000)),
         }
 
     ensure_inventory_snapshot_metadata(sess)
@@ -6075,7 +6086,7 @@ def get_inventory(
         "rows": rows,
         "total_rows": total_rows,
         "offset": max(0, int(offset)),
-        "limit": max(1, min(int(limit), 5000)),
+        "limit": max(1, min(int(limit), 50000)),
         "columns": ["OMS_SKU"] + cols,
         "totals": totals,
         "debug": dbg,

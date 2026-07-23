@@ -1974,8 +1974,8 @@ def calculate_po_base(
                 if not eff_inv.empty and coverage_days > 0:
                     po_df = po_df.merge(eff_inv, on="OMS_SKU", how="left")
                     inv_days = pd.to_numeric(po_df["Eff_Days_Inventory"], errors="coerce")
-                    # Match inventory-history UI: Eff_Days = days with Qty >= 1 in the ADS
-                    # window (no sales-span override, no extrapolation over missing snapshots).
+                    # Match inventory-history matrix Days: Eff_Days_Inventory already
+                    # forward-fills per-SKU gaps (see effective_days_from_history).
                     _has_inv_hist = inv_days.notna()
                     po_df.loc[_has_inv_hist, "Eff_Days"] = (
                         inv_days[_has_inv_hist]

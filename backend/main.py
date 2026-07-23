@@ -990,6 +990,39 @@ def merge_inventory_into_warm_cache(sess) -> None:
     except Exception:
         log.exception("inventory warm-cache downgrade guard failed (continuing)")
 
+    # Refuse to publish a frame whose Amazon total disagrees with the session's
+    # own Amazon ledger disclaimer (desync after attach overwrote numbers only).
+    try:
+        import pandas as pd
+
+        dbg = getattr(sess, "inventory_debug", None) or {}
+        amz = dbg.get("amz_disclaimer") if isinstance(dbg, dict) else None
+        if isinstance(amz, dict):
+            expected = float(
+                amz.get("sellable_non_znne_units") or amz.get("latest_report_units") or 0
+            )
+            inv = getattr(sess, "inventory_df_variant", None)
+            if (
+                expected > 0
+                and inv is not None
+                and hasattr(inv, "empty")
+                and not inv.empty
+                and "Amazon_Inventory" in inv.columns
+            ):
+                actual = float(
+                    pd.to_numeric(inv["Amazon_Inventory"], errors="coerce").fillna(0).sum()
+                )
+                if abs(actual - expected) >= 1.0:
+                    log.error(
+                        "merge_inventory_into_warm_cache: refusing desynced snapshot "
+                        "(frame Amazon %.0f vs ledger %.0f) — not publishing",
+                        actual,
+                        expected,
+                    )
+                    return
+    except Exception:
+        log.exception("inventory Amazon ledger guard failed (continuing)")
+
     try:
         from .services.manual_intransit_sheet import ensure_manual_intransit_overlay_applied
 

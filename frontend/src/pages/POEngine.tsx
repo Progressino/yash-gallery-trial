@@ -3071,9 +3071,8 @@ export default function POEngine() {
                   )}
                   {(effInvData.covered_days ?? 0) < effInvData.window_days && (effInvData.covered_days ?? 0) > 0 && (
                     <span className="text-amber-700 w-full">
-                      ⚠ Coverage only spans {effInvData.covered_days} of {effInvData.window_days} days. Engine extrapolates:
-                      Eff_Days ≈ <strong>{Math.min(effInvData.window_days, Math.round(effInvData.in_stock_days * effInvData.window_days / Math.max(1, effInvData.covered_days ?? 1)))}</strong>
-                      &nbsp;(in-stock rate × window).
+                      ⚠ Sparse history: only {effInvData.covered_days} of {effInvData.window_days} days have rows.
+                      Engine forward-fills gaps (same as Inventory History matrix) so Eff_Days matches the Days column.
                     </span>
                   )}
                   {effInvData.parent_used && (

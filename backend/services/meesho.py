@@ -1163,9 +1163,13 @@ def meesho_to_sales_rows(meesho_df: pd.DataFrame, sku_mapping: dict | None = Non
         "TxnDate":          meesho_df[date_col],
         "Transaction Type": meesho_df["TxnType"],
         "Quantity":         meesho_df["Quantity"],
-        "Units_Effective":  np.where(meesho_df["TxnType"] == "Refund", -meesho_df["Quantity"],
-                            np.where(meesho_df["TxnType"] == "Cancel", -meesho_df["Quantity"],
-                                     meesho_df["Quantity"])),
+        # Credit-entry matrix: CANCELLED is not a sale (0). Refunds/RTO stay
+        # negative for PO net demand; Sales History zeroes them separately.
+        "Units_Effective":  np.where(
+            meesho_df["TxnType"] == "Refund",
+            -meesho_df["Quantity"],
+            np.where(meesho_df["TxnType"] == "Cancel", 0.0, meesho_df["Quantity"]),
+        ),
         "Source":           "Meesho",
         "OrderId":          oid,
         "LineKey":          lk_sales,

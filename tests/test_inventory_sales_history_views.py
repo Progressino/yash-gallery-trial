@@ -203,3 +203,35 @@ def test_sales_history_excludes_combo_fan_component_rows():
     )
     wide = sales_history_wide_matrix(sales, days=1, end_date="2026-07-17", platform="Amazon")
     assert wide["date_totals"] == [1.0]
+
+
+def test_sales_history_meesho_credit_entry_excludes_cancel_and_refund():
+    """Meesho CANCELLED/RTO must not inflate Sales History (ops File = sale statuses only)."""
+    from backend.services.daily_sales_history import _apply_daily_sales_history_txn_fixup
+
+    sales = pd.DataFrame(
+        {
+            "Sku": ["A", "B", "C", "D"],
+            "TxnDate": pd.to_datetime(["2026-07-20"] * 4),
+            "Transaction Type": ["Shipment", "Cancel", "Refund", "Shipment"],
+            "Quantity": [100.0, 25.0, 1.0, 98.0],
+            "Units_Effective": [100.0, -25.0, -1.0, 98.0],
+            "Source": ["Meesho"] * 4,
+        }
+    )
+    fixed = _apply_daily_sales_history_txn_fixup(sales)
+    wide = sales_history_wide_matrix(fixed, days=1, end_date="2026-07-20", platform="Meesho")
+    assert wide["date_totals"] == [198.0]
+    # Myntra Cancel still counts as sale
+    myn = pd.DataFrame(
+        {
+            "Sku": ["M1", "M2"],
+            "TxnDate": pd.to_datetime(["2026-07-20"] * 2),
+            "Transaction Type": ["Shipment", "Cancel"],
+            "Quantity": [10.0, 5.0],
+            "Units_Effective": [10.0, 0.0],
+            "Source": ["Myntra"] * 2,
+        }
+    )
+    mfixed = _apply_daily_sales_history_txn_fixup(myn)
+    assert float(mfixed["Units_Effective"].sum()) == 15.0

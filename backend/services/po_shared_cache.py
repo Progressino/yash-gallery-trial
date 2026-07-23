@@ -350,6 +350,14 @@ def build_data_fingerprint(sess, body: dict) -> dict[str, Any]:
         "inventory_rows": inv_rows,
         "inventory_skus": inv_skus,
         "inventory_snapshot": _inventory_snapshot_for_fp(sess),
+        # Same-day re-uploads share the calendar date — include upload stamp +
+        # revision so PO shared cache cannot serve yesterday's stock totals.
+        "inventory_uploaded_at": str(
+            getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
+        ),
+        "inventory_data_revision": int(
+            getattr(sess, "inventory_data_revision", 0) or 0
+        ),
         "inventory_history_rows": hist_rows,
         # Intentionally omit warm_cache_generation / pipeline_snapshot_hash —
         # those change on every process restart and were causing shared-cache

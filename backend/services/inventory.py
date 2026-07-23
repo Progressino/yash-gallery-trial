@@ -541,20 +541,51 @@ def sync_inventory_snapshot_from_warm(sess: Any) -> None:
     sess_df = getattr(sess, "inventory_df_variant", None)
     sess_has = sess_df is not None and hasattr(sess_df, "empty") and not sess_df.empty
 
+    def _amz_expected(meta_or_debug: dict | None) -> float:
+        if not isinstance(meta_or_debug, dict):
+            return 0.0
+        dbg = meta_or_debug.get("inventory_debug") if "inventory_debug" in meta_or_debug else meta_or_debug
+        if not isinstance(dbg, dict):
+            return 0.0
+        amz = dbg.get("amz_disclaimer") or {}
+        if not isinstance(amz, dict):
+            return 0.0
+        return float(amz.get("sellable_non_znne_units") or amz.get("latest_report_units") or 0)
+
+    def _amz_actual(frame) -> float:
+        if frame is None or not hasattr(frame, "columns") or "Amazon_Inventory" not in frame.columns:
+            return 0.0
+        return float(pd.to_numeric(frame["Amazon_Inventory"], errors="coerce").fillna(0).sum())
+
     # Prefer warm frame when Amazon ledger in warm meta disagrees with the session
     # frame — classic desync after publish_warm_cache overwrote numbers only.
     if warm_has and sess_has and warm_meta:
         try:
-            amz = (warm_meta.get("inventory_debug") or {}).get("amz_disclaimer") or {}
-            expected = float(
-                amz.get("sellable_non_znne_units") or amz.get("latest_report_units") or 0
-            )
-            if expected > 0 and "Amazon_Inventory" in sess_df.columns:
-                actual = float(
-                    pd.to_numeric(sess_df["Amazon_Inventory"], errors="coerce").fillna(0).sum()
-                )
+            expected = _amz_expected(warm_meta)
+            if expected > 0:
+                actual = _amz_actual(sess_df)
                 if abs(actual - expected) >= 1.0:
                     sess_at = 0.0  # force warm to win below
+        except Exception:
+            pass
+
+    # Session meta can be newer than the frame (attach clobbered numbers only).
+    # Never republish that desync into warm — treat session as stale vs warm.
+    if sess_has:
+        try:
+            sess_expected = _amz_expected(getattr(sess, "inventory_debug", None) or {})
+            if sess_expected > 0:
+                sess_actual = _amz_actual(sess_df)
+                if abs(sess_actual - sess_expected) >= 1.0:
+                    sess_at = 0.0
+                    if warm_has:
+                        # Prefer warm only when its frame matches its own ledger.
+                        warm_expected = _amz_expected(warm_meta)
+                        warm_actual = _amz_actual(warm_variant)
+                        if warm_expected > 0 and abs(warm_actual - warm_expected) >= 1.0:
+                            # Both sides desynced — still prefer not to overwrite warm
+                            # with another bad session publish.
+                            pass
         except Exception:
             pass
 
@@ -587,6 +618,9 @@ def sync_inventory_snapshot_from_warm(sess: Any) -> None:
             except Exception:
                 pass
 
+    # Only publish session → warm when the session snapshot is strictly newer.
+    # Never republish on equal timestamps (read paths / FBA strip / overlay ensure
+    # used to look like silent inventory changes with no upload).
     if sess_has and (not warm_has or sess_at > warm_at + 1e-6):
         try:
             _main.merge_inventory_into_warm_cache(sess)

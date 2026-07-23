@@ -167,13 +167,29 @@ export default function Inventory() {
   }, [invUploadRunning])
 
   const exportExcel = async () => {
-    const { data: full } = await api.get<InventoryData>('/data/inventory', {
-      params: { search: search.trim() || undefined, offset: 0, limit: 5000 },
-      timeout: 180_000,
-    })
-    const exportRows = (full?.rows ?? []).map(r => {
+    const pageLimit = 5000
+    const allRows: InventoryData['rows'] = []
+    let offset = 0
+    let total = Infinity
+    let exportCols = invCols
+    while (offset < total) {
+      const { data: page } = await api.get<InventoryData>('/data/inventory', {
+        params: { search: search.trim() || undefined, offset, limit: pageLimit },
+        timeout: 180_000,
+      })
+      const batch = page?.rows ?? []
+      if (page?.columns?.length) {
+        exportCols = page.columns.filter(c => c !== 'OMS_SKU')
+      }
+      total = Number(page?.total_rows ?? batch.length)
+      allRows.push(...batch)
+      if (!batch.length) break
+      offset += batch.length
+      if (batch.length < pageLimit) break
+    }
+    const exportRows = allRows.map(r => {
       const out: Record<string, string | number> = { 'OMS SKU': String(r['OMS_SKU'] ?? '') }
-      invCols.forEach(col => {
+      exportCols.forEach(col => {
         out[col] = Number(r[col] ?? 0)
       })
       return out

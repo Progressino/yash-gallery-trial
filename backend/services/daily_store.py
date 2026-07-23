@@ -1678,6 +1678,36 @@ def clear_tier3_range_cache() -> None:
     _tier3_range_cache.clear()
 
 
+def _clip_platform_df_to_report_range(
+    df: pd.DataFrame,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    """Keep only rows whose Date/TxnDate falls inside ``[start_date, end_date]``."""
+    if df is None or getattr(df, "empty", True):
+        return df if df is not None else pd.DataFrame()
+    dt_col = None
+    for c in ("Date", "TxnDate", "Order Date", "order_date", "Reporting_Date"):
+        if c in df.columns:
+            dt_col = c
+            break
+    if dt_col is None:
+        return df
+    s0 = pd.Timestamp(str(start_date)[:10]).normalize()
+    s1 = pd.Timestamp(str(end_date)[:10]).normalize()
+    dt = pd.to_datetime(df[dt_col], errors="coerce")
+    try:
+        if getattr(dt.dt, "tz", None) is not None:
+            dt = dt.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
+    except (TypeError, AttributeError, ValueError):
+        pass
+    day = dt.dt.normalize()
+    mask = day.notna() & (day >= s0) & (day <= s1)
+    if mask.all():
+        return df
+    return df.loc[mask].copy()
+
+
 def load_platform_data_for_report_range(
     platform: str,
     start_date: str,
@@ -1697,7 +1727,8 @@ def load_platform_data_for_report_range(
     if s1 < s0:
         s0, s1 = s1, s0
 
-    cache_key = (platform, s0, s1, bool(dedup), bool(columns_only), 6)
+    # Cache key v7: per-blob clip to report range (avoids OOM on Sales History).
+    cache_key = (platform, s0, s1, bool(dedup), bool(columns_only), 7)
     cached = _tier3_range_cache_get(cache_key)
     if cached is not None:
         return cached
@@ -1737,6 +1768,9 @@ def load_platform_data_for_report_range(
     dfs: list[pd.DataFrame] = []
     tail = _DSR_TAIL_FOR_PLATFORM.get(platform)
     want_cols = _PLATFORM_METRICS_COLUMNS.get(platform) if columns_only else None
+    # Sales-history path needs DSR_Segment when present for brand tabs.
+    if columns_only and platform == "myntra" and want_cols and "DSR_Segment" not in want_cols:
+        want_cols = list(want_cols) + ["DSR_Segment"]
     for filename, blob in rows:
         try:
             if want_cols:
@@ -1762,6 +1796,10 @@ def load_platform_data_for_report_range(
                             d.loc[miss, "DSR_Segment"] = label
             if platform == "myntra" and not d.empty:
                 d = _filter_myntra_tier3_upload_frame(filename, d, auth_days=auth_days)
+            # Clip each blob to the requested calendar window before concat — critical
+            # for memory when multi-month seller files overlap a 30-day Sales History view.
+            if not d.empty:
+                d = _clip_platform_df_to_report_range(d, s0, s1)
             if not d.empty:
                 dfs.append(d)
         except Exception:
@@ -1769,10 +1807,13 @@ def load_platform_data_for_report_range(
     if not dfs:
         return pd.DataFrame()
     combined = pd.concat(dfs, ignore_index=True)
+    del dfs
     if not dedup:
         out = combined.reset_index(drop=True)
     else:
         out = _dedup_platform_df(combined, platform)
+    del combined
+    out = _clip_platform_df_to_report_range(out, s0, s1)
     _tier3_range_cache_put(cache_key, out)
     return out
 

@@ -67,7 +67,46 @@ def attach_shared_frames(sess, *, warm_cache_generation: int) -> None:
     wc = _warm_cache()
     if isinstance(wc.get("sku_mapping"), dict) and wc["sku_mapping"]:
         sess.sku_mapping = wc["sku_mapping"]
+
+    # Never clobber a newer in-session inventory snapshot with a stale warm frame.
+    # Race: upload sets sess frame+meta, then a concurrent attach overwrites only the
+    # frame from warm while leaving the new uploaded_at — sync then republishes the
+    # old numbers under the new meta (Amazon ledger mismatch / "concurrent session").
+    skip_inventory_frames = False
+    try:
+        from .inventory import inventory_snapshot_upload_epoch
+
+        meta_key = "inventory_session_meta"
+        try:
+            import backend.main as _main
+
+            meta_key = getattr(_main, "_INVENTORY_META_WARM_KEY", meta_key)
+        except Exception:
+            pass
+        warm_meta = wc.get(meta_key) if isinstance(wc.get(meta_key), dict) else {}
+        warm_at = inventory_snapshot_upload_epoch(
+            str((warm_meta or {}).get("inventory_snapshot_uploaded_at") or "")
+        )
+        sess_at = inventory_snapshot_upload_epoch(
+            getattr(sess, "inventory_snapshot_uploaded_at", "") or ""
+        )
+        sess_inv = getattr(sess, "inventory_df_variant", None)
+        sess_has = (
+            sess_inv is not None
+            and hasattr(sess_inv, "empty")
+            and not sess_inv.empty
+        )
+        if sess_has and sess_at and (not warm_at or sess_at > warm_at + 1e-6):
+            skip_inventory_frames = True
+        elif getattr(sess, "inventory_upload_status", "idle") == "running":
+            skip_inventory_frames = True
+    except Exception:
+        skip_inventory_frames = False
+
+    _INV_KEYS = frozenset({"inventory_df_variant", "inventory_df_parent"})
     for key in LARGE_FRAME_KEYS:
+        if skip_inventory_frames and key in _INV_KEYS:
+            continue
         val = wc.get(key)
         if val is not None and hasattr(val, "empty") and not val.empty:
             setattr(sess, key, val)

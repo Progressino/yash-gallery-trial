@@ -9,6 +9,7 @@ import pandas as pd
 _IST = ZoneInfo("Asia/Kolkata")
 _DEFAULT_VIEW_DAYS = int(os.environ.get("DAILY_SALES_VIEW_DAYS", "30"))
 _CORE_PLATFORMS = ("amazon", "flipkart", "meesho", "myntra")
+_SALES_HISTORY_FRAME_CACHE: dict = {}
 
 
 def today_ist_timestamp() -> pd.Timestamp:
@@ -520,8 +521,13 @@ def sales_history_for_sku(
 def _apply_daily_sales_history_txn_fixup(out: pd.DataFrame) -> pd.DataFrame:
     """
     Tier-3 SQLite/PostgreSQL stores parsed platform parquets from upload time.
-    When daily-sales rules change (e.g. Myntra no status filter), remap legacy
-    Cancel/RTO rows so Sales History matches fresh CSV parses without re-upload.
+    When daily-sales rules change, remap legacy rows so Sales History matches
+    fresh CSV parses / ops File totals without re-upload.
+
+    - **Myntra**: no status filter — Cancel/legacy RTO rows count as Shipment.
+    - **Meesho** (credit-entry matrix): CANCELLED / RETURNED / RTO are **not**
+      sales. Do not promote Cancel→Shipment; zero their Units_Effective so the
+      matrix matches seller daily File totals (Shipment/PENDING/READY_TO_SHIP/…).
     """
     if out is None or out.empty:
         return out
@@ -532,16 +538,25 @@ def _apply_daily_sales_history_txn_fixup(out: pd.DataFrame) -> pd.DataFrame:
     src = out["Source"].astype(str).str.strip().str.lower()
     txn = out["Transaction Type"].astype(str).str.strip()
     qty = pd.to_numeric(out["Quantity"], errors="coerce").fillna(0)
-    daily = src.isin({"myntra", "meesho"})
-    if not daily.any():
-        return out
-    refund = txn.isin(("Refund", "Return"))
-    gross = daily & ~refund
-    out.loc[gross, "Transaction Type"] = "Shipment"
-    out.loc[gross, "Units_Effective"] = qty.loc[gross]
-    ref_rows = daily & refund
-    if ref_rows.any():
-        out.loc[ref_rows, "Units_Effective"] = -qty.loc[ref_rows].abs()
+
+    myntra = src.eq("myntra")
+    if myntra.any():
+        refund = txn.isin(("Refund", "Return"))
+        gross = myntra & ~refund
+        out.loc[gross, "Transaction Type"] = "Shipment"
+        out.loc[gross, "Units_Effective"] = qty.loc[gross]
+        ref_rows = myntra & refund
+        if ref_rows.any():
+            out.loc[ref_rows, "Units_Effective"] = -qty.loc[ref_rows].abs()
+
+    meesho = src.eq("meesho")
+    if meesho.any():
+        non_sale = meesho & txn.isin(("Cancel", "Refund", "Return"))
+        if non_sale.any():
+            out.loc[non_sale, "Units_Effective"] = 0.0
+        ship = meesho & txn.eq("Shipment")
+        if ship.any():
+            out.loc[ship, "Units_Effective"] = qty.loc[ship]
     return out
 
 
@@ -556,9 +571,13 @@ def build_sales_history_sales_df(
     Build unified sales for the Sales History window from Tier-3 uploads (deduped),
     not the session warm-cache sales_df (which can double-count re-uploaded days).
     """
+    import gc
+    import logging
+    import time
+
     import pandas as pd
 
-    from .daily_store import load_platform_data_for_report_range
+    from .daily_store import get_tier3_sync_token, load_platform_data_for_report_range
     from .po_calculate_run import _build_platform_sales_df
     from .sales import _dedup_sales_linekey_rows, _downcast_sales
 
@@ -566,6 +585,19 @@ def build_sales_history_sales_df(
         days=days, end_date=end_date, start_date=start_date, sales_df=None
     )
     s0, s1 = str(start.date()), str(end.date())
+
+    # Process-local cache — Sales History summary + matrix hit this twice per page load.
+    try:
+        token = tuple(sorted((get_tier3_sync_token() or {}).items()))
+    except Exception:
+        token = ()
+    cache_key = (s0, s1, token)
+    hit = _SALES_HISTORY_FRAME_CACHE.get(cache_key)
+    if hit is not None:
+        ts, frame = hit
+        if (time.time() - ts) < 120.0 and frame is not None and not frame.empty:
+            return frame.copy()
+
     specs = (
         ("amazon", "mtr_df"),
         ("myntra", "myntra_df"),
@@ -574,19 +606,33 @@ def build_sales_history_sales_df(
         ("snapdeal", "snapdeal_df"),
     )
     overrides: dict[str, pd.DataFrame] = {}
+    log = logging.getLogger(__name__)
     for pk, attr in specs:
-        df = load_platform_data_for_report_range(pk, s0, s1, dedup=True)
+        # columns_only keeps Amazon/Myntra blobs slim — full parquet OOM'd the 6.5GB
+        # prod container on a 30-day Sales History load.
+        try:
+            df = load_platform_data_for_report_range(
+                pk, s0, s1, dedup=True, columns_only=True
+            )
+        except MemoryError:
+            log.exception("sales history Tier-3 load OOM for %s %s..%s", pk, s0, s1)
+            gc.collect()
+            continue
         if df is not None and not df.empty:
             overrides[attr] = df
+        gc.collect()
     if not overrides:
         return pd.DataFrame()
     out = _build_platform_sales_df(sess, frame_overrides=overrides)
+    del overrides
+    gc.collect()
     if out is None or out.empty:
         return pd.DataFrame()
     if "Source" in out.columns:
         src = out["Source"].astype(str).str.strip().str.lower()
         miss = out["Source"].isna() | src.isin(("", "nan", "none"))
-        if miss.any() and "mtr_df" in overrides:
+        if miss.any():
+            # Amazon MTR conversion sometimes leaves Source blank on FreeReplacement rows.
             out.loc[miss, "Source"] = "Amazon"
     # Sales History mirrors the uploaded files: zero-amount Amazon shipments
     # (reclassified to FreeReplacement with Units_Effective 0 for PO math)
@@ -597,6 +643,16 @@ def build_sales_history_sales_df(
             out.loc[fr, "Units_Effective"] = pd.to_numeric(
                 out.loc[fr, "Quantity"], errors="coerce"
             ).fillna(0)
+    # Clip unified TxnDate to the window again (conversion can widen slightly).
+    if "TxnDate" in out.columns:
+        td = pd.to_datetime(out["TxnDate"], errors="coerce").dt.normalize()
+        out = out.loc[(td >= start) & (td <= end)].copy()
     out = _apply_daily_sales_history_txn_fixup(out)
     out = _dedup_sales_linekey_rows(out)
-    return _downcast_sales(out)
+    out = _downcast_sales(out)
+    _SALES_HISTORY_FRAME_CACHE[cache_key] = (time.time(), out)
+    # Cap cache size
+    if len(_SALES_HISTORY_FRAME_CACHE) > 6:
+        oldest = min(_SALES_HISTORY_FRAME_CACHE.items(), key=lambda kv: kv[1][0])[0]
+        _SALES_HISTORY_FRAME_CACHE.pop(oldest, None)
+    return out.copy()
