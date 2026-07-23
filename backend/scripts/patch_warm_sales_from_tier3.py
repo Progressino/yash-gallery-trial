@@ -1,38 +1,40 @@
-"""One-shot: patch warm sales_df.parquet from Tier-3 uploads (post-coalesce-fix)."""
+#!/usr/bin/env python3
+"""Patch warm sales_df from Tier-3; fix _Combo_Fan bool for parquet write."""
+from __future__ import annotations
+
 import sys
 import time
+import warnings
+from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, "/srv")
-
-import pandas as pd
-import warnings
-
 warnings.filterwarnings("ignore")
 
+import pandas as pd
+
+from backend.services.combo_sku_map import combo_fan_mask
 from backend.services.daily_store import load_platform_data
 from backend.services.sales import (
     build_sales_df,
     patch_sales_df_after_daily_upload,
     sales_date_window_from_platform_dfs,
-    txn_reporting_naive_ist,
 )
 from backend.services.sku_mapping import load_sku_mapping_from_disk
 
 WARM = Path("/data/warm_cache/sales_df.parquet")
-
 sku_mapping = load_sku_mapping_from_disk() or {}
-print("sku_mapping", len(sku_mapping))
+print("sku_mapping", len(sku_mapping), flush=True)
 
 plat_frames = {}
 for p in ("amazon", "myntra", "meesho", "flipkart", "snapdeal"):
     df = load_platform_data(p, months=3, dedup=False, max_files=500)
     if df is not None and not df.empty:
         plat_frames[p] = df
-        print(p, len(df))
+        print(p, len(df), flush=True)
 
 d0, d1 = sales_date_window_from_platform_dfs(plat_frames)
-print("window", d0, d1)
+print("window", d0, d1, flush=True)
 
 fresh = build_sales_df(
     mtr_df=plat_frames.get("amazon", pd.DataFrame()),
@@ -42,24 +44,53 @@ fresh = build_sales_df(
     snapdeal_df=plat_frames.get("snapdeal", pd.DataFrame()),
     sku_mapping=sku_mapping,
 )
-print("fresh rows", len(fresh))
+print("fresh", len(fresh), "max", None if fresh.empty else fresh["TxnDate"].max(), flush=True)
 
 existing = pd.read_parquet(WARM)
-print("existing rows", len(existing))
+print("existing", len(existing), "max", existing["TxnDate"].max(), flush=True)
 
 new_sales = patch_sales_df_after_daily_upload(existing, fresh, set(plat_frames), d0, d1)
-print("new rows", len(new_sales))
+print("patched", len(new_sales), "max", new_sales["TxnDate"].max(), flush=True)
 
-# Sanity: Amazon net shipments for key dates must match Tier-3 uploads.
-t = txn_reporting_naive_ist(new_sales["TxnDate"])
-src = new_sales["Source"].astype(str).str.strip()
-q = pd.to_numeric(new_sales["Quantity"], errors="coerce").fillna(0)
-txn = new_sales["Transaction Type"].astype(str).str.strip().str.lower()
-for day in ("2026-06-20", "2026-07-16", "2026-07-17", "2026-07-18", "2026-07-19"):
-    m = (src == "Amazon") & (t == pd.Timestamp(day)) & (txn == "shipment")
-    print(day, int(q[m].sum()))
+if "_Combo_Fan" in new_sales.columns:
+    new_sales["_Combo_Fan"] = combo_fan_mask(new_sales["_Combo_Fan"]).astype(bool)
 
-bak = WARM.with_suffix(f".parquet.bak-tier3sync-{time.strftime('%Y%m%d%H%M')}")
+stamp = time.strftime("%Y%m%d%H%M")
+tmp = WARM.with_name(f"sales_df.parquet.tmp-patch-{stamp}")
+bak = WARM.with_name(f"sales_df.parquet.bak-prepatch-{stamp}")
+new_sales.to_parquet(tmp, index=False)
 WARM.rename(bak)
-new_sales.to_parquet(WARM, index=False)
-print("saved", WARM, "backup", bak)
+tmp.rename(WARM)
+print("saved", WARM, "backup", bak, flush=True)
+
+sales = new_sales.copy()
+sales["TxnDate"] = pd.to_datetime(sales["TxnDate"], errors="coerce")
+sales["Sku"] = sales["Sku"].astype(str).str.strip().str.upper()
+sales["TT"] = sales["Transaction Type"].astype(str).str.strip().str.lower()
+mustard = sales[sales["Sku"].str.startswith("165YK251MUSTRAD")]
+maxd = sales["TxnDate"].max().normalize()
+win = mustard[
+    (mustard["TxnDate"] >= maxd - timedelta(days=29))
+    & (mustard["TxnDate"] <= maxd)
+    & (mustard["TT"] == "shipment")
+]
+print(
+    "30d end",
+    maxd,
+    "XL",
+    int(win[win["Sku"] == "165YK251MUSTRAD-XL"]["Quantity"].sum()),
+    "all",
+    int(win["Quantity"].sum()),
+    flush=True,
+)
+for d in ("2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23"):
+    day = mustard[
+        (mustard["TxnDate"].dt.normalize() == pd.Timestamp(d)) & (mustard["TT"] == "shipment")
+    ]
+    print(
+        d,
+        int(day["Quantity"].sum()),
+        "XL",
+        int(day[day["Sku"] == "165YK251MUSTRAD-XL"]["Quantity"].sum()),
+        flush=True,
+    )

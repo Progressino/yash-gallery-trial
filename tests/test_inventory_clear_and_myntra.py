@@ -52,6 +52,26 @@ def test_myntra_warehouse_filter_other_only():
     assert int(out["Myntra_Other_Inventory"].iloc[0]) == 50
 
 
+def test_myntra_numeric_seller_sku_maps_per_size_not_style():
+    """Numeric seller sku ids must map to sized OMS SKUs; style id is last resort."""
+    mapping = {
+        "45233549": "1007YKBLACK-4XL",
+        "13001164": "1007YKBLACK-XXL",  # style id → one size (wrong if preferred)
+        "45233550": "1007YKBLACK-XXL",
+    }
+    csv_bytes = (
+        b"seller sku code,style id,inventory count,warehouse name\n"
+        b"45233549,13001164,5,Myntra Other Warehouse\n"
+        b"45233550,13001164,7,Myntra Other Warehouse\n"
+    )
+    out = _parse_myntra_other(csv_bytes, mapping).set_index("OMS_SKU")["Myntra_Other_Inventory"]
+    assert int(out.get("1007YKBLACK-4XL", 0)) == 5
+    assert int(out.get("1007YKBLACK-XXL", 0)) == 7
+    assert "1007YKBLACK-XXL" in out.index
+    # Must not collapse both rows onto XXL via style id alone.
+    assert int(out.sum()) == 12
+
+
 def test_clear_inventory_platform_endpoint(client, session_for_client, monkeypatch):
     """DELETE /upload/clear/inventory clears snapshot without touching sales."""
     import backend.main as main_mod

@@ -1348,7 +1348,13 @@ def _parse_fk_ppmp_inventory(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.Da
 
     def _resolve(row) -> str:
         val = str(row.get(sku_col, "")).strip()
-        if val and val.lower() not in ("nan", "") and not val.isdigit():
+        if not val or val.lower() in ("nan", ""):
+            return ""
+        # Prefer mapped OMS SKU even for numeric Flipkart sku ids.
+        mapped = map_to_oms_sku(val, mapping)
+        if mapped and not str(mapped).isdigit():
+            return str(mapped).strip().upper()
+        if not val.isdigit():
             return _resolve_seller_style_sku(val, mapping)
         return ""
 
@@ -1392,9 +1398,12 @@ def _parse_fk_inventory_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.Dat
 
 def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     """
-    Myntra other-warehouse CSV.
-    Uses 'seller sku code' (non-numeric only) for SKU mapping; falls back to
-    'style id' for rows where seller sku code is a Myntra internal numeric ID.
+    Myntra other-warehouse CSV (PPMP Seller Inventory Report).
+
+    Prefer size-accurate ids (seller sku code / sku id / sku code) via the SKU
+    mapping — including numeric Myntra sku_ids. Style id is style-level and often
+    maps to a single size (commonly XXL); use it only as a last resort.
+
     Uses 'inventory count' (not 'sellable inventory count') as the stock value.
     Returns OMS_SKU, Myntra_Other_Inventory.
     """
@@ -1420,24 +1429,45 @@ def _parse_myntra_other(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFra
     df[inv_col] = pd.to_numeric(df[inv_col], errors="coerce").fillna(0)
 
     def _resolve(row) -> str:
-        # Primary: seller sku code — only use if it's a real seller SKU (non-numeric)
-        # Myntra sometimes puts their internal sku_id (pure number) here, skip those
+        # Prefer size-accurate ids (seller sku / sku id / sku code) via mapping —
+        # including numeric Myntra sku_ids. Style id often maps to a single size
+        # (commonly XXL) and must only be a last resort or all sizes collapse.
+        candidates: list[str] = []
         if sku_col:
-            val = str(row.get(sku_col, "")).strip()
-            if val and val.lower() not in ("nan", "") and not val.isdigit():
-                return _resolve_seller_style_sku(val, mapping)
-        # Fallback: style id → mapped via SKU mapping sheet (MYNTRA sheet adds style_id→OMS)
+            candidates.append(str(row.get(sku_col, "")).strip())
+        sku_id_col = next(
+            (c for c in df.columns if str(c).strip().lower() in ("sku id", "skuid", "sku_id")),
+            None,
+        )
+        if sku_id_col:
+            candidates.append(str(row.get(sku_id_col, "")).strip())
+        if sku_code_col:
+            candidates.append(str(row.get(sku_code_col, "")).strip())
+
+        for val in candidates:
+            if not val or val.lower() in ("nan", ""):
+                continue
+            # Mapped numeric sku_id → sized OMS SKU (e.g. 45233549 → …-4XL).
+            mapped = map_to_oms_sku(val, mapping)
+            if mapped and not str(mapped).isdigit():
+                return str(mapped).strip().upper()
+            # Alphanumeric seller codes: resolve with PL-strip helper.
+            if not val.isdigit():
+                resolved = _resolve_seller_style_sku(val, mapping)
+                if resolved and not resolved.isdigit():
+                    return resolved
+
+        # Style id is style-level (one size) — only when nothing size-specific mapped.
         if style_col:
             val = str(row.get(style_col, "")).strip()
             if val and val.lower() not in ("nan", ""):
                 result = map_to_oms_sku(val, mapping)
-                # Only use if it resolved to a non-numeric OMS SKU
                 if result and not result.isdigit():
                     return result
-        # Last resort: keep unmapped rows under Myntra ``sku code`` so the warehouse
-        # total matches the ops sheet (dropping them under-counts Other Warehouse).
-        if sku_code_col:
-            val = str(row.get(sku_code_col, "")).strip()
+
+        # Last resort: keep unmapped alphanumeric seller/sku code so warehouse
+        # totals are not silently dropped.
+        for val in candidates:
             if val and val.lower() not in ("nan", "") and not val.isdigit():
                 return val.upper()
         return ""
