@@ -226,7 +226,9 @@ def _sales_shipment_history_part(sales_df: pd.DataFrame) -> pd.DataFrame:
     src = sales_df
     # Ignore combo-fan component copies for history / File-matching paths.
     if "_Combo_Fan" in sales_df.columns:
-        fan = sales_df["_Combo_Fan"].fillna(False).astype(bool)
+        from .combo_sku_map import combo_fan_mask
+
+        fan = combo_fan_mask(sales_df["_Combo_Fan"])
         if fan.any():
             src = sales_df.loc[~fan]
             if src.empty:

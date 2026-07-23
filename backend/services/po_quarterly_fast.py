@@ -616,13 +616,14 @@ def _accumulate_sales_df_shipments(
 ) -> int:
     """Append unified sales shipment rows for SKU-days not already on platform side."""
     from .po_engine import _sales_shipment_history_part
+    from .combo_sku_map import combo_fan_mask
 
     part = _sales_shipment_history_part(sales_df)
     if part.empty:
         return 0
     # Drop combo-fan component copies so quarterly matches File (listing-level).
     if "_Combo_Fan" in sales_df.columns:
-        fan = sales_df["_Combo_Fan"].fillna(False).astype(bool)
+        fan = combo_fan_mask(sales_df["_Combo_Fan"])
         if fan.any():
             part = _sales_shipment_history_part(sales_df.loc[~fan])
             if part.empty:
@@ -801,6 +802,71 @@ def calculate_quarterly_from_tier3_streaming(
     units_30: dict[str, int] = defaultdict(int)
     days_30: dict[str, Set[pd.Timestamp]] = defaultdict(set)
     platform_day_keys: Set[PlatformDayKey] = set()
+
+    # Prod RAM mode skips loading Tier-1 platform frames into warm cache. Streaming
+    # Tier-3 then "gap-filling" from sales_df undercounts badly: Tier-3 day keys
+    # block sales_df rows even when Tier-3 qty is incomplete. Prefer full sales_df.
+    po_session_only = False
+    try:
+        import backend.main as _main
+
+        po_session_only = bool(_main.warm_cache_po_session_only())
+    except Exception:
+        po_session_only = False
+
+    if po_session_only:
+        sales_df = _load_unified_sales_df()
+        if sales_df is None or getattr(sales_df, "empty", True):
+            return pd.DataFrame()
+        if progress_cb:
+            progress_cb(
+                20,
+                "PO_SESSION_ONLY: building quarterly from unified sales_df (skip Tier-3 gap-fill)…",
+            )
+        _accumulate_sales_df_shipments(
+            sales_df,
+            sku_mapping,
+            group_by_parent=group_by_parent,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            cutoff_90=cutoff_90,
+            cutoff_30=cutoff_30,
+            q_label_map=q_label_map,
+            quarter_sums=quarter_sums,
+            units_90=units_90,
+            units_30=units_30,
+            days_30=days_30,
+            platform_day_keys=set(),
+            demand_basis=demand_basis,
+            platform_quarter_sums=platform_quarter_sums,
+        )
+        if not quarter_sums:
+            return pd.DataFrame()
+        if progress_cb:
+            progress_cb(96, "Building SKU table…")
+        skus = sorted({k[0] for k in quarter_sums})
+        rows = []
+        for sku in skus:
+            row = {"OMS_SKU": sku}
+            for col in ordered_q_cols:
+                row[col] = quarter_sums.get((sku, col), 0)
+            rows.append(row)
+        pivot = pd.DataFrame(rows)
+        last4 = ordered_q_cols[-4:]
+        pivot["Avg_Monthly"] = (pivot[last4].mean(axis=1) / 3).round(1)
+        pivot["Units_90d"] = pivot["OMS_SKU"].map(lambda s: units_90.get(s, 0)).astype(int)
+        pivot["ADS"] = (pivot["Units_90d"].clip(lower=0) / 90).round(3)
+        pivot["Units_30d"] = pivot["OMS_SKU"].map(lambda s: units_30.get(s, 0)).astype(int)
+        pivot["Freq_30d"] = pivot["OMS_SKU"].map(lambda s: len(days_30.get(s, set()))).astype(int)
+        ads = pivot["ADS"]
+        pivot["Status"] = np.select(
+            [ads >= 1.0, ads >= 0.33, ads >= 0.10],
+            ["Fast Moving", "Moderate", "Slow Selling"],
+            default="Not Moving",
+        )
+        if not group_by_parent:
+            pivot = apply_quarterly_bundled_fan_out(pivot, ordered_q_cols)
+        return pivot
 
     tier1_covered = _accumulate_tier1_platform_history(
         sku_mapping,

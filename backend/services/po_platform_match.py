@@ -118,7 +118,9 @@ def build_platform_match_frames(
         keep.append(fan_c)
     work = sales_df.loc[:, keep]
     if fan_c:
-        fan = work[fan_c].fillna(False).astype(bool)
+        from .combo_sku_map import combo_fan_mask
+
+        fan = combo_fan_mask(work[fan_c])
         if bool(fan.any()):
             work = work.loc[~fan]
 

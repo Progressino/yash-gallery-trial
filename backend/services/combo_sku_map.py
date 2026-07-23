@@ -27,6 +27,21 @@ ComboBom = Dict[str, List[Tuple[str, float]]]
 
 _BUNDLED_COMBO_CACHE: Optional[ComboBom] = None
 
+
+def combo_fan_mask(series: pd.Series | None) -> pd.Series:
+    """True only for real combo-component fan rows.
+
+    ``sales_df`` often persists ``_Combo_Fan`` as string ``\"False\"``/``\"True\"``.
+    ``astype(bool)`` treats every non-empty string as True, which wiped ~99% of
+    sales from quarterly / history paths. Parse explicitly.
+    """
+    if series is None:
+        return pd.Series(dtype=bool)
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False).astype(bool)
+    s = series.astype(str).str.strip().str.lower()
+    return s.isin({"1", "true", "yes", "y", "t"})
+
 _COMBO_KEY_HINTS = (
     "dpt sku",
     "dpt_sku",

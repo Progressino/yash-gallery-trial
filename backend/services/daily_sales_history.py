@@ -44,7 +44,9 @@ def _normalize_sales_tall(sales_df: pd.DataFrame | None) -> pd.DataFrame:
     # listing row retained. Sales History must match the uploaded files, so the
     # synthetic component copies (_Combo_Fan=True) are excluded here.
     if "_Combo_Fan" in s.columns:
-        fan = s["_Combo_Fan"].fillna(False).astype(bool)
+        from .combo_sku_map import combo_fan_mask
+
+        fan = combo_fan_mask(s["_Combo_Fan"])
         if fan.any():
             s = s.loc[~fan]
     dates = pd.to_datetime(s[date_col], errors="coerce")

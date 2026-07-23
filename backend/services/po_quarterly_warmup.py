@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 36  # listing-only combo; skip Tier-3 when Tier-1 covers platform
+QUARTERLY_CACHE_SCHEMA = 38  # fix string _Combo_Fan bool parse; PO_SESSION_ONLY sales_df quarters
 
 
 def normalize_quarterly_demand_basis(demand_basis: object) -> str:
