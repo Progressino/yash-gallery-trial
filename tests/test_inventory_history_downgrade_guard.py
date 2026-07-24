@@ -600,6 +600,49 @@ def test_refresh_fills_sales_gap_between_wide_end_and_snapshot():
     assert days[-1] == "2026-06-29"
 
 
+def test_refresh_rebuilds_flat_derived_gap_without_wide_end():
+    """Daily RAR stacks often have empty wide_end — still rebuild sales gap before snapshot."""
+    from backend.session import AppSession
+    from backend.services.daily_inventory_history import refresh_inventory_history_rollforward
+
+    sess = AppSession()
+    # Authoritative Jul 17 snapshot, then stale flat derived copies (bug shape on prod).
+    hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"] * 4,
+            "Date": pd.to_datetime(
+                ["2026-07-17", "2026-07-18", "2026-07-19", "2026-07-20"]
+            ),
+            "Qty": [100.0, 100.0, 100.0, 100.0],
+            "Source": ["snapshot", "derived", "derived", "derived"],
+            "Channel": [""] * 4,
+        }
+    )
+    sess.daily_inventory_history_df = hist
+    sess.daily_inventory_history_wide_end_date = ""
+    sess.inventory_snapshot_date = "2026-07-21"
+    sess.inventory_df_variant = pd.DataFrame(
+        {"OMS_SKU": ["SKU-A"], "OMS_Inventory": [80.0], "Total_Inventory": [90.0]},
+    )
+    sales = pd.DataFrame(
+        {
+            "Sku": ["SKU-A"] * 3,
+            "TxnDate": pd.to_datetime(["2026-07-18", "2026-07-19", "2026-07-20"]),
+            "Units_Effective": [5.0, 5.0, 5.0],
+        }
+    )
+    out = refresh_inventory_history_rollforward(sess, include_snapshot=True, sales_df=sales)
+    assert out.get("ok") is True
+    assert out.get("rolled_forward") is True
+    work = sess.daily_inventory_history_df.copy()
+    work["Date"] = pd.to_datetime(work["Date"]).dt.normalize()
+    by_day = work.groupby("Date")["Qty"].max()
+    assert float(by_day[pd.Timestamp("2026-07-18")]) == 95.0
+    assert float(by_day[pd.Timestamp("2026-07-19")]) == 90.0
+    assert float(by_day[pd.Timestamp("2026-07-20")]) == 85.0
+    assert float(by_day[pd.Timestamp("2026-07-21")]) == 80.0
+
+
 def test_refresh_fills_gap_when_snapshot_already_present():
     from backend.session import AppSession
     from backend.services.daily_inventory_history import (

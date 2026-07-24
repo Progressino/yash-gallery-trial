@@ -270,6 +270,35 @@ def snapshot_dates_from_history(hist: pd.DataFrame | None) -> list[str]:
     return sorted({str(pd.Timestamp(d).date()) for d in days.unique()})
 
 
+def last_authoritative_history_date(
+    hist: pd.DataFrame | None,
+    *,
+    before: pd.Timestamp | str | None = None,
+) -> pd.Timestamp | None:
+    """Latest calendar day with Source ``uploaded`` or ``snapshot``.
+
+    Optionally require the day to be strictly before ``before`` (used when
+    rebuilding the sales-derived gap ahead of a new daily snapshot).
+    """
+    if hist is None or getattr(hist, "empty", True):
+        return None
+    work = _ensure_source_column(hist)
+    if "Date" not in work.columns:
+        return None
+    src = work["Source"].astype(str).str.strip().str.lower()
+    auth = work[src.isin(["uploaded", "snapshot"])].copy()
+    if auth.empty:
+        return None
+    auth["Date"] = pd.to_datetime(auth["Date"], errors="coerce").dt.normalize()
+    auth = auth.dropna(subset=["Date"])
+    if before is not None:
+        before_ts = pd.Timestamp(before).normalize()
+        auth = auth[auth["Date"] < before_ts]
+    if auth.empty:
+        return None
+    return pd.Timestamp(auth["Date"].max()).normalize()
+
+
 def prune_non_snapshot_post_matrix_days(
     hist: pd.DataFrame | None,
     sess,
@@ -1268,18 +1297,32 @@ def refresh_inventory_history_rollforward(
         wide_end = wide_matrix_upload_end_date(sess)
         snap_date = snap if len(snap) == 10 else str(cap_ts.date())
         snap_ts = pd.Timestamp(snap_date).normalize()
-        if wide_end is not None and snap_ts > pd.Timestamp(wide_end).normalize():
-            fill_cap = snap_ts - pd.Timedelta(days=1)
-            wide_ts = pd.Timestamp(wide_end).normalize()
-            if fill_cap > wide_ts:
-                clip = merged[merged["Date"] <= wide_ts].copy()
-                filled = extend_history_with_sales(clip, sales_df=sales, cap_date=fill_cap)
-                snap_rows = merged[
-                    (merged["Date"] > wide_ts)
-                    & (merged["Source"].astype(str).str.lower() == "snapshot")
-                ]
-                merged = merge_inventory_history(filled, snap_rows)
-                rolled = True
+        # Rebuild the gap before this snapshot from the last authoritative day.
+        # Do not require wide_end — daily RAR-only stacks often have an empty
+        # wide_end, and stale flat derived copies (no sales subtracted) otherwise
+        # stick until the next snapshot creates a cliff in Inv. History.
+        fill_cap = snap_ts - pd.Timedelta(days=1)
+        auth_end = last_authoritative_history_date(merged, before=snap_ts)
+        if auth_end is None and wide_end is not None:
+            auth_end = pd.Timestamp(wide_end).normalize()
+        if auth_end is not None and fill_cap > auth_end:
+            src_l = merged["Source"].astype(str).str.strip().str.lower()
+            keep = (merged["Date"] <= auth_end) | (
+                (src_l == "snapshot") & (merged["Date"] < snap_ts)
+            )
+            clip = merged.loc[keep].copy()
+            # Drop stale derived after the baseline so extend_history_with_sales
+            # recomputes them from sales instead of treating flat copies as truth.
+            clip_src = clip["Source"].astype(str).str.strip().str.lower()
+            clip = clip.loc[~((clip["Date"] > auth_end) & (clip_src == "derived"))].copy()
+            filled = extend_history_with_sales(clip, sales_df=sales, cap_date=fill_cap)
+            other_snaps = merged[
+                (merged["Date"] > auth_end)
+                & (merged["Date"] < snap_ts)
+                & (src_l == "snapshot")
+            ]
+            merged = merge_inventory_history(filled, other_snaps)
+            rolled = True
         variant = getattr(sess, "inventory_df_variant", None)
         if variant is not None and not getattr(variant, "empty", True) and "OMS_SKU" in variant.columns:
             snap_date = snap if len(snap) == 10 else str(cap_ts.date())

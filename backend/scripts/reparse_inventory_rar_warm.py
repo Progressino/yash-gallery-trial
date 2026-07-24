@@ -72,7 +72,40 @@ def main() -> None:
     print("auto_checks", json.dumps(checks, indent=2))
     import backend.main as main_mod
 
+    # Attach existing Inv History so snapshot append can sales-roll the gap.
+    ih_path = Path("/data/warm_cache/daily_inventory_history_df.parquet")
+    if ih_path.is_file():
+        try:
+            sess.daily_inventory_history_df = pd.read_parquet(ih_path)
+            from backend.services.daily_inventory_history import (
+                read_daily_inventory_history_disk_meta,
+            )
+
+            meta = read_daily_inventory_history_disk_meta() or {}
+            for k, v in meta.items():
+                if hasattr(sess, k) and v not in (None, ""):
+                    setattr(sess, k, v)
+        except Exception as exc:
+            print("history load skipped:", exc)
+    try:
+        sales_path = Path("/data/warm_cache/sales_df.parquet")
+        if sales_path.is_file():
+            sess.sales_df = pd.read_parquet(sales_path)
+    except Exception as exc:
+        print("sales load skipped:", exc)
+
     main_mod.merge_inventory_into_warm_cache(sess)
+    try:
+        from backend.services.daily_inventory_history import (
+            append_snapshot_inventory_to_history,
+            persist_inventory_history_authoritative,
+        )
+
+        hist_res = append_snapshot_inventory_to_history(sess)
+        print("history_append", hist_res)
+        persist_inventory_history_authoritative(sess)
+    except Exception as exc:
+        print("history append failed:", exc)
     warm = main_mod._warm_cache.get("inventory_df_variant")
     if warm is not None and not warm.empty:
         print(
