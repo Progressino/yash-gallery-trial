@@ -134,6 +134,8 @@ type SetBomLine = {
   default_next_process: string
   routing: string
   requires_embroidery: boolean
+  component_role: 'SET_COMPONENT' | 'PANEL'
+  parent_component_code: string
   materials: SetBomMaterial[]
 }
 
@@ -158,9 +160,9 @@ export default function SetBomPanel({
     stitching_requires_complete_set: true,
     bundle_gate_process: 'Cutting',
     lines: [
-      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, materials: [] },
-      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, materials: [] },
-      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery', routing: 'Cutting>Embroidery>Cutting>Stitching', requires_embroidery: true, materials: [] },
+      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
+      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
+      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery', routing: 'Cutting>Embroidery>Cutting>Stitching', requires_embroidery: true, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
     ] as SetBomLine[],
   })
   const [setMatchForm, setSetMatchForm] = useState({
@@ -222,6 +224,8 @@ export default function SetBomPanel({
             default_next_process: l.default_next_process || '',
             routing: l.routing || '',
             requires_embroidery: Boolean(l.requires_embroidery) || String(l.routing || '').includes('Embroidery'),
+            component_role: (String(l.component_role || '').toUpperCase() === 'PANEL' ? 'PANEL' : 'SET_COMPONENT') as 'SET_COMPONENT' | 'PANEL',
+            parent_component_code: l.parent_component_code || '',
             materials: (l.materials || []).map((m: any) => ({
               material_code: m.material_code || '',
               material_name: m.material_name || '',
@@ -250,9 +254,9 @@ export default function SetBomPanel({
       <div className="bg-white rounded-xl border p-4 space-y-3">
         <h3 className="font-semibold text-gray-800">Component BOM (Set recipe + materials)</h3>
         <p className="text-xs text-gray-500">
-          Define Top / Pant / Dupatta under the main style (e.g. <span className="font-mono">1001YKBEIGE</span>).
-          Cutting JOs are created <strong>per component</strong> (<span className="font-mono">1001YKBEIGE-XS-TOP</span> etc.)
-          with fabric issue from each component&apos;s material lines.
+          <strong>Set Components</strong> (Top / Bottom / Dupatta) each get one Cutting Job Order.
+          <strong> Panels</strong> (Front / Back) belong under a parent (usually Top) for embroidery WIP —
+          they do <em>not</em> create separate Cutting JOs.
         </p>
         <div className="grid grid-cols-2 gap-2">
           <div>
@@ -297,8 +301,10 @@ export default function SetBomPanel({
           <table className="w-full text-xs">
             <thead className="bg-gray-50 text-gray-500">
               <tr>
+                <th className="text-left px-2 py-1.5">Role</th>
                 <th className="text-left px-2 py-1.5">Code</th>
                 <th className="text-left px-2 py-1.5">Name</th>
+                <th className="text-left px-2 py-1.5">Parent</th>
                 <th className="text-right px-2 py-1.5">Qty/set</th>
                 <th className="text-left px-2 py-1.5">Routing (partial WIP)</th>
                 <th className="text-left px-2 py-1.5">Next</th>
@@ -309,6 +315,24 @@ export default function SetBomPanel({
               {setBomForm.lines.map((ln, i) => (
                 <Fragment key={i}>
                 <tr className="border-t">
+                  <td className="px-2 py-1">
+                    <select
+                      value={ln.component_role || 'SET_COMPONENT'}
+                      onChange={e => setSetBomForm(f => ({
+                        ...f,
+                        lines: f.lines.map((x, j) => j === i ? {
+                          ...x,
+                          component_role: e.target.value as 'SET_COMPONENT' | 'PANEL',
+                          parent_component_code: e.target.value === 'PANEL' ? (x.parent_component_code || 'TOP') : '',
+                        } : x),
+                      }))}
+                      className="border rounded px-1 py-0.5 text-[10px]"
+                      title="Set Component = Cutting JO; Panel = Front/Back under parent"
+                    >
+                      <option value="SET_COMPONENT">Set Component</option>
+                      <option value="PANEL">Panel</option>
+                    </select>
+                  </td>
                   <td className="px-2 py-1">
                     <input
                       value={ln.component_code}
@@ -328,6 +352,29 @@ export default function SetBomPanel({
                       }))}
                       className="w-full border rounded px-1.5 py-0.5"
                     />
+                  </td>
+                  <td className="px-2 py-1">
+                    {ln.component_role === 'PANEL' ? (
+                      <select
+                        value={ln.parent_component_code || 'TOP'}
+                        onChange={e => setSetBomForm(f => ({
+                          ...f,
+                          lines: f.lines.map((x, j) => j === i ? { ...x, parent_component_code: e.target.value } : x),
+                        }))}
+                        className="w-full border rounded px-1 py-0.5 font-mono text-[10px]"
+                      >
+                        {setBomForm.lines
+                          .filter(x => x.component_role !== 'PANEL' && x.component_code)
+                          .map(x => (
+                            <option key={x.component_code} value={x.component_code}>{x.component_code}</option>
+                          ))}
+                        {!setBomForm.lines.some(x => x.component_role !== 'PANEL' && x.component_code === 'TOP') && (
+                          <option value="TOP">TOP</option>
+                        )}
+                      </select>
+                    ) : (
+                      <span className="text-gray-300 text-[10px]">—</span>
+                    )}
                   </td>
                   <td className="px-2 py-1">
                     <input
@@ -388,8 +435,11 @@ export default function SetBomPanel({
                   </td>
                 </tr>
                 <tr className="border-t bg-gray-50/80">
-                  <td colSpan={6} className="px-2 py-2">
-                    <p className="text-[10px] font-semibold text-gray-500 mb-1">Materials for {ln.component_code || 'component'}</p>
+                  <td colSpan={8} className="px-2 py-2">
+                    <p className="text-[10px] font-semibold text-gray-500 mb-1">
+                      {ln.component_role === 'PANEL' ? 'Panel' : 'Materials'} for {ln.component_code || 'component'}
+                      {ln.component_role === 'PANEL' ? ' (managed inside parent Cutting JO — no separate JO)' : ''}
+                    </p>
                     <div className="space-y-1">
                       {(ln.materials || []).map((mat, mi) => (
                         <div key={mi} className="flex gap-1 items-center flex-wrap">
@@ -489,11 +539,41 @@ export default function SetBomPanel({
           <button
             onClick={() => setSetBomForm(f => ({
               ...f,
-              lines: [...f.lines, { component_code: '', component_name: '', qty_per_set: 1, default_next_process: '', routing: '', requires_embroidery: false, materials: [] }],
+              lines: [...f.lines, {
+                component_code: '',
+                component_name: '',
+                qty_per_set: 1,
+                default_next_process: 'Stitching',
+                routing: 'Cutting>Stitching',
+                requires_embroidery: false,
+                component_role: 'SET_COMPONENT' as const,
+                parent_component_code: '',
+                materials: [],
+              }],
             }))}
             className="px-3 py-1.5 text-xs border rounded-lg"
           >
-            + Component
+            + Set Component
+          </button>
+          <button
+            type="button"
+            onClick={() => setSetBomForm(f => ({
+              ...f,
+              lines: [...f.lines, {
+                component_code: 'FRONT',
+                component_name: 'Top Front',
+                qty_per_set: 1,
+                default_next_process: 'Embroidery',
+                routing: 'Cutting>Embroidery>Cutting>Stitching',
+                requires_embroidery: true,
+                component_role: 'PANEL' as const,
+                parent_component_code: f.lines.find(x => x.component_role !== 'PANEL' && /TOP/i.test(x.component_code))?.component_code || 'TOP',
+                materials: [],
+              }],
+            }))}
+            className="px-3 py-1.5 text-xs border border-amber-300 text-amber-900 bg-amber-50 rounded-lg"
+          >
+            + Panel (Front/Back)
           </button>
           <button
             onClick={() => saveSetBomMut.mutate(setBomForm)}
@@ -523,6 +603,8 @@ export default function SetBomPanel({
                     default_next_process: l.default_next_process || '',
                     routing: l.routing || '',
                     requires_embroidery: Boolean(l.requires_embroidery),
+                    component_role: (String(l.component_role || '').toUpperCase() === 'PANEL' ? 'PANEL' : 'SET_COMPONENT') as 'SET_COMPONENT' | 'PANEL',
+                    parent_component_code: l.parent_component_code || '',
                     materials: (l.materials || []).map((m: any) => ({
                       material_code: m.material_code || '',
                       material_name: m.material_name || '',

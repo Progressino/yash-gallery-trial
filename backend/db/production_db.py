@@ -317,6 +317,9 @@ def init_db():
         ("set_bom_headers", "bundle_gate_process", "TEXT DEFAULT 'Cutting'"),
         ("set_bom_lines", "routing", "TEXT DEFAULT ''"),
         ("set_bom_lines", "requires_embroidery", "INTEGER DEFAULT 0"),
+        ("set_bom_lines", "component_role", "TEXT DEFAULT 'SET_COMPONENT'"),
+        ("set_bom_lines", "parent_component_code", "TEXT DEFAULT ''"),
+        ("set_bom_lines", "creates_cutting_jo", "INTEGER DEFAULT 1"),
     ]
     for table, col, decl in migrations:
         try:
@@ -739,18 +742,26 @@ def create_jo(data: dict) -> str | list[str]:
 
 
 def create_component_cutting_jos(data: dict) -> list[str]:
-    """Explode a main-SKU Cutting plan into one JO per Set BOM component."""
-    from ..services.component_bom import effective_set_bom_for_cutting, resolve_cutting_main_sku
+    """Explode a main-SKU Cutting plan into one JO per Set BOM set-component.
+
+    Panel rows (Front/Back/…) do not get Cutting Job Orders.
+    """
+    from ..services.component_bom import (
+        effective_set_bom_for_cutting,
+        resolve_cutting_main_sku,
+        set_component_lines,
+    )
     from ..services.set_components import component_sku
 
     main_sku = resolve_cutting_main_sku(data) or str(data.get("sku") or "").strip().upper()
     bom = effective_set_bom_for_cutting(main_sku)
-    if not bom or not bom.get("lines"):
+    lines = set_component_lines(bom)
+    if not lines:
         return [_create_single_jo(data)]
 
     base_planned = int(data.get("planned_qty") or 0)
     jo_numbers: list[str] = []
-    for ln in bom["lines"]:
+    for ln in lines:
         code = ln["component_code"]
         ratio = max(int(ln.get("qty_per_set") or 1), 1)
         comp_qty = base_planned * ratio
@@ -1571,7 +1582,9 @@ def _hydrate_set_bom(conn, header_row) -> Optional[dict]:
         return None
     h = dict(header_row)
     h["lines"] = _set_bom_lines(conn, h["id"])
-    return h
+    from ..services.component_bom import annotate_set_bom_roles
+
+    return annotate_set_bom_roles(h)
 
 
 def list_set_boms(active_only: bool = True) -> list:
@@ -1627,6 +1640,11 @@ def get_set_bom_for_sku(sku: str) -> Optional[dict]:
 
 
 def upsert_set_bom(data: dict) -> dict:
+    from ..services.component_bom import (
+        ROLE_PANEL,
+        ROLE_SET_COMPONENT,
+        normalize_line_role,
+    )
     from ..services.set_components import normalize_component_code
 
     style_key = str(data.get("style_key") or "").strip().upper()
@@ -1643,6 +1661,10 @@ def upsert_set_bom(data: dict) -> dict:
             raise ValueError(f"Duplicate component code: {code}")
         seen_codes.add(code)
         qty = max(int(ln.get("qty_per_set") or 1), 1)
+        role = normalize_line_role(ln)
+        parent = str(ln.get("parent_component_code") or "").strip().upper()
+        if role == ROLE_PANEL and not parent:
+            parent = ""  # filled after all codes known
         cleaned.append(
             {
                 "component_code": code,
@@ -1651,6 +1673,9 @@ def upsert_set_bom(data: dict) -> dict:
                 "default_next_process": str(ln.get("default_next_process") or "").strip(),
                 "routing": str(ln.get("routing") or "").strip(),
                 "requires_embroidery": 1 if ln.get("requires_embroidery") else 0,
+                "component_role": role,
+                "parent_component_code": parent,
+                "creates_cutting_jo": 0 if role == ROLE_PANEL else 1,
                 "sort_order": int(ln.get("sort_order") if ln.get("sort_order") is not None else i),
                 "materials": [
                     {
@@ -1664,6 +1689,21 @@ def upsert_set_bom(data: dict) -> dict:
                     if str(m.get("material_code") or "").strip()
                 ],
             }
+        )
+    from ..services.component_bom import _infer_panel_parent
+
+    set_codes = {
+        ln["component_code"]
+        for ln in cleaned
+        if ln["component_role"] == ROLE_SET_COMPONENT
+    }
+    for ln in cleaned:
+        if ln["component_role"] == ROLE_PANEL and not ln["parent_component_code"]:
+            ln["parent_component_code"] = _infer_panel_parent(ln["component_code"], set_codes)
+    if not any(ln["component_role"] == ROLE_SET_COMPONENT for ln in cleaned):
+        raise ValueError(
+            "At least one Set Component (Top / Bottom / …) is required — "
+            "Front/Back panels alone cannot create Cutting Job Orders"
         )
     conn = _connect()
     existing = conn.execute(
@@ -1712,8 +1752,9 @@ def upsert_set_bom(data: dict) -> dict:
         conn.execute(
             """INSERT INTO set_bom_lines
                (header_id, component_code, component_name, qty_per_set,
-                default_next_process, routing, requires_embroidery, sort_order)
-               VALUES(?,?,?,?,?,?,?,?)""",
+                default_next_process, routing, requires_embroidery,
+                component_role, parent_component_code, creates_cutting_jo, sort_order)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 hid,
                 ln["component_code"],
@@ -1722,6 +1763,9 @@ def upsert_set_bom(data: dict) -> dict:
                 ln["default_next_process"],
                 routing,
                 requires_emb,
+                ln["component_role"],
+                ln["parent_component_code"],
+                ln["creates_cutting_jo"],
                 ln["sort_order"],
             ),
         )
@@ -1841,8 +1885,12 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                 "main_sku": main,
             }
         gate = str(bom.get("bundle_gate_process") or "Cutting").strip() or "Cutting"
+        from ..services.component_bom import ROLE_PANEL, set_component_lines
+
+        # Stitching gate uses set components (Top/Bottom). Panels are WIP under parents.
+        gate_lines = set_component_lines(bom) or list(bom.get("lines") or [])
         comps = []
-        for ln in bom["lines"]:
+        for ln in gate_lines:
             code = ln["component_code"]
             csku = component_sku(main, code)
             path = resolve_component_routing(
@@ -1880,9 +1928,82 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                     "embroidery_outstanding": emb_out,
                     "location": location,
                     "routing": path,
+                    "component_role": ln.get("component_role") or "SET_COMPONENT",
+                    "parent_component_code": ln.get("parent_component_code") or "",
                 }
             )
-        out = compute_bundle_readiness(comps, gate_process=gate)
+        # Surface panels on the WIP board without treating them as set-match units.
+        for ln in bom.get("lines") or []:
+            if str(ln.get("component_role") or "").upper() != ROLE_PANEL:
+                continue
+            code = ln["component_code"]
+            csku = component_sku(main, code)
+            path = resolve_component_routing(
+                routing=ln.get("routing"),
+                default_next_process=ln.get("default_next_process"),
+                item_routing=["Cutting", "Embroidery", "Cutting", "Stitching"],
+            )
+            emb_row = conn.execute(
+                "SELECT COALESCE(available_qty,0) AS q FROM process_stock WHERE so_number=? AND sku=? AND process=?",
+                (so_number, csku, "Embroidery"),
+            ).fetchone()
+            gate_row = conn.execute(
+                "SELECT COALESCE(available_qty,0) AS q FROM process_stock WHERE so_number=? AND sku=? AND process=?",
+                (so_number, csku, gate),
+            ).fetchone()
+            avail_gate = int(gate_row["q"] if gate_row else 0)
+            emb_out = int(emb_row["q"] if emb_row else 0)
+            location = "Embroidery" if emb_out > 0 else (gate if avail_gate > 0 else "")
+            comps.append(
+                {
+                    "component_code": code,
+                    "component_name": ln.get("component_name") or code,
+                    "component_sku": csku,
+                    "qty_per_set": ln.get("qty_per_set") or 1,
+                    "available_at_gate": avail_gate,
+                    "embroidery_outstanding": emb_out,
+                    "location": location,
+                    "routing": path,
+                    "component_role": ROLE_PANEL,
+                    "parent_component_code": ln.get("parent_component_code") or "",
+                    "gate_optional": True,
+                }
+            )
+        out = compute_bundle_readiness(
+            [c for c in comps if not c.get("gate_optional")],
+            gate_process=gate,
+        )
+        # Append panel WIP rows (not part of set-match / stitching gate math).
+        panel_rows = [c for c in comps if c.get("gate_optional")]
+        for c in panel_rows:
+            from ..services.operation_routing import panel_wip_status, routing_path_to_string
+
+            emb_out = int(c.get("embroidery_outstanding") or 0)
+            avail = int(c.get("available_at_gate") or 0)
+            path = c.get("routing") or []
+            status = panel_wip_status(
+                location=str(c.get("location") or ""),
+                available_qty=emb_out if emb_out > 0 else avail,
+                path=path if isinstance(path, list) else [],
+                bundle_ready=bool(out.get("bundle_complete")),
+            )
+            out.setdefault("components", []).append(
+                {
+                    "component_code": c.get("component_code"),
+                    "component_name": c.get("component_name"),
+                    "component_sku": c.get("component_sku"),
+                    "qty_per_set": c.get("qty_per_set") or 1,
+                    "available_at_gate": avail,
+                    "embroidery_outstanding": emb_out,
+                    "location": c.get("location") or "",
+                    "status": status,
+                    "ready": emb_out == 0 and avail > 0,
+                    "routing": routing_path_to_string(path) if isinstance(path, list) else str(path or ""),
+                    "component_role": ROLE_PANEL,
+                    "parent_component_code": c.get("parent_component_code") or "",
+                    "gate_optional": True,
+                }
+            )
         out["so_number"] = so_number
         out["main_sku"] = main
         out["stitching_requires_complete_set"] = bool(
@@ -1950,11 +2071,14 @@ def _split_cutting_receive(
     if not bom:
         # Also try exact main as style_key (size-level BOM)
         bom = _hydrate_set_bom(conn, _set_bom_header_row(conn, main))
-    if not bom or not bom.get("lines"):
+    from ..services.component_bom import set_component_lines
+
+    lines = set_component_lines(bom)
+    if not lines:
         return None
 
     components_out = []
-    for ln in bom["lines"]:
+    for ln in lines:
         code = ln["component_code"]
         ratio = max(int(ln.get("qty_per_set") or 1), 1)
         qty = int(split_qty) * ratio
@@ -2021,12 +2145,15 @@ def preview_set_match(
         main = parsed_main
 
     bom = get_set_bom_for_sku(main)
-    if not bom or not bom.get("lines"):
-        raise ValueError(f"No Set BOM defined for {main}")
+    from ..services.component_bom import set_component_lines
+
+    lines = set_component_lines(bom)
+    if not lines:
+        raise ValueError(f"No Set BOM components defined for {main}")
 
     conn = _connect()
     avails = []
-    for ln in bom["lines"]:
+    for ln in lines:
         code = ln["component_code"]
         csku = component_sku(main, code)
         stock_row = conn.execute(

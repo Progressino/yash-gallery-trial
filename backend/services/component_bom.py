@@ -2,17 +2,37 @@
 
 Main SKU stays the business identity (sales, planning, FG). Set BOM defines
 production components (TOP/PANT/DUPATTA) each with their own material lines.
-Cutting JOs are created per component; issue notes explode only that component's
-materials.
+Cutting JOs are created per **set component** only.
+
+Panels (Front / Back / Sleeve) may live on the same Set BOM for embroidery WIP,
+but they are **not** independent Cutting Job Orders — they belong under a parent
+set component (usually TOP).
 """
 from __future__ import annotations
 
 from typing import Any, Optional
 
+ROLE_SET_COMPONENT = "SET_COMPONENT"
+ROLE_PANEL = "PANEL"
+
 _GARMENT_COMPONENT_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("DUPATTA", ("DUPATTA", "CHUNNI", "STOLE", "ODHNI")),
     ("PANT", ("PANT", "PANTS", "PALAZZO", "SALWAR", "BOTTOM", "TROUSER", "LEGGING")),
     ("TOP", ("TOP", "KURTA", "KURTI", "SHIRT", "BLOUSE", "TUNIC", "KAMEEZ", "CHOLI")),
+)
+
+# Codes that are panels of a garment piece, not set-level Cutting JO components.
+_PANEL_CODE_TOKENS = (
+    "FRONT",
+    "BACK",
+    "SLEEVE",
+    "SLEEVES",
+    "NECK",
+    "COLLAR",
+    "YOKE",
+    "POCKET",
+    "PANEL",
+    "PLACKET",
 )
 
 
@@ -43,6 +63,122 @@ def infer_garment_component_code(name: str, item_code: str = "") -> Optional[str
         if any(h in blob for h in hints):
             return code
     return None
+
+
+def _looks_like_panel_code(code: str, name: str = "") -> bool:
+    blob = f"{code} {name}".upper().replace("-", " ").replace("_", " ")
+    tokens = [t for t in blob.split() if t]
+    if any(t in _PANEL_CODE_TOKENS for t in tokens):
+        return True
+    # TOPFRONT / TOP_BACK style codes
+    compact = "".join(tokens)
+    return any(tok in compact for tok in ("FRONT", "BACK", "SLEEVE", "PANEL"))
+
+
+def _infer_panel_parent(code: str, set_codes: set[str]) -> str:
+    """Best-effort parent for legacy panel rows (TOP_FRONT → TOP)."""
+    raw = str(code or "").strip().upper().replace("-", "_")
+    for parent in ("TOP", "PANT", "BOTTOM", "DUPATTA"):
+        if parent in set_codes and (raw.startswith(parent + "_") or raw.startswith(parent)):
+            rest = raw[len(parent) :].lstrip("_")
+            if rest and _looks_like_panel_code(rest):
+                return parent
+    if "TOP" in set_codes:
+        return "TOP"
+    if "PANT" in set_codes:
+        return "PANT"
+    if "BOTTOM" in set_codes:
+        return "BOTTOM"
+    return ""
+
+
+def normalize_line_role(line: dict[str, Any], *, sibling_codes: set[str] | None = None) -> str:
+    """Return SET_COMPONENT or PANEL for a Set BOM line."""
+    role = str(line.get("component_role") or line.get("role") or "").strip().upper()
+    if role in (ROLE_PANEL, "PANEL_PART", "PART"):
+        return ROLE_PANEL
+    if role in (ROLE_SET_COMPONENT, "COMPONENT", "SET"):
+        return ROLE_SET_COMPONENT
+    if line.get("creates_cutting_jo") is False or str(line.get("creates_cutting_jo") or "").strip() in (
+        "0",
+        "false",
+        "False",
+    ):
+        return ROLE_PANEL
+    # Explicit True must not override panel-code heuristics when role was omitted.
+    parent = str(line.get("parent_component_code") or "").strip().upper()
+    if parent:
+        return ROLE_PANEL
+    code = str(line.get("component_code") or "").strip().upper()
+    name = str(line.get("component_name") or "").strip()
+    if _looks_like_panel_code(code, name):
+        # Exact garment set tokens stay components even if name mentions front/back.
+        if code in {"TOP", "PANT", "BOTTOM", "DUPATTA", "PANTS"}:
+            return ROLE_SET_COMPONENT
+        return ROLE_PANEL
+    return ROLE_SET_COMPONENT
+
+
+def annotate_set_bom_roles(bom: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Fill component_role / parent_component_code on every line (in place)."""
+    if not bom or not bom.get("lines"):
+        return bom
+    codes = {
+        str(ln.get("component_code") or "").strip().upper()
+        for ln in bom["lines"]
+        if str(ln.get("component_code") or "").strip()
+    }
+    set_codes = {
+        c
+        for c in codes
+        if c in {"TOP", "PANT", "BOTTOM", "DUPATTA", "PANTS"}
+        or not _looks_like_panel_code(c)
+    }
+    for ln in bom["lines"]:
+        role = normalize_line_role(ln, sibling_codes=codes)
+        ln["component_role"] = role
+        if role == ROLE_PANEL:
+            parent = str(ln.get("parent_component_code") or "").strip().upper()
+            if not parent:
+                parent = _infer_panel_parent(str(ln.get("component_code") or ""), set_codes)
+            ln["parent_component_code"] = parent
+            ln["creates_cutting_jo"] = False
+        else:
+            ln["parent_component_code"] = str(ln.get("parent_component_code") or "").strip().upper()
+            ln["creates_cutting_jo"] = True
+    return bom
+
+
+def set_component_lines(bom: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Lines that create Cutting Job Orders / set-match components."""
+    annotate_set_bom_roles(bom)
+    if not bom:
+        return []
+    return [
+        ln
+        for ln in (bom.get("lines") or [])
+        if normalize_line_role(ln) == ROLE_SET_COMPONENT
+    ]
+
+
+def panel_lines(
+    bom: dict[str, Any] | None,
+    *,
+    parent_component_code: str | None = None,
+) -> list[dict[str, Any]]:
+    """Panel rows (Front/Back/…) managed inside a parent Cutting JO."""
+    annotate_set_bom_roles(bom)
+    if not bom:
+        return []
+    parent = str(parent_component_code or "").strip().upper()
+    out = []
+    for ln in bom.get("lines") or []:
+        if normalize_line_role(ln) != ROLE_PANEL:
+            continue
+        if parent and str(ln.get("parent_component_code") or "").strip().upper() != parent:
+            continue
+        out.append(ln)
+    return out
 
 
 def _set_bom_from_fg_item_bom(main_sku: str) -> Optional[dict]:
@@ -150,8 +286,9 @@ def effective_set_bom_for_cutting(sku: str) -> Optional[dict]:
         return None
     bom = get_set_bom_for_sku(raw)
     if bom and bom.get("lines"):
-        return bom
-    return _set_bom_from_fg_item_bom(raw)
+        return annotate_set_bom_roles(bom)
+    derived = _set_bom_from_fg_item_bom(raw)
+    return annotate_set_bom_roles(derived) if derived else None
 
 
 def get_component_material_lines(main_sku: str, component_code: str) -> list[dict[str, Any]]:
@@ -226,4 +363,4 @@ def should_auto_create_component_jos(data: dict) -> bool:
     if parse_component_sku(main_sku)[1]:
         return False
     bom = effective_set_bom_for_cutting(main_sku)
-    return bool(bom and bom.get("lines"))
+    return bool(set_component_lines(bom))

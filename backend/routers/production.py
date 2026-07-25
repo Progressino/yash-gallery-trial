@@ -355,6 +355,10 @@ class SetBomLineIn(BaseModel):
     default_next_process: Optional[str] = ''
     routing: Optional[str] = ''  # e.g. Cutting>Embroidery>Cutting>Stitching
     requires_embroidery: Optional[bool] = False
+    # Blank = infer (FRONT/BACK → PANEL; TOP/BOTTOM → SET_COMPONENT)
+    component_role: Optional[str] = ''
+    parent_component_code: Optional[str] = ''
+    creates_cutting_jo: Optional[bool] = None
     sort_order: Optional[int] = 0
     materials: Optional[List[SetBomMaterialIn]] = []
 
@@ -684,10 +688,22 @@ def get_set_bom_detail(style_key: str):
 
 @router.get("/set-bom-for-sku/{sku:path}")
 def get_set_bom_by_sku(sku: str):
-    from ..services.component_bom import effective_set_bom_for_cutting
+    from ..services.component_bom import (
+        effective_set_bom_for_cutting,
+        panel_lines,
+        set_component_lines,
+    )
 
     bom = effective_set_bom_for_cutting(sku) or get_set_bom_for_sku(sku)
-    return {"sku": sku, "bom": bom, "has_set_bom": bool(bom and bom.get("lines"))}
+    cutting = set_component_lines(bom)
+    panels = panel_lines(bom)
+    return {
+        "sku": sku,
+        "bom": bom,
+        "has_set_bom": bool(cutting),
+        "cutting_components": cutting,
+        "panels": panels,
+    }
 
 
 @router.post("/set-bom")

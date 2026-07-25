@@ -1770,3 +1770,115 @@ def test_component_cutting_jos_and_issue_note(isolated_module_dbs, client):
         params={"so_number": "SO-COMP-1", "sku": "2002SET-M-TOP"},
     ).json()
     assert int(st.get("Cutting", {}).get("available", 0)) == 50
+
+
+def test_panel_lines_do_not_create_cutting_jos(isolated_module_dbs, client):
+    """Front/Back panels under Top must not explode into independent Cutting JOs."""
+    bom = client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "1001PANEL",
+            "style_name": "Top/Bottom with panels",
+            "lines": [
+                {
+                    "component_code": "TOP",
+                    "component_name": "Top",
+                    "qty_per_set": 1,
+                    "component_role": "SET_COMPONENT",
+                    "materials": [
+                        {"material_code": "FAB-TOP", "material_name": "Top fabric", "quantity": 1.2, "unit": "MTR"},
+                    ],
+                },
+                {
+                    "component_code": "BOTTOM",
+                    "component_name": "Bottom",
+                    "qty_per_set": 1,
+                    "component_role": "SET_COMPONENT",
+                    "materials": [
+                        {"material_code": "FAB-BOT", "material_name": "Bottom fabric", "quantity": 1.0, "unit": "MTR"},
+                    ],
+                },
+                {
+                    "component_code": "FRONT",
+                    "component_name": "Top Front",
+                    "qty_per_set": 1,
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                    "requires_embroidery": True,
+                    "routing": "Cutting>Embroidery>Cutting>Stitching",
+                },
+                {
+                    "component_code": "BACK",
+                    "component_name": "Top Back",
+                    "qty_per_set": 1,
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+            ],
+        },
+    )
+    assert bom.status_code == 200, bom.text
+    saved = bom.json()
+    roles = {ln["component_code"]: ln.get("component_role") for ln in saved["lines"]}
+    assert roles["FRONT"] == "PANEL"
+    assert roles["BACK"] == "PANEL"
+    assert roles["TOP"] == "SET_COMPONENT"
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-07-25",
+            "so_number": "SO-PANEL-1",
+            "sku": "1001PANEL-XS",
+            "process": "Cutting",
+            "planned_qty": 10,
+            "lines": [{"sku": "1001PANEL-XS", "planned_qty": 10}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("component_jos") is True
+    assert len(body.get("jo_numbers") or []) == 2
+
+    orders = client.get("/api/production/orders").json()
+    comp_jos = [o for o in orders if o.get("so_number") == "SO-PANEL-1" and o.get("sku_role") == "COMPONENT"]
+    skus = {o["sku"] for o in comp_jos}
+    assert skus == {"1001PANEL-XS-TOP", "1001PANEL-XS-BOTTOM"}
+    assert not any("FRONT" in s or "BACK" in s for s in skus)
+
+
+def test_legacy_front_back_codes_inferred_as_panels(isolated_module_dbs, client):
+    """Existing Set BOMs that listed FRONT/BACK without role still get 2 Cutting JOs."""
+    bom = client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "1001LEGACY",
+            "lines": [
+                {"component_code": "TOP", "component_name": "Top", "qty_per_set": 1},
+                {"component_code": "BOTTOM", "component_name": "Bottom", "qty_per_set": 1},
+                {"component_code": "FRONT", "component_name": "Front", "qty_per_set": 1},
+                {"component_code": "BACK", "component_name": "Back", "qty_per_set": 1},
+            ],
+        },
+    )
+    assert bom.status_code == 200, bom.text
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-07-25",
+            "so_number": "SO-LEGACY-1",
+            "sku": "1001LEGACY-M",
+            "process": "Cutting",
+            "planned_qty": 5,
+            "lines": [{"sku": "1001LEGACY-M", "planned_qty": 5}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json().get("jo_numbers") or []) == 2
+    orders = client.get("/api/production/orders").json()
+    skus = {
+        o["sku"]
+        for o in orders
+        if o.get("so_number") == "SO-LEGACY-1" and o.get("sku_role") == "COMPONENT"
+    }
+    assert skus == {"1001LEGACY-M-TOP", "1001LEGACY-M-BOTTOM"}

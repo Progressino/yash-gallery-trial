@@ -1913,8 +1913,18 @@ export default function Production() {
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                 <p className="font-semibold">Multi-component set — creates separate Cutting JOs</p>
                 <p className="mt-1 font-mono">
-                  {(cuttingSetBomInfo.bom?.lines || []).map((l: { component_code: string }) => `${cuttingMainSku}-${l.component_code}`).join(' · ')}
+                  {(cuttingSetBomInfo.cutting_components || cuttingSetBomInfo.bom?.lines || [])
+                    .filter((l: { component_role?: string }) => String(l.component_role || 'SET_COMPONENT').toUpperCase() !== 'PANEL')
+                    .map((l: { component_code: string }) => `${cuttingMainSku}-${l.component_code}`)
+                    .join(' · ')}
                 </p>
+                {(cuttingSetBomInfo.panels || []).length > 0 && (
+                  <p className="mt-1 text-amber-800/80">
+                    Panels (no JO): {(cuttingSetBomInfo.panels || []).map((l: { component_code: string; parent_component_code?: string }) =>
+                      `${l.component_code}${l.parent_component_code ? `→${l.parent_component_code}` : ''}`
+                    ).join(', ')}
+                  </p>
+                )}
               </div>
             )}
 
