@@ -596,7 +596,9 @@ async def po_get_daily_inventory_history(request: Request, days: int = 30, end_d
     def _work() -> dict:
         from ..services.daily_inventory_history import inventory_history_summary
 
-        df = _inventory_history_df_for_read(sess)
+        # Fast disk path — same as matrix. Full authoritative hydrate was 15–30s and
+        # starved the read pool so Inv History stayed on "Loading matrix…".
+        df = _inventory_history_df_for_matrix_read(sess)
         summary = inventory_history_summary(
             df,
             days=min(max(1, int(days)), 120),

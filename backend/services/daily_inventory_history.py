@@ -744,16 +744,28 @@ def inventory_history_view_end_date(
     df: pd.DataFrame | None,
     end_date: str | None = None,
 ) -> str:
-    """End anchor for UI windows — use latest matrix date when it trails today."""
+    """End anchor for UI windows — prefer last uploaded snapshot, not ffill-to-today."""
     try:
-        end = pd.Timestamp(str(end_date or "")[:10]).normalize() if end_date else today_ist_timestamp()
+        end = pd.Timestamp(str(end_date or "")[:10]).normalize() if end_date else None
     except Exception:
-        end = today_ist_timestamp()
-    if pd.isna(end):
-        end = today_ist_timestamp()
+        end = None
+    if end is not None and pd.isna(end):
+        end = None
+
+    # Prefer true snapshot census days (daily RAR uploads) over legacy "uploaded".
+    snap_dates = snapshot_dates_from_history(df)
+    auth = pd.Timestamp(snap_dates[-1]).normalize() if snap_dates else last_authoritative_history_date(df)
     mx = inventory_history_max_date(df)
-    if mx is not None and mx < end - pd.Timedelta(days=1):
-        end = pd.Timestamp(mx).normalize()
+    cap = auth if auth is not None else mx
+
+    if end is None:
+        if cap is not None:
+            return str(pd.Timestamp(cap).normalize().date())
+        return str(today_ist_timestamp().date())
+
+    # Explicit end_date: do not invent columns past the last real census day.
+    if cap is not None and end > pd.Timestamp(cap).normalize():
+        end = pd.Timestamp(cap).normalize()
     return str(end.date())
 
 
@@ -3358,7 +3370,12 @@ def _inventory_history_unique_days(df: pd.DataFrame | None) -> int:
 def restore_inventory_history_from_best_disk_backups(
     current: pd.DataFrame | None = None,
 ) -> pd.DataFrame | None:
-    """Merge all on-disk candidates when the union is broader than ``current`` alone."""
+    """Merge all on-disk candidates when the union is broader than ``current`` alone.
+
+    Never extend past ``current``'s max date — intentional tail cleanups (delete
+    phantom post-upload days) must not be undone by an older bak-* file that still
+    contains those days.
+    """
     paths = iter_inventory_history_parquet_candidates()
     if not paths:
         return None
@@ -3367,13 +3384,19 @@ def restore_inventory_history_from_best_disk_backups(
         return None
     if current is None or getattr(current, "empty", True):
         return merged
+    cur_max = inventory_history_max_date(current)
+    if cur_max is not None:
+        merged = merged.copy()
+        merged["Date"] = pd.to_datetime(merged["Date"], errors="coerce").dt.normalize()
+        merged = merged[merged["Date"] <= pd.Timestamp(cur_max).normalize()]
+        if merged.empty:
+            return None
     cur_days = _inventory_history_unique_days(current)
     merged_days = _inventory_history_unique_days(merged)
     if merged_days > cur_days:
         return merged
     if inventory_history_is_newer_than(merged, current):
         return merged
-    cur_max = inventory_history_max_date(current)
     merged_max = inventory_history_max_date(merged)
     if (
         merged_max is not None

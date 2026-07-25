@@ -88,6 +88,7 @@ export default function InventoryHistory() {
   const matrixQ = useQuery({
     queryKey: ['inv-history-matrix', skuFilter, page, HISTORY_WINDOW_DAYS, channel, effectiveEnd ?? 'latest'],
     retry: 1,
+    staleTime: 30_000,
     queryFn: async () =>
       getPoDailyInventoryHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE, {
         days: HISTORY_WINDOW_DAYS,
@@ -183,6 +184,13 @@ export default function InventoryHistory() {
     setPage(0)
   }
 
+  const matrixBusy = matrixQ.isLoading || (matrixQ.isFetching && !matrixQ.data)
+  const pickerEnd =
+    endDate.trim() ||
+    summaryQ.data?.max_date ||
+    summaryQ.data?.window_end ||
+    ''
+
   return (
     <div className="max-w-[100vw] mx-auto p-4 md:p-6 space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -276,7 +284,7 @@ export default function InventoryHistory() {
           <input
             type="date"
             className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
-            value={endDate || summaryQ.data?.max_date || todayIsoIST().slice(0, 10)}
+            value={pickerEnd}
             max={todayIsoIST().slice(0, 10)}
             onChange={e => {
               setEndDate(e.target.value)
@@ -416,7 +424,7 @@ export default function InventoryHistory() {
             </button>
           </div>
 
-          {matrixQ.isLoading ? (
+          {matrixBusy ? (
             <p className="p-4 text-sm text-gray-500">
               Loading matrix…
               {summaryQ.data?.max_date ? (
@@ -424,11 +432,33 @@ export default function InventoryHistory() {
                   Summary loaded ({summaryQ.data.skus?.toLocaleString() ?? '—'} SKUs through{' '}
                   {summaryQ.data.max_date}) — building table…
                 </span>
-              ) : null}
+              ) : (
+                <span className="block text-xs text-gray-400 mt-1">
+                  Fetching inventory history from server…
+                </span>
+              )}
+              <button
+                type="button"
+                className="mt-3 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 hover:bg-gray-50"
+                onClick={() => {
+                  void matrixQ.refetch()
+                  void summaryQ.refetch()
+                }}
+              >
+                Retry
+              </button>
             </p>
           ) : matrixQ.isError ? (
             <p className="p-4 text-sm text-red-700">
-              Matrix load failed — try refreshing. If this persists, ask admin to reload server cache.
+              Matrix load failed —{' '}
+              {matrixQ.error instanceof Error ? matrixQ.error.message : 'try refreshing'}.
+              <button
+                type="button"
+                className="ml-2 underline font-medium"
+                onClick={() => void matrixQ.refetch()}
+              >
+                Retry
+              </button>
             </p>
           ) : !dates.length ? (
             <p className="p-4 text-sm text-gray-500">No inventory history dates loaded for this window.</p>
