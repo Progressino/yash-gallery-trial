@@ -1161,6 +1161,7 @@ export async function getPoDailyInventoryHistoryMatrix(
     channel_split_available?: boolean
     integrity?: InventoryHistoryIntegrity
     gap_dates?: string[]
+    uploaded_dates?: string[]
   }>('/po/daily-inventory-history/matrix', {
     params: {
       q,

@@ -118,6 +118,10 @@ export default function InventoryHistory() {
   const dates = matrixQ.data?.dates ?? []
   const dateTotals = matrixQ.data?.date_totals ?? []
   const gapDates = new Set(matrixQ.data?.gap_dates ?? [])
+  const carriedDateList = useMemo(
+    () => (matrixQ.data?.gap_dates ?? []).filter(d => dates.includes(d)),
+    [matrixQ.data?.gap_dates, dates],
+  )
   const matrixRows = matrixQ.data?.rows ?? []
   const totalSkus = matrixQ.data?.total ?? 0
   const inStockMin = matrixQ.data?.in_stock_min_qty ?? 1
@@ -214,6 +218,24 @@ export default function InventoryHistory() {
           Still elevated after auto-fix:{' '}
           {matrixQ.data.integrity.spike_dates_remaining.join(', ')}. Re-upload the OMS
           snapshot for those days if the totals still look wrong.
+        </div>
+      )}
+
+      {carriedDateList.length > 0 && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+          <p className="font-semibold">
+            No inventory file uploaded for {carriedDateList.length} day
+            {carriedDateList.length === 1 ? '' : 's'} in this window
+          </p>
+          <p className="mt-1 leading-relaxed">
+            Amber columns are <strong>carried from the previous uploaded day</strong> by the app
+            (sales roll / forward-fill) — not a real snapshot upload. Dates:{' '}
+            <span className="font-mono text-xs">{carriedDateList.join(', ')}</span>
+          </p>
+          <p className="mt-2 text-xs text-amber-800">
+            Upload the missing day on Upload → Daily uploads → Snapshot inventory to replace the
+            carried numbers.
+          </p>
         </div>
       )}
 
@@ -327,6 +349,16 @@ export default function InventoryHistory() {
             Showing warehouse on-hand (no separate Amazon sheet uploaded).
           </span>
         )}
+        <span className="text-xs text-gray-500 ml-auto flex flex-wrap items-center gap-3">
+          <span className="inline-flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-sm bg-emerald-100 border border-emerald-400" />
+            Uploaded file
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <span className="inline-block w-3 h-3 rounded-sm bg-amber-200 border border-amber-500" />
+            No file — carried from previous day
+          </span>
+        </span>
       </div>
 
       <div className="flex gap-2 flex-wrap">
@@ -438,15 +470,31 @@ export default function InventoryHistory() {
                       <th className="sticky left-0 z-20 bg-slate-100 border border-gray-200 px-2 py-1.5 text-left font-semibold text-gray-700 min-w-[10rem]">
                         Item SkuCode
                       </th>
-                      {dates.map(d => (
-                        <th
-                          key={d}
-                          className="sticky top-0 z-10 bg-slate-100 border border-gray-200 px-1.5 py-1 text-center font-semibold text-gray-600 whitespace-nowrap min-w-[3rem]"
-                          title={d}
-                        >
-                          {formatDateCol(d)}
-                        </th>
-                      ))}
+                      {dates.map(d => {
+                        const carried = gapDates.has(d)
+                        return (
+                          <th
+                            key={d}
+                            className={`sticky top-0 z-10 border border-gray-200 px-1.5 py-1 text-center font-semibold whitespace-nowrap min-w-[3.25rem] ${
+                              carried
+                                ? 'bg-amber-200 text-amber-950 ring-1 ring-inset ring-amber-400'
+                                : 'bg-slate-100 text-gray-600'
+                            }`}
+                            title={
+                              carried
+                                ? `${d}: no inventory file uploaded — numbers carried from previous day`
+                                : `${d}: uploaded snapshot`
+                            }
+                          >
+                            <div>{formatDateCol(d)}</div>
+                            {carried ? (
+                              <div className="text-[8px] font-bold uppercase tracking-wide text-amber-800 leading-tight">
+                                carried
+                              </div>
+                            ) : null}
+                          </th>
+                        )
+                      })}
                     </tr>
                     <tr className="bg-indigo-50">
                       <th className="sticky left-0 z-20 bg-indigo-50 border border-gray-200 px-2 py-1 text-left text-[10px] font-semibold text-indigo-900">
@@ -459,12 +507,12 @@ export default function InventoryHistory() {
                           <th
                             key={`${d}-total`}
                             className={`border border-gray-200 px-1 py-1 text-center text-[10px] font-bold whitespace-nowrap tabular-nums ${
-                              carried ? 'bg-amber-50 text-amber-900' : 'text-indigo-900'
+                              carried ? 'bg-amber-100 text-amber-950' : 'text-indigo-900'
                             }`}
                             title={
                               carried
-                                ? `${d}: ${total.toLocaleString()} units (carried — no upload this day)`
-                                : `${d}: ${total.toLocaleString()} units`
+                                ? `${d}: ${total.toLocaleString()} units — NOT uploaded; carried from previous day by the app`
+                                : `${d}: ${total.toLocaleString()} units (uploaded)`
                             }
                           >
                             {total > 0
@@ -476,16 +524,26 @@ export default function InventoryHistory() {
                     </tr>
                     <tr className="bg-slate-50">
                       <th className="sticky left-0 z-20 bg-slate-50 border border-gray-200 px-2 py-0.5 text-left text-[10px] text-gray-400 font-normal">
-                        Date
+                        Source
                       </th>
-                      {dates.map(d => (
-                        <th
-                          key={`${d}-iso`}
-                          className="border border-gray-200 px-1 py-0.5 text-center text-[9px] text-gray-400 font-normal whitespace-nowrap"
-                        >
-                          {d.slice(8)}
-                        </th>
-                      ))}
+                      {dates.map(d => {
+                        const carried = gapDates.has(d)
+                        return (
+                          <th
+                            key={`${d}-src`}
+                            className={`border border-gray-200 px-1 py-0.5 text-center text-[8px] font-semibold whitespace-nowrap ${
+                              carried ? 'bg-amber-50 text-amber-800' : 'text-emerald-700'
+                            }`}
+                            title={
+                              carried
+                                ? 'No inventory file for this date'
+                                : 'Inventory file uploaded'
+                            }
+                          >
+                            {carried ? 'no file' : 'uploaded'}
+                          </th>
+                        )
+                      })}
                     </tr>
                   </thead>
                   <tbody>
@@ -496,13 +554,22 @@ export default function InventoryHistory() {
                         </td>
                         {row.qtys.map((qty, i) => {
                           const inStock = qty >= inStockMin
+                          const carried = gapDates.has(dates[i])
                           return (
                             <td
                               key={`${row.sku}-${dates[i]}`}
                               className={`border border-gray-200 px-1.5 py-1 text-right font-mono tabular-nums ${
-                                inStock ? 'text-gray-800' : 'text-rose-400 bg-rose-50/60'
+                                carried
+                                  ? 'bg-amber-50/80 text-amber-950'
+                                  : inStock
+                                    ? 'text-gray-800'
+                                    : 'text-rose-400 bg-rose-50/60'
                               }`}
-                              title={`${dates[i]}: ${qty}`}
+                              title={
+                                carried
+                                  ? `${dates[i]}: ${qty} (carried — no upload this day)`
+                                  : `${dates[i]}: ${qty}`
+                              }
                             >
                               {qty > 0 ? qty.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}
                             </td>

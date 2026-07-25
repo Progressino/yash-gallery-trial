@@ -2592,6 +2592,44 @@ def inventory_rows_for_date(
     }
 
 
+def non_uploaded_inventory_dates(
+    work: pd.DataFrame | None,
+    dates_sorted: list,
+) -> list[str]:
+    """Calendar days in ``dates_sorted`` with no inventory *file* upload.
+
+    A day counts as uploaded only when it has ``Source == snapshot`` (daily RAR /
+    snapshot upload). Sales-derived / forward-filled days are "carried" — the app
+    invented the numbers from the previous census, not from an uploaded file.
+
+    Legacy wide-matrix rows use ``uploaded``; if a window has no snapshots at all,
+    fall back to treating ``uploaded`` as authoritative so old baselines still work.
+    """
+    if not dates_sorted:
+        return []
+    date_strs = [str(pd.Timestamp(d).normalize().date()) for d in dates_sorted]
+    if work is None or getattr(work, "empty", True) or "Date" not in work.columns:
+        return date_strs
+    frame = work
+    if "Source" not in frame.columns:
+        # No source metadata — only mark days with zero observed qty as gaps.
+        return []
+    src = frame["Source"].astype(str).str.strip().str.lower()
+    dates = pd.to_datetime(frame["Date"], errors="coerce").dt.normalize()
+    snap_dates = {
+        str(pd.Timestamp(d).date())
+        for d in dates[src == "snapshot"].dropna().unique()
+    }
+    if snap_dates:
+        auth_dates = snap_dates
+    else:
+        auth_dates = {
+            str(pd.Timestamp(d).date())
+            for d in dates[src.isin(["uploaded", "snapshot"])].dropna().unique()
+        }
+    return [d for d in date_strs if d not in auth_dates]
+
+
 def inventory_history_wide_matrix(
     df: pd.DataFrame,
     *,
@@ -2618,6 +2656,8 @@ def inventory_history_wide_matrix(
         "window_end": str(end_date or today_ist_timestamp().date()),
         "channel": channel,
         "channel_split_available": False,
+        "gap_dates": [],
+        "uploaded_dates": [],
     }
     if df is None or df.empty:
         return empty
@@ -2675,18 +2715,24 @@ def inventory_history_wide_matrix(
 
         totals_map = daily.groupby("_d", sort=False)["Qty"].sum()
         date_totals = [float(totals_map.get(d, 0.0) or 0.0) for d in dates_sorted]
+        # Days without a snapshot upload are "carried" even when derived qty > 0.
+        gap_dates = non_uploaded_inventory_dates(work, dates_sorted)
+        gap_set = set(gap_dates)
         carried = 0.0
         date_totals_filled: list[float] = []
-        gap_dates: list[str] = []
         for d, tot in zip(dates_sorted, date_totals):
+            d_s = str(pd.Timestamp(d).date())
             if tot > 0:
                 carried = tot
                 date_totals_filled.append(tot)
             elif carried > 0:
                 date_totals_filled.append(carried)
-                gap_dates.append(str(pd.Timestamp(d).date()))
+                if d_s not in gap_set:
+                    gap_dates.append(d_s)
+                    gap_set.add(d_s)
             else:
                 date_totals_filled.append(0.0)
+        uploaded_dates = [d for d in date_strs if d not in gap_set]
 
         if not page_skus:
             return {
@@ -2695,6 +2741,7 @@ def inventory_history_wide_matrix(
                 "dates": date_strs,
                 "date_totals": date_totals_filled,
                 "gap_dates": gap_dates,
+                "uploaded_dates": uploaded_dates,
                 "total": total,
             }
 
@@ -2713,6 +2760,7 @@ def inventory_history_wide_matrix(
             "dates": date_strs,
             "date_totals": date_totals_filled,
             "gap_dates": gap_dates,
+            "uploaded_dates": uploaded_dates,
             "rows": rows,
             "total": total,
             "limit": int(limit),
@@ -2724,6 +2772,7 @@ def inventory_history_wide_matrix(
             "channel_split_available": split_available,
         }
 
+    source_probe = work  # window-trimmed tall history (all channels) for upload detection
     channel_df = filter_inventory_history_channel(work, channel)
     if channel_df is None or channel_df.empty:
         return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
@@ -2759,19 +2808,24 @@ def inventory_history_wide_matrix(
     work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     totals = work.groupby("_d", sort=False)["Qty"].sum()
     date_totals = [float(totals.get(d, 0.0) or 0.0) for d in dates_sorted]
+    gap_dates = non_uploaded_inventory_dates(source_probe, dates_sorted)
+    gap_set = set(gap_dates)
     carried = 0.0
     date_totals_filled = []
-    gap_dates = []
     for d, tot in zip(dates_sorted, date_totals):
+        d_s = str(pd.Timestamp(d).date())
         if tot > 0:
             carried = tot
             date_totals_filled.append(tot)
         elif carried > 0:
             date_totals_filled.append(carried)
-            gap_dates.append(str(pd.Timestamp(d).date()))
+            if d_s not in gap_set:
+                gap_dates.append(d_s)
+                gap_set.add(d_s)
         else:
             date_totals_filled.append(0.0)
     date_totals = date_totals_filled
+    uploaded_dates = [d for d in date_strs if d not in gap_set]
 
     if sales_df is None or getattr(sales_df, "empty", True):
         if not page_skus:
@@ -2781,6 +2835,7 @@ def inventory_history_wide_matrix(
                 "dates": date_strs,
                 "date_totals": date_totals,
                 "gap_dates": gap_dates,
+                "uploaded_dates": uploaded_dates,
                 "total": total,
             }
         page = work[work["OMS_SKU"].isin(page_skus)]
@@ -2791,6 +2846,7 @@ def inventory_history_wide_matrix(
                 "dates": date_strs,
                 "date_totals": date_totals,
                 "gap_dates": gap_dates,
+                "uploaded_dates": uploaded_dates,
                 "total": total,
             }
         page = (
@@ -2811,6 +2867,7 @@ def inventory_history_wide_matrix(
             "dates": date_strs,
             "date_totals": date_totals,
             "gap_dates": gap_dates,
+            "uploaded_dates": uploaded_dates,
             "rows": rows,
             "total": total,
             "limit": int(limit),
@@ -2854,6 +2911,8 @@ def inventory_history_wide_matrix(
         "loaded": True,
         "dates": date_strs,
         "date_totals": date_totals,
+        "gap_dates": gap_dates,
+        "uploaded_dates": uploaded_dates,
         "rows": rows,
         "total": total,
         "limit": int(limit),
@@ -3541,6 +3600,7 @@ __all__ = [
     "inventory_rows_for_date",
     "inventory_history_wide_matrix",
     "inventory_history_wide_matrix_csv",
+    "non_uploaded_inventory_dates",
     "daily_inventory_history_meta_bundle",
     "apply_daily_inventory_history_meta",
     "read_daily_inventory_history_disk_meta",
