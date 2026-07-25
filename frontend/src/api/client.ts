@@ -1122,6 +1122,7 @@ export async function getPoDailyInventoryHistorySku(
       ...(opts?.endDate ? { end_date: opts.endDate } : {}),
       ...(opts?.channel ? { channel: opts.channel } : {}),
     },
+    timeout: 60_000,
   })
   return data
 }
@@ -1193,18 +1194,34 @@ export async function downloadPoDailyInventoryHistoryMatrixCsv(
   const cd = String(res.headers?.['content-disposition'] || '')
   const m = /filename="?([^";]+)"?/i.exec(cd)
   const filename = m?.[1] || 'inventory-matrix.csv'
-  const blob = res.data as Blob
+  let blob = res.data as Blob
   // If the server returned JSON error as a blob, surface it.
-  if (blob.type && blob.type.includes('application/json')) {
+  const looksJson =
+    (blob.type && blob.type.includes('application/json')) ||
+    (blob.size > 0 && blob.size < 4096 && !(blob.type || '').includes('csv'))
+  if (looksJson) {
     const text = await blob.text()
-    throw new Error(text || 'Inventory matrix export failed')
+    const trimmed = text.trimStart()
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      let detail = text
+      try {
+        const parsed = JSON.parse(text) as { message?: string; detail?: string }
+        detail = parsed.detail || parsed.message || text
+      } catch {
+        /* keep raw text */
+      }
+      throw new Error(detail || 'Inventory matrix export failed')
+    }
+    blob = new Blob([text], { type: 'text/csv;charset=utf-8' })
   }
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
   a.download = filename
+  document.body.appendChild(a)
   a.click()
-  URL.revokeObjectURL(url)
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 2_000)
 }
 
 export type SalesHistoryCoverageGap = {

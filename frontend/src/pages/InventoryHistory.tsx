@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
@@ -50,6 +50,7 @@ export default function InventoryHistory() {
   const [channel, setChannel] = useState<InventoryHistoryChannel>('combined')
   const [skuFilter, setSkuFilter] = useState('')
   const [skuQuery, setSkuQuery] = useState('')
+  const [debouncedSku, setDebouncedSku] = useState('')
   const [skuWindow, setSkuWindow] = useState(30)
   const [page, setPage] = useState(0)
   const [exporting, setExporting] = useState(false)
@@ -60,6 +61,11 @@ export default function InventoryHistory() {
   const [datePage, setDatePage] = useState(0)
 
   const effectiveEnd = endDate.trim() || undefined
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedSku(skuQuery.trim()), 350)
+    return () => window.clearTimeout(t)
+  }, [skuQuery])
 
   const summaryQ = useQuery({
     queryKey: ['inv-history-summary', HISTORY_WINDOW_DAYS, effectiveEnd ?? 'latest'],
@@ -98,10 +104,11 @@ export default function InventoryHistory() {
   })
 
   const skuTimelineQ = useQuery({
-    queryKey: ['inv-history-sku', skuQuery, skuWindow, channel, effectiveEnd ?? 'latest'],
-    enabled: mode === 'sku' && skuQuery.trim().length >= 3,
+    queryKey: ['inv-history-sku', debouncedSku, skuWindow, channel, effectiveEnd ?? 'latest'],
+    enabled: mode === 'sku' && debouncedSku.length >= 3,
+    retry: 1,
     queryFn: async () =>
-      getPoDailyInventoryHistorySku(skuQuery.trim(), skuWindow, {
+      getPoDailyInventoryHistorySku(debouncedSku, skuWindow, {
         channel,
         ...(effectiveEnd ? { endDate: effectiveEnd } : {}),
       }),
@@ -645,10 +652,17 @@ export default function InventoryHistory() {
               Download CSV
             </button>
           </div>
-          {skuTimelineQ.isLoading ? (
-            <p className="p-4 text-sm text-gray-500">Loading…</p>
-          ) : skuQuery.trim().length < 3 ? (
+          {skuQuery.trim().length < 3 ? (
             <p className="p-4 text-sm text-gray-500">Enter at least 3 characters of a SKU.</p>
+          ) : skuTimelineQ.isLoading || (skuQuery.trim() !== debouncedSku && debouncedSku.length >= 3) ? (
+            <p className="p-4 text-sm text-gray-500">Loading…</p>
+          ) : skuTimelineQ.isError ? (
+            <p className="p-4 text-sm text-rose-700">
+              SKU search failed:{' '}
+              {skuTimelineQ.error instanceof Error
+                ? skuTimelineQ.error.message
+                : 'server error — try again'}
+            </p>
           ) : skuRows.length === 0 ? (
             <p className="p-4 text-sm text-amber-700">No history rows for this SKU.</p>
           ) : (

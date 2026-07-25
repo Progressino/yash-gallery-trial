@@ -2937,6 +2937,150 @@ def inventory_history_wide_matrix(
     }
 
 
+def inventory_history_sku_timeline(
+    df: pd.DataFrame | None,
+    sku: str,
+    *,
+    window_days: int = 30,
+    end_date: str | None = None,
+    channel: str = "combined",
+    sales_df: pd.DataFrame | None = None,
+    sku_mapping: dict | None = None,
+) -> dict:
+    """Day-by-day on-hand timeline for one SKU (Inv History single-SKU search).
+
+    Pre-filters to the target SKU (and parent fallback) before channel combine /
+    calendar projection so the request stays sub-second instead of densifying the
+    full ~10k-SKU catalog (which starved CSV download and other reads).
+    """
+    from .helpers import get_parent_sku
+    from .po_engine import canonical_oms_key
+
+    ch = (channel or "combined").strip().lower() or "combined"
+    window = max(1, min(int(window_days or 30), 120))
+    empty = {
+        "ok": True,
+        "loaded": bool(df is not None and not getattr(df, "empty", True)),
+        "sku": sku,
+        "rows": [],
+        "in_stock_days": 0,
+        "out_of_stock_days": 0,
+        "window_days": window,
+        "parent_used": False,
+        "channel": ch,
+        "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
+    }
+    if df is None or getattr(df, "empty", True) or not str(sku or "").strip():
+        return empty
+
+    target = str(canonical_oms_key(sku, sku_mapping) or "").strip().upper()
+    raw_key = str(sku).strip().upper()
+    parent_key = str(get_parent_sku(target) or "").strip().upper()
+    keys = {k for k in (raw_key, target, parent_key) if k}
+
+    oms = df["OMS_SKU"].astype(str).str.strip().str.upper()
+    mask = oms.isin(keys)
+    parent_used = False
+    if not mask.any() and parent_key:
+        # Parent rollup: only scan unique SKUs, not every history row.
+        uniq = pd.Index(oms.unique())
+        parent_hits = {str(u) for u in uniq if str(get_parent_sku(u) or "").strip().upper() == parent_key}
+        if parent_hits:
+            mask = oms.isin(parent_hits)
+            parent_used = True
+    if not mask.any():
+        return empty
+
+    pre = df.loc[mask].copy()
+    work = filter_inventory_history_channel(pre, ch)
+    if work is None or work.empty:
+        return empty
+
+    work = work.copy()
+    work["OMS_SKU"] = work["OMS_SKU"].astype(str).map(lambda v: canonical_oms_key(v, sku_mapping))
+    work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    if "Source" not in work.columns:
+        work["Source"] = "uploaded"
+
+    sub = work[work["OMS_SKU"] == target].copy()
+    if sub.empty and parent_key:
+        sub = work[work["OMS_SKU"].map(lambda v: str(get_parent_sku(v) or "").strip().upper()) == parent_key].copy()
+        if not sub.empty:
+            parent_used = True
+            # Roll parent variants up to the requested canonical SKU for the calendar.
+            sub["OMS_SKU"] = target
+    if sub.empty:
+        return empty
+
+    sub["Date"] = pd.to_datetime(sub["Date"], errors="coerce")
+    sub = sub.dropna(subset=["Date"])
+    sub["Qty"] = pd.to_numeric(sub["Qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    sub["_src_rank"] = sub["Source"].map(
+        lambda x: 0 if str(x).strip().lower() in ("uploaded", "snapshot") else 1
+    )
+    sub = (
+        sub.sort_values(["Date", "_src_rank"])
+        .groupby("Date", as_index=False)
+        .agg({"OMS_SKU": "first", "Qty": "max", "Source": "first"})
+    )
+
+    end_s = inventory_history_view_end_date(df, end_date)
+    end_ts = pd.Timestamp(end_s).normalize()
+    start_ts = end_ts - pd.Timedelta(days=window - 1)
+    dense = project_inventory_calendar(
+        sub,
+        start_ts,
+        end_ts,
+        sales_df=sales_df,
+        skus=[target],
+    )
+    win = dense[dense["OMS_SKU"].astype(str).str.strip().str.upper() == target].copy()
+    if win.empty:
+        return {
+            **empty,
+            "loaded": True,
+            "canonical_sku": target,
+            "parent_used": parent_used,
+            "window_start": str(start_ts.date()),
+            "window_end": str(end_ts.date()),
+        }
+
+    win["Date"] = pd.to_datetime(win["Date"], errors="coerce")
+    win = win.dropna(subset=["Date"]).sort_values("Date")
+    win["Qty"] = pd.to_numeric(win["Qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    if "Source" not in win.columns:
+        win["Source"] = "uploaded"
+    in_stock_days = int((win["Qty"] >= IN_STOCK_MIN_QTY).sum())
+    rows = [
+        {
+            "date": str(r["Date"].date()),
+            "qty": float(r["Qty"]),
+            "in_stock": bool(r["Qty"] >= IN_STOCK_MIN_QTY),
+            "source": str(r.get("Source", "uploaded") or "uploaded"),
+        }
+        for _, r in win.iterrows()
+    ]
+    derived_days = sum(1 for r in rows if str(r["source"]).strip().lower() == "derived")
+    return {
+        "ok": True,
+        "loaded": True,
+        "sku": sku,
+        "canonical_sku": target,
+        "parent_used": parent_used,
+        "channel": ch,
+        "window_days": window,
+        "window_start": str(start_ts.date()),
+        "window_end": str(end_ts.date()),
+        "covered_days": int(len(rows)),
+        "uploaded_days": int(len(rows) - derived_days),
+        "derived_days": int(derived_days),
+        "in_stock_days": in_stock_days,
+        "out_of_stock_days": int(len(rows) - in_stock_days),
+        "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
+        "rows": rows,
+    }
+
+
 def inventory_history_wide_matrix_csv(
     df: pd.DataFrame,
     *,

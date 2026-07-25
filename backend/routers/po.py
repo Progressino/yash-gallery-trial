@@ -702,6 +702,7 @@ async def po_daily_inventory_history_matrix_csv(
     channel: str = "combined",
 ):
     """Full wide-matrix CSV download (server-side — avoids browser OOM on 10k+ SKUs)."""
+    from fastapi import HTTPException
     from fastapi.responses import Response
 
     from ..concurrency import run_read_api
@@ -709,7 +710,7 @@ async def po_daily_inventory_history_matrix_csv(
 
     sess = request.state.session
     if sess is None:
-        return {"ok": False, "message": "No session"}
+        raise HTTPException(status_code=401, detail="No session")
 
     def _build():
         df = _inventory_history_df_for_matrix_read(sess)
@@ -725,7 +726,7 @@ async def po_daily_inventory_history_matrix_csv(
         csv_bytes, filename = await run_read_api(_build)
     except Exception as e:
         logging.getLogger(__name__).exception("inventory history CSV export failed")
-        return {"ok": False, "message": str(e)}
+        raise HTTPException(status_code=500, detail=f"Inventory matrix export failed: {e}") from e
 
     return Response(
         content=csv_bytes,
@@ -738,7 +739,7 @@ async def po_daily_inventory_history_matrix_csv(
 
 
 @router.get("/daily-inventory-history/sku")
-def po_get_daily_inventory_history_for_sku(
+async def po_get_daily_inventory_history_for_sku(
     request: Request,
     sku: str,
     window_days: int = 30,
@@ -751,151 +752,27 @@ def po_get_daily_inventory_history_for_sku(
     item was actually in stock within the ADS window. Without a window, the
     last ``window_days`` days from the latest record are returned.
     """
+    from ..concurrency import run_read_api
+    from ..services.daily_inventory_history import inventory_history_sku_timeline
+
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
-    df = _inventory_history_df_for_read(sess)
-    if df is None or df.empty:
-        return {"ok": True, "loaded": False, "sku": sku, "rows": []}
-    from ..services.po_engine import canonical_oms_key
-    from ..services.helpers import get_parent_sku
-    from ..services.daily_inventory_history import (
-        IN_STOCK_MIN_QTY,
-        extend_history_with_sales,
-        filter_inventory_history_channel,
-        project_inventory_calendar,
-    )
 
-    sku_map = sess.sku_mapping or None
-    canon = lambda v: canonical_oms_key(v, sku_map)  # noqa: E731
-    target = canon(sku)
-    work = filter_inventory_history_channel(df, channel)
-    if work is None or work.empty:
-        return {
-            "ok": True,
-            "loaded": True,
-            "sku": sku,
-            "rows": [],
-            "in_stock_days": 0,
-            "window_days": int(window_days),
-            "channel": (channel or "combined").strip().lower() or "combined",
-        }
-    work = work.copy()
-    work["OMS_SKU"] = work["OMS_SKU"].astype(str).map(canon)
-    if "Source" not in work.columns:
-        work["Source"] = "uploaded"
-    uploaded_snap = work.copy()
-    # Auto-extend with sales-derived snapshots so the drawer shows the same
-    # data the engine used to compute Eff_Days (including days after baseline).
-    sales_for_ext = sess.sales_df if hasattr(sess, "sales_df") else None
-    cap_now = pd.Timestamp.now().normalize()
-    try:
-        work_ext = extend_history_with_sales(work, sales_df=sales_for_ext, cap_date=cap_now)
-        if work_ext is not None and not work_ext.empty:
-            work = work_ext
-    except Exception:
-        pass  # fall back to the raw upload
-    # Uploaded snapshots always win over derived for the same calendar day.
-    if not uploaded_snap.empty:
-        uploaded_snap["Source"] = "uploaded"
-        work = pd.concat([work, uploaded_snap], ignore_index=True)
-    sub = work[work["OMS_SKU"] == target].copy()
-    parent_used = False
-    if sub.empty:
-        parent_key = get_parent_sku(target)
-        if parent_key and parent_key != target:
-            sub = work[work["OMS_SKU"].map(get_parent_sku) == parent_key].copy()
-            if not sub.empty:
-                parent_used = True
+    def _work():
+        df = _inventory_history_df_for_matrix_read(sess)
+        sales_for_ext = getattr(sess, "sales_df", None)
+        return inventory_history_sku_timeline(
+            df,
+            sku,
+            window_days=window_days,
+            end_date=end_date,
+            channel=channel,
+            sales_df=sales_for_ext if sales_for_ext is not None and not getattr(sales_for_ext, "empty", True) else None,
+            sku_mapping=getattr(sess, "sku_mapping", None) or None,
+        )
 
-    if sub.empty:
-        return {"ok": True, "loaded": True, "sku": sku, "rows": [], "in_stock_days": 0,
-                "window_days": int(window_days), "parent_used": False,
-                "channel": (channel or "combined").strip().lower() or "combined"}
-
-    sub["Date"] = pd.to_datetime(sub["Date"], errors="coerce")
-    sub = sub.dropna(subset=["Date"])
-    sub["Qty"] = pd.to_numeric(sub["Qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
-    if "Source" not in sub.columns:
-        sub["Source"] = "uploaded"
-    # Collapse duplicates (parent rollup can dup days); prefer uploaded source
-    # over derived when both exist on the same date so the user sees the
-    # actual baseline snapshot when available.
-    sub["_src_rank"] = sub["Source"].map(lambda x: 0 if str(x) == "uploaded" else 1)
-    sub = (
-        sub.sort_values(["Date", "_src_rank"])
-        .groupby("Date", as_index=False)
-        .agg({"Qty": "max", "Source": "first"})
-    )
-
-    sub = sub.sort_values("Date")
-    uploaded_only = sub[sub["Source"].astype(str) == "uploaded"] if "Source" in sub.columns else sub
-    uploaded_max = (
-        pd.Timestamp(uploaded_only["Date"].max()).normalize()
-        if not uploaded_only.empty and pd.notna(uploaded_only["Date"].max())
-        else None
-    )
-    # Anchor at latest uploaded snapshot (or today) so today's upload is visible
-    # even when sales / derived roll-forward only run through yesterday.
-    # Explicit end_date always wins so users can navigate historical windows.
-    today_norm = pd.Timestamp.now().normalize()
-    if end_date:
-        try:
-            end_ts = pd.Timestamp(end_date).normalize()
-        except Exception:
-            end_ts = today_norm
-    else:
-        end_ts = today_norm
-        if uploaded_max is not None:
-            end_ts = max(end_ts, uploaded_max)
-    start_ts = end_ts - pd.Timedelta(days=max(0, int(window_days) - 1))
-    dense = project_inventory_calendar(
-        work,
-        start_ts,
-        end_ts,
-        sales_df=sales_for_ext,
-    )
-    win = dense[dense["OMS_SKU"] == target].copy()
-    if win.empty and parent_used:
-        parent_key = get_parent_sku(target)
-        win = dense[dense["OMS_SKU"].map(get_parent_sku) == parent_key].copy()
-    win["Date"] = pd.to_datetime(win["Date"], errors="coerce")
-    win = win.dropna(subset=["Date"])
-    win["Qty"] = pd.to_numeric(win["Qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
-    if "Source" not in win.columns:
-        win["Source"] = "uploaded"
-    win = win.sort_values("Date")
-    in_stock_days = int((win["Qty"] >= IN_STOCK_MIN_QTY).sum())
-
-    rows = [
-        {
-            "date": str(r["Date"].date()),
-            "qty": float(r["Qty"]),
-            "in_stock": bool(r["Qty"] >= IN_STOCK_MIN_QTY),
-            "source": str(r.get("Source", "uploaded") or "uploaded"),
-        }
-        for _, r in win.iterrows()
-    ]
-    derived_days = sum(1 for r in rows if r["source"] == "derived")
-    uploaded_days = len(rows) - derived_days
-    return {
-        "ok": True,
-        "loaded": True,
-        "sku": sku,
-        "canonical_sku": target,
-        "parent_used": parent_used,
-        "channel": (channel or "combined").strip().lower() or "combined",
-        "window_days": int(window_days),
-        "window_start": str(start_ts.date()),
-        "window_end": str(end_ts.date()),
-        "covered_days": int(len(rows)),
-        "uploaded_days": uploaded_days,
-        "derived_days": derived_days,
-        "in_stock_days": in_stock_days,
-        "out_of_stock_days": int(len(rows) - in_stock_days),
-        "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
-        "rows": rows,
-    }
+    return await run_read_api(_work)
 
 
 @router.get("/sku-audit")
