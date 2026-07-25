@@ -175,7 +175,11 @@ def combine_inventory_channels(df: pd.DataFrame | None) -> pd.DataFrame:
 
 
 def filter_inventory_history_channel(df: pd.DataFrame | None, channel: str = "combined") -> pd.DataFrame:
-    """``combined`` = max(OMS, Amazon); ``oms`` / ``amazon`` = one channel only."""
+    """``combined`` = max(OMS, Amazon); ``oms`` / ``amazon`` = one channel only.
+
+    Legacy / snapshot history often stores OMS warehouse qty with blank Channel.
+    Treat blank-channel-only matrices as OMS so the OMS tab is not empty zeros.
+    """
     channel = (channel or "combined").strip().lower()
     if channel == "combined":
         return combine_inventory_channels(df)
@@ -184,6 +188,9 @@ def filter_inventory_history_channel(df: pd.DataFrame | None, channel: str = "co
         return pd.DataFrame(columns=_STORE_COLS)
     ch = work["Channel"].astype(str).str.strip().str.lower()
     if not ch.isin(["oms", "amazon"]).any():
+        # No explicit OMS/Amazon split — blank rows are OMS warehouse on-hand.
+        if channel == "oms":
+            return work[_STORE_COLS].reset_index(drop=True)
         return pd.DataFrame(columns=_STORE_COLS)
     return work.loc[ch == channel, _STORE_COLS].reset_index(drop=True)
 
@@ -1402,6 +1409,16 @@ def append_snapshot_inventory_to_history(sess) -> dict:
     if _variant_snapshot_qty_series(variant) is None:
         return {"appended": False, "reason": "no_total_inventory"}
 
+    # Sessions restored from RAM/PostgreSQL can hold a history frame that is days
+    # behind the authoritative disk parquet (PG persist fails on oversized
+    # bundles, so the restored copy never refreshes). Rolling forward from that
+    # stale frame and persisting would clobber newer disk history — reconcile
+    # with disk/warm first so the newest frame wins before the snapshot append.
+    try:
+        ensure_latest_daily_inventory_authoritative(sess)
+    except Exception:
+        pass
+
     result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
     if not result.get("ok"):
         return {"appended": False, "reason": result.get("reason", "refresh_failed")}
@@ -1941,12 +1958,14 @@ def extend_history_with_sales(
     if sheet_max >= cap_date:
         return base[out_cols].reset_index(drop=True)
 
-    # Last seen snapshot per SKU = starting point for the roll-forward.
+    # Starting on-hand = qty on the latest history day only.
+    # Using last-seen-across-all-days resurrects SKUs that dropped off the
+    # newest snapshot (filtered Qty>0), and day totals climb after a snapshot.
+    on_max = base.loc[base["Date"] == sheet_max]
+    if on_max.empty:
+        return base[out_cols].reset_index(drop=True)
     last_snap = (
-        base.sort_values(["OMS_SKU", "Date"])
-        .groupby("OMS_SKU", as_index=False)
-        .tail(1)
-        .set_index("OMS_SKU")["Qty"]
+        on_max.groupby("OMS_SKU", as_index=True)["Qty"].max()
     )
     sku_list = last_snap.index.to_numpy()
 
@@ -2015,10 +2034,17 @@ def extend_history_with_sales(
 
     # Iterate days (small N — usually a handful) but vectorise across SKUs.
     prev_qty = last_snap.reindex(sku_list).fillna(0.0).to_numpy(dtype=float)
+    # Refunds/cancellations carry negative Units_Effective, so a naive
+    # ``prev - net`` lets returns invent warehouse stock — a SKU the OMS said was
+    # 0 became 7 and stayed in stock for weeks, inflating Eff_Days (e.g.
+    # 1072YKBLACK-4XL showed 25 in-stock days on zero on-hand). Returns may only
+    # restore stock up to the last authoritative snapshot; genuine restocks
+    # arrive with the next snapshot instead.
+    baseline_qty = prev_qty.copy()
     derived_rows: list[pd.DataFrame] = []
     for di, d in enumerate(days):
         net_d = net_matrix[:, di]
-        new_qty = np.maximum(0.0, prev_qty - net_d)
+        new_qty = np.clip(prev_qty - net_d, 0.0, baseline_qty)
         # Only materialize rows for SKUs that had on-hand stock or net sales this day.
         # Writing explicit Qty=0 for every OOS SKU on every sales day poisoned the
         # wide matrix (all dashes) and forced Eff_Days_Inventory to 0 after merges.

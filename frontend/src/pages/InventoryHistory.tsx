@@ -235,9 +235,14 @@ export default function InventoryHistory() {
             {label}
           </button>
         ))}
-        {!channelSplitAvailable && channel !== 'combined' && (
+        {!channelSplitAvailable && channel === 'amazon' && (
           <span className="text-xs text-amber-700 ml-2">
-            OMS/Amazon split needs a re-upload of the wide matrix (OMS + Amazon sheets).
+            Amazon FBA split needs a re-upload of the wide matrix (OMS + Amazon sheets).
+          </span>
+        )}
+        {!channelSplitAvailable && channel === 'oms' && (
+          <span className="text-xs text-gray-500 ml-2">
+            Showing warehouse on-hand (no separate Amazon sheet uploaded).
           </span>
         )}
       </div>

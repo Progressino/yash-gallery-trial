@@ -152,6 +152,82 @@ def test_snapshot_extends_history_beyond_wide_matrix_end():
     assert float(snap_row.iloc[0]["Qty"]) == 42.0
 
 
+def test_snapshot_append_reconciles_stale_session_with_newer_disk(tmp_path, monkeypatch):
+    """Daily upload from a stale PG-restored session must not roll disk history back.
+
+    Prod failure 25-Jul: session restored from PostgreSQL held a days-old history
+    frame; the morning inventory upload rolled forward from it and persisted,
+    clobbering the rebuilt disk parquet. append_snapshot must adopt the newer
+    disk frame first.
+    """
+    import json
+
+    import pandas as pd
+
+    from backend.services.daily_inventory_history import (
+        append_snapshot_inventory_to_history,
+    )
+    from backend.services.helpers import _coerce_df_for_parquet
+    from backend.session import AppSession
+
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+
+    # Newer disk frame: authoritative snapshot on 2026-07-22 with the GOOD qty.
+    disk = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"] * 3,
+            "Date": pd.to_datetime(["2026-07-20", "2026-07-21", "2026-07-22"]),
+            "Qty": [170.0, 172.0, 174.0],
+            "Source": ["snapshot", "snapshot", "snapshot"],
+            "Channel": ["", "", ""],
+        }
+    )
+    _coerce_df_for_parquet(disk).to_parquet(
+        tmp_path / "daily_inventory_history_df.parquet", index=False
+    )
+    (tmp_path / "daily_inventory_history_meta.json").write_text(
+        json.dumps(
+            {
+                "daily_inventory_history_uploaded_at": "2026-07-24T17:51:46Z",
+                "daily_inventory_history_max_date": "2026-07-22",
+                "daily_inventory_history_matrix_max_date": "2026-07-22",
+                "daily_inventory_history_snapshot_dates": ["2026-07-20", "2026-07-21", "2026-07-22"],
+                "daily_inventory_history_rows": 3,
+                "daily_inventory_history_skus": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Stale session frame: same days but wrong (old) qtys, older uploaded_at.
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A"] * 3,
+            "Date": pd.to_datetime(["2026-07-20", "2026-07-21", "2026-07-22"]),
+            "Qty": [130.0, 131.0, 132.0],
+            "Source": ["derived", "derived", "derived"],
+            "Channel": ["", "", ""],
+        }
+    )
+    sess.daily_inventory_history_uploaded_at = "2026-07-24T06:00:00Z"
+    sess.inventory_snapshot_date = "2026-07-24"
+    sess.inventory_df_variant = pd.DataFrame(
+        {"OMS_SKU": ["SKU-A"], "OMS_Inventory": [178.0], "Amazon_Inventory": [0.0]}
+    )
+
+    res = append_snapshot_inventory_to_history(sess)
+    assert res.get("appended") is True
+
+    out = sess.daily_inventory_history_df.copy()
+    out["Date"] = pd.to_datetime(out["Date"]).dt.normalize()
+    qty_by_day = out.groupby("Date")["Qty"].max()
+    # Disk's authoritative snapshot qtys won over the stale session copies.
+    assert float(qty_by_day[pd.Timestamp("2026-07-22")]) == 174.0
+    # New daily snapshot appended on top.
+    assert float(qty_by_day[pd.Timestamp("2026-07-24")]) == 178.0
+
+
 def test_wide_matrix_includes_date_totals():
     from backend.services.daily_inventory_history import inventory_history_wide_matrix
 

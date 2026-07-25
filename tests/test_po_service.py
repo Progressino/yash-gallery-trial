@@ -4222,6 +4222,117 @@ def test_extend_history_rolls_forward_using_sales_units_effective():
     assert (derived["Source"] == "derived").all()
 
 
+def test_extend_history_does_not_resurrect_skus_missing_from_latest_day():
+    """SKUs absent from sheet_max must not reappear from older history days."""
+    from backend.services.daily_inventory_history import extend_history_with_sales
+
+    baseline = pd.DataFrame(
+        {
+            "OMS_SKU": ["KEEP", "GONE", "KEEP"],
+            "Date": pd.to_datetime(["2026-05-09", "2026-05-09", "2026-05-10"]),
+            "Qty": [100.0, 500.0, 90.0],
+            "Source": ["uploaded", "uploaded", "snapshot"],
+        }
+    )
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "KEEP",
+                "TxnDate": pd.Timestamp("2026-05-11"),
+                "Transaction Type": "Shipment",
+                "Quantity": 5,
+                "Units_Effective": 5,
+            }
+        ]
+    )
+    out = extend_history_with_sales(baseline, sales, cap_date=pd.Timestamp("2026-05-11"))
+    out["Date"] = pd.to_datetime(out["Date"])
+    gone_derived = out[
+        (out["OMS_SKU"] == "GONE") & (out["Date"] > pd.Timestamp("2026-05-10"))
+    ]
+    assert gone_derived.empty
+    keep = out[(out["OMS_SKU"] == "KEEP") & (out["Date"] == pd.Timestamp("2026-05-11"))]
+    assert float(keep.iloc[0]["Qty"]) == 85.0
+    # Day total must not climb above the latest snapshot.
+    day11 = float(out.loc[out["Date"] == pd.Timestamp("2026-05-11"), "Qty"].sum())
+    assert day11 == 85.0
+
+
+def test_extend_history_returns_never_invent_stock_above_snapshot():
+    """Refunds must not create on-hand the warehouse never had.
+
+    Prod 25-Jul: 1072YKBLACK-4XL was 0 on the uploaded column, a refund flipped
+    it to 7 derived, and it stayed "in stock" for weeks — Eff_Days 25 on zero
+    inventory. Returns may only restore up to the last authoritative qty.
+    """
+    from backend.services.daily_inventory_history import (
+        effective_days_from_history,
+        extend_history_with_sales,
+    )
+
+    baseline = pd.DataFrame(
+        {
+            "OMS_SKU": ["ZERO-SKU", "HAS-STOCK"],
+            "Date": [pd.Timestamp("2026-06-28")] * 2,
+            "Qty": [0.0, 10.0],
+            "Source": ["uploaded", "uploaded"],
+        }
+    )
+    sales = pd.DataFrame(
+        [
+            # Refund on a SKU with zero on-hand — must NOT create stock.
+            {"Sku": "ZERO-SKU", "TxnDate": pd.Timestamp("2026-06-29"),
+             "Transaction Type": "Refund", "Quantity": 7, "Units_Effective": -7},
+            # Ship 4 then refund 2 on a stocked SKU: 10 → 6 → 8 (capped at 10).
+            {"Sku": "HAS-STOCK", "TxnDate": pd.Timestamp("2026-06-29"),
+             "Transaction Type": "Shipment", "Quantity": 4, "Units_Effective": 4},
+            {"Sku": "HAS-STOCK", "TxnDate": pd.Timestamp("2026-06-30"),
+             "Transaction Type": "Refund", "Quantity": 2, "Units_Effective": -2},
+        ]
+    )
+
+    out = extend_history_with_sales(baseline, sales, cap_date=pd.Timestamp("2026-06-30"))
+    out["Date"] = pd.to_datetime(out["Date"])
+    qty = {
+        (r.OMS_SKU, str(r.Date.date())): float(r.Qty) for r in out.itertuples()
+    }
+
+    # Zero baseline stays zero on every derived day.
+    assert qty.get(("ZERO-SKU", "2026-06-29"), 0.0) == 0.0
+    # Returns restore stock but never above the last authoritative on-hand.
+    assert qty[("HAS-STOCK", "2026-06-29")] == 6.0
+    assert qty[("HAS-STOCK", "2026-06-30")] == 8.0
+
+    eff = effective_days_from_history(
+        out, pd.Timestamp("2026-06-28"), pd.Timestamp("2026-06-30")
+    ).set_index("OMS_SKU")["Eff_Days_Inventory"]
+    assert int(eff.get("ZERO-SKU", 0)) == 0
+    assert int(eff["HAS-STOCK"]) == 3
+
+
+def test_extend_history_returns_cannot_exceed_baseline_over_many_days():
+    """A long run of refunds must stay capped at the snapshot qty, not accumulate."""
+    from backend.services.daily_inventory_history import extend_history_with_sales
+
+    baseline = pd.DataFrame(
+        {
+            "OMS_SKU": ["CAP-SKU"],
+            "Date": [pd.Timestamp("2026-06-28")],
+            "Qty": [5.0],
+            "Source": ["snapshot"],
+        }
+    )
+    sales = pd.DataFrame(
+        [
+            {"Sku": "CAP-SKU", "TxnDate": pd.Timestamp(d),
+             "Transaction Type": "Refund", "Quantity": 3, "Units_Effective": -3}
+            for d in ["2026-06-29", "2026-06-30", "2026-07-01"]
+        ]
+    )
+    out = extend_history_with_sales(baseline, sales, cap_date=pd.Timestamp("2026-07-01"))
+    assert float(pd.to_numeric(out["Qty"]).max()) == 5.0
+
+
 def test_extend_history_floors_at_zero_when_over_sold():
     """Stock can't go negative — derived snapshot floors at 0."""
     from backend.services.daily_inventory_history import extend_history_with_sales

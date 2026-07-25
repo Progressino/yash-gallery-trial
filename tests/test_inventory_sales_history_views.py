@@ -49,6 +49,22 @@ def test_parse_keeps_oms_and_amazon_separate():
     assert float(amz_only.iloc[0]["Qty"]) == 4.0
 
 
+def test_blank_channel_history_served_as_oms():
+    """Snapshot/legacy history uses blank Channel — OMS tab must not return empty zeros."""
+    hist = _hist("SKU-A", ["2026-07-16", "2026-07-17"], [100.0, 95.0])
+    hist["Channel"] = ""
+    assert inventory_channel_split_available(hist) is False
+    oms = filter_inventory_history_channel(hist, "oms")
+    assert len(oms) == 2
+    assert float(oms["Qty"].sum()) == 195.0
+    amz = filter_inventory_history_channel(hist, "amazon")
+    assert amz.empty
+    wide = inventory_history_wide_matrix(hist, days=2, end_date="2026-07-17", channel="oms")
+    assert wide["loaded"] is True
+    assert wide["date_totals"][-1] == 95.0
+    assert sum(wide["date_totals"]) > 0
+
+
 def test_inventory_matrix_channel_split_flag():
     oms = _hist("SKU-A", ["2026-06-01", "2026-06-02"], [5.0, 5.0])
     oms["Channel"] = "oms"
