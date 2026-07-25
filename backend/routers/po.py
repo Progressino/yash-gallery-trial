@@ -283,6 +283,8 @@ class PORequest(BaseModel):
     use_ly_fallback: bool = True
     # When True, PO cover / days-left / quantity use OMS warehouse stock only.
     use_oms_inventory_only: bool = False
+    # Inventory-history channel for Eff_Days: combined (max) | oms | amazon.
+    inventory_history_channel: str = "combined"
     # When True (default), reuse another session's PO result on this server if planning
     # date, settings, and data snapshot match (see ``po_shared_cache``).
     use_shared_cache: bool = True
@@ -634,6 +636,7 @@ def po_daily_inventory_history_by_date(
     q: str = "",
     limit: int = 500,
     offset: int = 0,
+    channel: str = "combined",
 ):
     """All SKU on-hand quantities for one snapshot date (admin verification)."""
     sess = request.state.session
@@ -654,6 +657,7 @@ def po_daily_inventory_history_by_date(
         q=q,
         limit=min(max(1, int(limit)), 2000),
         offset=max(0, int(offset)),
+        channel=channel,
     )
     out["ok"] = True
     return out
@@ -737,6 +741,7 @@ def po_get_daily_inventory_history_for_sku(
     sku: str,
     window_days: int = 30,
     end_date: Optional[str] = None,
+    channel: str = "combined",
 ):
     """Return the day-by-day on-hand timeline for a single SKU.
 
@@ -755,13 +760,25 @@ def po_get_daily_inventory_history_for_sku(
     from ..services.daily_inventory_history import (
         IN_STOCK_MIN_QTY,
         extend_history_with_sales,
+        filter_inventory_history_channel,
         project_inventory_calendar,
     )
 
     sku_map = sess.sku_mapping or None
     canon = lambda v: canonical_oms_key(v, sku_map)  # noqa: E731
     target = canon(sku)
-    work = df.copy()
+    work = filter_inventory_history_channel(df, channel)
+    if work is None or work.empty:
+        return {
+            "ok": True,
+            "loaded": True,
+            "sku": sku,
+            "rows": [],
+            "in_stock_days": 0,
+            "window_days": int(window_days),
+            "channel": (channel or "combined").strip().lower() or "combined",
+        }
+    work = work.copy()
     work["OMS_SKU"] = work["OMS_SKU"].astype(str).map(canon)
     if "Source" not in work.columns:
         work["Source"] = "uploaded"
@@ -791,7 +808,8 @@ def po_get_daily_inventory_history_for_sku(
 
     if sub.empty:
         return {"ok": True, "loaded": True, "sku": sku, "rows": [], "in_stock_days": 0,
-                "window_days": int(window_days), "parent_used": False}
+                "window_days": int(window_days), "parent_used": False,
+                "channel": (channel or "combined").strip().lower() or "combined"}
 
     sub["Date"] = pd.to_datetime(sub["Date"], errors="coerce")
     sub = sub.dropna(subset=["Date"])
@@ -817,6 +835,7 @@ def po_get_daily_inventory_history_for_sku(
     )
     # Anchor at latest uploaded snapshot (or today) so today's upload is visible
     # even when sales / derived roll-forward only run through yesterday.
+    # Explicit end_date always wins so users can navigate historical windows.
     today_norm = pd.Timestamp.now().normalize()
     if end_date:
         try:
@@ -825,8 +844,8 @@ def po_get_daily_inventory_history_for_sku(
             end_ts = today_norm
     else:
         end_ts = today_norm
-    if uploaded_max is not None:
-        end_ts = max(end_ts, uploaded_max)
+        if uploaded_max is not None:
+            end_ts = max(end_ts, uploaded_max)
     start_ts = end_ts - pd.Timedelta(days=max(0, int(window_days) - 1))
     dense = project_inventory_calendar(
         work,
@@ -863,6 +882,7 @@ def po_get_daily_inventory_history_for_sku(
         "sku": sku,
         "canonical_sku": target,
         "parent_used": parent_used,
+        "channel": (channel or "combined").strip().lower() or "combined",
         "window_days": int(window_days),
         "window_start": str(start_ts.date()),
         "window_end": str(end_ts.date()),
@@ -1611,6 +1631,7 @@ def po_dashboard(request: Request, body: PODashboardRequest):
             urgent_all_sizes_days=body.urgent_all_sizes_days,
             use_ly_fallback=body.use_ly_fallback,
             use_oms_inventory_only=body.use_oms_inventory_only,
+            inventory_history_channel=str(body.inventory_history_channel or "combined"),
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}

@@ -390,6 +390,7 @@ export default function POEngine() {
         enforce_two_size_minimum: params.enforce_two_size_minimum,
         enforce_lead_time_release_gate: params.enforce_lead_time_release_gate,
         use_oms_inventory_only: params.use_oms_inventory_only,
+        inventory_history_channel: params.inventory_history_channel || 'combined',
         urgent_all_sizes_days: params.urgent_all_sizes_days,
       }
       const [invRes, auditRes] = await Promise.all([
@@ -1590,6 +1591,29 @@ export default function POEngine() {
                 onFormulaOpen={openFormulaCol}
                 onChange={v => setParams({ ...params, use_oms_inventory_only: v })}
               />
+              <label className="flex flex-col gap-1 text-xs text-gray-700 min-w-[14rem]">
+                <button
+                  type="button"
+                  className="font-medium text-left hover:underline"
+                  onClick={() => openFormulaCol('inventory_history_channel')}
+                >
+                  Eff_Days inventory channel
+                </button>
+                <select
+                  value={params.inventory_history_channel || 'combined'}
+                  onChange={e =>
+                    setParams({
+                      ...params,
+                      inventory_history_channel: e.target.value as 'combined' | 'oms' | 'amazon',
+                    })
+                  }
+                  className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm bg-white"
+                >
+                  <option value="combined">Combined (max OMS/Amazon)</option>
+                  <option value="oms">OMS warehouse only</option>
+                  <option value="amazon">Amazon FBA only</option>
+                </select>
+              </label>
             </div>
 
             <div className="mt-5 p-4 rounded-lg border border-slate-200 bg-slate-50/90 text-xs text-slate-800 space-y-2">

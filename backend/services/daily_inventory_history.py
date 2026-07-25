@@ -1711,9 +1711,15 @@ def trim_inventory_history_for_po(
     window_start: pd.Timestamp,
     window_end: pd.Timestamp,
     po_skus: Optional[set] = None,
+    *,
+    channel: str = "combined",
 ) -> pd.DataFrame:
-    """Keep only SKU-day rows needed for one PO run (avoids processing multi-year baselines)."""
-    inv_history = combine_inventory_channels(inv_history)
+    """Keep only SKU-day rows needed for one PO run (avoids processing multi-year baselines).
+
+    ``channel``: ``combined`` (max OMS/Amazon), ``oms``, or ``amazon`` — controls which
+    on-hand series feeds Eff_Days.
+    """
+    inv_history = filter_inventory_history_channel(inv_history, channel)
     if inv_history is None or inv_history.empty:
         return pd.DataFrame(columns=_TALL_COLS)
     ws = pd.Timestamp(window_start).normalize()
@@ -1743,21 +1749,26 @@ def effective_days_from_history(
     cutoff_start: pd.Timestamp,
     cutoff_end: pd.Timestamp,
     min_qty: float = IN_STOCK_MIN_QTY,
+    *,
+    channel: str = "combined",
 ) -> pd.DataFrame:
     """
     Count days within ``[cutoff_start, cutoff_end]`` where each SKU had ``Qty >= min_qty``.
 
     By default ``min_qty == IN_STOCK_MIN_QTY`` (1.0) — any positive on-hand
-    counts toward Eff_Days.
+    counts toward Eff_Days. Explicit Qty=0 days are out-of-stock and do **not**
+    count (so 28 in-stock + 2 zero days → Eff_Days = 28).
+
+    ``channel`` selects Combined (max), OMS warehouse, or Amazon FBA history.
 
     Per-SKU gaps between snapshots are forward-filled across the calendar window
     (same as Inventory History matrix ``ffill``), so Eff_Days matches the matrix
     Days column. Leading days before a SKU's first observation stay missing and
-    do not count. Explicit Qty=0 days still count as out-of-stock.
+    do not count.
 
     Returns: ``OMS_SKU``, ``Eff_Days_Inventory`` (int).
     """
-    inv_history = combine_inventory_channels(inv_history)
+    inv_history = filter_inventory_history_channel(inv_history, channel)
     if inv_history is None or inv_history.empty:
         return pd.DataFrame(columns=["OMS_SKU", "Eff_Days_Inventory"])
     df = inv_history.copy()
@@ -1787,6 +1798,7 @@ def effective_days_from_history(
     pivot = pivot.reindex(columns=cal)
     # Match Inv History matrix: carry last known on-hand across missing days.
     # Leading NaNs (before first observation) stay NaN and do not count as stock.
+    # Explicit 0s stay 0 (OOS) and do not count toward Eff_Days.
     pivot = pivot.ffill(axis=1)
     in_stock = pivot.ge(float(min_qty)).fillna(False)
     out = (
@@ -2495,6 +2507,7 @@ def inventory_rows_for_date(
     q: str = "",
     limit: int = 500,
     offset: int = 0,
+    channel: str = "combined",
 ) -> dict:
     if df is None or df.empty:
         return {
@@ -2504,6 +2517,7 @@ def inventory_rows_for_date(
             "total": 0,
             "limit": int(limit),
             "offset": int(offset),
+            "channel": (channel or "combined").strip().lower() or "combined",
         }
     try:
         target = pd.Timestamp(date_iso).normalize()
@@ -2515,10 +2529,22 @@ def inventory_rows_for_date(
             "total": 0,
             "limit": int(limit),
             "offset": int(offset),
+            "channel": (channel or "combined").strip().lower() or "combined",
             "message": "Invalid date.",
         }
 
-    work = df.copy()
+    work = filter_inventory_history_channel(df, channel)
+    if work is None or work.empty:
+        return {
+            "loaded": True,
+            "date": str(target.date()),
+            "rows": [],
+            "total": 0,
+            "limit": int(limit),
+            "offset": int(offset),
+            "channel": (channel or "combined").strip().lower() or "combined",
+        }
+    work = work.copy()
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     sub = work[work["Date"] == target].copy()
     if sub.empty:
@@ -2529,6 +2555,7 @@ def inventory_rows_for_date(
             "total": 0,
             "limit": int(limit),
             "offset": int(offset),
+            "channel": (channel or "combined").strip().lower() or "combined",
         }
 
     sub["OMS_SKU"] = sub["OMS_SKU"].astype(str).str.strip()
@@ -2536,6 +2563,11 @@ def inventory_rows_for_date(
     needle = (q or "").strip().upper()
     if needle:
         sub = sub[sub["OMS_SKU"].str.upper().str.contains(needle, na=False)]
+    # Collapse duplicate SKUs (channel filter can still leave multi-source rows).
+    sub = (
+        sub.groupby("OMS_SKU", as_index=False)
+        .agg(Qty=("Qty", "max"), Source=("Source", "first"))
+    )
     sub = sub.sort_values(["Qty", "OMS_SKU"], ascending=[False, True])
     total = int(len(sub))
     page = sub.iloc[max(0, int(offset)) : max(0, int(offset)) + max(1, int(limit))]
@@ -2555,6 +2587,7 @@ def inventory_rows_for_date(
         "total": total,
         "limit": int(limit),
         "offset": int(offset),
+        "channel": (channel or "combined").strip().lower() or "combined",
         "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
     }
 

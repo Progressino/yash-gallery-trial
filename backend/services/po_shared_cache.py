@@ -24,7 +24,7 @@ _log = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Bump when PO engine merge/ADS semantics change (invalidates shared cache).
-PO_MERGE_LOGIC_VERSION = 55
+PO_MERGE_LOGIC_VERSION = 56
 
 
 def po_merge_result_is_stale(meta: dict[str, Any] | None) -> bool:
@@ -58,6 +58,7 @@ _CALC_PARAM_KEYS = (
     "urgent_all_sizes_days",
     "use_ly_fallback",
     "use_oms_inventory_only",
+    "inventory_history_channel",
 )
 
 # Mirror ``PORequest`` defaults so partial query bodies match POST fingerprints.
@@ -79,6 +80,7 @@ _CALC_PARAM_DEFAULTS: dict[str, Any] = {
     "urgent_all_sizes_days": 45,
     "use_ly_fallback": True,
     "use_oms_inventory_only": False,
+    "inventory_history_channel": "combined",
 }
 
 

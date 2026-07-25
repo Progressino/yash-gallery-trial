@@ -1066,6 +1066,8 @@ export async function resetStuckDailyInventoryUpload(): Promise<{
 
 export type DailyInventoryHistoryDate = { date: string; rows: number; skus: number }
 
+export type InventoryHistoryChannel = 'combined' | 'oms' | 'amazon'
+
 export async function getPoDailyInventoryHistoryDates(limit = 120) {
   const { data } = await api.get<{ ok: boolean; dates: DailyInventoryHistoryDate[] }>(
     '/po/daily-inventory-history/dates',
@@ -1079,19 +1081,31 @@ export async function getPoDailyInventoryHistoryByDate(
   q = '',
   limit = 500,
   offset = 0,
+  opts?: { channel?: InventoryHistoryChannel },
 ) {
   const { data } = await api.get<{
     ok: boolean
     date: string
     rows: Array<{ sku: string; qty: number; in_stock: boolean; source: string }>
     total: number
+    channel?: InventoryHistoryChannel
   }>('/po/daily-inventory-history/by-date', {
-    params: { date, q, limit, offset },
+    params: {
+      date,
+      q,
+      limit,
+      offset,
+      ...(opts?.channel ? { channel: opts.channel } : {}),
+    },
   })
   return data
 }
 
-export async function getPoDailyInventoryHistorySku(sku: string, windowDays = 30) {
+export async function getPoDailyInventoryHistorySku(
+  sku: string,
+  windowDays = 30,
+  opts?: { endDate?: string; channel?: InventoryHistoryChannel },
+) {
   const { data } = await api.get<{
     ok: boolean
     loaded: boolean
@@ -1102,14 +1116,17 @@ export async function getPoDailyInventoryHistorySku(sku: string, windowDays = 30
     window_start?: string
     window_end?: string
   }>('/po/daily-inventory-history/sku', {
-    params: { sku, window_days: windowDays },
+    params: {
+      sku,
+      window_days: windowDays,
+      ...(opts?.endDate ? { end_date: opts.endDate } : {}),
+      ...(opts?.channel ? { channel: opts.channel } : {}),
+    },
   })
   return data
 }
 
 export type InventoryHistoryMatrixRow = { sku: string; qtys: number[] }
-
-export type InventoryHistoryChannel = 'combined' | 'oms' | 'amazon'
 
 export type InventoryHistoryIntegrity = {
   ok?: boolean

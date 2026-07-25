@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import {
   api,
   downloadPoDailyInventoryHistoryMatrixCsv,
+  getPoDailyInventoryHistoryByDate,
   getPoDailyInventoryHistoryMatrix,
   getPoDailyInventoryHistorySku,
   type InventoryHistoryChannel,
@@ -34,21 +35,40 @@ function formatDateCol(iso: string) {
   return iso
 }
 
+function shiftIsoDate(iso: string, days: number): string {
+  const d = new Date(`${iso}T12:00:00`)
+  d.setDate(d.getDate() + days)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 export default function InventoryHistory() {
   const coverage = useSession()
-  const [mode, setMode] = useState<'matrix' | 'sku'>('matrix')
+  const [mode, setMode] = useState<'matrix' | 'sku' | 'date'>('matrix')
   const [channel, setChannel] = useState<InventoryHistoryChannel>('combined')
   const [skuFilter, setSkuFilter] = useState('')
   const [skuQuery, setSkuQuery] = useState('')
   const [skuWindow, setSkuWindow] = useState(30)
   const [page, setPage] = useState(0)
   const [exporting, setExporting] = useState(false)
+  /** End of the rolling window (inclusive). Empty = latest available on server. */
+  const [endDate, setEndDate] = useState('')
+  /** Single-day lookup (By date mode). */
+  const [lookupDate, setLookupDate] = useState(() => todayIsoIST().slice(0, 10))
+  const [datePage, setDatePage] = useState(0)
+
+  const effectiveEnd = endDate.trim() || undefined
 
   const summaryQ = useQuery({
-    queryKey: ['inv-history-summary', HISTORY_WINDOW_DAYS],
+    queryKey: ['inv-history-summary', HISTORY_WINDOW_DAYS, effectiveEnd ?? 'latest'],
     queryFn: async () => {
       const { data } = await api.get('/po/daily-inventory-history', {
-        params: { days: HISTORY_WINDOW_DAYS },
+        params: {
+          days: HISTORY_WINDOW_DAYS,
+          ...(effectiveEnd ? { end_date: effectiveEnd } : {}),
+        },
       })
       return data as {
         loaded?: boolean
@@ -66,19 +86,33 @@ export default function InventoryHistory() {
   })
 
   const matrixQ = useQuery({
-    queryKey: ['inv-history-matrix', skuFilter, page, HISTORY_WINDOW_DAYS, channel],
+    queryKey: ['inv-history-matrix', skuFilter, page, HISTORY_WINDOW_DAYS, channel, effectiveEnd ?? 'latest'],
     retry: 1,
     queryFn: async () =>
       getPoDailyInventoryHistoryMatrix(skuFilter, PAGE_SIZE, page * PAGE_SIZE, {
         days: HISTORY_WINDOW_DAYS,
         channel,
+        ...(effectiveEnd ? { endDate: effectiveEnd } : {}),
       }),
   })
 
   const skuTimelineQ = useQuery({
-    queryKey: ['inv-history-sku', skuQuery, skuWindow],
+    queryKey: ['inv-history-sku', skuQuery, skuWindow, channel, effectiveEnd ?? 'latest'],
     enabled: mode === 'sku' && skuQuery.trim().length >= 3,
-    queryFn: async () => getPoDailyInventoryHistorySku(skuQuery.trim(), skuWindow),
+    queryFn: async () =>
+      getPoDailyInventoryHistorySku(skuQuery.trim(), skuWindow, {
+        channel,
+        ...(effectiveEnd ? { endDate: effectiveEnd } : {}),
+      }),
+  })
+
+  const byDateQ = useQuery({
+    queryKey: ['inv-history-by-date', lookupDate, skuFilter, datePage, channel],
+    enabled: mode === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(lookupDate),
+    queryFn: async () =>
+      getPoDailyInventoryHistoryByDate(lookupDate, skuFilter, PAGE_SIZE, datePage * PAGE_SIZE, {
+        channel,
+      }),
   })
 
   const dates = matrixQ.data?.dates ?? []
@@ -88,8 +122,11 @@ export default function InventoryHistory() {
   const totalSkus = matrixQ.data?.total ?? 0
   const inStockMin = matrixQ.data?.in_stock_min_qty ?? 1
   const skuRows = (skuTimelineQ.data?.rows ?? []) as SkuDayRow[]
+  const byDateRows = byDateQ.data?.rows ?? []
+  const byDateTotal = byDateQ.data?.total ?? 0
 
   const pageCount = Math.max(1, Math.ceil(totalSkus / PAGE_SIZE))
+  const datePageCount = Math.max(1, Math.ceil(byDateTotal / PAGE_SIZE))
 
   const handleExportMatrix = async () => {
     setExporting(true)
@@ -98,6 +135,7 @@ export default function InventoryHistory() {
         q: skuFilter,
         days: HISTORY_WINDOW_DAYS,
         channel,
+        ...(effectiveEnd ? { endDate: effectiveEnd } : {}),
       })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -115,6 +153,14 @@ export default function InventoryHistory() {
     )
   }
 
+  const handleExportByDate = () => {
+    downloadCsv(
+      `inventory-${lookupDate}.csv`,
+      ['date', 'sku', 'qty', 'in_stock', 'source'],
+      byDateRows.map(r => [lookupDate, r.sku, String(r.qty), r.in_stock ? 'yes' : 'no', r.source]),
+    )
+  }
+
   const channelSplitAvailable = matrixQ.data?.channel_split_available ?? false
 
   const rangeLabel = useMemo(() => {
@@ -122,14 +168,25 @@ export default function InventoryHistory() {
     return `${dates[0]} → ${dates[dates.length - 1]}`
   }, [dates])
 
+  const jumpToLatest = () => {
+    setEndDate('')
+    setPage(0)
+  }
+
+  const nudgeEndDate = (delta: number) => {
+    const base = endDate.trim() || summaryQ.data?.max_date || todayIsoIST().slice(0, 10)
+    setEndDate(shiftIsoDate(base, delta))
+    setPage(0)
+  }
+
   return (
     <div className="max-w-[100vw] mx-auto p-4 md:p-6 space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">📅 Inventory History</h1>
           <p className="text-sm text-gray-600 mt-1 max-w-2xl">
-            Last {HISTORY_WINDOW_DAYS} days of daily inventory snapshots. Each day you upload a snapshot adds one column.
-            Use this matrix to verify on-hand counts match PO{' '}
+            Rolling {HISTORY_WINDOW_DAYS}-day inventory matrix (or jump to any end date / single day).
+            Use this to verify on-hand counts match PO{' '}
             <code className="font-mono text-xs">Eff_Days</code>.
           </p>
         </div>
@@ -169,6 +226,7 @@ export default function InventoryHistory() {
           <span>
             <strong>Window:</strong> last {summaryQ.data.window_days ?? HISTORY_WINDOW_DAYS} days ·{' '}
             {summaryQ.data.min_date} → {summaryQ.data.max_date}
+            {effectiveEnd ? ` · as of ${effectiveEnd}` : ''}
           </span>
         )}
         {summaryQ.data?.skus != null && (
@@ -186,27 +244,54 @@ export default function InventoryHistory() {
           <Link to="/upload" className="text-indigo-700 font-medium underline">
             Upload → Daily uploads → Snapshot inventory
           </Link>
-          . Each day you upload builds one column in this matrix (last {HISTORY_WINDOW_DAYS} days).
+          . Each day you upload builds one column in this matrix.
         </div>
       )}
 
-      {summaryQ.data?.loaded && !dates.length && !matrixQ.isLoading && !matrixQ.isFetching && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          {summaryQ.data.max_date &&
-          summaryQ.data.max_date < todayIsoIST().slice(0, 10) ? (
-            <>
-              Inventory history ends <strong>{summaryQ.data.max_date}</strong> (today{' '}
-              {todayIsoIST()}). Upload today's snapshot on{' '}
-              <Link to="/upload" className="underline font-medium">Upload → Daily uploads → Snapshot inventory</Link>.
-            </>
-          ) : (
-            <>
-              Matrix summary loaded but the table is empty — try refreshing. If this persists after
-              upload, use Upload → Server &amp; cache → Reload from server.
-            </>
-          )}
+      <div className="bg-white border border-gray-200 rounded-xl p-4 flex flex-wrap gap-3 items-end">
+        <label className="text-sm">
+          <span className="block text-gray-600 mb-1">Matrix / SKU window ends on</span>
+          <input
+            type="date"
+            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+            value={endDate || summaryQ.data?.max_date || todayIsoIST().slice(0, 10)}
+            max={todayIsoIST().slice(0, 10)}
+            onChange={e => {
+              setEndDate(e.target.value)
+              setPage(0)
+            }}
+          />
+        </label>
+        <div className="flex gap-1">
+          <button
+            type="button"
+            onClick={() => nudgeEndDate(-1)}
+            className="px-2 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50"
+            title="Previous day"
+          >
+            ← Day
+          </button>
+          <button
+            type="button"
+            onClick={() => nudgeEndDate(1)}
+            className="px-2 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50"
+            title="Next day"
+          >
+            Day →
+          </button>
+          <button
+            type="button"
+            onClick={jumpToLatest}
+            className="px-3 py-1.5 text-sm font-medium rounded-lg border border-indigo-300 text-indigo-800 hover:bg-indigo-50"
+          >
+            Latest
+          </button>
         </div>
-      )}
+        <p className="text-xs text-gray-500 max-w-md">
+          Shows the {HISTORY_WINDOW_DAYS} days ending on this date. Use <strong>By date</strong> below
+          to inspect one calendar day&apos;s full SKU list.
+        </p>
+      </div>
 
       <div className="flex flex-wrap gap-2 items-center">
         <span className="text-xs font-medium text-gray-500 mr-1">Channel:</span>
@@ -223,6 +308,7 @@ export default function InventoryHistory() {
             onClick={() => {
               setChannel(key)
               setPage(0)
+              setDatePage(0)
             }}
             className={`px-3 py-1.5 rounded-lg text-sm font-medium border ${
               channel === key ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700'
@@ -243,7 +329,7 @@ export default function InventoryHistory() {
         )}
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex gap-2 flex-wrap">
         <button
           type="button"
           onClick={() => setMode('matrix')}
@@ -261,6 +347,15 @@ export default function InventoryHistory() {
           }`}
         >
           Single SKU timeline
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode('date')}
+          className={`px-3 py-1.5 rounded-lg text-sm font-medium border ${
+            mode === 'date' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700'
+          }`}
+        >
+          By date
         </button>
       </div>
 
@@ -304,7 +399,7 @@ export default function InventoryHistory() {
               Matrix load failed — try refreshing. If this persists, ask admin to reload server cache.
             </p>
           ) : !dates.length ? (
-            <p className="p-4 text-sm text-gray-500">No inventory history dates loaded.</p>
+            <p className="p-4 text-sm text-gray-500">No inventory history dates loaded for this window.</p>
           ) : (
             <>
               <div className="px-4 py-2 text-xs text-gray-500 border-b border-gray-50 flex flex-wrap items-center justify-between gap-2">
@@ -385,18 +480,17 @@ export default function InventoryHistory() {
                       </th>
                       {dates.map(d => (
                         <th
-                          key={`${d}-sub`}
-                          className="border border-gray-200 px-1 py-0.5 text-center text-[10px] text-gray-400 font-normal whitespace-nowrap"
-                          title={d}
+                          key={`${d}-iso`}
+                          className="border border-gray-200 px-1 py-0.5 text-center text-[9px] text-gray-400 font-normal whitespace-nowrap"
                         >
-                          {d.slice(5)}
+                          {d.slice(8)}
                         </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {matrixRows.map(row => (
-                      <tr key={row.sku} className="hover:bg-sky-50/40">
+                      <tr key={row.sku} className="hover:bg-slate-50/80">
                         <td className="sticky left-0 z-10 bg-white border border-gray-200 px-2 py-1 font-mono text-gray-800 whitespace-nowrap">
                           {row.sku}
                         </td>
@@ -422,7 +516,7 @@ export default function InventoryHistory() {
             </>
           )}
         </div>
-      ) : (
+      ) : mode === 'sku' ? (
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
           <div className="p-4 border-b border-gray-100 flex flex-wrap gap-3 items-end">
             <label className="text-sm flex-1 min-w-[12rem]">
@@ -439,7 +533,7 @@ export default function InventoryHistory() {
               <input
                 type="number"
                 min={7}
-                max={90}
+                max={120}
                 className="border border-gray-300 rounded-lg px-2 py-1.5 w-20"
                 value={skuWindow}
                 onChange={e => setSkuWindow(Number(e.target.value) || 30)}
@@ -462,6 +556,12 @@ export default function InventoryHistory() {
             <p className="p-4 text-sm text-amber-700">No history rows for this SKU.</p>
           ) : (
             <div className="max-h-[32rem] overflow-auto">
+              <div className="px-4 py-2 text-xs text-gray-500 border-b">
+                {skuTimelineQ.data?.window_start} → {skuTimelineQ.data?.window_end}
+                {skuTimelineQ.data?.in_stock_days != null
+                  ? ` · Eff_Days ${skuTimelineQ.data.in_stock_days}`
+                  : ''}
+              </div>
               <table className="w-full text-xs">
                 <thead className="bg-gray-50 sticky top-0">
                   <tr>
@@ -477,12 +577,133 @@ export default function InventoryHistory() {
                       <td className="px-4 py-1.5 font-mono">{r.date}</td>
                       <td className="px-4 py-1.5 text-right font-mono">{r.qty.toLocaleString()}</td>
                       <td className="px-4 py-1.5">{r.source === 'derived' ? 'auto · sales' : 'uploaded'}</td>
-                      <td className="px-4 py-1.5">{r.in_stock ? '✓' : '—'}</td>
+                      <td className="px-4 py-1.5">{r.in_stock ? 'yes (Eff_Days)' : 'no (Qty=0)'}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+          )}
+        </div>
+      ) : (
+        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+          <div className="p-4 border-b border-gray-100 flex flex-wrap gap-3 items-end">
+            <label className="text-sm">
+              <span className="block text-gray-600 mb-1">Lookup date</span>
+              <input
+                type="date"
+                className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
+                value={lookupDate}
+                max={todayIsoIST().slice(0, 10)}
+                onChange={e => {
+                  setLookupDate(e.target.value)
+                  setDatePage(0)
+                }}
+              />
+            </label>
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setLookupDate(d => shiftIsoDate(d, -1))
+                  setDatePage(0)
+                }}
+                className="px-2 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50"
+              >
+                ← Day
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setLookupDate(d => shiftIsoDate(d, 1))
+                  setDatePage(0)
+                }}
+                className="px-2 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50"
+              >
+                Day →
+              </button>
+            </div>
+            <label className="text-sm flex-1 min-w-[12rem] max-w-md">
+              <span className="block text-gray-600 mb-1">Filter SKU</span>
+              <input
+                className="w-full border border-gray-300 rounded-lg px-2 py-1.5 font-mono text-sm"
+                placeholder="optional filter"
+                value={skuFilter}
+                onChange={e => {
+                  setSkuFilter(e.target.value)
+                  setDatePage(0)
+                }}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={handleExportByDate}
+              disabled={!byDateRows.length}
+              className="px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-40"
+            >
+              Download CSV (page)
+            </button>
+          </div>
+          {byDateQ.isLoading ? (
+            <p className="p-4 text-sm text-gray-500">Loading {lookupDate}…</p>
+          ) : byDateQ.isError ? (
+            <p className="p-4 text-sm text-red-700">Failed to load inventory for {lookupDate}.</p>
+          ) : byDateRows.length === 0 ? (
+            <p className="p-4 text-sm text-amber-700">
+              No inventory rows for {lookupDate} on the {channel} channel.
+            </p>
+          ) : (
+            <>
+              <div className="px-4 py-2 text-xs text-gray-500 border-b flex flex-wrap items-center justify-between gap-2">
+                <span>
+                  {byDateTotal.toLocaleString()} SKUs on {lookupDate}
+                  {channel !== 'combined' ? ` · ${channel.toUpperCase()}` : ''}
+                </span>
+                <span className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={datePage <= 0}
+                    onClick={() => setDatePage(p => Math.max(0, p - 1))}
+                    className="px-2 py-0.5 rounded border border-gray-300 disabled:opacity-40"
+                  >
+                    ← Prev
+                  </button>
+                  <span>
+                    Page {datePage + 1} / {datePageCount}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={datePage + 1 >= datePageCount}
+                    onClick={() => setDatePage(p => p + 1)}
+                    className="px-2 py-0.5 rounded border border-gray-300 disabled:opacity-40"
+                  >
+                    Next →
+                  </button>
+                </span>
+              </div>
+              <div className="max-h-[32rem] overflow-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 sticky top-0">
+                    <tr>
+                      <th className="text-left px-4 py-2 font-semibold text-gray-600">SKU</th>
+                      <th className="text-right px-4 py-2 font-semibold text-gray-600">On-hand</th>
+                      <th className="text-left px-4 py-2 font-semibold text-gray-600">Source</th>
+                      <th className="text-left px-4 py-2 font-semibold text-gray-600">In stock?</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {byDateRows.map(r => (
+                      <tr key={r.sku} className={r.in_stock ? '' : 'bg-rose-50/50'}>
+                        <td className="px-4 py-1.5 font-mono">{r.sku}</td>
+                        <td className="px-4 py-1.5 text-right font-mono">{r.qty.toLocaleString()}</td>
+                        <td className="px-4 py-1.5">{r.source === 'derived' ? 'auto · sales' : 'uploaded'}</td>
+                        <td className="px-4 py-1.5">{r.in_stock ? 'yes' : 'no'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       )}

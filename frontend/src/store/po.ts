@@ -43,6 +43,7 @@ interface POParams {
   urgent_all_sizes_days: number
   enforce_lead_time_release_gate: boolean
   use_oms_inventory_only: boolean
+  inventory_history_channel: 'combined' | 'oms' | 'amazon'
 }
 
 interface POState {
@@ -92,6 +93,7 @@ export const usePOStore = create<POState>()(
     urgent_all_sizes_days: 45,
     enforce_lead_time_release_gate: false,
     use_oms_inventory_only: false,
+    inventory_history_channel: 'combined',
   },
   result: null,
   quarterly: null,
@@ -119,7 +121,7 @@ export const usePOStore = create<POState>()(
     }),
     {
       name: 'po-store-v1',
-      version: 6,
+      version: 7,
       migrate: (persisted, fromVersion) => {
         const p = persisted as Partial<POState> | undefined
         if (!p) return persisted as POState
@@ -136,6 +138,9 @@ export const usePOStore = create<POState>()(
         }
         if (fromVersion < 6 && params && params.use_oms_inventory_only === undefined) {
           params.use_oms_inventory_only = false
+        }
+        if (fromVersion < 7 && params && params.inventory_history_channel === undefined) {
+          params.inventory_history_channel = 'combined'
         }
         return p as POState
       },
