@@ -20,6 +20,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import threading
 from datetime import date, datetime
 from typing import BinaryIO, Callable, Optional
 from zoneinfo import ZoneInfo
@@ -35,6 +36,41 @@ _TALL_COLS = ["OMS_SKU", "Date", "Qty"]
 _STORE_COLS = ["OMS_SKU", "Date", "Qty", "Source"]
 _CHANNEL_COLS = ["OMS_SKU", "Date", "Qty", "Source", "Channel"]
 _SOURCE_RANK = {"snapshot": 3, "uploaded": 2, "derived": 1}
+
+# Memoize channel views — combine_inventory_channels copies ~600k rows and concurrent
+# Inv History tabs were stacking those temps until the 6.5–7 GB container OOM'd.
+_CHANNEL_VIEW_LOCK = threading.Lock()
+_CHANNEL_VIEW_CACHE: dict[tuple[int, int, str], pd.DataFrame] = {}
+_CHANNEL_VIEW_CACHE_MAX = 6
+
+
+def _channel_view_cache_key(df: pd.DataFrame, channel: str) -> tuple[int, int, str]:
+    return (id(df), int(len(df)), str(channel))
+
+
+def _get_cached_channel_view(df: pd.DataFrame, channel: str) -> pd.DataFrame | None:
+    key = _channel_view_cache_key(df, channel)
+    with _CHANNEL_VIEW_LOCK:
+        hit = _CHANNEL_VIEW_CACHE.get(key)
+        return hit
+
+
+def _store_cached_channel_view(df: pd.DataFrame, channel: str, view: pd.DataFrame) -> pd.DataFrame:
+    key = _channel_view_cache_key(df, channel)
+    with _CHANNEL_VIEW_LOCK:
+        if len(_CHANNEL_VIEW_CACHE) >= _CHANNEL_VIEW_CACHE_MAX:
+            # Drop oldest insertion (CPython 3.7+ dict order).
+            try:
+                _CHANNEL_VIEW_CACHE.pop(next(iter(_CHANNEL_VIEW_CACHE)))
+            except Exception:
+                _CHANNEL_VIEW_CACHE.clear()
+        _CHANNEL_VIEW_CACHE[key] = view
+    return view
+
+
+def clear_inventory_channel_view_cache() -> None:
+    with _CHANNEL_VIEW_LOCK:
+        _CHANNEL_VIEW_CACHE.clear()
 
 
 def _channel_from_sheet(sheet_name: str) -> str:
@@ -177,25 +213,36 @@ def filter_inventory_history_channel(df: pd.DataFrame | None, channel: str = "co
     Treat blank-channel-only matrices as OMS so the OMS tab is not empty zeros.
     """
     channel = (channel or "combined").strip().lower()
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame(columns=_STORE_COLS)
+    cached = _get_cached_channel_view(df, channel)
+    if cached is not None:
+        return cached
     if channel == "combined":
-        return combine_inventory_channels(df)
+        out = combine_inventory_channels(df)
+        return _store_cached_channel_view(df, channel, out)
     work = _coalesce_history_rows(_ensure_channel_column(df))
     if work.empty:
-        return pd.DataFrame(columns=_STORE_COLS)
+        out = pd.DataFrame(columns=_STORE_COLS)
+        return _store_cached_channel_view(df, channel, out)
     ch = work["Channel"].astype(str).str.strip().str.lower()
     if not ch.isin(["oms", "amazon"]).any():
         # No explicit OMS/Amazon split — blank rows are OMS warehouse on-hand.
         if channel == "oms":
-            return work[_STORE_COLS].reset_index(drop=True)
-        return pd.DataFrame(columns=_STORE_COLS)
+            out = work[_STORE_COLS].reset_index(drop=True)
+            return _store_cached_channel_view(df, channel, out)
+        out = pd.DataFrame(columns=_STORE_COLS)
+        return _store_cached_channel_view(df, channel, out)
     if channel == "amazon":
-        return work.loc[ch == "amazon", _STORE_COLS].reset_index(drop=True)
+        out = work.loc[ch == "amazon", _STORE_COLS].reset_index(drop=True)
+        return _store_cached_channel_view(df, channel, out)
     # During migration, old wide-matrix dates are blank-channel OMS while newer
     # daily snapshots carry explicit channels. Keep blank dates only where no
     # explicit OMS census exists.
     explicit_oms_dates = work.loc[ch == "oms", "Date"].unique()
     keep = (ch == "oms") | ((ch == "") & ~work["Date"].isin(explicit_oms_dates))
-    return work.loc[keep, _STORE_COLS].reset_index(drop=True)
+    out = work.loc[keep, _STORE_COLS].reset_index(drop=True)
+    return _store_cached_channel_view(df, channel, out)
 
 
 def _ensure_source_column(df: pd.DataFrame | None, default: str = "uploaded") -> pd.DataFrame:
@@ -3657,6 +3704,7 @@ def persist_inventory_history_authoritative(sess, df: pd.DataFrame | None = None
     work = df if df is not None else getattr(sess, "daily_inventory_history_df", None)
     if work is None or getattr(work, "empty", True):
         return False
+    clear_inventory_channel_view_cache()
     sess.daily_inventory_history_df = work
     cache = _warm_cache_dir()
     cache.mkdir(parents=True, exist_ok=True)

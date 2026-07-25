@@ -87,7 +87,8 @@ services:
       # platform DataFrames into memory on every session restore (prevents OOM on 5.5 GB VPS).
       # The warm cache disk already contains full bulk history; only recent deltas are needed.
       - AUTO_RESTORE_MONTHS=1
-      - SESSION_MAX_ACTIVE=8
+      # Cap concurrent browser sessions — each login can still spike RAM on hydrate.
+      - SESSION_MAX_ACTIVE=4
       # Disable background Intelligence bundle precompute on startup to prevent a concurrent
       # 1-2 GB build_sales_df spike while session hydration is also running. The bundle is
       # built on first request (2-3s delay) rather than consuming an extra 1-2 GB at startup.
@@ -129,9 +130,9 @@ services:
       postgres:
         condition: service_healthy
     # Cap below host RAM so the kernel OOM-killer targets this container, not ssh/postgres.
-    # Warm cache peaks ~5–6 GB; 2 GiB swap covers brief spikes. Host: 7.8 GiB + 2 GiB swap.
-    # PG reduced from 2g to 1g (only uses ~500 MB) to free 1g for the backend.
-    mem_limit: 6.5g
+    # Warm cache + a few concurrent Inv History/dashboard reads peak ~6–7 GB on this VPS.
+    # 7.2g + swap headroom; keep below host 7.8 GiB so ssh/postgres survive container OOM.
+    mem_limit: 7.2g
     memswap_limit: 8.5g
     # Single worker on 7.5 GB VPS — dual workers OOM during parallel warm-cache boot.
     command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
