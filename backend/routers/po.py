@@ -48,77 +48,25 @@ def _warm_cache_parquet(name: str, *, columns: list[str] | None = None) -> pd.Da
 
 
 def _inventory_history_df_for_matrix_read(sess) -> pd.DataFrame:
-    """Fast matrix read — prefer in-RAM warm/session; avoid full parquet reloads.
+    """Return the shared authoritative history frame for every browser session.
 
-    Never copy large frames on every page request (that previously spiked RAM and
-    made Inventory History hang at "Loading matrix…").
+    The disk helper is mtime-cached, so this does not re-read parquet per page.
+    Never choose by max-date alone: old session frames often share the same final
+    date while containing different totals/channels, which made tabs disagree.
     """
-    from ..services.daily_inventory_history import (
-        inventory_history_max_date,
-        read_daily_inventory_history_disk_meta,
-    )
-
-    sess_df = getattr(sess, "daily_inventory_history_df", None)
-    warm = None
-    try:
-        import backend.main as _main
-
-        warm = (_main._warm_cache or {}).get("daily_inventory_history_df")
-    except Exception:
-        warm = None
-
-    def _max_ord(df: pd.DataFrame | None) -> int:
-        if df is None or getattr(df, "empty", True):
-            return 0
-        mx = inventory_history_max_date(df)
-        return int(pd.Timestamp(mx).toordinal()) if mx is not None else 0
-
-    warm_ord = _max_ord(warm)
-    sess_ord = _max_ord(sess_df)
-    disk_meta_ord = 0
-    try:
-        meta = read_daily_inventory_history_disk_meta() or {}
-        mx = str(meta.get("daily_inventory_history_max_date") or "")[:10]
-        if len(mx) == 10:
-            disk_meta_ord = int(pd.Timestamp(mx).toordinal())
-    except Exception:
-        disk_meta_ord = 0
-
-    # Prefer the newest in-RAM frame when it already matches disk meta (or is newer).
-    if warm_ord and warm_ord >= disk_meta_ord and warm_ord >= sess_ord:
-        return warm
-    if sess_ord and sess_ord >= disk_meta_ord and sess_ord >= warm_ord:
-        return sess_df
-
     disk = _warm_cache_parquet("daily_inventory_history_df")
-    if disk.empty:
-        if warm is not None and not getattr(warm, "empty", True):
-            return warm
-        if sess_df is not None and not getattr(sess_df, "empty", True):
-            return sess_df
-        return _inventory_history_df_for_read(sess)
+    if not disk.empty:
+        try:
+            import backend.main as _main
 
-    disk_ord = _max_ord(disk)
-    best = disk
-    best_ord = disk_ord
-    if warm_ord >= best_ord and warm is not None and not getattr(warm, "empty", True):
-        best, best_ord = warm, warm_ord
-    if sess_ord >= best_ord and sess_df is not None and not getattr(sess_df, "empty", True):
-        best, best_ord = sess_df, sess_ord
-
-    # Point warm/session at the winner without deep-copying (~400k-row frames).
-    try:
-        import backend.main as _main
-
-        if not getattr(_main, "_warm_cache", None):
-            _main._warm_cache = {}
-        if best is not warm:
-            _main._warm_cache["daily_inventory_history_df"] = best
-        if best is not sess_df:
-            sess.daily_inventory_history_df = best
-    except Exception:
-        pass
-    return best
+            if not getattr(_main, "_warm_cache", None):
+                _main._warm_cache = {}
+            _main._warm_cache["daily_inventory_history_df"] = disk
+            sess.daily_inventory_history_df = disk
+        except Exception:
+            pass
+        return disk
+    return _inventory_history_df_for_read(sess)
 
 
 def _inventory_history_df_for_read(sess) -> pd.DataFrame:
@@ -736,6 +684,50 @@ async def po_daily_inventory_history_matrix(
         days=days,
         end_date=end_date,
         channel=channel,
+    )
+
+
+@router.get("/daily-inventory-history/matrix.csv")
+async def po_daily_inventory_history_matrix_csv(
+    request: Request,
+    q: str = "",
+    days: int = 30,
+    end_date: Optional[str] = None,
+    channel: str = "combined",
+):
+    """Full wide-matrix CSV download (server-side — avoids browser OOM on 10k+ SKUs)."""
+    from fastapi.responses import Response
+
+    from ..concurrency import run_read_api
+    from ..services.daily_inventory_history import inventory_history_wide_matrix_csv
+
+    sess = request.state.session
+    if sess is None:
+        return {"ok": False, "message": "No session"}
+
+    def _build():
+        df = _inventory_history_df_for_matrix_read(sess)
+        return inventory_history_wide_matrix_csv(
+            df,
+            q=q,
+            days=min(max(1, int(days)), 120),
+            end_date=end_date,
+            channel=channel,
+        )
+
+    try:
+        csv_bytes, filename = await run_read_api(_build)
+    except Exception as e:
+        logging.getLogger(__name__).exception("inventory history CSV export failed")
+        return {"ok": False, "message": str(e)}
+
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
     )
 
 

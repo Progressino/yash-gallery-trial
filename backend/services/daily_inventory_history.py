@@ -79,12 +79,7 @@ def repair_snapshot_channel_totals(
     hist_df: pd.DataFrame | None,
     variant_df: pd.DataFrame | None,
 ) -> pd.DataFrame:
-    """Fix under-counted snapshot rows written as channel=oms (OMS_Inventory only).
-
-    When inventory_df_variant is available, rebuild the latest snapshot date's rows
-    using Total_Inventory (blank channel). Also strip erroneous amazon-channel
-    snapshot rows and collapse oms-channel snapshots to blank channel.
-    """
+    """Repair the latest snapshot without destroying an explicit channel split."""
     if hist_df is None or hist_df.empty:
         return hist_df if hist_df is not None else pd.DataFrame(columns=_STORE_COLS)
     work = _ensure_channel_column(hist_df.copy())
@@ -95,21 +90,7 @@ def repair_snapshot_channel_totals(
     if not snap_mask.any():
         return work.reset_index(drop=True)
 
-    # Drop amazon-channel snapshot rows (double-counted FBA when combined with oms).
-    bad_amz = snap_mask & (ch == "amazon")
-    if bad_amz.any():
-        work = work.loc[~bad_amz]
-
-    # Collapse oms-channel snapshots to blank channel (qty may still be OMS-only).
-    oms_snap = work[snap_mask & (work["Channel"].astype(str).str.strip().str.lower() == "oms")]
-    if not oms_snap.empty:
-        work.loc[oms_snap.index, "Channel"] = ""
-
     if variant_df is None or getattr(variant_df, "empty", True):
-        return _coalesce_history_rows(work)
-
-    qty = _variant_snapshot_qty_series(variant_df)
-    if qty is None:
         return _coalesce_history_rows(work)
 
     snap_dates = work.loc[work["Source"].astype(str).str.strip().str.lower() == "snapshot", "Date"].dropna()
@@ -119,21 +100,36 @@ def repair_snapshot_channel_totals(
 
     var = variant_df.copy()
     var["OMS_SKU"] = var["OMS_SKU"].astype(str).str.strip().str.upper()
-    var["Qty"] = pd.to_numeric(qty, errors="coerce").fillna(0.0)
     var = var[var["OMS_SKU"].str.len() > 0]
     if var.empty:
         return _coalesce_history_rows(work)
 
-    # Replace latest snapshot date with authoritative Total_Inventory rows.
+    split = ch.isin(["oms", "amazon"]).any()
     work = work[~((work["Date"] == latest) & (work["Source"].astype(str).str.strip().str.lower() == "snapshot"))]
-    incoming = pd.DataFrame({
-        "OMS_SKU": var["OMS_SKU"].values,
-        "Date": latest,
-        "Qty": var["Qty"].values,
-        "Source": "snapshot",
-        "Channel": "",
-    })
-    work = pd.concat([work, incoming], ignore_index=True)
+    parts: list[pd.DataFrame] = []
+    if split and {"OMS_Inventory", "Amazon_Inventory"}.intersection(var.columns):
+        for channel, col in (("oms", "OMS_Inventory"), ("amazon", "Amazon_Inventory")):
+            if col not in var.columns:
+                continue
+            parts.append(pd.DataFrame({
+                "OMS_SKU": var["OMS_SKU"].values,
+                "Date": latest,
+                "Qty": pd.to_numeric(var[col], errors="coerce").fillna(0.0).values,
+                "Source": "snapshot",
+                "Channel": channel,
+            }))
+    else:
+        qty = _variant_snapshot_qty_series(var)
+        if qty is None:
+            return _coalesce_history_rows(work)
+        parts.append(pd.DataFrame({
+            "OMS_SKU": var["OMS_SKU"].values,
+            "Date": latest,
+            "Qty": pd.to_numeric(qty, errors="coerce").fillna(0.0).values,
+            "Source": "snapshot",
+            "Channel": "",
+        }))
+    work = pd.concat([work, *parts], ignore_index=True)
     return _coalesce_history_rows(work)
 
 
@@ -192,7 +188,14 @@ def filter_inventory_history_channel(df: pd.DataFrame | None, channel: str = "co
         if channel == "oms":
             return work[_STORE_COLS].reset_index(drop=True)
         return pd.DataFrame(columns=_STORE_COLS)
-    return work.loc[ch == channel, _STORE_COLS].reset_index(drop=True)
+    if channel == "amazon":
+        return work.loc[ch == "amazon", _STORE_COLS].reset_index(drop=True)
+    # During migration, old wide-matrix dates are blank-channel OMS while newer
+    # daily snapshots carry explicit channels. Keep blank dates only where no
+    # explicit OMS census exists.
+    explicit_oms_dates = work.loc[ch == "oms", "Date"].unique()
+    keep = (ch == "oms") | ((ch == "") & ~work["Date"].isin(explicit_oms_dates))
+    return work.loc[keep, _STORE_COLS].reset_index(drop=True)
 
 
 def _ensure_source_column(df: pd.DataFrame | None, default: str = "uploaded") -> pd.DataFrame:
@@ -865,9 +868,26 @@ def inventory_history_is_newer_than(
         return False
     if existing is None or getattr(existing, "empty", True):
         return True
+    # Never allow a blank/legacy frame to clobber an explicit OMS+Amazon split.
+    if inventory_channel_split_available(existing) and not inventory_channel_split_available(
+        incoming
+    ):
+        return False
     in_at = upload_timestamp_epoch(incoming_uploaded_at)
     ex_at = upload_timestamp_epoch(existing_uploaded_at)
     if in_at > ex_at + 0.5:
+        # Same max-date uploads can still be a total collapse (spike-repair
+        # fallout). Reject large combined-total downgrades even with a newer stamp.
+        in_max = inventory_history_max_date(incoming)
+        ex_max = inventory_history_max_date(existing)
+        if in_max is not None and ex_max is not None and in_max == ex_max:
+            try:
+                in_tot = float(_day_qty_totals(incoming).get(in_max, 0.0) or 0.0)
+                ex_tot = float(_day_qty_totals(existing).get(ex_max, 0.0) or 0.0)
+                if ex_tot > 50_000 and in_tot < ex_tot * 0.90:
+                    return False
+            except Exception:
+                pass
         return True
     if ex_at > in_at + 0.5:
         return False
@@ -878,11 +898,13 @@ def inventory_history_is_newer_than(
             return True
         if in_max < ex_max:
             return False
+    # Equal timestamps must not rewrite disk — stale warm sessions used to
+    # clobber a just-rebuilt channel matrix with the same uploaded_at.
     if in_at > 0 or ex_at > 0:
-        return in_at >= ex_at
+        return False
     in_skus = int(incoming["OMS_SKU"].astype(str).nunique()) if "OMS_SKU" in incoming.columns else 0
     ex_skus = int(existing["OMS_SKU"].astype(str).nunique()) if "OMS_SKU" in existing.columns else 0
-    return in_skus >= ex_skus
+    return in_skus > ex_skus
 
 
 def filter_inventory_history_window(
@@ -1336,24 +1358,35 @@ def refresh_inventory_history_rollforward(
             snap_ts = pd.Timestamp(snap_date).normalize()
             work = variant.copy()
             work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
-            qty = _variant_snapshot_qty_series(work)
-            if qty is not None:
-                work["Qty"] = qty.values
-                work = work[work["OMS_SKU"].str.len() > 0]
-                # Keep all snapshot SKUs — new styles must appear on Inv History
-                # the same day they land in the OMS upload.
-                if not work.empty:
-                    # Store OMS-aligned snapshot qty as blank-channel rows so the
-                    # history matrix stays on the same series as the uploaded OMS sheet.
-                    # Do NOT also store Amazon_Inventory as a separate channel — that
-                    # double-counts FBA into Combined totals (~190–250K spikes).
-                    incoming = pd.DataFrame({
+            work = work[work["OMS_SKU"].str.len() > 0]
+            if not work.empty:
+                parts: list[pd.DataFrame] = []
+                for snap_channel, col in (
+                    ("oms", "OMS_Inventory"),
+                    ("amazon", "Amazon_Inventory"),
+                ):
+                    if col not in work.columns:
+                        continue
+                    parts.append(pd.DataFrame({
                         "OMS_SKU": work["OMS_SKU"].values,
                         "Date": snap_ts,
-                        "Qty": work["Qty"].values,
+                        "Qty": pd.to_numeric(work[col], errors="coerce").fillna(0.0).values,
                         "Source": "snapshot",
-                        "Channel": "",
-                    })
+                        "Channel": snap_channel,
+                    }))
+                # Older inventory frames may only expose a total/OMS series.
+                if not parts:
+                    qty = _variant_snapshot_qty_series(work)
+                    if qty is not None:
+                        parts.append(pd.DataFrame({
+                            "OMS_SKU": work["OMS_SKU"].values,
+                            "Date": snap_ts,
+                            "Qty": qty.values,
+                            "Source": "snapshot",
+                            "Channel": "",
+                        }))
+                if parts:
+                    incoming = pd.concat(parts, ignore_index=True)
                     merged = merged[
                         ~((merged["Date"] == snap_ts) & (merged["Source"].astype(str) == "derived"))
                     ]
@@ -2236,10 +2269,18 @@ def repair_inventory_history_spikes(
     tolerance_units: float = 800.0,
     ratio_threshold: float = 1.04,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Replace snapshot columns that jump up when sales imply a decrease."""
+    """Replace snapshot columns that jump up when sales imply a decrease.
+
+    Channel-split matrices (explicit ``oms`` / ``amazon`` rows) are left untouched.
+    Raw ``Qty.sum()`` on those frames double-counts warehouse + FBA and historically
+    treated the first split day as a spike, then ``rollforward_inventory_day``
+    collapsed channels to blank and persisted ~130k totals over ~174k/181k truth.
+    """
     if inv_history is None or inv_history.empty:
         return inv_history, []
-    work = _ensure_source_column(inv_history)
+    work = _ensure_source_column(_ensure_channel_column(inv_history))
+    if inventory_channel_split_available(work):
+        return work.reset_index(drop=True), []
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
     dates = sorted(work["Date"].dropna().unique())
@@ -2249,6 +2290,8 @@ def repair_inventory_history_spikes(
     sales = _sales_net_by_sku_day(sales_df)
     actions: list[str] = []
     out = work.copy()
+    # Use combined (per-SKU max) day totals — never raw row sums.
+    day_totals = _day_qty_totals(out)
     # Check ALL consecutive date pairs for spikes (not just the last one).
     # Historical spikes (e.g. 163K → 247K two days ago) are just as invalid as
     # a spike on the latest snapshot. The strict conditions (>12% jump, >5K units,
@@ -2261,8 +2304,8 @@ def repair_inventory_history_spikes(
         next_rows = out[out["Date"] == d_next]
         if prev_rows.empty or next_rows.empty:
             continue
-        t_prev = float(prev_rows["Qty"].sum())
-        t_next = float(next_rows["Qty"].sum())
+        t_prev = float(day_totals.get(d_prev, 0.0) or 0.0)
+        t_next = float(day_totals.get(d_next, 0.0) or 0.0)
         if t_next <= t_prev:
             continue
         prev_skus = int(prev_rows["OMS_SKU"].astype(str).nunique())
@@ -2289,6 +2332,7 @@ def repair_inventory_history_spikes(
         repaired = rollforward_inventory_day(prev_rows, d_next, sales_df=sales_df)
         out = out[out["Date"] != d_next]
         out = pd.concat([out, repaired], ignore_index=True)
+        day_totals = _day_qty_totals(out)
         actions.append(f"repaired_spike:{d_next.date()}: {int(t_next)}→{int(repaired['Qty'].sum())}")
     if not actions:
         return work.reset_index(drop=True), []
@@ -2625,12 +2669,11 @@ def inventory_history_wide_matrix(
         pivot = page.pivot(index="OMS_SKU", columns="_d", values="Qty")
         pivot = pivot.reindex(index=page_skus, columns=dates_sorted)
         pivot = pivot.ffill(axis=1).fillna(0.0)
+        # Avoid DataFrame.iterrows (10k+ SKU exports were multi-minute / OOM).
+        vals = pivot.to_numpy(dtype=float, copy=False)
         rows = [
-            {
-                "sku": str(sku),
-                "qtys": [float(row.get(d, 0.0) or 0.0) for d in dates_sorted],
-            }
-            for sku, row in pivot.iterrows()
+            {"sku": str(sku), "qtys": vals[i].tolist()}
+            for i, sku in enumerate(page_skus)
         ]
         return {
             "loaded": True,
@@ -2725,12 +2768,10 @@ def inventory_history_wide_matrix(
         pivot = page.pivot(index="OMS_SKU", columns="Date", values="Qty")
         pivot = pivot.reindex(index=page_skus, columns=dates_sorted)
         pivot = pivot.ffill(axis=1).fillna(0.0)
+        vals = pivot.to_numpy(dtype=float, copy=False)
         rows = [
-            {
-                "sku": str(sku),
-                "qtys": [float(row.get(d, 0.0) or 0.0) for d in dates_sorted],
-            }
-            for sku, row in pivot.iterrows()
+            {"sku": str(sku), "qtys": vals[i].tolist()}
+            for i, sku in enumerate(page_skus)
         ]
         return {
             "loaded": True,
@@ -2771,12 +2812,10 @@ def inventory_history_wide_matrix(
     pivot = page_dense.pivot(index="OMS_SKU", columns="Date", values="Qty")
     pivot = pivot.reindex(index=page_skus, columns=dates_sorted).fillna(0.0)
 
+    vals = pivot.to_numpy(dtype=float, copy=False)
     rows = [
-        {
-            "sku": str(sku),
-            "qtys": [float(row.get(d, 0.0) or 0.0) for d in dates_sorted],
-        }
-        for sku, row in pivot.iterrows()
+        {"sku": str(sku), "qtys": vals[i].tolist()}
+        for i, sku in enumerate(page_skus)
     ]
     return {
         "loaded": True,
@@ -2792,6 +2831,72 @@ def inventory_history_wide_matrix(
         "channel": channel,
         "channel_split_available": inventory_channel_split_available(df),
     }
+
+
+def inventory_history_wide_matrix_csv(
+    df: pd.DataFrame,
+    *,
+    q: str = "",
+    days: int | None = None,
+    end_date: str | None = None,
+    channel: str = "combined",
+) -> tuple[bytes, str]:
+    """Build the wide Inv History matrix as UTF-8 CSV bytes (server-side export).
+
+    Avoids shipping ~10k×30 floats as JSON into the browser — that path OOMs /
+    times out the tab. Returns ``(csv_bytes, filename)``.
+    """
+    import csv
+    import io
+
+    # Cap matches the old browser export (limit=15000) but streams as CSV.
+    wide = inventory_history_wide_matrix(
+        df,
+        q=q,
+        limit=20_000,
+        offset=0,
+        days=days,
+        end_date=end_date,
+        sales_df=None,
+        channel=channel,
+    )
+    dates = list(wide.get("dates") or [])
+    rows = list(wide.get("rows") or [])
+    totals = list(wide.get("date_totals") or [])
+
+    buf = io.StringIO(newline="")
+    writer = csv.writer(buf)
+    writer.writerow(["SKU", *dates])
+    if dates and totals and len(totals) == len(dates):
+        writer.writerow(
+            [
+                "Total inv.",
+                *[
+                    int(round(float(t))) if abs(float(t) - round(float(t))) < 1e-9 else float(t)
+                    for t in totals
+                ],
+            ]
+        )
+    for r in rows:
+        qtys = r.get("qtys") or []
+        writer.writerow(
+            [
+                str(r.get("sku") or ""),
+                *[
+                    int(round(float(q))) if abs(float(q) - round(float(q))) < 1e-9 else float(q)
+                    for q in qtys
+                ],
+            ]
+        )
+
+    channel_s = (channel or "combined").strip().lower()
+    suffix = f"-{channel_s}" if channel_s and channel_s != "combined" else ""
+    needle = (q or "").strip().upper()
+    if needle:
+        suffix = f"{suffix}-{needle}" if suffix else f"-{needle}"
+    end = wide.get("window_end") or (dates[-1] if dates else str(today_ist_timestamp().date()))
+    filename = f"inventory-matrix{suffix}-{end}.csv"
+    return buf.getvalue().encode("utf-8"), filename
 
 
 _DAILY_INV_META_FILENAME = "daily_inventory_history_meta.json"
@@ -3402,6 +3507,7 @@ __all__ = [
     "list_inventory_history_dates",
     "inventory_rows_for_date",
     "inventory_history_wide_matrix",
+    "inventory_history_wide_matrix_csv",
     "daily_inventory_history_meta_bundle",
     "apply_daily_inventory_history_meta",
     "read_daily_inventory_history_disk_meta",

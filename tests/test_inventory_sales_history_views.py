@@ -65,6 +65,52 @@ def test_blank_channel_history_served_as_oms():
     assert sum(wide["date_totals"]) > 0
 
 
+def test_oms_channel_uses_legacy_blank_dates_and_new_explicit_dates():
+    legacy = _hist("SKU-A", ["2026-07-15"], [100.0])
+    legacy["Channel"] = ""
+    oms = _hist("SKU-A", ["2026-07-16"], [90.0])
+    oms["Channel"] = "oms"
+    amz = _hist("SKU-A", ["2026-07-16"], [20.0])
+    amz["Channel"] = "amazon"
+    hist = pd.concat([legacy, oms, amz], ignore_index=True)
+
+    oms_only = filter_inventory_history_channel(hist, "oms")
+    got = dict(zip(oms_only["Date"].dt.strftime("%Y-%m-%d"), oms_only["Qty"]))
+    assert got == {"2026-07-15": 100.0, "2026-07-16": 90.0}
+    amazon_only = filter_inventory_history_channel(hist, "amazon")
+    assert list(amazon_only["Qty"]) == [20.0]
+    combined = combine_inventory_channels(hist)
+    totals = combined.groupby("Date")["Qty"].sum()
+    assert float(totals[pd.Timestamp("2026-07-15")]) == 100.0
+    assert float(totals[pd.Timestamp("2026-07-16")]) == 90.0
+
+
+def test_inventory_history_wide_matrix_csv_includes_total_row():
+    from backend.services.daily_inventory_history import inventory_history_wide_matrix_csv
+
+    hist = pd.concat(
+        [
+            _hist("SKU-A", ["2026-07-16", "2026-07-17"], [10.0, 8.0]),
+            _hist("SKU-B", ["2026-07-16", "2026-07-17"], [5.0, 4.0]),
+        ],
+        ignore_index=True,
+    )
+    hist["Channel"] = ""
+    csv_bytes, filename = inventory_history_wide_matrix_csv(
+        hist, days=2, end_date="2026-07-17", channel="combined"
+    )
+    text = csv_bytes.decode("utf-8")
+    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    assert lines[0].startswith("SKU,")
+    assert "2026-07-16" in lines[0] and "2026-07-17" in lines[0]
+    assert lines[1].startswith("Total inv.,")
+    assert "15" in lines[1] and "12" in lines[1]
+    assert any(ln.startswith("SKU-A,") for ln in lines)
+    assert any(ln.startswith("SKU-B,") for ln in lines)
+    assert filename.endswith(".csv")
+    assert "2026-07-17" in filename
+
+
 def test_inventory_matrix_channel_split_flag():
     oms = _hist("SKU-A", ["2026-06-01", "2026-06-02"], [5.0, 5.0])
     oms["Channel"] = "oms"

@@ -1158,6 +1158,37 @@ export async function getPoDailyInventoryHistoryMatrix(
   return data
 }
 
+/** Server-side full-matrix CSV — avoids loading 10k×30 floats as JSON in the browser. */
+export async function downloadPoDailyInventoryHistoryMatrixCsv(
+  opts?: { q?: string; days?: number; endDate?: string; channel?: InventoryHistoryChannel },
+) {
+  const res = await api.get('/po/daily-inventory-history/matrix.csv', {
+    params: {
+      q: opts?.q ?? '',
+      days: opts?.days ?? 30,
+      channel: opts?.channel ?? 'combined',
+      ...(opts?.endDate ? { end_date: opts.endDate } : {}),
+    },
+    responseType: 'blob',
+    timeout: 300_000,
+  })
+  const cd = String(res.headers?.['content-disposition'] || '')
+  const m = /filename="?([^";]+)"?/i.exec(cd)
+  const filename = m?.[1] || 'inventory-matrix.csv'
+  const blob = res.data as Blob
+  // If the server returned JSON error as a blob, surface it.
+  if (blob.type && blob.type.includes('application/json')) {
+    const text = await blob.text()
+    throw new Error(text || 'Inventory matrix export failed')
+  }
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 export type SalesHistoryCoverageGap = {
   date: string
   missing_platforms: string[]

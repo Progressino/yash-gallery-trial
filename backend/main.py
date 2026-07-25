@@ -670,6 +670,15 @@ def persist_po_sidecars_to_disk() -> None:
                 manifest = json.load(f)
         keys = set(manifest.get("keys") or [])
         for key in _PO_SIDECAR_KEYS:
+            # Inventory history has its own guarded/atomic persistence path
+            # (sync_daily_inventory_history_sidecar /
+            # persist_inventory_history_authoritative). Generic PO sidecar
+            # persistence may be called while hydrating an old PostgreSQL
+            # session; writing that frame here repeatedly rolled the shared
+            # matrix back after restarts and made different browser tabs show
+            # different totals.
+            if key == "daily_inventory_history_df":
+                continue
             df = _warm_cache.get(key)
             path = os.path.join(_DISK_CACHE_DIR, f"{key}.parquet")
             if df is None or not hasattr(df, "empty") or df.empty:
@@ -2070,7 +2079,6 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
         if "daily_inventory_history_df" in loaded:
             try:
                 from .services.daily_inventory_history import repair_inventory_history_integrity
-                from .services.helpers import _coerce_df_for_parquet
 
                 hist = loaded["daily_inventory_history_df"]
                 variant = loaded.get("inventory_df_variant")
@@ -2079,14 +2087,13 @@ def _load_warm_cache_from_disk(ignore_age: bool = False) -> "tuple[bool, dict]":
                 )
                 if report.get("repaired"):
                     log.info(
-                        "Repaired daily_inventory_history_df integrity on disk load: %s",
+                        "Repaired daily_inventory_history_df integrity on disk load "
+                        "(memory only — not rewriting authoritative parquet): %s",
                         report.get("actions"),
                     )
-                    try:
-                        hist_path = Path(_DISK_CACHE_DIR) / "daily_inventory_history_df.parquet"
-                        _coerce_df_for_parquet(repaired).to_parquet(hist_path, index=False)
-                    except Exception:
-                        log.exception("persist integrity repair on Phase-0 load failed")
+                # Never write Phase-0 integrity repairs back to disk. That path
+                # bypassed persist_inventory_history_authoritative and wiped
+                # channel-split matrices after RAR rebuilds.
                 loaded["daily_inventory_history_df"] = repaired
             except Exception:
                 log.exception("inventory history integrity repair on Phase-0 disk load failed")

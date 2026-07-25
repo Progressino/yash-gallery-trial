@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
   api,
+  downloadPoDailyInventoryHistoryMatrixCsv,
   getPoDailyInventoryHistoryMatrix,
   getPoDailyInventoryHistorySku,
   type InventoryHistoryChannel,
@@ -93,19 +94,14 @@ export default function InventoryHistory() {
   const handleExportMatrix = async () => {
     setExporting(true)
     try {
-      const data = await getPoDailyInventoryHistoryMatrix(skuFilter, 15000, 0, {
+      await downloadPoDailyInventoryHistoryMatrixCsv({
+        q: skuFilter,
         days: HISTORY_WINDOW_DAYS,
         channel,
       })
-      const hdr = ['SKU', ...data.dates]
-      const body = data.rows.map(r => [r.sku, ...r.qtys.map(q => String(q))])
-      const label = [
-        channel !== 'combined' ? channel : null,
-        skuFilter.trim() || null,
-      ]
-        .filter(Boolean)
-        .join('-')
-      downloadCsv(`${label ? `inventory-matrix-${label}` : 'inventory-matrix'}.csv`, hdr, body)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      window.alert(`Inventory export failed: ${msg}`)
     } finally {
       setExporting(false)
     }

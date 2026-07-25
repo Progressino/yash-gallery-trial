@@ -21,6 +21,70 @@ def test_inventory_history_is_newer_than_prefers_later_max_date():
     assert not inventory_history_is_newer_than(old, new)
 
 
+def test_inventory_history_is_newer_than_rejects_channel_split_loss():
+    split = pd.DataFrame(
+        {
+            "OMS_SKU": ["A", "A"],
+            "Date": pd.to_datetime(["2026-07-23", "2026-07-23"]),
+            "Qty": [100.0, 40.0],
+            "Source": ["snapshot", "snapshot"],
+            "Channel": ["oms", "amazon"],
+        }
+    )
+    blank = pd.DataFrame(
+        {
+            "OMS_SKU": ["A"],
+            "Date": pd.to_datetime(["2026-07-23"]),
+            "Qty": [100.0],
+            "Source": ["derived"],
+            "Channel": [""],
+        }
+    )
+    assert not inventory_history_is_newer_than(
+        blank,
+        split,
+        incoming_uploaded_at="2026-07-25T12:00:00Z",
+        existing_uploaded_at="2026-07-25T10:00:00Z",
+    )
+    assert inventory_history_is_newer_than(
+        split,
+        blank,
+        incoming_uploaded_at="2026-07-25T12:00:00Z",
+        existing_uploaded_at="2026-07-25T10:00:00Z",
+    )
+
+
+def test_inventory_history_is_newer_than_rejects_equal_uploaded_at_rewrite():
+    a = _hist("A", "2026-07-23", 3)
+    b = _hist("A", "2026-07-23", 3)
+    b.loc[:, "Qty"] = 1.0
+    assert not inventory_history_is_newer_than(
+        b,
+        a,
+        incoming_uploaded_at="2026-07-25T10:31:53Z",
+        existing_uploaded_at="2026-07-25T10:31:53Z",
+    )
+
+
+def test_repair_inventory_history_spikes_skips_channel_split():
+    from backend.services.daily_inventory_history import repair_inventory_history_spikes
+
+    hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["A", "A", "A", "A"],
+            "Date": pd.to_datetime(
+                ["2026-07-22", "2026-07-22", "2026-07-23", "2026-07-23"]
+            ),
+            "Qty": [100.0, 40.0, 100.0, 40.0],
+            "Source": ["snapshot"] * 4,
+            "Channel": ["oms", "amazon", "oms", "amazon"],
+        }
+    )
+    repaired, actions = repair_inventory_history_spikes(hist, sales_df=None)
+    assert actions == []
+    assert set(repaired["Channel"].astype(str)) == {"oms", "amazon"}
+
+
 def test_inventory_history_is_newer_than_wins_with_fewer_rows():
     """June upload trimmed to 30d must beat May blob with more rows."""
     may = _hist("A", "2026-05-30", 30)

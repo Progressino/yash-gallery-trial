@@ -434,24 +434,11 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
     except Exception:
         _log.exception("reconcile_daily_inventory_meta_if_session_newer failed")
 
+    # Spike repair on the read path used to rewrite + persist disk (and, for
+    # channel-split matrices, collapse OMS+Amazon into a blank ~130k series).
+    # Keep authoritative history disk-only; UI densify still repairs in-memory.
     df = getattr(sess, "daily_inventory_history_df", None)
-    if df is not None and not getattr(df, "empty", True):
-        from .daily_inventory_history import repair_inventory_history_spikes
-
-        sales_df = getattr(sess, "sales_df", None)
-        repaired, actions = repair_inventory_history_spikes(df, sales_df)
-        if actions:
-            sess.daily_inventory_history_df = repaired
-            if not _main._warm_cache:
-                _main._warm_cache = {}
-            _main._warm_cache["daily_inventory_history_df"] = repaired.copy()
-            try:
-                _main.sync_daily_inventory_history_sidecar(sess)
-            except Exception:
-                _log.exception("persist repaired inventory history failed")
-            df = repaired
-
-    return drop_zero_derived_rows(df)
+    return drop_zero_derived_rows(df) if df is not None else pd.DataFrame()
 
 
 _MIN_STATUS_ROWS_FOR_LARGE_CATALOG = 100
