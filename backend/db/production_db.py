@@ -1112,6 +1112,16 @@ def receive_pieces(joid: int, data: dict):
             process=process,
             split_qty=received,
         )
+        # Parent set-component Cutting JO receive: explode FRONT/BACK panel stock
+        # under that parent (panels never get their own Cutting JO).
+        if split_info is None:
+            split_info = _split_panels_on_component_receive(
+                conn,
+                so_number=so_number,
+                component_sku_in=sku,
+                process=process,
+                split_qty=received,
+            )
 
     from ..services.document_qty_control import jo_should_auto_close
 
@@ -1933,9 +1943,10 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                 }
             )
         # Surface panels on the WIP board without treating them as set-match units.
-        for ln in bom.get("lines") or []:
-            if str(ln.get("component_role") or "").upper() != ROLE_PANEL:
-                continue
+        from ..services.component_bom import panel_lines as _panel_lines
+
+        panel_comps = []
+        for ln in _panel_lines(bom):
             code = ln["component_code"]
             csku = component_sku(main, code)
             path = resolve_component_routing(
@@ -1954,7 +1965,7 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
             avail_gate = int(gate_row["q"] if gate_row else 0)
             emb_out = int(emb_row["q"] if emb_row else 0)
             location = "Embroidery" if emb_out > 0 else (gate if avail_gate > 0 else "")
-            comps.append(
+            panel_comps.append(
                 {
                     "component_code": code,
                     "component_name": ln.get("component_name") or code,
@@ -1969,6 +1980,20 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                     "gate_optional": True,
                 }
             )
+        # Fold panel embroidery into parent set-component so stitching stays blocked
+        # while FRONT (etc.) is still under Embroidery.
+        emb_by_parent: dict[str, int] = {}
+        for pc in panel_comps:
+            parent = str(pc.get("parent_component_code") or "").strip().upper()
+            if not parent:
+                continue
+            emb_by_parent[parent] = emb_by_parent.get(parent, 0) + int(pc.get("embroidery_outstanding") or 0)
+        for c in comps:
+            code = str(c.get("component_code") or "").strip().upper()
+            extra = emb_by_parent.get(code, 0)
+            if extra:
+                c["embroidery_outstanding"] = int(c.get("embroidery_outstanding") or 0) + extra
+        comps.extend(panel_comps)
         out = compute_bundle_readiness(
             [c for c in comps if not c.get("gate_optional")],
             gate_process=gate,
@@ -2044,6 +2069,116 @@ def get_partial_wip_board(so_number: str, main_sku: str) -> dict:
     }
 
 
+def _load_set_bom_for_split(conn, main_sku: str) -> Optional[dict]:
+    from ..services.set_components import style_key_for_set_bom
+
+    main = str(main_sku or "").strip().upper()
+    if not main:
+        return None
+    style_key = style_key_for_set_bom(main)
+    bom = _hydrate_set_bom(conn, _set_bom_header_row(conn, style_key))
+    if not bom:
+        bom = _hydrate_set_bom(conn, _set_bom_header_row(conn, main))
+    return bom
+
+
+def _create_panel_stocks_under_parents(
+    conn,
+    *,
+    so_number: str,
+    main_sku: str,
+    process: str,
+    parent_qty_by_code: dict[str, int],
+    bom: dict,
+) -> list[dict]:
+    """Create Cutting process_stock for PANEL SKUs under each parent set component."""
+    from ..services.component_bom import panel_lines
+    from ..services.set_components import component_sku
+
+    main = str(main_sku or "").strip().upper()
+    panels_out: list[dict] = []
+    for parent_code, parent_qty in parent_qty_by_code.items():
+        pq = int(parent_qty or 0)
+        if pq <= 0:
+            continue
+        parent = str(parent_code or "").strip().upper()
+        for ln in panel_lines(bom, parent_component_code=parent):
+            code = ln["component_code"]
+            ratio = max(int(ln.get("qty_per_set") or 1), 1)
+            qty = pq * ratio
+            psku = component_sku(main, code)
+            _update_process_stock(conn, so_number, psku, process, qty_in=qty)
+            panels_out.append(
+                {
+                    "component_code": code,
+                    "component_name": ln.get("component_name") or code,
+                    "component_sku": psku,
+                    "parent_component_code": parent,
+                    "qty_per_set": ratio,
+                    "qty": qty,
+                    "default_next_process": ln.get("default_next_process") or "",
+                    "component_role": "PANEL",
+                }
+            )
+    return panels_out
+
+
+def _split_panels_on_component_receive(
+    conn,
+    *,
+    so_number: str,
+    component_sku_in: str,
+    process: str,
+    split_qty: int,
+) -> Optional[dict]:
+    """When a parent set-component Cutting JO receives, explode its child panels."""
+    from ..services.component_bom import panel_lines, set_component_lines
+    from ..services.set_components import parse_component_sku
+
+    sku_u = str(component_sku_in or "").strip().upper()
+    if not sku_u or split_qty <= 0:
+        return None
+    main, comp = parse_component_sku(sku_u)
+    if not main or not comp:
+        return None
+
+    bom = _load_set_bom_for_split(conn, main)
+    if not bom:
+        return None
+
+    # Only explode from SET_COMPONENT parents — never from a panel SKU itself.
+    set_codes = {str(ln["component_code"]).upper() for ln in set_component_lines(bom)}
+    if comp not in set_codes:
+        return None
+    children = panel_lines(bom, parent_component_code=comp)
+    if not children:
+        return None
+
+    panels_out = _create_panel_stocks_under_parents(
+        conn,
+        so_number=so_number,
+        main_sku=main,
+        process=process,
+        parent_qty_by_code={comp: int(split_qty)},
+        bom=bom,
+    )
+    if not panels_out:
+        return None
+    return {
+        "main_sku": main,
+        "parent_component_code": comp,
+        "parent_sku": sku_u,
+        "style_key": bom.get("style_key"),
+        "split_qty": split_qty,
+        "panels": panels_out,
+        "components": panels_out,
+        "message": (
+            f"Split {split_qty} of {sku_u} into {len(panels_out)} panel SKU(s) "
+            f"(FRONT/BACK WIP under parent Cutting JO)"
+        ),
+    }
+
+
 def _split_cutting_receive(
     conn,
     *,
@@ -2054,23 +2189,19 @@ def _split_cutting_receive(
     process: str,
     split_qty: int,
 ) -> Optional[dict]:
-    """Move Cutting stock from main SKU onto component SKUs per Set BOM."""
-    from ..services.set_components import component_sku, style_key_for_set_bom
+    """Move Cutting stock from main SKU onto set-component + panel SKUs per Set BOM."""
+    from ..services.set_components import component_sku
 
     main = str(main_sku or "").strip().upper()
     if not main or split_qty <= 0:
         return None
-    # Do not re-split a component receive
+    # Do not re-split a component receive (panel explosion handled separately)
     from ..services.set_components import parse_component_sku
 
     if parse_component_sku(main)[1]:
         return None
 
-    style_key = style_key_for_set_bom(main)
-    bom = _hydrate_set_bom(conn, _set_bom_header_row(conn, style_key))
-    if not bom:
-        # Also try exact main as style_key (size-level BOM)
-        bom = _hydrate_set_bom(conn, _set_bom_header_row(conn, main))
+    bom = _load_set_bom_for_split(conn, main)
     from ..services.component_bom import set_component_lines
 
     lines = set_component_lines(bom)
@@ -2078,12 +2209,14 @@ def _split_cutting_receive(
         return None
 
     components_out = []
+    parent_qty_by_code: dict[str, int] = {}
     for ln in lines:
         code = ln["component_code"]
         ratio = max(int(ln.get("qty_per_set") or 1), 1)
         qty = int(split_qty) * ratio
         csku = component_sku(main, code)
         _update_process_stock(conn, so_number, csku, process, qty_in=qty)
+        parent_qty_by_code[str(code).upper()] = qty
         components_out.append(
             {
                 "component_code": code,
@@ -2092,8 +2225,18 @@ def _split_cutting_receive(
                 "qty_per_set": ratio,
                 "qty": qty,
                 "default_next_process": ln.get("default_next_process") or "",
+                "component_role": "SET_COMPONENT",
             }
         )
+
+    panels_out = _create_panel_stocks_under_parents(
+        conn,
+        so_number=so_number,
+        main_sku=main,
+        process=process,
+        parent_qty_by_code=parent_qty_by_code,
+        bom=bom,
+    )
 
     # Remove the just-received qty from main Cutting stock (components own it now)
     _update_process_stock(conn, so_number, main, process, qty_out=split_qty)
@@ -2105,6 +2248,7 @@ def _split_cutting_receive(
             (main, jo_line_id),
         )
 
+    event_payload = components_out + panels_out
     conn.execute(
         """INSERT INTO set_split_events
            (jo_id, jo_line_id, so_number, main_sku, process, split_qty, components_json)
@@ -2116,15 +2260,21 @@ def _split_cutting_receive(
             main,
             process,
             split_qty,
-            json.dumps(components_out),
+            json.dumps(event_payload),
         ),
     )
+    n_comp = len(components_out)
+    n_panel = len(panels_out)
+    msg = f"Split {split_qty} of {main} into {n_comp} component SKU(s)"
+    if n_panel:
+        msg += f" and {n_panel} panel SKU(s)"
     return {
         "main_sku": main,
         "style_key": bom.get("style_key"),
         "split_qty": split_qty,
         "components": components_out,
-        "message": f"Split {split_qty} of {main} into {len(components_out)} component SKU(s)",
+        "panels": panels_out,
+        "message": msg,
     }
 
 

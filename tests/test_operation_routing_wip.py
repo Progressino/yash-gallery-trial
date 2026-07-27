@@ -126,12 +126,22 @@ def test_embroidery_after_cutting_partial_wip_and_stitch_gate(isolated_module_db
             "bundle_gate_process": "Cutting",
             "lines": [
                 {
+                    "component_code": "TOP",
+                    "component_name": "Top",
+                    "qty_per_set": 1,
+                    "default_next_process": "Stitching",
+                    "routing": "Cutting>Stitching",
+                    "component_role": "SET_COMPONENT",
+                },
+                {
                     "component_code": "FRONT",
                     "component_name": "Front",
                     "qty_per_set": 1,
                     "default_next_process": "Embroidery",
                     "routing": "Cutting>Embroidery>Cutting>Stitching",
                     "requires_embroidery": True,
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
                 },
                 {
                     "component_code": "BACK",
@@ -139,13 +149,16 @@ def test_embroidery_after_cutting_partial_wip_and_stitch_gate(isolated_module_db
                     "qty_per_set": 1,
                     "default_next_process": "Stitching",
                     "routing": "Cutting>Stitching",
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
                 },
                 {
-                    "component_code": "SLEEVE",
-                    "component_name": "Sleeve",
-                    "qty_per_set": 2,
+                    "component_code": "BOTTOM",
+                    "component_name": "Bottom",
+                    "qty_per_set": 1,
                     "default_next_process": "Stitching",
                     "routing": "Cutting>Stitching",
+                    "component_role": "SET_COMPONENT",
                 },
             ],
         },
@@ -260,15 +273,25 @@ def test_embroidery_before_cutting_routing_resolution(isolated_module_dbs, clien
             "style_key": "EMBBEFORE",
             "lines": [
                 {
+                    "component_code": "TOP",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "SET_COMPONENT",
+                },
+                {
                     "component_code": "FRONT",
                     "qty_per_set": 1,
                     "routing": "Cutting>Embroidery>Cutting>Stitching",
                     "requires_embroidery": True,
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
                 },
                 {
                     "component_code": "BACK",
                     "qty_per_set": 1,
                     "routing": "Cutting>Stitching",
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
                 },
             ],
         },
@@ -285,3 +308,101 @@ def test_embroidery_before_cutting_routing_resolution(isolated_module_dbs, clien
     assert get_next_process("EMBBEFORE-M-FRONT", "Cutting") == "Embroidery"
     assert get_next_process("EMBBEFORE-M-FRONT", "Embroidery") == "Cutting"
     assert get_next_process("EMBBEFORE-M-BACK", "Cutting") == "Stitching"
+
+
+def test_parent_component_jo_receive_explodes_panel_stock(isolated_module_dbs, client):
+    """Default flow: TOP Cutting JO receive creates FRONT/BACK panel stock under parent."""
+    bom = client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "COMPJOSET",
+            "stitching_requires_complete_set": True,
+            "bundle_gate_process": "Cutting",
+            "lines": [
+                {
+                    "component_code": "TOP",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "SET_COMPONENT",
+                },
+                {
+                    "component_code": "FRONT",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Embroidery>Cutting>Stitching",
+                    "requires_embroidery": True,
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+                {
+                    "component_code": "BACK",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+                {
+                    "component_code": "BOTTOM",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "SET_COMPONENT",
+                },
+            ],
+        },
+    )
+    assert bom.status_code == 200, bom.text
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-07-22",
+            "so_number": "SO-COMPJO-1",
+            "sku": "COMPJOSET-M",
+            "process": "Cutting",
+            "planned_qty": 4,
+            "create_component_jos": True,
+            "lines": [{"sku": "COMPJOSET-M", "style": "M", "planned_qty": 4}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    orders = client.get("/api/production/orders").json()
+    top_jo = next(
+        o
+        for o in orders
+        if o.get("so_number") == "SO-COMPJO-1" and str(o.get("sku") or "").endswith("-TOP")
+    )
+    line = top_jo["lines"][0]
+
+    rec = client.post(
+        f"/api/production/orders/{top_jo['id']}/receive-pieces",
+        json={
+            "received_qty": 4,
+            "process": "Cutting",
+            "sku": "COMPJOSET-M-TOP",
+            "jo_line_id": line["id"],
+            "split_components": True,
+        },
+    )
+    assert rec.status_code == 200, rec.text
+    split = rec.json().get("split") or {}
+    assert split.get("panels"), split
+    panel_codes = {p["component_code"] for p in split["panels"]}
+    assert panel_codes == {"FRONT", "BACK"}
+
+    iss_front = client.post(
+        f"/api/production/orders/{top_jo['id']}/issue-pieces",
+        json={
+            "issued_qty": 4,
+            "from_process": "Cutting",
+            "to_process": "Embroidery",
+            "sku": "COMPJOSET-M-FRONT",
+        },
+    )
+    assert iss_front.status_code == 200, iss_front.text
+
+    board = client.get(
+        "/api/production/wip-board",
+        params={"so_number": "SO-COMPJO-1", "main_sku": "COMPJOSET-M"},
+    ).json()
+    by_code = {i["component_code"]: i for i in board["items"]}
+    assert by_code["FRONT"]["current_location"] == "Embroidery"
+    assert board["bundle_complete"] is False

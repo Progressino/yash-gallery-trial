@@ -20,12 +20,30 @@ def main() -> int:
             "bundle_gate_process": "Cutting",
             "lines": [
                 {
+                    "component_code": "TOP",
+                    "component_name": "Top",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "default_next_process": "Stitching",
+                    "component_role": "SET_COMPONENT",
+                },
+                {
                     "component_code": "FRONT",
                     "component_name": "Front",
                     "qty_per_set": 1,
                     "routing": "Cutting>Embroidery>Cutting>Stitching",
                     "requires_embroidery": True,
                     "default_next_process": "Embroidery",
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+                {
+                    "component_code": "BOTTOM",
+                    "component_name": "Bottom",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "default_next_process": "Stitching",
+                    "component_role": "SET_COMPONENT",
                 },
                 {
                     "component_code": "BACK",
@@ -33,6 +51,8 @@ def main() -> int:
                     "qty_per_set": 1,
                     "routing": "Cutting>Stitching",
                     "default_next_process": "Stitching",
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
                 },
             ],
         }
