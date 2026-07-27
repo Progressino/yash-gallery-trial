@@ -406,3 +406,62 @@ def test_parent_component_jo_receive_explodes_panel_stock(isolated_module_dbs, c
     by_code = {i["component_code"]: i for i in board["items"]}
     assert by_code["FRONT"]["current_location"] == "Embroidery"
     assert board["bundle_complete"] is False
+
+
+def test_jo_panel_wip_endpoint_before_and_after_receive(isolated_module_dbs, client):
+    """Cutting JO detail exposes FRONT/BACK panel rows for the Production UI."""
+    bom = client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "PANELUI",
+            "lines": [
+                {"component_code": "TOP", "qty_per_set": 1, "routing": "Cutting>Stitching", "component_role": "SET_COMPONENT"},
+                {"component_code": "FRONT", "qty_per_set": 1, "routing": "Cutting>Embroidery>Cutting>Stitching", "component_role": "PANEL", "parent_component_code": "TOP"},
+                {"component_code": "BACK", "qty_per_set": 1, "routing": "Cutting>Stitching", "component_role": "PANEL", "parent_component_code": "TOP"},
+            ],
+        },
+    )
+    assert bom.status_code == 200, bom.text
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-07-22",
+            "so_number": "SO-PANELUI",
+            "sku": "PANELUI-M",
+            "process": "Cutting",
+            "planned_qty": 3,
+            "create_component_jos": True,
+            "lines": [{"sku": "PANELUI-M", "style": "M", "planned_qty": 3}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    top_jo = next(
+        o for o in client.get("/api/production/orders").json()
+        if o.get("so_number") == "SO-PANELUI" and str(o.get("sku") or "").endswith("-TOP")
+    )
+
+    before = client.get(f"/api/production/orders/{top_jo['id']}/panel-wip").json()
+    assert before["has_panels"] is True
+    assert {p["component_code"] for p in before["panels"]} == {"FRONT", "BACK"}
+    assert all(p["issueable_qty"] == 0 for p in before["panels"])
+
+    line = top_jo["lines"][0]
+    rec = client.post(
+        f"/api/production/orders/{top_jo['id']}/receive-pieces",
+        json={
+            "received_qty": 3,
+            "process": "Cutting",
+            "sku": "PANELUI-M-TOP",
+            "jo_line_id": line["id"],
+            "split_components": True,
+        },
+    )
+    assert rec.status_code == 200, rec.text
+
+    after = client.get(f"/api/production/orders/{top_jo['id']}/panel-wip").json()
+    by_code = {p["component_code"]: p for p in after["panels"]}
+    assert by_code["FRONT"]["issueable_qty"] == 3
+    assert by_code["BACK"]["issueable_qty"] == 3
+    assert by_code["FRONT"]["issue_to_process"] == "Embroidery"
+    assert by_code["BACK"]["issue_to_process"] == "Stitching"

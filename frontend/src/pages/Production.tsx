@@ -696,6 +696,8 @@ export default function Production() {
   const [fabricReturnForm, setFabricReturnForm] = useState({ fabric_code: '', returned_qty: 0, unit: 'MTR', returned_by: '', remarks: '' })
   const [receiveForm, setReceiveForm] = useState({ received_qty: 0, rejected_qty: 0, received_by: '', remarks: '', split_components: true })
   const [issuePiecesForm, setIssuePiecesForm] = useState({ issued_qty: 0, to_process: '', issued_by: '', remarks: '' })
+  const [issuePiecesSku, setIssuePiecesSku] = useState('')
+  const [issueFromProcess, setIssueFromProcess] = useState('')
   const [costForm, setCostForm] = useState({ cost_type: 'Labour', amount: 0, description: '' })
 
   // URL params auto-fill
@@ -751,6 +753,11 @@ export default function Production() {
     queryKey: ['set-bom-for-sku', receiveSku],
     queryFn: () => api.get(`/production/set-bom-for-sku/${encodeURIComponent(receiveSku)}`).then(r => r.data),
     enabled: modal === 'receive' && !!receiveSku && activeJO?.process === 'Cutting',
+  })
+  const { data: expandedPanelWip } = useQuery({
+    queryKey: ['jo-panel-wip', expanded],
+    queryFn: () => api.get(`/production/orders/${expanded}/panel-wip`).then(r => r.data),
+    enabled: expanded != null,
   })
   const { data: soList = [] } = useQuery({
     queryKey: ['so-list'],
@@ -930,6 +937,7 @@ export default function Production() {
     qc.invalidateQueries({ queryKey: ['process-report'] })
     qc.invalidateQueries({ queryKey: ['prod-issue-notes'] })
     qc.invalidateQueries({ queryKey: ['jo-issue-note'] })
+    qc.invalidateQueries({ queryKey: ['jo-panel-wip'] })
   }
 
   // ── Mutations ─────────────────────────────────────────────────────────────────
@@ -996,7 +1004,12 @@ export default function Production() {
     onError: (e: unknown) => alert(apiErrorMessage(e, 'Error')),
   })
 
-  const openModal = async (type: ModalType, jo: JO, lineId?: number) => {
+  const openModal = async (
+    type: ModalType,
+    jo: JO,
+    lineId?: number,
+    opts?: { sku?: string; toProcess?: string; fromProcess?: string; issuedQty?: number },
+  ) => {
     setActiveJO(jo)
     setActiveLineId(lineId || null)
     setModal(type)
@@ -1063,7 +1076,30 @@ export default function Production() {
     }
     if (type === 'issue-pieces') {
       const line = jo.lines.find(l => l.id === lineId)
-      setIssuePiecesForm(f => ({ ...f, to_process: jo.next_process || '', issued_qty: line ? line.received_qty : jo.received_qty }))
+      const sku = opts?.sku || line?.sku || jo.sku
+      const fromProc = opts?.fromProcess || jo.process
+      let toProc = opts?.toProcess || ''
+      if (!toProc && sku !== jo.sku) {
+        try {
+          const route = await api.get(`/production/item-routing/${encodeURIComponent(sku)}`)
+          toProc = fromProc === 'Embroidery'
+            ? (route.data?.routing || []).includes('Cutting')
+              ? 'Cutting'
+              : route.data?.next_after_cutting || ''
+            : route.data?.next_after_cutting || ''
+        } catch {
+          toProc = jo.next_process || ''
+        }
+      }
+      if (!toProc) toProc = jo.next_process || ''
+      const defaultQty = opts?.issuedQty ?? (
+        opts?.sku
+          ? (expandedPanelWip?.panels?.find((p: { component_sku: string; issueable_qty?: number }) => p.component_sku === opts.sku)?.issueable_qty || 0)
+          : (line ? line.received_qty : jo.received_qty)
+      )
+      setIssuePiecesSku(sku)
+      setIssueFromProcess(fromProc)
+      setIssuePiecesForm(f => ({ ...f, to_process: toProc, issued_qty: defaultQty }))
     }
     if (type === 'add-cost') setCostForm({ cost_type: 'Labour', amount: 0, description: '' })
   }
@@ -1119,6 +1155,9 @@ export default function Production() {
 
   const renderJOCard = (jo: JO) => {
     const isExpanded = expanded === jo.id
+    const panelCtx = isExpanded && expandedPanelWip?.has_panels && expandedPanelWip?.jo_id === jo.id
+      ? expandedPanelWip
+      : null
     const totalPlanned = jo.lines.reduce((s, l) => s + l.planned_qty, 0) || jo.planned_qty
     const totalReceived = jo.lines.reduce((s, l) => s + l.received_qty, 0) || jo.received_qty
     const totalBalance = totalPlanned - totalReceived
@@ -1215,6 +1254,77 @@ export default function Production() {
               </div>
             )}
 
+            {/* Panel WIP (FRONT/BACK under parent Cutting JO) */}
+            {panelCtx && (
+              <div className="bg-white rounded-lg border border-indigo-200 overflow-hidden">
+                <div className="px-3 py-2 bg-indigo-50 text-xs font-semibold text-indigo-900 flex flex-wrap justify-between gap-2">
+                  <span>Panel WIP — managed inside this Cutting JO</span>
+                  <span className={panelCtx.bundle_complete ? 'text-emerald-700' : 'text-amber-700'}>
+                    {panelCtx.bundle_message || (panelCtx.bundle_complete ? 'Bundle complete' : 'Bundle incomplete')}
+                  </span>
+                </div>
+                <p className="px-3 py-2 text-[11px] text-indigo-800/80 border-b border-indigo-100">
+                  {panelCtx.hint}
+                </p>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-gray-400 border-b uppercase">
+                      <th className="text-left px-3 py-2">Panel</th>
+                      <th className="text-left px-3 py-2">SKU</th>
+                      <th className="text-left px-3 py-2">Routing</th>
+                      <th className="text-left px-3 py-2">Location</th>
+                      <th className="text-right px-3 py-2">Cutting</th>
+                      <th className="text-right px-3 py-2">Embroidery</th>
+                      <th className="text-left px-3 py-2">Status</th>
+                      <th className="text-center px-3 py-2">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(panelCtx.panels || []).map((panel: {
+                      component_code: string
+                      component_name: string
+                      component_sku: string
+                      routing: string
+                      current_location: string
+                      available_qty: number
+                      embroidery_outstanding: number
+                      status: string
+                      issue_from_process: string
+                      issue_to_process: string
+                      issueable_qty: number
+                    }) => (
+                      <tr key={panel.component_sku} className="border-t border-gray-50 hover:bg-indigo-50/40">
+                        <td className="px-3 py-2 font-semibold text-indigo-900">{panel.component_name || panel.component_code}</td>
+                        <td className="px-3 py-2 font-mono text-[11px]">{panel.component_sku}</td>
+                        <td className="px-3 py-2 text-gray-600">{panel.routing || '—'}</td>
+                        <td className="px-3 py-2">{panel.current_location || '—'}</td>
+                        <td className="px-3 py-2 text-right">{fmt(panel.available_qty || 0)}</td>
+                        <td className="px-3 py-2 text-right text-purple-700">{fmt(panel.embroidery_outstanding || 0)}</td>
+                        <td className="px-3 py-2">{panel.status || '—'}</td>
+                        <td className="px-3 py-2 text-center">
+                          {panel.issueable_qty > 0 && panel.issue_to_process ? (
+                            <button
+                              onClick={() => openModal('issue-pieces', jo, undefined, {
+                                sku: panel.component_sku,
+                                fromProcess: panel.issue_from_process,
+                                toProcess: panel.issue_to_process,
+                                issuedQty: panel.issueable_qty,
+                              })}
+                              className="px-2 py-0.5 text-xs bg-purple-600 text-white rounded hover:bg-purple-700"
+                            >
+                              → {panel.issue_to_process}
+                            </button>
+                          ) : (
+                            <span className="text-gray-400">Receive parent first</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
             {/* Lines table */}
             {jo.lines.length > 0 && (
               <div className="bg-white rounded-lg border overflow-hidden">
@@ -1249,7 +1359,7 @@ export default function Production() {
                           <div className="flex gap-1 justify-center">
                             <button onClick={() => openModal('receive', jo, line.id)}
                               className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700">✅ Rec</button>
-                            {jo.next_process && (
+                            {jo.next_process && !panelCtx && (
                               <button onClick={() => openModal('issue-pieces', jo, line.id)}
                                 className="px-2 py-0.5 text-xs bg-purple-600 text-white rounded hover:bg-purple-700">
                                 → {jo.next_process}
@@ -1301,7 +1411,7 @@ export default function Production() {
                 </>
               )}
               <button onClick={() => openModal('receive', jo)} className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg font-medium hover:bg-green-700">✅ Receive (JO level)</button>
-              {jo.next_process && (
+              {jo.next_process && !panelCtx && (
                 <button onClick={() => openModal('issue-pieces', jo)} className="px-3 py-1.5 text-xs bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700">
                   ➡️ Issue to {jo.next_process}
                 </button>
@@ -2118,18 +2228,38 @@ export default function Production() {
             <div className="bg-green-50 rounded-lg p-3 text-xs text-green-700">
               Process: <b>{activeJO.process}</b> · Planned: <b>{activeJO.planned_qty} pcs</b> · Received so far: <b>{activeJO.received_qty} pcs</b>
             </div>
-            {activeJO.process === 'Cutting' && receiveSetBomInfo?.has_set_bom && (
-              <label className="flex items-start gap-2 text-xs text-gray-700 bg-indigo-50 border border-indigo-100 rounded-lg p-3">
-                <input type="checkbox" className="mt-0.5" checked={!!receiveForm.split_components}
-                  onChange={e => setReceiveForm(f => ({ ...f, split_components: e.target.checked }))} />
-                <span>
-                  Split into components after receive
-                  <span className="block text-indigo-700 mt-0.5">
-                    {(receiveSetBomInfo.bom?.lines || []).map((l: any) => l.component_code).join(' + ')}
+            {activeJO.process === 'Cutting' && receiveSetBomInfo?.has_set_bom && (() => {
+              const receiveParentCode = receiveSku.includes('-') ? receiveSku.split('-').pop()?.toUpperCase() : ''
+              const childPanels = (receiveSetBomInfo.panels || []).filter((p: { parent_component_code?: string }) =>
+                !receiveParentCode || !p.parent_component_code || String(p.parent_component_code).toUpperCase() === receiveParentCode,
+              )
+              const setComponents = (receiveSetBomInfo.cutting_components || receiveSetBomInfo.bom?.lines || [])
+                .filter((l: { component_role?: string }) => String(l.component_role || 'SET_COMPONENT').toUpperCase() !== 'PANEL')
+              return (
+                <label className="flex items-start gap-2 text-xs text-gray-700 bg-indigo-50 border border-indigo-100 rounded-lg p-3">
+                  <input type="checkbox" className="mt-0.5" checked={!!receiveForm.split_components}
+                    onChange={e => setReceiveForm(f => ({ ...f, split_components: e.target.checked }))} />
+                  <span>
+                    {childPanels.length > 0 && receiveParentCode
+                      ? `Create panel stock after receive (${childPanels.map((p: { component_code: string }) => p.component_code).join(' + ')})`
+                      : 'Split into components after receive'}
+                    {childPanels.length > 0 && (
+                      <span className="block text-indigo-700 mt-0.5 font-mono">
+                        Panels: {childPanels.map((p: { component_code: string; routing?: string }) =>
+                          `${p.component_code}${p.routing ? ` (${p.routing})` : ''}`,
+                        ).join(' · ')}
+                      </span>
+                    )}
+                    {!receiveParentCode && setComponents.length > 0 && (
+                      <span className="block text-indigo-700 mt-0.5 font-mono">
+                        Components: {setComponents.map((l: { component_code: string }) => l.component_code).join(' + ')}
+                        {childPanels.length > 0 && ` · Panels: ${childPanels.map((p: { component_code: string }) => p.component_code).join(' + ')}`}
+                      </span>
+                    )}
                   </span>
-                </span>
-              </label>
-            )}
+                </label>
+              )
+            })()}
             <div className="grid grid-cols-2 gap-3">
               <div><label className="text-xs text-gray-500">Received Qty (pcs) *</label>
                 <input type="number" value={receiveForm.received_qty} onChange={e => setReceiveForm(f => ({ ...f, received_qty: +e.target.value }))}
@@ -2175,9 +2305,17 @@ export default function Production() {
               <button onClick={() => setModal(null)} className="text-gray-400 text-xl">✕</button>
             </div>
             <div className="bg-purple-50 rounded-lg p-3 text-xs text-purple-700">
-              From: <b>{activeJO.process}</b> → To: <b>{activeJO.next_process || 'Next'}</b>
+              SKU: <b className="font-mono">{issuePiecesSku || activeJO.sku}</b>
+              <br />
+              From: <b>{issueFromProcess || activeJO.process}</b> → To: <b>{issuePiecesForm.to_process || activeJO.next_process || 'Next'}</b>
             </div>
             <div className="grid grid-cols-2 gap-3">
+              <div><label className="text-xs text-gray-500">Panel / SKU</label>
+                <input value={issuePiecesSku || activeJO.sku} readOnly
+                  className="w-full border rounded px-2 py-1.5 text-sm mt-1 font-mono bg-gray-50" /></div>
+              <div><label className="text-xs text-gray-500">From process</label>
+                <input value={issueFromProcess || activeJO.process} readOnly
+                  className="w-full border rounded px-2 py-1.5 text-sm mt-1 bg-gray-50" /></div>
               <div><label className="text-xs text-gray-500">To Process</label>
                 <select value={issuePiecesForm.to_process} onChange={e => setIssuePiecesForm(f => ({ ...f, to_process: e.target.value }))}
                   className="w-full border rounded px-2 py-1.5 text-sm mt-1">
@@ -2195,7 +2333,15 @@ export default function Production() {
               ))}
             </div>
             <div className="flex gap-2">
-              <button onClick={() => issuePiecesMut.mutate({ id: activeJO.id, data: { ...issuePiecesForm, from_process: activeJO.process, sku: activeJO.sku, jo_line_id: activeLineId } })}
+              <button onClick={() => issuePiecesMut.mutate({
+                id: activeJO.id,
+                data: {
+                  ...issuePiecesForm,
+                  from_process: issueFromProcess || activeJO.process,
+                  sku: issuePiecesSku || activeJO.sku,
+                  jo_line_id: activeLineId ?? undefined,
+                },
+              })}
                 disabled={issuePiecesMut.isPending || !issuePiecesForm.issued_qty || !issuePiecesForm.to_process}
                 className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
                 {issuePiecesMut.isPending ? 'Saving…' : '➡️ Issue Pieces'}

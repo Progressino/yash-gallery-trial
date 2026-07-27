@@ -20,7 +20,7 @@ from ..db.production_db import (
     list_reservations, create_reservation, release_reservation, get_reserved_qty,
     list_set_boms, get_set_bom, get_set_bom_for_sku, upsert_set_bom, delete_set_bom,
     preview_set_match, commit_set_match, list_set_split_events, list_set_match_events,
-    get_component_routing, preview_bundle_ready, get_partial_wip_board,
+    get_component_routing, preview_bundle_ready, get_partial_wip_board, get_jo_panel_wip,
 )
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
@@ -481,6 +481,12 @@ def get_jo_detail(joid: int):
     if not jo:
         raise HTTPException(404, "Job order not found")
     return jo
+
+
+@router.get("/orders/{joid}/panel-wip")
+def get_jo_panel_wip_detail(joid: int):
+    """Child panel WIP for a Cutting JO (TOP → FRONT/BACK, etc.)."""
+    return get_jo_panel_wip(joid)
 
 @router.post("/orders")
 def post_jo(body: JOIn):

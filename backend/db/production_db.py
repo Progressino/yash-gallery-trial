@@ -2040,6 +2040,134 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
             conn.close()
 
 
+def get_jo_panel_wip(joid: int) -> dict:
+    """Panel rows + live stock for a Cutting JO (parent component or main set SKU)."""
+    from ..services.component_bom import panel_lines
+    from ..services.operation_routing import (
+        panel_wip_status,
+        resolve_component_routing,
+        routing_path_to_string,
+    )
+    from ..services.set_components import component_sku, parse_component_sku
+
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT id, sku, process, so_number FROM job_orders WHERE id=?",
+            (joid,),
+        ).fetchone()
+        if not row:
+            return {"has_panels": False}
+        jo = dict(row)
+        if str(jo.get("process") or "") != "Cutting":
+            return {"has_panels": False, "jo_sku": jo.get("sku"), "reason": "not_cutting"}
+
+        sku = str(jo.get("sku") or "").strip().upper()
+        so_number = str(jo.get("so_number") or "").strip()
+        main, comp = parse_component_sku(sku)
+        bom = get_set_bom_for_sku(sku)
+        if not bom:
+            return {"has_panels": False, "jo_sku": sku, "so_number": so_number}
+
+        style_main = main or sku
+        if comp:
+            panels_bom = panel_lines(bom, parent_component_code=comp)
+            parent_code = comp
+        else:
+            panels_bom = panel_lines(bom)
+            parent_code = None
+
+        if not panels_bom:
+            return {
+                "has_panels": False,
+                "jo_sku": sku,
+                "main_sku": style_main,
+                "so_number": so_number,
+                "parent_component_code": parent_code,
+            }
+
+        gate = str(bom.get("bundle_gate_process") or "Cutting").strip() or "Cutting"
+        panel_rows: list[dict] = []
+        for ln in panels_bom:
+            code = ln["component_code"]
+            psku = component_sku(style_main, code)
+            path = resolve_component_routing(
+                routing=ln.get("routing"),
+                default_next_process=ln.get("default_next_process"),
+                item_routing=["Cutting", "Embroidery", "Cutting", "Stitching"],
+            )
+            stock_rows = conn.execute(
+                "SELECT process, available_qty FROM process_stock WHERE so_number=? AND sku=?",
+                (so_number, psku),
+            ).fetchall()
+            stock_map = {
+                str(r["process"]): int(r["available_qty"] or 0)
+                for r in stock_rows
+                if int(r["available_qty"] or 0) > 0
+            }
+            emb_out = int(stock_map.get("Embroidery", 0))
+            gate_qty = int(stock_map.get(gate, 0))
+            cutting_qty = int(stock_map.get("Cutting", 0))
+            avail = gate_qty if gate_qty > 0 else cutting_qty
+            if emb_out > 0:
+                location = "Embroidery"
+            elif avail > 0:
+                location = gate if gate_qty > 0 else "Cutting"
+            elif stock_map:
+                location = next(iter(stock_map.keys()))
+            else:
+                location = ""
+            status = panel_wip_status(
+                location=location or gate,
+                available_qty=emb_out if emb_out > 0 else avail,
+                path=path,
+                bundle_ready=False,
+            )
+            issue_from = "Embroidery" if emb_out > 0 else "Cutting"
+            issue_to = get_next_process(psku, issue_from)
+            panel_rows.append(
+                {
+                    "component_code": code,
+                    "component_name": ln.get("component_name") or code,
+                    "component_sku": psku,
+                    "parent_component_code": ln.get("parent_component_code") or "",
+                    "routing": routing_path_to_string(path),
+                    "default_next_process": ln.get("default_next_process") or "",
+                    "process_stocks": stock_map,
+                    "available_qty": avail,
+                    "embroidery_outstanding": emb_out,
+                    "current_location": location or "—",
+                    "status": status,
+                    "next_process": get_next_process(psku, "Cutting"),
+                    "issue_from_process": issue_from,
+                    "issue_to_process": issue_to,
+                    "issueable_qty": emb_out if emb_out > 0 else avail,
+                }
+            )
+    finally:
+        conn.close()
+
+    bundle = preview_bundle_ready(so_number, style_main) if so_number and style_main else {}
+    return {
+        "has_panels": True,
+        "jo_id": joid,
+        "jo_sku": sku,
+        "main_sku": style_main,
+        "so_number": so_number,
+        "parent_component_code": parent_code,
+        "gate_process": gate,
+        "panels": panel_rows,
+        "bundle_complete": bundle.get("bundle_complete"),
+        "complete_sets": bundle.get("complete_sets"),
+        "bundle_message": bundle.get("message"),
+        "stitching_requires_complete_set": bundle.get("stitching_requires_complete_set"),
+        "hint": (
+            "Receive this Cutting JO to create panel stock (FRONT/BACK), "
+            "then issue each panel to its routed next process."
+        ),
+    }
+
+
 def get_partial_wip_board(so_number: str, main_sku: str) -> dict:
     """Panel-level WIP locations/status for the Production UI."""
     ready = preview_bundle_ready(so_number, main_sku)
