@@ -2600,6 +2600,36 @@ def list_inventory_history_dates(df: pd.DataFrame, limit: int = 120) -> list[dic
     ]
 
 
+def _inventory_history_bounds(work: pd.DataFrame | None) -> tuple[str, str, list[pd.Timestamp]]:
+    """Return (min_iso, max_iso, sorted_unique_dates) for a history frame."""
+    if work is None or getattr(work, "empty", True) or "Date" not in work.columns:
+        return "", "", []
+    dates = pd.to_datetime(work["Date"], errors="coerce").dt.normalize().dropna().unique()
+    if len(dates) == 0:
+        return "", "", []
+    sorted_dates = sorted(pd.Timestamp(d).normalize() for d in dates)
+    return str(sorted_dates[0].date()), str(sorted_dates[-1].date()), sorted_dates
+
+
+def _nearest_inventory_date(target: pd.Timestamp, sorted_dates: list[pd.Timestamp]) -> str:
+    if not sorted_dates:
+        return ""
+    target = pd.Timestamp(target).normalize()
+    if target <= sorted_dates[0]:
+        return str(sorted_dates[0].date())
+    if target >= sorted_dates[-1]:
+        return str(sorted_dates[-1].date())
+    # Target falls in a calendar gap — nearest calendar day with rows.
+    best = sorted_dates[0]
+    best_delta = abs((best - target).days)
+    for d in sorted_dates:
+        delta = abs((d - target).days)
+        if delta < best_delta:
+            best = d
+            best_delta = delta
+    return str(best.date())
+
+
 def inventory_rows_for_date(
     df: pd.DataFrame,
     date_iso: str,
@@ -2618,6 +2648,10 @@ def inventory_rows_for_date(
             "limit": int(limit),
             "offset": int(offset),
             "channel": (channel or "combined").strip().lower() or "combined",
+            "min_date": "",
+            "max_date": "",
+            "nearest_date": "",
+            "message": "Inventory history not loaded.",
         }
     try:
         target = pd.Timestamp(date_iso).normalize()
@@ -2634,6 +2668,7 @@ def inventory_rows_for_date(
         }
 
     work = filter_inventory_history_channel(df, channel)
+    min_d, max_d, sorted_dates = _inventory_history_bounds(work)
     if work is None or work.empty:
         return {
             "loaded": True,
@@ -2643,11 +2678,24 @@ def inventory_rows_for_date(
             "limit": int(limit),
             "offset": int(offset),
             "channel": (channel or "combined").strip().lower() or "combined",
+            "min_date": min_d,
+            "max_date": max_d,
+            "nearest_date": min_d or max_d,
+            "message": (
+                f"No inventory rows for {target.date()} on the {(channel or 'combined').strip().lower()} channel."
+                + (f" History covers {min_d} → {max_d}." if min_d and max_d else "")
+            ),
         }
     work = work.copy()
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     sub = work[work["Date"] == target].copy()
     if sub.empty:
+        nearest = _nearest_inventory_date(target, sorted_dates)
+        msg = f"No inventory rows for {target.date()} on the {(channel or 'combined').strip().lower()} channel."
+        if min_d and max_d:
+            msg += f" Uploaded history covers {min_d} → {max_d}."
+        if nearest and nearest != str(target.date()):
+            msg += f" Nearest date with data: {nearest}."
         return {
             "loaded": True,
             "date": str(target.date()),
@@ -2656,6 +2704,10 @@ def inventory_rows_for_date(
             "limit": int(limit),
             "offset": int(offset),
             "channel": (channel or "combined").strip().lower() or "combined",
+            "min_date": min_d,
+            "max_date": max_d,
+            "nearest_date": nearest,
+            "message": msg,
         }
 
     sub["OMS_SKU"] = sub["OMS_SKU"].astype(str).str.strip()
@@ -2689,6 +2741,9 @@ def inventory_rows_for_date(
         "offset": int(offset),
         "channel": (channel or "combined").strip().lower() or "combined",
         "in_stock_min_qty": float(IN_STOCK_MIN_QTY),
+        "min_date": min_d,
+        "max_date": max_d,
+        "nearest_date": str(target.date()),
     }
 
 

@@ -613,26 +613,25 @@ async def po_get_daily_inventory_history(request: Request, days: int = 30, end_d
 
 
 @router.get("/daily-inventory-history/dates")
-def po_list_daily_inventory_history_dates(request: Request, limit: int = 120):
+async def po_list_daily_inventory_history_dates(request: Request, limit: int = 120):
     """List snapshot dates in the wide inventory matrix (newest first)."""
+    from ..concurrency import run_read_api
+    from ..services.daily_inventory_history import list_inventory_history_dates
+
     sess = request.state.session
     if sess is None:
         return {"ok": False, "dates": []}
-    try:
-        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
 
-        ensure_po_sidecars_hydrated(sess)
-    except Exception:
-        pass
-    df = getattr(sess, "daily_inventory_history_df", None)
-    from ..services.daily_inventory_history import list_inventory_history_dates
+    def _work():
+        df = _inventory_history_df_for_matrix_read(sess)
+        dates = list_inventory_history_dates(df if df is not None else pd.DataFrame(), limit=limit)
+        return {"ok": True, "dates": dates, "count": len(dates)}
 
-    dates = list_inventory_history_dates(df if df is not None else pd.DataFrame(), limit=limit)
-    return {"ok": True, "dates": dates, "count": len(dates)}
+    return await run_read_api(_work)
 
 
 @router.get("/daily-inventory-history/by-date")
-def po_daily_inventory_history_by_date(
+async def po_daily_inventory_history_by_date(
     request: Request,
     date: str,
     q: str = "",
@@ -641,28 +640,27 @@ def po_daily_inventory_history_by_date(
     channel: str = "combined",
 ):
     """All SKU on-hand quantities for one snapshot date (admin verification)."""
+    from ..concurrency import run_read_api
+    from ..services.daily_inventory_history import inventory_rows_for_date
+
     sess = request.state.session
     if sess is None:
         return {"ok": False, "message": "No session"}
-    try:
-        from ..services.po_session_hydrate import ensure_po_sidecars_hydrated
 
-        ensure_po_sidecars_hydrated(sess)
-    except Exception:
-        pass
-    df = getattr(sess, "daily_inventory_history_df", None)
-    from ..services.daily_inventory_history import inventory_rows_for_date
+    def _work():
+        df = _inventory_history_df_for_matrix_read(sess)
+        out = inventory_rows_for_date(
+            df if df is not None else pd.DataFrame(),
+            date,
+            q=q,
+            limit=min(max(1, int(limit)), 2000),
+            offset=max(0, int(offset)),
+            channel=channel,
+        )
+        out["ok"] = True
+        return out
 
-    out = inventory_rows_for_date(
-        df if df is not None else pd.DataFrame(),
-        date,
-        q=q,
-        limit=min(max(1, int(limit)), 2000),
-        offset=max(0, int(offset)),
-        channel=channel,
-    )
-    out["ok"] = True
-    return out
+    return await run_read_api(_work)
 
 
 @router.get("/daily-inventory-history/matrix")

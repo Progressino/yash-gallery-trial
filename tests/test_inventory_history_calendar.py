@@ -269,3 +269,19 @@ def test_repair_inventory_history_integrity_collapses_dups_and_spikes():
     assert float(totals.loc[pd.Timestamp("2026-07-04")]) == 150000.0
     after = detect_inventory_history_integrity_issues(repaired)
     assert after["ok"] is True
+
+
+def test_inventory_rows_for_date_reports_bounds_when_missing():
+    from backend.services.daily_inventory_history import inventory_rows_for_date
+
+    hist = _hist("SKU-A", ["2026-06-02", "2026-06-03"], [5.0, 7.0])
+    out = inventory_rows_for_date(hist, "2026-06-01", channel="oms")
+    assert out["total"] == 0
+    assert out["min_date"] == "2026-06-02"
+    assert out["max_date"] == "2026-06-03"
+    assert out["nearest_date"] == "2026-06-02"
+    assert "2026-06-02" in out["message"]
+
+    hit = inventory_rows_for_date(hist, "2026-06-02", channel="oms")
+    assert hit["total"] == 1
+    assert hit["rows"][0]["sku"] == "SKU-A"

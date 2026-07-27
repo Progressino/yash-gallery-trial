@@ -136,6 +136,12 @@ export default function InventoryHistory() {
   const skuRows = (skuTimelineQ.data?.rows ?? []) as SkuDayRow[]
   const byDateRows = byDateQ.data?.rows ?? []
   const byDateTotal = byDateQ.data?.total ?? 0
+  const byDateBounds = {
+    min: byDateQ.data?.min_date || summaryQ.data?.min_date || '',
+    max: byDateQ.data?.max_date || summaryQ.data?.max_date || '',
+    nearest: byDateQ.data?.nearest_date || '',
+    message: byDateQ.data?.message || '',
+  }
 
   const pageCount = Math.max(1, Math.ceil(totalSkus / PAGE_SIZE))
   const datePageCount = Math.max(1, Math.ceil(byDateTotal / PAGE_SIZE))
@@ -705,12 +711,18 @@ export default function InventoryHistory() {
                 type="date"
                 className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm"
                 value={lookupDate}
-                max={todayIsoIST().slice(0, 10)}
+                min={byDateBounds.min || undefined}
+                max={byDateBounds.max || todayIsoIST().slice(0, 10)}
                 onChange={e => {
                   setLookupDate(e.target.value)
                   setDatePage(0)
                 }}
               />
+              {byDateBounds.min && byDateBounds.max && (
+                <span className="block text-[11px] text-gray-500 mt-1 font-mono">
+                  Uploaded history: {byDateBounds.min} → {byDateBounds.max}
+                </span>
+              )}
             </label>
             <div className="flex gap-1">
               <button
@@ -760,9 +772,29 @@ export default function InventoryHistory() {
           ) : byDateQ.isError ? (
             <p className="p-4 text-sm text-red-700">Failed to load inventory for {lookupDate}.</p>
           ) : byDateRows.length === 0 ? (
-            <p className="p-4 text-sm text-amber-700">
-              No inventory rows for {lookupDate} on the {channel} channel.
-            </p>
+            <div className="p-4 text-sm text-amber-800 space-y-2">
+              <p>
+                {byDateBounds.message ||
+                  `No inventory rows for ${lookupDate} on the ${channel} channel.`}
+              </p>
+              {byDateBounds.nearest && byDateBounds.nearest !== lookupDate && (
+                <button
+                  type="button"
+                  className="text-indigo-700 font-medium hover:underline"
+                  onClick={() => {
+                    setLookupDate(byDateBounds.nearest)
+                    setDatePage(0)
+                  }}
+                >
+                  Jump to nearest date with data ({byDateBounds.nearest}) →
+                </button>
+              )}
+              <p className="text-xs text-amber-700/90">
+                Days before the first upload have no snapshot. Amber columns in the matrix are
+                carried forward from the previous uploaded day — use a date inside the uploaded
+                range, or upload a file for {lookupDate} on Upload → Daily uploads.
+              </p>
+            </div>
           ) : (
             <>
               <div className="px-4 py-2 text-xs text-gray-500 border-b flex flex-wrap items-center justify-between gap-2">

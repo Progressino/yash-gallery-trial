@@ -1089,6 +1089,10 @@ export async function getPoDailyInventoryHistoryByDate(
     rows: Array<{ sku: string; qty: number; in_stock: boolean; source: string }>
     total: number
     channel?: InventoryHistoryChannel
+    min_date?: string
+    max_date?: string
+    nearest_date?: string
+    message?: string
   }>('/po/daily-inventory-history/by-date', {
     params: {
       date,
