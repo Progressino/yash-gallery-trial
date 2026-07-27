@@ -11,14 +11,11 @@ from backend.db import production_db
 
 def main() -> int:
     production_db.init_db()
-    jo = next(
-        (
-            j
-            for j in production_db.list_jos(so_number="SO-0005")
-            if str(j.get("sku") or "").upper() == "TEST SKU-TOP"
-        ),
-        None,
-    )
+    candidates = [
+        j for j in production_db.list_jos(so_number="SO-0005")
+        if str(j.get("sku") or "").upper() == "TEST SKU-TOP"
+    ]
+    jo = max(candidates, key=lambda j: (int(j.get("planned_qty") or 0), int(j.get("id") or 0))) if candidates else None
     if not jo:
         print("FAIL no TEST SKU-TOP JO for SO-0005")
         return 1
@@ -31,32 +28,36 @@ def main() -> int:
         return 2
 
     line = (jo.get("lines") or [{}])[0]
-  # receive if not yet done
-    if int(jo.get("received_qty") or 0) < 10:
+    recv_qty = int(line.get("planned_qty") or jo.get("planned_qty") or 0)
+    if recv_qty <= 0:
+        print("FAIL JO has no planned qty")
+        return 1
+    # receive if not yet done
+    if int(jo.get("received_qty") or 0) < recv_qty:
         production_db.receive_pieces(
             int(jo["id"]),
             {
-                "received_qty": 10,
+                "received_qty": recv_qty,
                 "process": "Cutting",
                 "sku": "TEST SKU-TOP",
                 "jo_line_id": line.get("id"),
                 "split_components": True,
             },
         )
-        print("received 10 on TEST SKU-TOP")
+        print(f"received {recv_qty} on TEST SKU-TOP")
 
     ctx2 = production_db.get_jo_panel_wip(int(jo["id"]))
     front = next(p for p in ctx2["panels"] if p["component_code"] == "FRONT")
     back = next(p for p in ctx2["panels"] if p["component_code"] == "BACK")
     print("front_cutting", front.get("issueable_qty"), "back_cutting", back.get("issueable_qty"))
-    if front.get("issueable_qty", 0) < 10 or back.get("issueable_qty", 0) < 10:
+    if front.get("issueable_qty", 0) < recv_qty or back.get("issueable_qty", 0) < recv_qty:
         print("FAIL panel stock not created after receive")
         return 3
 
     production_db.issue_pieces(
         int(jo["id"]),
         {
-            "issued_qty": 10,
+            "issued_qty": recv_qty,
             "from_process": "Cutting",
             "to_process": "Embroidery",
             "sku": "TEST SKU-FRONT",
@@ -65,7 +66,7 @@ def main() -> int:
     ctx3 = production_db.get_jo_panel_wip(int(jo["id"]))
     front3 = next(p for p in ctx3["panels"] if p["component_code"] == "FRONT")
     print("front_after_emb_issue", front3.get("embroidery_outstanding"), front3.get("current_location"))
-    if front3.get("embroidery_outstanding", 0) != 10:
+    if front3.get("embroidery_outstanding", 0) != recv_qty:
         print("FAIL FRONT not in embroidery")
         return 4
 
@@ -87,7 +88,7 @@ def main() -> int:
     production_db.issue_pieces(
         int(jo["id"]),
         {
-            "issued_qty": 10,
+            "issued_qty": recv_qty,
             "from_process": "Embroidery",
             "to_process": "Cutting",
             "sku": "TEST SKU-FRONT",
@@ -96,7 +97,7 @@ def main() -> int:
     production_db.issue_pieces(
         int(jo["id"]),
         {
-            "issued_qty": 10,
+            "issued_qty": recv_qty,
             "from_process": "Cutting",
             "to_process": "Stitching",
             "sku": "TEST SKU-BACK",
