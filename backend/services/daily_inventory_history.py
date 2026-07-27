@@ -928,6 +928,8 @@ def inventory_history_is_newer_than(
     if existing is None or getattr(existing, "empty", True):
         return True
     # Never allow a blank/legacy frame to clobber an explicit OMS+Amazon split.
+    # OMS-only / blank-only wholesale replaces must go through
+    # ``merge_inventory_history_preserving_channels`` first so Amazon census stays.
     if inventory_channel_split_available(existing) and not inventory_channel_split_available(
         incoming
     ):
@@ -964,6 +966,44 @@ def inventory_history_is_newer_than(
     in_skus = int(incoming["OMS_SKU"].astype(str).nunique()) if "OMS_SKU" in incoming.columns else 0
     ex_skus = int(existing["OMS_SKU"].astype(str).nunique()) if "OMS_SKU" in existing.columns else 0
     return in_skus > ex_skus
+
+
+def merge_inventory_history_preserving_channels(
+    existing: Optional[pd.DataFrame],
+    incoming: pd.DataFrame,
+) -> pd.DataFrame:
+    """Overlay ``incoming`` days onto ``existing`` without wiping the other channel.
+
+    Wide OMS Excel uploads must update OMS/blank rows for their dates while keeping
+    Amazon (and any non-overlapping) census rows intact — otherwise the downgrade
+    guard rejects the upload and Inv History never reflects the sheet.
+    """
+    if incoming is None or incoming.empty:
+        return _ensure_source_column(existing) if existing is not None else pd.DataFrame(columns=_STORE_COLS)
+    if existing is None or existing.empty:
+        return _ensure_source_column(incoming, default="snapshot")
+
+    ex = _ensure_channel_column(existing)
+    inc = _ensure_channel_column(incoming, default="oms")
+    # Blank-channel wide sheets are OMS warehouse on-hand.
+    inc_ch = inc["Channel"].astype(str).str.strip().str.lower()
+    inc.loc[inc_ch.eq("") | inc_ch.isin(["nan", "none"]), "Channel"] = "oms"
+    if "Source" in inc.columns:
+        src = inc["Source"].astype(str).str.strip().str.lower()
+        inc.loc[src.isin(["", "nan", "none", "uploaded"]), "Source"] = "snapshot"
+    else:
+        inc["Source"] = "snapshot"
+
+    inc_dates = set(pd.to_datetime(inc["Date"], errors="coerce").dt.normalize().dropna().unique())
+    if not inc_dates:
+        return merge_inventory_history(existing, incoming)
+
+    ex_dates = pd.to_datetime(ex["Date"], errors="coerce").dt.normalize()
+    ex_ch = ex["Channel"].astype(str).str.strip().str.lower()
+    # Drop existing OMS/blank rows on incoming dates (Amazon kept).
+    drop = ex_dates.isin(inc_dates) & ~ex_ch.eq("amazon")
+    kept = ex.loc[~drop]
+    return merge_inventory_history(kept, inc)
 
 
 def filter_inventory_history_window(
@@ -1657,7 +1697,8 @@ def _parse_one_sheet(
     if tall.empty:
         return pd.DataFrame(columns=_TALL_COLS)
     tall["Qty"] = tall["Qty"].astype(float).clip(lower=0.0)
-    tall["Source"] = "uploaded"
+    # File uploads are authoritative census days (same rank family as RAR snapshots).
+    tall["Source"] = "snapshot"
     return tall[_STORE_COLS].reset_index(drop=True)
 
 
@@ -2657,12 +2698,10 @@ def non_uploaded_inventory_dates(
 ) -> list[str]:
     """Calendar days in ``dates_sorted`` with no inventory *file* upload.
 
-    A day counts as uploaded only when it has ``Source == snapshot`` (daily RAR /
-    snapshot upload). Sales-derived / forward-filled days are "carried" — the app
-    invented the numbers from the previous census, not from an uploaded file.
-
-    Legacy wide-matrix rows use ``uploaded``; if a window has no snapshots at all,
-    fall back to treating ``uploaded`` as authoritative so old baselines still work.
+    A day counts as uploaded when it has ``Source`` in ``snapshot`` **or**
+    ``uploaded`` (wide-matrix Excel / legacy baseline). Sales-derived /
+    forward-filled days are "carried" — the app invented the numbers from the
+    previous census, not from an uploaded file.
     """
     if not dates_sorted:
         return []
@@ -2675,17 +2714,10 @@ def non_uploaded_inventory_dates(
         return []
     src = frame["Source"].astype(str).str.strip().str.lower()
     dates = pd.to_datetime(frame["Date"], errors="coerce").dt.normalize()
-    snap_dates = {
+    auth_dates = {
         str(pd.Timestamp(d).date())
-        for d in dates[src == "snapshot"].dropna().unique()
+        for d in dates[src.isin(["uploaded", "snapshot"])].dropna().unique()
     }
-    if snap_dates:
-        auth_dates = snap_dates
-    else:
-        auth_dates = {
-            str(pd.Timestamp(d).date())
-            for d in dates[src.isin(["uploaded", "snapshot"])].dropna().unique()
-        }
     return [d for d in date_strs if d not in auth_dates]
 
 

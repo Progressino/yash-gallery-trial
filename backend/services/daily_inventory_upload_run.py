@@ -99,10 +99,12 @@ def execute_daily_inventory_upload(
         inventory_sheet_start_date_from_filename,
         is_full_matrix_inventory_reupload,
         merge_inventory_history,
+        merge_inventory_history_preserving_channels,
         parse_daily_inventory_history_upload,
         promote_daily_inventory_matrix_max_date,
         recanonicalize_inventory_history_skus,
         drop_zero_derived_rows,
+        inventory_channel_split_available,
     )
 
     def _progress(msg: str) -> None:
@@ -169,7 +171,18 @@ def execute_daily_inventory_upload(
             and in_max >= ex_max
             and in_skus >= max(500, int(ex_skus * 0.85))
         )
-        if full_reupload:
+        # OMS/blank wide sheets must overlay without wiping Amazon census days.
+        preserve_channels = inventory_channel_split_available(existing) and (
+            not inventory_channel_split_available(df)
+            or (
+                "Channel" in df.columns
+                and not df["Channel"].astype(str).str.strip().str.lower().isin(["amazon"]).any()
+            )
+        )
+        if preserve_channels:
+            _progress("Merging OMS matrix into channel history…")
+            df = merge_inventory_history_preserving_channels(existing, df)
+        elif full_reupload:
             in_min = inventory_history_min_date(df)
             if in_min is not None and in_max is not None:
                 # Drop every existing row inside (or before) the matrix — only keep post-matrix tail.
@@ -292,6 +305,24 @@ def background_daily_inventory_upload(
             persist_upload_pipeline_snapshot(sess.daily_inventory_history_df)
             _progress("Saving to server…")
             _sync_disk_and_cache()
+            try:
+                from .daily_inventory_history import clear_inventory_channel_view_cache
+
+                clear_inventory_channel_view_cache()
+            except Exception:
+                pass
+            try:
+                from .po_raise_remove import invalidate_po_calculate_result
+                from .po_shared_cache import invalidate_all_shared_caches
+
+                invalidate_po_calculate_result(sess)
+                invalidate_all_shared_caches()
+            except Exception:
+                logger.exception("PO cache invalidate after inventory history upload failed")
+            try:
+                sess.inventory_data_revision = int(getattr(sess, "inventory_data_revision", 0) or 0) + 1
+            except Exception:
+                pass
             threading.Thread(target=_persist_pg_background, daemon=True).start()
             sess.daily_inventory_upload_status = "done"
             sess.daily_inventory_upload_message = result.get("message") or "Daily inventory loaded."

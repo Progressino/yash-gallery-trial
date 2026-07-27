@@ -775,6 +775,7 @@ def sync_daily_inventory_history_sidecar(sess) -> None:
         return
 
     from .services.daily_inventory_history import (
+        clear_inventory_channel_view_cache,
         daily_inventory_history_meta_bundle,
         inventory_history_is_newer_than,
         persist_daily_inventory_history_meta,
@@ -803,17 +804,15 @@ def sync_daily_inventory_history_sidecar(sess) -> None:
 
     if not accept:
         log.warning(
-            "Skipping daily inventory warm-cache sync — session matrix is older than server copy"
+            "Skipping daily inventory warm-cache sync — session matrix is older than server copy "
+            "(session kept; disk/warm unchanged)"
         )
-        if warm_df is not None and not getattr(warm_df, "empty", True):
-            sess.daily_inventory_history_df = warm_df.copy()
-            from .services.daily_inventory_history import apply_daily_inventory_history_meta
-
-            if warm_meta:
-                apply_daily_inventory_history_meta(sess, warm_meta)
+        # Do NOT clobber the session frame — a just-parsed upload must remain visible
+        # to the uploader even when the downgrade guard refuses to overwrite disk.
         return
 
-    _warm_cache["daily_inventory_history_df"] = df.copy()
+    clear_inventory_channel_view_cache()
+    _warm_cache["daily_inventory_history_df"] = df  # shared ref — avoid duplicate RAM
     meta = sess_meta
     if meta.get("daily_inventory_history_uploaded_at") or meta.get("daily_inventory_history_rows"):
         _warm_cache[_DAILY_INV_META_WARM_KEY] = meta

@@ -1,8 +1,9 @@
-"""Days without a snapshot upload must be flagged as carried in Inv History."""
+"""Days without a snapshot/uploaded file must be flagged as carried in Inv History."""
 import pandas as pd
 
 from backend.services.daily_inventory_history import (
     inventory_history_wide_matrix,
+    merge_inventory_history_preserving_channels,
     non_uploaded_inventory_dates,
 )
 
@@ -28,6 +29,35 @@ def test_non_uploaded_dates_are_days_without_snapshot():
     dates = list(pd.date_range("2026-07-04", "2026-07-07"))
     carried = non_uploaded_inventory_dates(df, dates)
     assert carried == ["2026-07-05", "2026-07-07"]
+
+
+def test_uploaded_days_not_carried_even_when_snapshots_exist():
+    """Wide-matrix ``uploaded`` days must not show as CARRIED once RAR snapshots exist."""
+    rows = []
+    for d, src, qty in [
+        ("2026-06-26", "uploaded", 26),
+        ("2026-06-27", "uploaded", 22),
+        ("2026-06-28", "uploaded", 12),
+        ("2026-06-29", "derived", 12),
+        ("2026-07-01", "snapshot", 8),
+    ]:
+        rows.append(
+            {
+                "OMS_SKU": "165YK251MUSTRAD-XXL",
+                "Date": pd.Timestamp(d),
+                "Qty": qty,
+                "Source": src,
+                "Channel": "oms" if src == "snapshot" else "",
+            }
+        )
+    df = pd.DataFrame(rows)
+    dates = list(pd.date_range("2026-06-26", "2026-07-01"))
+    carried = non_uploaded_inventory_dates(df, dates)
+    assert "2026-06-29" in carried
+    assert "2026-06-26" not in carried
+    assert "2026-06-27" not in carried
+    assert "2026-06-28" not in carried
+    assert "2026-07-01" not in carried
 
 
 def test_matrix_marks_derived_only_days_as_gap_dates():
@@ -61,3 +91,36 @@ def test_matrix_marks_derived_only_days_as_gap_dates():
     assert "2026-07-04" not in (wide.get("gap_dates") or [])
     assert "2026-07-06" not in (wide.get("gap_dates") or [])
     assert "2026-07-05" not in (wide.get("uploaded_dates") or [])
+
+
+def test_oms_overlay_preserves_amazon_census():
+    existing = pd.DataFrame(
+        {
+            "OMS_SKU": ["A", "A", "A", "A"],
+            "Date": pd.to_datetime(
+                ["2026-06-28", "2026-06-28", "2026-06-29", "2026-06-29"]
+            ),
+            "Qty": [10.0, 40.0, 9.0, 40.0],
+            "Source": ["derived", "snapshot", "derived", "snapshot"],
+            "Channel": ["oms", "amazon", "oms", "amazon"],
+        }
+    )
+    incoming = pd.DataFrame(
+        {
+            "OMS_SKU": ["A", "A"],
+            "Date": pd.to_datetime(["2026-06-28", "2026-06-29"]),
+            "Qty": [12.0, 3.0],
+            "Source": ["uploaded", "uploaded"],
+            "Channel": ["", ""],
+        }
+    )
+    out = merge_inventory_history_preserving_channels(existing, incoming)
+    sub = out[out["OMS_SKU"] == "A"].copy()
+    sub["Date"] = pd.to_datetime(sub["Date"]).dt.normalize()
+    jun28 = sub[sub["Date"] == pd.Timestamp("2026-06-28")]
+    jun29 = sub[sub["Date"] == pd.Timestamp("2026-06-29")]
+    assert float(jun28.loc[jun28["Channel"] == "oms", "Qty"].iloc[0]) == 12.0
+    assert float(jun28.loc[jun28["Channel"] == "amazon", "Qty"].iloc[0]) == 40.0
+    assert float(jun29.loc[jun29["Channel"] == "oms", "Qty"].iloc[0]) == 3.0
+    assert float(jun29.loc[jun29["Channel"] == "amazon", "Qty"].iloc[0]) == 40.0
+    assert str(jun29.loc[jun29["Channel"] == "oms", "Source"].iloc[0]) == "snapshot"
