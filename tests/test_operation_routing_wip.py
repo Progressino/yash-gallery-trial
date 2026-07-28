@@ -582,3 +582,168 @@ def test_issue_panel_to_embroidery_auto_creates_embroidery_jo(isolated_module_db
     assert front["embroidery_jo"]["jo_number"] == child["jo_number"]
     assert front["current_location"] == "Cutting"
     assert front["embroidery_outstanding"] == 0
+
+
+def test_top_stitching_independent_of_pant_dupatta(isolated_module_dbs, client):
+    """TOP FRONT/BACK may go to Stitching without PANT or DUPATTA at Cutting."""
+    bom = client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "INDEPSET",
+            "stitching_requires_complete_set": True,
+            "bundle_gate_process": "Cutting",
+            "lines": [
+                {
+                    "component_code": "TOP",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "SET_COMPONENT",
+                },
+                {
+                    "component_code": "FRONT",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Embroidery>Cutting>Stitching",
+                    "requires_embroidery": True,
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+                {
+                    "component_code": "BACK",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+                {
+                    "component_code": "PANT",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "SET_COMPONENT",
+                },
+                {
+                    "component_code": "DUPATTA",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "SET_COMPONENT",
+                },
+            ],
+        },
+    )
+    assert bom.status_code == 200, bom.text
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-07-28",
+            "so_number": "SO-INDEP-1",
+            "sku": "INDEPSET-M",
+            "process": "Cutting",
+            "planned_qty": 1,
+            "create_component_jos": True,
+            "lines": [{"sku": "INDEPSET-M", "style": "M", "planned_qty": 1}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    orders = client.get("/api/production/orders").json()
+    top_jo = next(
+        o for o in orders
+        if o.get("so_number") == "SO-INDEP-1" and str(o.get("sku") or "").endswith("-TOP")
+    )
+    # Do not receive PANT/DUPATTA JOs — they stay at 0 Cutting stock.
+
+    line = top_jo["lines"][0]
+    rec = client.post(
+        f"/api/production/orders/{top_jo['id']}/receive-pieces",
+        json={
+            "received_qty": 1,
+            "process": "Cutting",
+            "sku": "INDEPSET-M-TOP",
+            "jo_line_id": line["id"],
+            "split_components": True,
+        },
+    )
+    assert rec.status_code == 200, rec.text
+
+    # FRONT → Embroidery → back to Cutting
+    iss_front = client.post(
+        f"/api/production/orders/{top_jo['id']}/issue-pieces",
+        json={
+            "issued_qty": 1,
+            "from_process": "Cutting",
+            "to_process": "Embroidery",
+            "sku": "INDEPSET-M-FRONT",
+        },
+    )
+    assert iss_front.status_code == 200, iss_front.text
+    child = (iss_front.json().get("child_jo") or {})
+    assert child.get("created"), iss_front.json()
+    emb_id = child["id"]
+    emb_jo = client.get(f"/api/production/orders/{emb_id}").json()
+    emb_line = emb_jo["lines"][0]
+    assert client.post(
+        f"/api/production/orders/{emb_id}/receive-pieces",
+        json={
+            "received_qty": 1,
+            "process": "Embroidery",
+            "sku": "INDEPSET-M-FRONT",
+            "jo_line_id": emb_line["id"],
+        },
+    ).status_code == 200
+    assert client.post(
+        f"/api/production/orders/{emb_id}/issue-pieces",
+        json={
+            "issued_qty": 1,
+            "from_process": "Embroidery",
+            "to_process": "Cutting",
+            "sku": "INDEPSET-M-FRONT",
+        },
+    ).status_code == 200
+
+    # Full-style board still incomplete without PANT/DUPATTA.
+    full = client.get(
+        "/api/production/bundle-ready",
+        params={"so_number": "SO-INDEP-1", "main_sku": "INDEPSET-M"},
+    ).json()
+    assert full["bundle_complete"] is False
+    assert any("PANT" in b or "DUPATTA" in b for b in full["blockers"])
+
+    # TOP-scoped gate is ready (panels only).
+    top_ready = client.get(
+        "/api/production/bundle-ready",
+        params={
+            "so_number": "SO-INDEP-1",
+            "main_sku": "INDEPSET-M",
+            "parent_component_code": "TOP",
+        },
+    ).json()
+    assert top_ready["bundle_complete"] is True
+    assert top_ready["parent_component_code"] == "TOP"
+
+    panel_wip = client.get(f"/api/production/orders/{top_jo['id']}/panel-wip").json()
+    assert panel_wip["bundle_complete"] is True
+    msg = (panel_wip.get("bundle_message") or "").upper()
+    assert "PANT" not in msg and "DUPATTA" not in msg
+
+    # BACK → Stitching must succeed despite PANT/DUPATTA still at 0.
+    ok = client.post(
+        f"/api/production/orders/{top_jo['id']}/issue-pieces",
+        json={
+            "issued_qty": 1,
+            "from_process": "Cutting",
+            "to_process": "Stitching",
+            "sku": "INDEPSET-M-BACK",
+        },
+    )
+    assert ok.status_code == 200, ok.text
+
+    # FRONT → Stitching also allowed for the TOP panel bundle.
+    ok_front = client.post(
+        f"/api/production/orders/{top_jo['id']}/issue-pieces",
+        json={
+            "issued_qty": 1,
+            "from_process": "Cutting",
+            "to_process": "Stitching",
+            "sku": "INDEPSET-M-FRONT",
+        },
+    )
+    assert ok_front.status_code == 200, ok_front.text

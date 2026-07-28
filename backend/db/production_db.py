@@ -2029,7 +2029,8 @@ def _assert_set_issue_allowed(conn, so_number: str, sku: str, from_process: str,
                 "This style was split into components — use Set Match to move complete sets to Packing"
             )
 
-    # Stitching dependency: all mandatory panels available + embroidery complete.
+    # Stitching gate is per set-component (TOP panels, or PANT alone, etc.) —
+    # Top / Bottom / Dupatta may stitch independently.
     if to_p == "Stitching" and from_p != "Stitching":
         style_sku = main or sku_u
         bom = get_set_bom_for_sku(style_sku)
@@ -2037,14 +2038,40 @@ def _assert_set_issue_allowed(conn, so_number: str, sku: str, from_process: str,
             return
         if not int(bom.get("stitching_requires_complete_set") if bom.get("stitching_requires_complete_set") is not None else 1):
             return
-        # Component-level issue OR main SKU issue both need a complete bundle.
-        ready = preview_bundle_ready(so_number, style_sku, conn=conn)
+        scope = _stitching_gate_scope(bom, comp)
+        ready = preview_bundle_ready(
+            so_number,
+            style_sku,
+            conn=conn,
+            parent_component_code=scope,
+        )
         if not ready.get("bundle_complete"):
             msg = ready.get("message") or "Bundle incomplete"
             raise ValueError(
                 f"Stitching blocked — {msg}. "
-                "All mandatory panels must be at the gate process with embroidery complete."
+                "All mandatory panels for this component must be at the gate process with embroidery complete."
             )
+
+
+def _stitching_gate_scope(bom: dict | None, component_code: str | None) -> str | None:
+    """Resolve which set-component's panel bundle must be ready for stitching.
+
+    FRONT/BACK → parent TOP; TOP itself → TOP; PANT with no panels → PANT.
+    """
+    from ..services.component_bom import ROLE_PANEL, ROLE_SET_COMPONENT, normalize_line_role
+
+    code = str(component_code or "").strip().upper()
+    if not code or not bom:
+        return None
+    for ln in bom.get("lines") or []:
+        if str(ln.get("component_code") or "").strip().upper() != code:
+            continue
+        role = normalize_line_role(ln)
+        if role == ROLE_PANEL:
+            return str(ln.get("parent_component_code") or "").strip().upper() or None
+        if role == ROLE_SET_COMPONENT:
+            return code
+    return code
 
 
 def _assert_set_receive_allowed(conn, so_number: str, sku: str, process: str) -> None:
@@ -2059,8 +2086,18 @@ def _assert_set_receive_allowed(conn, so_number: str, sku: str, process: str) ->
         )
 
 
-def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
-    """WIP board + stitching gate: are all panels back and the cut bundle complete?"""
+def preview_bundle_ready(
+    so_number: str,
+    main_sku: str,
+    *,
+    conn=None,
+    parent_component_code: str | None = None,
+) -> dict:
+    """WIP board + stitching gate for a style (optionally scoped to one set component).
+
+    When ``parent_component_code`` is set (e.g. TOP), only that component's panels
+    (FRONT/BACK) must be ready — PANT/DUPATTA do not block TOP stitching.
+    """
     from ..services.operation_routing import compute_bundle_readiness, resolve_component_routing
     from ..services.set_components import component_sku, parse_component_sku
 
@@ -2069,9 +2106,9 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
         conn = _connect()
     try:
         main = str(main_sku or "").strip().upper()
-        parsed, _ = parse_component_sku(main)
-        if parsed:
-            main = parsed
+        parsed_main, parsed_comp = parse_component_sku(main)
+        if parsed_main:
+            main = parsed_main
         bom = get_set_bom_for_sku(main)
         if not bom or not bom.get("lines"):
             return {
@@ -2085,10 +2122,27 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                 "main_sku": main,
             }
         gate = str(bom.get("bundle_gate_process") or "Cutting").strip() or "Cutting"
-        from ..services.component_bom import ROLE_PANEL, set_component_lines
+        from ..services.component_bom import ROLE_PANEL, ROLE_SET_COMPONENT, normalize_line_role, panel_lines as _panel_lines, set_component_lines
 
-        # Stitching gate uses set components (Top/Bottom). Panels are WIP under parents.
-        gate_lines = set_component_lines(bom) or list(bom.get("lines") or [])
+        # Auto-scope when caller passed a component SKU (TEST SKU-TOP → TOP).
+        scope = str(parent_component_code or "").strip().upper() or None
+        if not scope and parsed_comp:
+            scope = _stitching_gate_scope(bom, parsed_comp)
+
+        all_set_lines = set_component_lines(bom) or [
+            ln for ln in (bom.get("lines") or []) if normalize_line_role(ln) == ROLE_SET_COMPONENT
+        ]
+        if scope:
+            gate_lines = [ln for ln in all_set_lines if str(ln.get("component_code") or "").upper() == scope]
+            if not gate_lines:
+                # Scope may be a panel parent that is still a set component code.
+                gate_lines = [
+                    ln for ln in (bom.get("lines") or [])
+                    if str(ln.get("component_code") or "").upper() == scope
+                ]
+        else:
+            gate_lines = all_set_lines or list(bom.get("lines") or [])
+
         comps = []
         for ln in gate_lines:
             code = ln["component_code"]
@@ -2108,10 +2162,8 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
             ).fetchone()
             avail_gate = int(gate_row["q"] if gate_row else 0)
             emb_out = int(emb_row["q"] if emb_row else 0)
-            # Prefer Embroidery as current location when stock sits there.
             location = "Embroidery" if emb_out > 0 else (gate if avail_gate > 0 else "")
             if not location:
-                # Scan other process stocks for display.
                 stocks = conn.execute(
                     "SELECT process, available_qty FROM process_stock WHERE so_number=? AND sku=? AND available_qty>0",
                     (so_number, csku),
@@ -2132,11 +2184,9 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                     "parent_component_code": ln.get("parent_component_code") or "",
                 }
             )
-        # Surface panels on the WIP board without treating them as set-match units.
-        from ..services.component_bom import panel_lines as _panel_lines
 
         panel_comps = []
-        for ln in _panel_lines(bom):
+        for ln in _panel_lines(bom, parent_component_code=scope):
             code = ln["component_code"]
             csku = component_sku(main, code)
             path = resolve_component_routing(
@@ -2152,9 +2202,19 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                 "SELECT COALESCE(available_qty,0) AS q FROM process_stock WHERE so_number=? AND sku=? AND process=?",
                 (so_number, csku, gate),
             ).fetchone()
+            # Panels already issued to Stitching (or later) still satisfy the TOP
+            # panel-bundle gate so siblings can follow.
+            downstream = conn.execute(
+                """SELECT COALESCE(SUM(available_qty),0) AS q FROM process_stock
+                   WHERE so_number=? AND sku=? AND process IN ('Stitching','Finishing','Packing','QC')""",
+                (so_number, csku),
+            ).fetchone()
             avail_gate = int(gate_row["q"] if gate_row else 0)
             emb_out = int(emb_row["q"] if emb_row else 0)
+            satisfied = avail_gate + int(downstream["q"] if downstream else 0)
             location = "Embroidery" if emb_out > 0 else (gate if avail_gate > 0 else "")
+            if not location and satisfied > avail_gate:
+                location = "Stitching"
             panel_comps.append(
                 {
                     "component_code": code,
@@ -2162,6 +2222,8 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                     "component_sku": csku,
                     "qty_per_set": ln.get("qty_per_set") or 1,
                     "available_at_gate": avail_gate,
+                    "available_at_cutting": avail_gate,
+                    "satisfied_qty": satisfied,
                     "embroidery_outstanding": emb_out,
                     "location": location,
                     "routing": path,
@@ -2170,26 +2232,48 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                     "gate_optional": True,
                 }
             )
-        # Fold panel embroidery into parent set-component so stitching stays blocked
-        # while FRONT (etc.) is still under Embroidery.
-        emb_by_parent: dict[str, int] = {}
-        for pc in panel_comps:
-            parent = str(pc.get("parent_component_code") or "").strip().upper()
-            if not parent:
-                continue
-            emb_by_parent[parent] = emb_by_parent.get(parent, 0) + int(pc.get("embroidery_outstanding") or 0)
-        for c in comps:
-            code = str(c.get("component_code") or "").strip().upper()
-            extra = emb_by_parent.get(code, 0)
-            if extra:
-                c["embroidery_outstanding"] = int(c.get("embroidery_outstanding") or 0) + extra
-        comps.extend(panel_comps)
-        out = compute_bundle_readiness(
-            [c for c in comps if not c.get("gate_optional")],
-            gate_process=gate,
-        )
-        # Append panel WIP rows (not part of set-match / stitching gate math).
-        panel_rows = [c for c in comps if c.get("gate_optional")]
+
+        # When this set-component has panels, the stitching gate is the panel bundle
+        # (FRONT/BACK), not the sibling set components (PANT/DUPATTA).
+        if panel_comps and scope:
+            # Cutting + already-stitched qty both satisfy the panel-bundle gate.
+            gate_for_math = [
+                {
+                    **pc,
+                    "available_at_gate": int(pc.get("satisfied_qty") or 0),
+                    "gate_optional": False,
+                }
+                for pc in panel_comps
+            ]
+            out = compute_bundle_readiness(gate_for_math, gate_process=gate)
+            for c in comps:
+                out.setdefault("components", []).insert(0, {
+                    **c,
+                    "ready": bool(out.get("bundle_complete")),
+                    "status": "Ready" if out.get("bundle_complete") else "Waiting for panels",
+                    "gate_optional": True,
+                })
+        else:
+            # No panels under scope: set-component itself must be at the gate.
+            emb_by_parent: dict[str, int] = {}
+            for pc in panel_comps:
+                parent = str(pc.get("parent_component_code") or "").strip().upper()
+                if not parent:
+                    continue
+                emb_by_parent[parent] = emb_by_parent.get(parent, 0) + int(pc.get("embroidery_outstanding") or 0)
+            for c in comps:
+                code = str(c.get("component_code") or "").strip().upper()
+                extra = emb_by_parent.get(code, 0)
+                if extra:
+                    c["embroidery_outstanding"] = int(c.get("embroidery_outstanding") or 0) + extra
+            comps.extend(panel_comps)
+            out = compute_bundle_readiness(
+                [c for c in comps if not c.get("gate_optional")],
+                gate_process=gate,
+            )
+
+        # Append panel WIP rows for UI (already in math when scoped).
+        panel_rows = panel_comps
         for c in panel_rows:
             from ..services.operation_routing import panel_wip_status, routing_path_to_string
 
@@ -2202,6 +2286,20 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                 path=path if isinstance(path, list) else [],
                 bundle_ready=bool(out.get("bundle_complete")),
             )
+            # Avoid duplicating panels already included in gate math.
+            already = {
+                str(x.get("component_code") or "").upper()
+                for x in (out.get("components") or [])
+            }
+            if str(c.get("component_code") or "").upper() in already:
+                # Refresh status on existing row
+                for x in out.get("components") or []:
+                    if str(x.get("component_code") or "").upper() == str(c.get("component_code") or "").upper():
+                        x["status"] = status
+                        x["available_at_gate"] = avail
+                        x["ready"] = emb_out == 0 and int(c.get("satisfied_qty") or avail) > 0
+                        x["gate_optional"] = True
+                continue
             out.setdefault("components", []).append(
                 {
                     "component_code": c.get("component_code"),
@@ -2219,8 +2317,15 @@ def preview_bundle_ready(so_number: str, main_sku: str, *, conn=None) -> dict:
                     "gate_optional": True,
                 }
             )
+        if scope and out.get("bundle_complete"):
+            out["message"] = (
+                f"{out.get('complete_sets') or 0} complete {scope} bundle(s) ready at {gate}"
+            )
+        elif scope and out.get("blockers"):
+            out["message"] = f"{scope} bundle incomplete — " + "; ".join((out.get("blockers") or [])[:3])
         out["so_number"] = so_number
         out["main_sku"] = main
+        out["parent_component_code"] = scope or ""
         out["stitching_requires_complete_set"] = bool(
             int(bom.get("stitching_requires_complete_set") if bom.get("stitching_requires_complete_set") is not None else 1)
         )
@@ -2358,7 +2463,17 @@ def get_jo_panel_wip(joid: int) -> dict:
     finally:
         conn.close()
 
-    bundle = preview_bundle_ready(so_number, style_main) if so_number and style_main else {}
+    # Scope stitching readiness to this JO's set component (TOP panels only —
+    # do not require PANT/DUPATTA on a TOP Cutting JO).
+    bundle = (
+        preview_bundle_ready(
+            so_number,
+            style_main,
+            parent_component_code=parent_code,
+        )
+        if so_number and style_main
+        else {}
+    )
     return {
         "has_panels": True,
         "jo_id": joid,
@@ -2374,7 +2489,9 @@ def get_jo_panel_wip(joid: int) -> dict:
         "stitching_requires_complete_set": bundle.get("stitching_requires_complete_set"),
         "hint": (
             "Receive this Cutting JO to create panel stock (FRONT/BACK), "
-            "then issue each panel to its routed next process."
+            "then issue each panel to its routed next process. "
+            "Stitching for this component only needs its own panels ready — "
+            "sibling pieces (Pant/Dupatta) stitch separately."
         ),
     }
 

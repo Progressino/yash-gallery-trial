@@ -424,11 +424,23 @@ def get_routing(sku: str):
 
 
 @router.get("/bundle-ready")
-def get_bundle_ready(so_number: str, main_sku: str):
-    """Stitching gate preview — complete cut bundle + embroidery done?"""
+def get_bundle_ready(
+    so_number: str,
+    main_sku: str,
+    parent_component_code: Optional[str] = None,
+):
+    """Stitching gate preview — component/panel bundle ready at the gate?
+
+    Pass ``parent_component_code`` (e.g. TOP) to check only that component's
+    panels. Omit it for full-style set-match readiness (TOP+PANT+DUPATTA).
+    """
     if not so_number or not main_sku:
         raise HTTPException(400, "so_number and main_sku are required")
-    return preview_bundle_ready(so_number, main_sku)
+    return preview_bundle_ready(
+        so_number,
+        main_sku,
+        parent_component_code=parent_component_code,
+    )
 
 
 @router.get("/wip-board")

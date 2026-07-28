@@ -283,7 +283,7 @@ export default function SetBomPanel({
                 checked={setBomForm.stitching_requires_complete_set}
                 onChange={e => setSetBomForm(f => ({ ...f, stitching_requires_complete_set: e.target.checked }))}
               />
-              Stitching requires complete bundle
+              Stitching requires complete component bundle (panels under Top/Pant/Dupatta — siblings stitch separately)
             </label>
             <label className="inline-flex items-center gap-1.5">
               Bundle gate
