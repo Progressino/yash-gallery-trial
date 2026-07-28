@@ -991,7 +991,18 @@ export default function Production() {
   })
   const issuePiecesMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/issue-pieces`, data),
-    onSuccess: () => { invalidateAll(); setModal(null) },
+    onSuccess: (res) => {
+      invalidateAll()
+      setModal(null)
+      const child = res?.data?.child_jo
+      if (child?.jo_number) {
+        const action = child.created ? 'Created' : 'Updated'
+        alert(
+          `${action} ${child.process} JO ${child.jo_number} for ${child.sku} `
+          + `(${child.planned_qty} pcs).\nOpen the ${child.process} tab to receive / process / return.`,
+        )
+      }
+    },
     onError: (e: unknown) => alert(apiErrorMessage(e, 'Error')),
   })
   const addCostMut = useMutation({
@@ -1276,6 +1287,7 @@ export default function Production() {
                       <th className="text-right px-3 py-2">Cutting</th>
                       <th className="text-right px-3 py-2">Embroidery</th>
                       <th className="text-left px-3 py-2">Status</th>
+                      <th className="text-left px-3 py-2">Embroidery JO</th>
                       <th className="text-center px-3 py-2">Actions</th>
                     </tr>
                   </thead>
@@ -1292,6 +1304,13 @@ export default function Production() {
                       issue_from_process: string
                       issue_to_process: string
                       issueable_qty: number
+                      embroidery_jo?: {
+                        id: number
+                        jo_number: string
+                        status: string
+                        planned_qty: number
+                        received_qty: number
+                      } | null
                     }) => (
                       <tr key={panel.component_sku} className="border-t border-gray-50 hover:bg-indigo-50/40">
                         <td className="px-3 py-2 font-semibold text-indigo-900">{panel.component_name || panel.component_code}</td>
@@ -1301,6 +1320,18 @@ export default function Production() {
                         <td className="px-3 py-2 text-right">{fmt(panel.available_qty || 0)}</td>
                         <td className="px-3 py-2 text-right text-purple-700">{fmt(panel.embroidery_outstanding || 0)}</td>
                         <td className="px-3 py-2">{panel.status || '—'}</td>
+                        <td className="px-3 py-2 font-mono text-[11px]">
+                          {panel.embroidery_jo ? (
+                            <span className="text-rose-700" title={panel.embroidery_jo.status}>
+                              {panel.embroidery_jo.jo_number}
+                              <span className="block text-gray-500 font-sans">
+                                {panel.embroidery_jo.received_qty}/{panel.embroidery_jo.planned_qty} · {panel.embroidery_jo.status}
+                              </span>
+                            </span>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-center">
                           {panel.issueable_qty > 0 && panel.issue_to_process ? (
                             <button

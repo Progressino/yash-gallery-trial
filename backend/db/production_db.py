@@ -979,6 +979,9 @@ def issue_pieces(joid: int, data: dict):
         conn.close()
         raise ValueError("JO not found")
     issued = int(data.get('issued_qty', 0))
+    if issued <= 0:
+        conn.close()
+        raise ValueError("Issued qty must be greater than 0")
     jo_line_id = data.get('jo_line_id')
     from_process = data.get('from_process') or jo.get('process','Cutting')
     to_process = data.get('to_process') or get_next_process(jo.get('sku',''), from_process)
@@ -1016,9 +1019,189 @@ def issue_pieces(joid: int, data: dict):
     _update_process_stock(conn, so_number, sku, from_process, qty_out=issued)
     _update_process_stock(conn, so_number, sku, to_process, qty_in=issued)
 
+    # Auto-create / grow the destination process JO (e.g. Embroidery work order for FRONT).
+    child_jo = None
+    if to_process and str(to_process).strip() and str(to_process) != str(from_process):
+        child_jo = _ensure_downstream_jo_for_issue(
+            conn,
+            parent_joid=joid,
+            parent_jo=jo,
+            sku=str(sku or "").strip().upper(),
+            to_process=str(to_process).strip(),
+            qty=issued,
+        )
+
+    # Mark parent in progress when pieces leave.
+    conn.execute(
+        """UPDATE job_orders SET
+            status = CASE WHEN status='Created' THEN 'In Progress' ELSE status END,
+            updated_at=datetime('now') WHERE id=?""",
+        (joid,),
+    )
+
     conn.commit()
     conn.close()
+    return {"ok": True, "child_jo": child_jo}
 
+
+def _ensure_downstream_jo_for_issue(
+    conn,
+    *,
+    parent_joid: int,
+    parent_jo: dict,
+    sku: str,
+    to_process: str,
+    qty: int,
+) -> Optional[dict]:
+    """Create or grow a destination-process JO when pieces are issued into it.
+
+    Embroidery (and other intermediate processes) need their own pending work order
+    so the department can receive / process / return against a document.
+    """
+    from ..services.operation_routing import normalize_process_name
+    from ..services.set_components import parse_component_sku
+
+    process = normalize_process_name(to_process) or str(to_process or "").strip()
+    if not process or qty <= 0 or not sku:
+        return None
+    # Only spawn work orders for intermediate specialist processes.
+    # Returning panels to Cutting (or moving to Packing) must not create a new JO.
+    if process not in {"Embroidery", "Printing"}:
+        return None
+
+    so_number = str(parent_jo.get("so_number") or "").strip()
+    main, comp = parse_component_sku(sku)
+    sku_name = str(parent_jo.get("sku_name") or "").strip()
+    if comp:
+        sku_name = f"{sku_name} {comp}".strip() if sku_name else sku
+
+    existing = conn.execute(
+        """SELECT id, jo_number, planned_qty, received_qty, status FROM job_orders
+           WHERE parent_jo_id=? AND process=? AND UPPER(TRIM(sku))=UPPER(TRIM(?))
+             AND so_number=? AND status NOT IN ('Closed','Cancelled')
+           ORDER BY id DESC LIMIT 1""",
+        (parent_joid, process, sku, so_number),
+    ).fetchone()
+
+    if existing:
+        existing = dict(existing)
+        new_planned = int(existing.get("planned_qty") or 0) + int(qty)
+        received = int(existing.get("received_qty") or 0)
+        conn.execute(
+            """UPDATE job_orders SET
+                planned_qty=?,
+                balance_qty=MAX(0, ? - COALESCE(received_qty,0)),
+                status = CASE WHEN status='Closed' THEN 'In Progress' ELSE status END,
+                updated_at=datetime('now')
+               WHERE id=?""",
+            (new_planned, new_planned, existing["id"]),
+        )
+        line = conn.execute(
+            "SELECT id, planned_qty FROM jo_lines WHERE jo_id=? AND UPPER(TRIM(sku))=UPPER(TRIM(?)) LIMIT 1",
+            (existing["id"], sku),
+        ).fetchone()
+        if line:
+            line = dict(line)
+            line_planned = int(line.get("planned_qty") or 0) + int(qty)
+            conn.execute(
+                """UPDATE jo_lines SET planned_qty=?, balance_qty=MAX(0, ? - COALESCE(received_qty,0))
+                   WHERE id=?""",
+                (line_planned, line_planned, line["id"]),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO jo_lines(jo_id,so_number,sku,sku_name,style,planned_qty,balance_qty,
+                    parent_sku,sku_role,component_code)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    existing["id"],
+                    so_number,
+                    sku,
+                    sku_name or sku,
+                    "",
+                    qty,
+                    qty,
+                    main or "",
+                    "PANEL" if comp else (str(parent_jo.get("sku_role") or "COMPONENT").upper()),
+                    comp or "",
+                ),
+            )
+        return {
+            "id": existing["id"],
+            "jo_number": existing.get("jo_number"),
+            "process": process,
+            "sku": sku,
+            "planned_qty": new_planned,
+            "created": False,
+            "message": f"Updated {process} JO {existing.get('jo_number')} (+{qty} pcs)",
+        }
+
+    num = _next_jo(conn)
+    conn.execute(
+        """INSERT INTO job_orders(
+            jo_number, jo_date, so_number, sku, sku_name, process, stage,
+            exec_type, vendor_name, vendor_rate, so_qty, planned_qty, balance_qty, status,
+            expected_completion, fabric_code, parent_jo_id, main_sku, component_code, sku_role,
+            remarks, updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+        (
+            num,
+            datetime.now().strftime("%Y-%m-%d"),
+            so_number,
+            sku,
+            sku_name or sku,
+            process,
+            process,
+            parent_jo.get("exec_type") or "Inhouse",
+            parent_jo.get("vendor_name") or "",
+            float(parent_jo.get("vendor_rate") or 0),
+            int(parent_jo.get("so_qty") or 0),
+            int(qty),
+            int(qty),
+            "Created",
+            parent_jo.get("expected_completion") or "",
+            parent_jo.get("fabric_code") or "",
+            parent_joid,
+            main or str(parent_jo.get("main_sku") or "").strip().upper(),
+            comp or "",
+            "PANEL" if comp else (str(parent_jo.get("sku_role") or "COMPONENT").upper() or "COMPONENT"),
+            f"Auto-created from {parent_jo.get('jo_number') or parent_joid} issue → {process}",
+        ),
+    )
+    new_joid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    conn.execute(
+        """INSERT INTO jo_lines(jo_id,so_number,sku,sku_name,style,planned_qty,balance_qty,
+            parent_sku,sku_role,component_code,remarks)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            new_joid,
+            so_number,
+            sku,
+            sku_name or sku,
+            "",
+            int(qty),
+            int(qty),
+            main or "",
+            "PANEL" if comp else "COMPONENT",
+            comp or "",
+            f"Issued from parent JO {parent_jo.get('jo_number') or parent_joid}",
+        ),
+    )
+    # Only set next_stage_jo_id when parent has none yet (multi-panel may spawn several).
+    if not parent_jo.get("next_stage_jo_id"):
+        conn.execute(
+            "UPDATE job_orders SET next_stage_jo_id=?, updated_at=datetime('now') WHERE id=?",
+            (new_joid, parent_joid),
+        )
+    return {
+        "id": new_joid,
+        "jo_number": num,
+        "process": process,
+        "sku": sku,
+        "planned_qty": int(qty),
+        "created": True,
+        "message": f"Created {process} JO {num} for {sku} ({qty} pcs)",
+    }
 
 # ── Receive Pieces ─────────────────────────────────────────────────────────────
 
@@ -1098,7 +1281,14 @@ def receive_pieces(joid: int, data: dict):
             rejected_qty = COALESCE(rejected_qty,0) + ?,
             balance_qty = planned_qty - (COALESCE(received_qty,0) + ?)
             WHERE id=? AND jo_id=?""", (received, rejected, received, jo_line_id, joid))
-    _update_process_stock(conn, so_number, sku, process, qty_in=received)
+    # Child process JOs (e.g. Embroidery spawned from Cutting issue) already hold
+    # stock from the parent issue transfer — do not double-count on receive.
+    stock_preloaded = bool(jo.get("parent_jo_id")) and str(process) == str(jo.get("process") or "")
+    if not stock_preloaded:
+        _update_process_stock(conn, so_number, sku, process, qty_in=received)
+    elif rejected > 0:
+        # Rejected pcs leave the preloaded available pool.
+        _update_process_stock(conn, so_number, sku, process, qty_out=rejected)
 
     split_info = None
     split_flag = data.get("split_components", True)
@@ -2125,6 +2315,26 @@ def get_jo_panel_wip(joid: int) -> dict:
             )
             issue_from = "Embroidery" if emb_out > 0 else "Cutting"
             issue_to = get_next_process(psku, issue_from)
+            child = conn.execute(
+                """SELECT id, jo_number, process, status, planned_qty, received_qty
+                   FROM job_orders
+                   WHERE parent_jo_id=? AND process='Embroidery'
+                     AND UPPER(TRIM(sku))=UPPER(TRIM(?))
+                     AND status NOT IN ('Cancelled')
+                   ORDER BY id DESC LIMIT 1""",
+                (joid, psku),
+            ).fetchone()
+            child_jo = None
+            if child:
+                child = dict(child)
+                child_jo = {
+                    "id": child["id"],
+                    "jo_number": child.get("jo_number"),
+                    "process": child.get("process"),
+                    "status": child.get("status"),
+                    "planned_qty": int(child.get("planned_qty") or 0),
+                    "received_qty": int(child.get("received_qty") or 0),
+                }
             panel_rows.append(
                 {
                     "component_code": code,
@@ -2142,6 +2352,7 @@ def get_jo_panel_wip(joid: int) -> dict:
                     "issue_from_process": issue_from,
                     "issue_to_process": issue_to,
                     "issueable_qty": emb_out if emb_out > 0 else avail,
+                    "embroidery_jo": child_jo,
                 }
             )
     finally:

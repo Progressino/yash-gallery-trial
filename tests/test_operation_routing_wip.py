@@ -465,3 +465,120 @@ def test_jo_panel_wip_endpoint_before_and_after_receive(isolated_module_dbs, cli
     assert by_code["BACK"]["issueable_qty"] == 3
     assert by_code["FRONT"]["issue_to_process"] == "Embroidery"
     assert by_code["BACK"]["issue_to_process"] == "Stitching"
+
+
+def test_issue_panel_to_embroidery_auto_creates_embroidery_jo(isolated_module_dbs, client):
+    """Cutting → Embroidery issue for FRONT must spawn an Embroidery work order."""
+    bom = client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "EMBJO",
+            "stitching_requires_complete_set": True,
+            "bundle_gate_process": "Cutting",
+            "lines": [
+                {"component_code": "TOP", "qty_per_set": 1, "routing": "Cutting>Stitching", "component_role": "SET_COMPONENT"},
+                {
+                    "component_code": "FRONT",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Embroidery>Cutting>Stitching",
+                    "requires_embroidery": True,
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+                {
+                    "component_code": "BACK",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+            ],
+        },
+    )
+    assert bom.status_code == 200, bom.text
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-07-22",
+            "so_number": "SO-EMBJO-1",
+            "sku": "EMBJO-M",
+            "process": "Cutting",
+            "planned_qty": 5,
+            "create_component_jos": True,
+            "lines": [{"sku": "EMBJO-M", "style": "M", "planned_qty": 5}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    top_jo = next(
+        o for o in client.get("/api/production/orders").json()
+        if o.get("so_number") == "SO-EMBJO-1" and str(o.get("sku") or "").endswith("-TOP")
+    )
+    line = top_jo["lines"][0]
+    rec = client.post(
+        f"/api/production/orders/{top_jo['id']}/receive-pieces",
+        json={
+            "received_qty": 5,
+            "process": "Cutting",
+            "sku": "EMBJO-M-TOP",
+            "jo_line_id": line["id"],
+            "split_components": True,
+        },
+    )
+    assert rec.status_code == 200, rec.text
+
+    iss = client.post(
+        f"/api/production/orders/{top_jo['id']}/issue-pieces",
+        json={
+            "issued_qty": 5,
+            "from_process": "Cutting",
+            "to_process": "Embroidery",
+            "sku": "EMBJO-M-FRONT",
+        },
+    )
+    assert iss.status_code == 200, iss.text
+    child = iss.json().get("child_jo") or {}
+    assert child.get("created") is True
+    assert child.get("process") == "Embroidery"
+    assert child.get("sku") == "EMBJO-M-FRONT"
+    assert child.get("planned_qty") == 5
+    emb_id = child["id"]
+
+    emb_jos = client.get("/api/production/orders?process=Embroidery").json()
+    emb = next(o for o in emb_jos if o["id"] == emb_id)
+    assert emb["status"] in ("Created", "In Progress")
+    assert emb["parent_jo_id"] == top_jo["id"]
+    assert emb["planned_qty"] == 5
+
+    # Embroidery receive acknowledges preloaded stock (no double-count).
+    emb_line = emb["lines"][0]
+    recv_emb = client.post(
+        f"/api/production/orders/{emb_id}/receive-pieces",
+        json={
+            "received_qty": 5,
+            "process": "Embroidery",
+            "sku": "EMBJO-M-FRONT",
+            "jo_line_id": emb_line["id"],
+        },
+    )
+    assert recv_emb.status_code == 200, recv_emb.text
+
+    # Return embroidered front to Cutting via Embroidery JO.
+    ret = client.post(
+        f"/api/production/orders/{emb_id}/issue-pieces",
+        json={
+            "issued_qty": 5,
+            "from_process": "Embroidery",
+            "to_process": "Cutting",
+            "sku": "EMBJO-M-FRONT",
+        },
+    )
+    assert ret.status_code == 200, ret.text
+    # Returning to Cutting must NOT spawn a new Cutting JO for the panel.
+    assert not (ret.json().get("child_jo") or {}).get("created")
+
+    panel_wip = client.get(f"/api/production/orders/{top_jo['id']}/panel-wip").json()
+    front = next(p for p in panel_wip["panels"] if p["component_code"] == "FRONT")
+    assert front["embroidery_jo"]["jo_number"] == child["jo_number"]
+    assert front["current_location"] == "Cutting"
+    assert front["embroidery_outstanding"] == 0

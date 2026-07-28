@@ -661,10 +661,10 @@ def post_return_fabric(joid: int, body: FabricReturnIn):
 @router.post("/orders/{joid}/issue-pieces")
 def post_issue_pieces(joid: int, body: PieceIssueIn):
     try:
-        issue_pieces(joid, body.model_dump())
+        result = issue_pieces(joid, body.model_dump())
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"ok": True}
+    return result if isinstance(result, dict) else {"ok": True}
 
 @router.post("/orders/{joid}/receive-pieces")
 def post_receive_pieces(joid: int, body: PieceReceiptIn):
