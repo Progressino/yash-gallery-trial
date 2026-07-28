@@ -355,6 +355,7 @@ class SetBomLineIn(BaseModel):
     default_next_process: Optional[str] = ''
     routing: Optional[str] = ''  # e.g. Cutting>Embroidery>Cutting>Stitching
     requires_embroidery: Optional[bool] = False
+    embroidery_before_cutting: Optional[bool] = False
     # Blank = infer (FRONT/BACK → PANEL; TOP/BOTTOM → SET_COMPONENT)
     component_role: Optional[str] = ''
     parent_component_code: Optional[str] = ''
@@ -415,11 +416,26 @@ def get_processes():
 @router.get("/item-routing/{sku}")
 def get_routing(sku: str):
     """Get process routing for a specific SKU (honors component-level Set BOM routing)."""
+    from ..services.set_components import parse_component_sku
+
+    main, comp = parse_component_sku(sku)
+    emb_before = False
+    requires_emb = False
+    if comp:
+        bom = get_set_bom_for_sku(main or sku)
+        if bom:
+            for ln in bom.get("lines") or []:
+                if str(ln.get("component_code") or "").strip().upper() == str(comp).upper():
+                    requires_emb = bool(int(ln.get("requires_embroidery") or 0))
+                    emb_before = bool(int(ln.get("embroidery_before_cutting") or 0))
+                    break
     return {
         "sku": sku,
         "routing": get_component_routing(sku),
         "item_routing": get_item_routing(sku),
         "next_after_cutting": get_next_process(sku, "Cutting"),
+        "requires_embroidery": requires_emb,
+        "embroidery_before_cutting": emb_before,
     }
 
 

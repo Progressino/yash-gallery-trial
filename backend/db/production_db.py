@@ -320,6 +320,7 @@ def init_db():
         ("set_bom_lines", "component_role", "TEXT DEFAULT 'SET_COMPONENT'"),
         ("set_bom_lines", "parent_component_code", "TEXT DEFAULT ''"),
         ("set_bom_lines", "creates_cutting_jo", "INTEGER DEFAULT 1"),
+        ("set_bom_lines", "embroidery_before_cutting", "INTEGER DEFAULT 0"),
     ]
     for table, col, decl in migrations:
         try:
@@ -1865,14 +1866,18 @@ def upsert_set_bom(data: dict) -> dict:
         parent = str(ln.get("parent_component_code") or "").strip().upper()
         if role == ROLE_PANEL and not parent:
             parent = ""  # filled after all codes known
+        from ..services.operation_routing import normalize_embroidery_line_fields
+
+        norm = normalize_embroidery_line_fields(ln)
         cleaned.append(
             {
                 "component_code": code,
                 "component_name": str(ln.get("component_name") or code).strip(),
                 "qty_per_set": qty,
-                "default_next_process": str(ln.get("default_next_process") or "").strip(),
-                "routing": str(ln.get("routing") or "").strip(),
-                "requires_embroidery": 1 if ln.get("requires_embroidery") else 0,
+                "default_next_process": str(norm.get("default_next_process") or "").strip(),
+                "routing": str(norm.get("routing") or "").strip(),
+                "requires_embroidery": 1 if norm.get("requires_embroidery") else 0,
+                "embroidery_before_cutting": 1 if norm.get("embroidery_before_cutting") else 0,
                 "component_role": role,
                 "parent_component_code": parent,
                 "creates_cutting_jo": 0 if role == ROLE_PANEL else 1,
@@ -1947,14 +1952,16 @@ def upsert_set_bom(data: dict) -> dict:
                 )
             )
         requires_emb = ln["requires_embroidery"]
+        emb_before = ln["embroidery_before_cutting"]
         if not requires_emb and "Embroidery" in routing:
             requires_emb = 1
         conn.execute(
             """INSERT INTO set_bom_lines
                (header_id, component_code, component_name, qty_per_set,
                 default_next_process, routing, requires_embroidery,
+                embroidery_before_cutting,
                 component_role, parent_component_code, creates_cutting_jo, sort_order)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 hid,
                 ln["component_code"],
@@ -1963,6 +1970,7 @@ def upsert_set_bom(data: dict) -> dict:
                 ln["default_next_process"],
                 routing,
                 requires_emb,
+                emb_before,
                 ln["component_role"],
                 ln["parent_component_code"],
                 ln["creates_cutting_jo"],
@@ -2339,6 +2347,8 @@ def get_jo_panel_wip(joid: int) -> dict:
     """Panel rows + live stock for a Cutting JO (parent component or main set SKU)."""
     from ..services.component_bom import panel_lines
     from ..services.operation_routing import (
+        embroidery_issue_label,
+        embroidery_timing_label,
         panel_wip_status,
         resolve_component_routing,
         routing_path_to_string,
@@ -2450,6 +2460,12 @@ def get_jo_panel_wip(joid: int) -> dict:
             )
             if emb_done and issue_from == "Cutting" and issue_to == "Embroidery":
                 issue_to = "Stitching"
+            emb_before = bool(int(ln.get("embroidery_before_cutting") or 0))
+            issue_label = embroidery_issue_label(
+                issue_from=issue_from,
+                issue_to=issue_to,
+                before_cutting=emb_before,
+            )
             panel_rows.append(
                 {
                     "component_code": code,
@@ -2458,6 +2474,11 @@ def get_jo_panel_wip(joid: int) -> dict:
                     "parent_component_code": ln.get("parent_component_code") or "",
                     "routing": routing_path_to_string(path),
                     "default_next_process": ln.get("default_next_process") or "",
+                    "requires_embroidery": bool(int(ln.get("requires_embroidery") or 0)),
+                    "embroidery_before_cutting": emb_before,
+                    "embroidery_timing": embroidery_timing_label(before_cutting=emb_before)
+                    if bool(int(ln.get("requires_embroidery") or 0)) or "Embroidery" in routing_path_to_string(path)
+                    else "",
                     "process_stocks": stock_map,
                     "available_qty": avail,
                     "embroidery_outstanding": emb_out,
@@ -2466,6 +2487,7 @@ def get_jo_panel_wip(joid: int) -> dict:
                     "next_process": get_next_process(psku, "Cutting"),
                     "issue_from_process": issue_from,
                     "issue_to_process": issue_to,
+                    "issue_to_label": issue_label,
                     "issueable_qty": emb_out if emb_out > 0 else avail,
                     "embroidery_jo": child_jo,
                 }

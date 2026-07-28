@@ -283,6 +283,7 @@ def test_embroidery_before_cutting_routing_resolution(isolated_module_dbs, clien
                     "qty_per_set": 1,
                     "routing": "Cutting>Embroidery>Cutting>Stitching",
                     "requires_embroidery": True,
+                    "embroidery_before_cutting": True,
                     "component_role": "PANEL",
                     "parent_component_code": "TOP",
                 },
@@ -308,6 +309,94 @@ def test_embroidery_before_cutting_routing_resolution(isolated_module_dbs, clien
     assert get_next_process("EMBBEFORE-M-FRONT", "Cutting") == "Embroidery"
     assert get_next_process("EMBBEFORE-M-FRONT", "Embroidery") == "Cutting"
     assert get_next_process("EMBBEFORE-M-BACK", "Cutting") == "Stitching"
+
+    route_api = client.get("/api/production/item-routing/EMBBEFORE-M-FRONT").json()
+    assert route_api["embroidery_before_cutting"] is True
+    assert route_api["requires_embroidery"] is True
+
+
+def test_set_bom_embroidery_before_cutting_persisted(isolated_module_dbs, client):
+    """embroidery_before_cutting flag is saved and returned on Set BOM lines."""
+    save = client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "EMBTIMING",
+            "lines": [
+                {
+                    "component_code": "TOP",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "SET_COMPONENT",
+                },
+                {
+                    "component_code": "FRONT",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Embroidery>Cutting>Stitching",
+                    "requires_embroidery": True,
+                    "embroidery_before_cutting": True,
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+                {
+                    "component_code": "BACK",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+            ],
+        },
+    )
+    assert save.status_code == 200, save.text
+    bom = client.get("/api/production/set-bom/EMBTIMING").json()
+    front = next(ln for ln in bom["lines"] if ln["component_code"] == "FRONT")
+    assert front["embroidery_before_cutting"] in (1, True)
+    assert front["requires_embroidery"] in (1, True)
+
+    after = client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "EMBTIMING",
+            "lines": [
+                {
+                    "component_code": "TOP",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "SET_COMPONENT",
+                },
+                {
+                    "component_code": "FRONT",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Embroidery>Cutting>Stitching",
+                    "requires_embroidery": True,
+                    "embroidery_before_cutting": False,
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+                {
+                    "component_code": "BACK",
+                    "qty_per_set": 1,
+                    "routing": "Cutting>Stitching",
+                    "component_role": "PANEL",
+                    "parent_component_code": "TOP",
+                },
+            ],
+        },
+    )
+    assert after.status_code == 200, after.text
+    bom2 = client.get("/api/production/set-bom/EMBTIMING").json()
+    front2 = next(ln for ln in bom2["lines"] if ln["component_code"] == "FRONT")
+    assert front2["embroidery_before_cutting"] in (0, False)
+
+
+def test_embroidery_issue_label_helpers():
+    from backend.services.operation_routing import embroidery_issue_label, embroidery_timing_label
+
+    assert embroidery_timing_label(before_cutting=True) == "Before cutting (fabric)"
+    assert embroidery_timing_label(before_cutting=False) == "After cutting (panel)"
+    assert embroidery_issue_label(issue_from="Cutting", issue_to="Embroidery", before_cutting=True) == "Embroidery (fabric)"
+    assert embroidery_issue_label(issue_from="Cutting", issue_to="Embroidery", before_cutting=False) == "Embroidery (panel)"
+    assert embroidery_issue_label(issue_from="Cutting", issue_to="Stitching", before_cutting=True) == "Stitching"
 
 
 def test_parent_component_jo_receive_explodes_panel_stock(isolated_module_dbs, client):

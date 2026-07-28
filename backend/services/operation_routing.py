@@ -243,3 +243,45 @@ def compute_bundle_readiness(
             else ("Bundle incomplete — " + "; ".join(blockers[:3]) if blockers else "Bundle incomplete")
         ),
     }
+
+
+EMBROIDERY_PARTIAL_ROUTING = "Cutting>Embroidery>Cutting>Stitching"
+
+
+def embroidery_timing_label(*, before_cutting: bool) -> str:
+    """Human label for Set BOM / panel WIP."""
+    return "Before cutting (fabric)" if before_cutting else "After cutting (panel)"
+
+
+def embroidery_issue_label(
+    *,
+    issue_from: str,
+    issue_to: str,
+    before_cutting: bool,
+) -> str:
+    """Action label when issuing from Cutting to Embroidery."""
+    to_p = normalize_process_name(issue_to)
+    from_p = normalize_process_name(issue_from)
+    if to_p != "Embroidery":
+        return to_p or str(issue_to or "")
+    if from_p == "Cutting":
+        return "Embroidery (fabric)" if before_cutting else "Embroidery (panel)"
+    return "Embroidery"
+
+
+def normalize_embroidery_line_fields(line: dict[str, Any] | None) -> dict[str, Any]:
+    """Ensure routing + flags stay aligned for embroidery scenarios."""
+    ln = dict(line or {})
+    routing = str(ln.get("routing") or "").strip()
+    requires = bool(ln.get("requires_embroidery")) or "Embroidery" in routing
+    before = bool(ln.get("embroidery_before_cutting"))
+    if requires and not routing:
+        routing = EMBROIDERY_PARTIAL_ROUTING
+    if requires and "Embroidery" not in routing:
+        routing = EMBROIDERY_PARTIAL_ROUTING
+    if requires and not str(ln.get("default_next_process") or "").strip():
+        ln["default_next_process"] = "Embroidery"
+    ln["requires_embroidery"] = requires
+    ln["embroidery_before_cutting"] = before if requires else False
+    ln["routing"] = routing
+    return ln

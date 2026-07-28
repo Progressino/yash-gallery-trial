@@ -1283,6 +1283,7 @@ export default function Production() {
                       <th className="text-left px-3 py-2">Panel</th>
                       <th className="text-left px-3 py-2">SKU</th>
                       <th className="text-left px-3 py-2">Routing</th>
+                      <th className="text-left px-3 py-2">Embroidery</th>
                       <th className="text-left px-3 py-2">Location</th>
                       <th className="text-right px-3 py-2">Cutting</th>
                       <th className="text-right px-3 py-2">Embroidery</th>
@@ -1303,6 +1304,9 @@ export default function Production() {
                       status: string
                       issue_from_process: string
                       issue_to_process: string
+                      issue_to_label?: string
+                      embroidery_timing?: string
+                      embroidery_before_cutting?: boolean
                       issueable_qty: number
                       embroidery_jo?: {
                         id: number
@@ -1316,6 +1320,9 @@ export default function Production() {
                         <td className="px-3 py-2 font-semibold text-indigo-900">{panel.component_name || panel.component_code}</td>
                         <td className="px-3 py-2 font-mono text-[11px]">{panel.component_sku}</td>
                         <td className="px-3 py-2 text-gray-600">{panel.routing || '—'}</td>
+                        <td className="px-3 py-2 text-[11px] text-purple-800">
+                          {panel.embroidery_timing || '—'}
+                        </td>
                         <td className="px-3 py-2">{panel.current_location || '—'}</td>
                         <td className="px-3 py-2 text-right">{fmt(panel.available_qty || 0)}</td>
                         <td className="px-3 py-2 text-right text-purple-700">{fmt(panel.embroidery_outstanding || 0)}</td>
@@ -1343,7 +1350,7 @@ export default function Production() {
                               })}
                               className="px-2 py-0.5 text-xs bg-purple-600 text-white rounded hover:bg-purple-700"
                             >
-                              → {panel.issue_to_process}
+                              → {panel.issue_to_label || panel.issue_to_process}
                             </button>
                           ) : (
                             <span className="text-gray-400">Receive parent first</span>

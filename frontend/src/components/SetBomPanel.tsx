@@ -134,9 +134,43 @@ type SetBomLine = {
   default_next_process: string
   routing: string
   requires_embroidery: boolean
+  embroidery_before_cutting: boolean
   component_role: 'SET_COMPONENT' | 'PANEL'
   parent_component_code: string
   materials: SetBomMaterial[]
+}
+
+const EMBROIDERY_PARTIAL_ROUTING = 'Cutting>Embroidery>Cutting>Stitching'
+
+type EmbroideryTiming = '' | 'before_cutting' | 'after_cutting'
+
+function embroideryTimingFromLine(ln: SetBomLine): EmbroideryTiming {
+  if (!ln.requires_embroidery && !String(ln.routing || '').includes('Embroidery')) return ''
+  return ln.embroidery_before_cutting ? 'before_cutting' : 'after_cutting'
+}
+
+function applyEmbroideryTiming(ln: SetBomLine, timing: EmbroideryTiming): SetBomLine {
+  if (!timing) {
+    const keepRouting = ln.routing && !ln.routing.includes('Embroidery')
+      ? ln.routing
+      : (ln.default_next_process && ln.default_next_process !== 'Embroidery'
+        ? `Cutting>${ln.default_next_process}`
+        : 'Cutting>Stitching')
+    return {
+      ...ln,
+      requires_embroidery: false,
+      embroidery_before_cutting: false,
+      routing: keepRouting,
+      default_next_process: ln.default_next_process === 'Embroidery' ? 'Stitching' : ln.default_next_process,
+    }
+  }
+  return {
+    ...ln,
+    requires_embroidery: true,
+    embroidery_before_cutting: timing === 'before_cutting',
+    routing: EMBROIDERY_PARTIAL_ROUTING,
+    default_next_process: 'Embroidery',
+  }
 }
 
 type Props = {
@@ -160,9 +194,9 @@ export default function SetBomPanel({
     stitching_requires_complete_set: true,
     bundle_gate_process: 'Cutting',
     lines: [
-      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
-      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
-      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery', routing: 'Cutting>Embroidery>Cutting>Stitching', requires_embroidery: true, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
+      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, embroidery_before_cutting: false, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
+      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, embroidery_before_cutting: false, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
+      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery', routing: 'Cutting>Embroidery>Cutting>Stitching', requires_embroidery: true, embroidery_before_cutting: false, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
     ] as SetBomLine[],
   })
   const [setMatchForm, setSetMatchForm] = useState({
@@ -224,6 +258,7 @@ export default function SetBomPanel({
             default_next_process: l.default_next_process || '',
             routing: l.routing || '',
             requires_embroidery: Boolean(l.requires_embroidery) || String(l.routing || '').includes('Embroidery'),
+            embroidery_before_cutting: Boolean(l.embroidery_before_cutting),
             component_role: (String(l.component_role || '').toUpperCase() === 'PANEL' ? 'PANEL' : 'SET_COMPONENT') as 'SET_COMPONENT' | 'PANEL',
             parent_component_code: l.parent_component_code || '',
             materials: (l.materials || []).map((m: any) => ({
@@ -257,6 +292,7 @@ export default function SetBomPanel({
           <strong>Set Components</strong> (Top / Bottom / Dupatta) each get one Cutting Job Order.
           <strong> Panels</strong> (Front / Back) belong under a parent (usually Top) for embroidery WIP —
           they do <em>not</em> create separate Cutting JOs.
+          For embroidered panels, choose <strong>Embroidery timing</strong>: before cutting (fabric) or after cutting (panel).
         </p>
         <div className="grid grid-cols-2 gap-2">
           <div>
@@ -307,6 +343,7 @@ export default function SetBomPanel({
                 <th className="text-left px-2 py-1.5">Parent</th>
                 <th className="text-right px-2 py-1.5">Qty/set</th>
                 <th className="text-left px-2 py-1.5">Routing (partial WIP)</th>
+                <th className="text-left px-2 py-1.5">Embroidery timing</th>
                 <th className="text-left px-2 py-1.5">Next</th>
                 <th className="px-2 py-1.5" />
               </tr>
@@ -396,12 +433,30 @@ export default function SetBomPanel({
                           ...x,
                           routing: e.target.value,
                           requires_embroidery: e.target.value.includes('Embroidery'),
+                          embroidery_before_cutting: e.target.value.includes('Embroidery') ? x.embroidery_before_cutting : false,
                         } : x),
                       }))}
                       placeholder="Cutting>Embroidery>Cutting>Stitching"
                       className="w-full border rounded px-1.5 py-0.5 font-mono text-[10px]"
                       title="Component-level route. Embroidery between Cutting hops = temporary child WIP."
                     />
+                  </td>
+                  <td className="px-2 py-1">
+                    <select
+                      value={embroideryTimingFromLine(ln)}
+                      onChange={e => setSetBomForm(f => ({
+                        ...f,
+                        lines: f.lines.map((x, j) => j === i
+                          ? applyEmbroideryTiming(x, e.target.value as EmbroideryTiming)
+                          : x),
+                      }))}
+                      className="w-full border rounded px-1 py-0.5 text-[10px]"
+                      title="Scenario 1: fabric to embroidery before cut. Scenario 2: cut panel to embroidery."
+                    >
+                      <option value="">No embroidery</option>
+                      <option value="before_cutting">Before cutting (fabric)</option>
+                      <option value="after_cutting">After cutting (panel)</option>
+                    </select>
                   </td>
                   <td className="px-2 py-1">
                     <select
@@ -412,11 +467,12 @@ export default function SetBomPanel({
                           ...x,
                           default_next_process: e.target.value,
                           routing: x.routing || (e.target.value === 'Embroidery'
-                            ? 'Cutting>Embroidery>Cutting>Stitching'
+                            ? EMBROIDERY_PARTIAL_ROUTING
                             : e.target.value
                               ? `Cutting>${e.target.value}`
                               : x.routing),
                           requires_embroidery: e.target.value === 'Embroidery' || (x.routing || '').includes('Embroidery'),
+                          embroidery_before_cutting: e.target.value === 'Embroidery' ? x.embroidery_before_cutting : false,
                         } : x),
                       }))}
                       className="w-full border rounded px-1.5 py-0.5"
@@ -435,7 +491,7 @@ export default function SetBomPanel({
                   </td>
                 </tr>
                 <tr className="border-t bg-gray-50/80">
-                  <td colSpan={8} className="px-2 py-2">
+                  <td colSpan={9} className="px-2 py-2">
                     <p className="text-[10px] font-semibold text-gray-500 mb-1">
                       {ln.component_role === 'PANEL' ? 'Panel' : 'Materials'} for {ln.component_code || 'component'}
                       {ln.component_role === 'PANEL' ? ' (managed inside parent Cutting JO — no separate JO)' : ''}
@@ -546,6 +602,7 @@ export default function SetBomPanel({
                 default_next_process: 'Stitching',
                 routing: 'Cutting>Stitching',
                 requires_embroidery: false,
+                embroidery_before_cutting: false,
                 component_role: 'SET_COMPONENT' as const,
                 parent_component_code: '',
                 materials: [],
@@ -564,8 +621,9 @@ export default function SetBomPanel({
                 component_name: 'Top Front',
                 qty_per_set: 1,
                 default_next_process: 'Embroidery',
-                routing: 'Cutting>Embroidery>Cutting>Stitching',
+                routing: EMBROIDERY_PARTIAL_ROUTING,
                 requires_embroidery: true,
+                embroidery_before_cutting: false,
                 component_role: 'PANEL' as const,
                 parent_component_code: f.lines.find(x => x.component_role !== 'PANEL' && /TOP/i.test(x.component_code))?.component_code || 'TOP',
                 materials: [],
@@ -603,6 +661,7 @@ export default function SetBomPanel({
                     default_next_process: l.default_next_process || '',
                     routing: l.routing || '',
                     requires_embroidery: Boolean(l.requires_embroidery),
+                    embroidery_before_cutting: Boolean(l.embroidery_before_cutting),
                     component_role: (String(l.component_role || '').toUpperCase() === 'PANEL' ? 'PANEL' : 'SET_COMPONENT') as 'SET_COMPONENT' | 'PANEL',
                     parent_component_code: l.parent_component_code || '',
                     materials: (l.materials || []).map((m: any) => ({
@@ -633,7 +692,8 @@ export default function SetBomPanel({
         <div className="bg-white rounded-xl border p-4 space-y-3">
           <h3 className="font-semibold text-gray-800">Partial WIP board (bundle gate)</h3>
           <p className="text-xs text-gray-500">
-            Embroidery is a temporary child of Cutting. Stitching stays blocked until all panels return and the bundle is complete.
+            Embroidery is a temporary child of Cutting. Choose before-cutting (fabric) or after-cutting (panel) per line on the Set BOM.
+            Stitching stays blocked until all panels return and the component bundle is complete.
           </p>
           <div className="grid grid-cols-2 gap-2">
             <div>
