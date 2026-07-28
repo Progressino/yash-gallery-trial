@@ -2440,6 +2440,16 @@ def get_jo_panel_wip(joid: int) -> dict:
                     "planned_qty": int(child.get("planned_qty") or 0),
                     "received_qty": int(child.get("received_qty") or 0),
                 }
+            # Path Cutting>Embroidery>Cutting>Stitching: after emb is done, next is Stitching.
+            emb_done = emb_out == 0 and child_jo and (
+                str(child_jo.get("status") or "").strip().lower() in ("closed", "complete", "completed")
+                or (
+                    int(child_jo.get("planned_qty") or 0) > 0
+                    and int(child_jo.get("received_qty") or 0) >= int(child_jo.get("planned_qty") or 0)
+                )
+            )
+            if emb_done and issue_from == "Cutting" and issue_to == "Embroidery":
+                issue_to = "Stitching"
             panel_rows.append(
                 {
                     "component_code": code,
@@ -2474,6 +2484,18 @@ def get_jo_panel_wip(joid: int) -> dict:
         if so_number and style_main
         else {}
     )
+    from ..services.operation_routing import parse_routing_path as _parse_path
+
+    bundle_ok = bool(bundle.get("bundle_complete"))
+    for p in panel_rows:
+        p["status"] = panel_wip_status(
+            location=str(p.get("current_location") or gate),
+            available_qty=int(p.get("embroidery_outstanding") or 0)
+            if int(p.get("embroidery_outstanding") or 0) > 0
+            else int(p.get("available_qty") or 0),
+            path=_parse_path(p.get("routing")),
+            bundle_ready=bundle_ok,
+        )
     return {
         "has_panels": True,
         "jo_id": joid,
