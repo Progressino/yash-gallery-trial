@@ -2,6 +2,7 @@
 import os, sqlite3
 from datetime import datetime
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, List
 import io
@@ -25,6 +26,7 @@ from ..db.production_db import (
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
 from ..services import jo_issue_notes
+from ..services.jo_import import build_jo_payload_from_import_row, jo_import_template_csv
 
 router = APIRouter()
 
@@ -503,6 +505,75 @@ def validate_jo(process: str, so_number: str, sku: str, planned_qty: int = 0):
     stocks = get_all_process_stocks(so_number, sku) if so_number and sku else {}
     return {**result, 'process_stocks': stocks}
 
+
+@router.get("/orders/import-template")
+def download_jo_import_template():
+    """CSV template for bulk JO import (main SKU + optional component_code; panels not separate rows)."""
+    return Response(
+        content=jo_import_template_csv(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="production_jo_import_template.csv"'
+        },
+    )
+
+
+@router.post("/orders/import")
+async def import_jos(
+    file: UploadFile = File(...),
+    process: str = Form("Cutting"),
+):
+    """
+    Import job orders from CSV/XLSX.
+
+    Cutting (recommended): one row per main size SKU → auto-creates TOP/PANT/DUPATTA
+    Cutting JOs from Set BOM. FRONT/BACK are panels under TOP — do not import them
+    as separate rows; they appear on the TOP JO after Receive.
+
+    Optional ``component_code`` = TOP | PANT | DUPATTA creates only that Cutting JO.
+    """
+    raw = await file.read()
+    name = (file.filename or "").lower()
+    try:
+        if name.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(io.BytesIO(raw))
+        else:
+            df = pd.read_csv(io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(400, f"Could not read file: {e}") from e
+    if df.empty:
+        raise HTTPException(400, "Import file is empty")
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+    created: list[str] = []
+    errors: list[str] = []
+    for i, row in df.iterrows():
+        try:
+            data = build_jo_payload_from_import_row(
+                row.to_dict(),
+                default_process=process,
+            )
+            result = create_jo(data)
+            if isinstance(result, list):
+                created.extend(result)
+            else:
+                created.append(result)
+        except Exception as e:
+            sku_hint = str(row.get("sku") or "").strip() or "?"
+            errors.append(f"Row {int(i) + 2} ({sku_hint}): {e}")
+    return {
+        "ok": True,
+        "created": len(created),
+        "jo_numbers": created,
+        "errors": errors,
+        "message": f"Imported {len(created)} job order(s)"
+        + (f"; {len(errors)} failed" if errors else ""),
+        "hint": (
+            "FRONT/BACK are panels inside the TOP Cutting JO after Receive — "
+            "not separate import rows. Use one main size SKU row, or component_code=TOP/PANT/DUPATTA."
+        ),
+    }
+
+
 @router.get("/orders/{joid}")
 def get_jo_detail(joid: int):
     jo = get_jo(joid)
@@ -569,86 +640,6 @@ def post_jo(body: JOIn):
     jo_row = next((j for j in list_jos() if j.get("jo_number") == num), None)
     issue_note = jo_issue_notes.get_issue_note_by_jo_id(jo_row["id"]) if jo_row else None
     return {"jo_number": num, "ok": True, "issue_note": issue_note}
-
-
-@router.post("/orders/import")
-async def import_jos(
-    file: UploadFile = File(...),
-    process: str = Form("Cutting"),
-):
-    """
-    Import job orders from CSV/XLSX.
-    Columns: so_number, sku, planned_qty, expected_completion (or delivery_date),
-    vendor_rate, remarks, fabric_code, fabric_qty, exec_type, vendor_name.
-    """
-    raw = await file.read()
-    name = (file.filename or "").lower()
-    try:
-        if name.endswith((".xlsx", ".xls")):
-            df = pd.read_excel(io.BytesIO(raw))
-        else:
-            df = pd.read_csv(io.BytesIO(raw))
-    except Exception as e:
-        raise HTTPException(400, f"Could not read file: {e}") from e
-    if df.empty:
-        raise HTTPException(400, "Import file is empty")
-    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-    created: list[str] = []
-    errors: list[str] = []
-    for i, row in df.iterrows():
-        so_number = str(row.get("so_number") or "").strip()
-        sku = str(row.get("sku") or "").strip()
-        if not so_number or not sku:
-            errors.append(f"Row {int(i) + 2}: so_number and sku required")
-            continue
-        planned = float(row.get("planned_qty") or row.get("qty") or 0)
-        delivery = str(
-            row.get("expected_completion")
-            or row.get("delivery_date")
-            or row.get("delivery")
-            or ""
-        ).strip()
-        data = {
-            "so_number": so_number,
-            "sku": sku,
-            "sku_name": str(row.get("sku_name") or "").strip(),
-            "process": str(row.get("process") or process or "Cutting").strip(),
-            "exec_type": str(row.get("exec_type") or "Inhouse").strip(),
-            "vendor_name": str(row.get("vendor_name") or "").strip(),
-            "vendor_rate": float(row.get("vendor_rate") or row.get("rate") or 0),
-            "planned_qty": planned,
-            "expected_completion": delivery[:10] if delivery else "",
-            "remarks": str(row.get("remarks") or "").strip(),
-            "fabric_code": str(row.get("fabric_code") or "").strip(),
-            "fabric_qty": float(row.get("fabric_qty") or 0),
-            "fabric_unit": str(row.get("fabric_unit") or "MTR").strip(),
-            "lines": [
-                {
-                    "so_number": so_number,
-                    "sku": sku,
-                    "sku_name": str(row.get("sku_name") or "").strip(),
-                    "planned_qty": planned,
-                    "vendor_rate": float(row.get("vendor_rate") or row.get("rate") or 0),
-                    "remarks": str(row.get("remarks") or "").strip(),
-                }
-            ],
-        }
-        try:
-            result = create_jo(data)
-            if isinstance(result, list):
-                created.extend(result)
-            else:
-                created.append(result)
-        except Exception as e:
-            errors.append(f"Row {int(i) + 2} ({sku}): {e}")
-    return {
-        "ok": True,
-        "created": len(created),
-        "jo_numbers": created,
-        "errors": errors,
-        "message": f"Imported {len(created)} job order(s)"
-        + (f"; {len(errors)} failed" if errors else ""),
-    }
 
 
 @router.patch("/orders/{joid}")

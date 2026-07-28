@@ -1631,19 +1631,34 @@ export default function Production() {
               />
               <button
                 type="button"
-                onClick={() => {
-                  const csv = [
-                    'so_number,sku,sku_name,planned_qty,process,exec_type,vendor_name,vendor_rate,expected_completion,fabric_code,fabric_qty,fabric_unit,remarks',
-                    'SO-0001,1046YKBLUE-L,Blue Kurta L,50,Cutting,Inhouse,,0,2026-07-20,P500Border Cotton,12.5,MTR,sample cutting JO',
-                    'SO-0001,1046YKBLUE-L,Blue Kurta L,50,Stitching,Outsource,Vendor ABC,25,2026-07-25,,,MTR,sample stitching JO',
-                  ].join('\n')
-                  const a = document.createElement('a')
-                  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv)
-                  a.download = 'production_jo_import_template.csv'
-                  a.click()
+                onClick={async () => {
+                  try {
+                    const res = await api.get('/production/orders/import-template', {
+                      responseType: 'blob',
+                    })
+                    const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }))
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = 'production_jo_import_template.csv'
+                    a.click()
+                    URL.revokeObjectURL(url)
+                  } catch (err) {
+                    // Fallback local template if API unavailable
+                    const csv = [
+                      'so_number,sku,component_code,planned_qty,process,create_component_jos,exec_type,vendor_name,vendor_rate,expected_completion,fabric_code,fabric_qty,fabric_unit,sku_name,remarks',
+                      'SO-0001,TEST SKU-M,,10,Cutting,yes,Inhouse,,0,2026-08-15,,,,Test Style M,"One row per size → TOP/PANT/DUPATTA JOs. Do NOT add FRONT/BACK rows — panels appear inside TOP JO after Receive."',
+                      'SO-0001,TEST SKU-M,TOP,10,Cutting,no,Inhouse,,0,2026-08-15,FABRIC-TOP,20,MTR,Top only,"Optional: only TOP Cutting JO; FRONT/BACK stay as panels on this JO"',
+                      'SO-0001,TEST SKU-M,PANT,10,Cutting,no,Inhouse,,0,2026-08-15,FABRIC-PANT,15,MTR,Pant only,"Optional: PANT or DUPATTA alone"',
+                    ].join('\n')
+                    const a = document.createElement('a')
+                    a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv)
+                    a.download = 'production_jo_import_template.csv'
+                    a.click()
+                    alert(apiErrorMessage(err, 'Used offline template (API template failed)'))
+                  }
                 }}
                 className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50"
-                title="Download CSV template showing importable Job Order columns"
+                title="Download CSV template — main size SKU (or TOP/PANT/DUPATTA). FRONT/BACK are panels, not JO rows."
               >
                 📥 Template
               </button>
@@ -1661,9 +1676,11 @@ export default function Production() {
             </div>
           </div>
           <p className="text-xs text-gray-500 -mt-1 mb-2">
-            JO import: required <code className="bg-gray-100 px-1 rounded">so_number</code> + <code className="bg-gray-100 px-1 rounded">sku</code>.
-            Optional <code className="bg-gray-100 px-1 rounded">process</code> overrides the active tab.
-            Fabric columns apply mainly to Cutting JOs. <code className="bg-gray-100 px-1 rounded">exec_type</code>: Inhouse | Outsource.
+            JO import — required <code className="bg-gray-100 px-1 rounded">so_number</code> + <code className="bg-gray-100 px-1 rounded">sku</code> (main size, e.g. STYLE-M).
+            Cutting with Set BOM: one row creates <strong>TOP / PANT / DUPATTA</strong> JOs.
+            Optional <code className="bg-gray-100 px-1 rounded">component_code</code>=TOP|PANT|DUPATTA for one component only.
+            <strong> Do not import FRONT/BACK</strong> — they are panels inside the TOP JO after Receive.
+            Optional <code className="bg-gray-100 px-1 rounded">create_component_jos</code>: yes (default) | no.
           </p>
 
           {/* Ready to process — always visible for stage context */}

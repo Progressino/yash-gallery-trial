@@ -702,6 +702,15 @@ def create_jo(data: dict) -> str | list[str]:
     from ..services.set_components import parse_component_sku
 
     data = dict(data)
+    # Explicit set-component Cutting JO (e.g. import row with component_code=TOP).
+    # Panels (FRONT/BACK) must never use this path — callers validate first.
+    if (
+        str(data.get("sku_role") or "").upper() == "COMPONENT"
+        and str(data.get("component_code") or "").strip()
+        and data.get("create_component_jos") is False
+    ):
+        return _create_single_jo(data)
+
     main = resolve_cutting_main_sku(data)
     if main:
         data["sku"] = main
