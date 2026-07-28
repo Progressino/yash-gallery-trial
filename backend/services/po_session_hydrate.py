@@ -862,7 +862,12 @@ def hydrate_po_session_for_calculate(sess) -> dict[str, int]:
         ensure_manual_intransit_overlay_applied(sess)
         inv = getattr(sess, "inventory_df_variant", None)
         if inv is not None and hasattr(inv, "empty") and not inv.empty:
-            sess.inventory_df_variant = recompute_inventory_totals(inv)
+            from .inventory import coalesce_inventory_by_sku_mapping
+
+            mapping = getattr(sess, "sku_mapping", None) or {}
+            sess.inventory_df_variant = coalesce_inventory_by_sku_mapping(
+                recompute_inventory_totals(inv), mapping
+            )
             try:
                 wc = getattr(_main, "_warm_cache", None)
                 if isinstance(wc, dict):

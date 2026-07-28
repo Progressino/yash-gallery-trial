@@ -37,6 +37,53 @@ _STORE_COLS = ["OMS_SKU", "Date", "Qty", "Source"]
 _CHANNEL_COLS = ["OMS_SKU", "Date", "Qty", "Source", "Channel"]
 _SOURCE_RANK = {"snapshot": 3, "uploaded": 2, "derived": 1}
 
+# Parent-style codes (YR021) and single-cell day-total leaks (~warehouse census)
+# must never enter Inv History as sellable SKU qty.
+_PARENT_STYLE_SKU_RE = re.compile(r"^YR\d{2,4}$", re.I)
+_ABSURD_SKU_DAY_QTY = float(os.environ.get("INV_HISTORY_ABSURD_SKU_QTY", "50000"))
+
+
+def _is_parent_style_inventory_sku(sku: object) -> bool:
+    s = str(sku or "").strip().upper()
+    return bool(s) and bool(_PARENT_STYLE_SKU_RE.match(s))
+
+
+def scrub_absurd_inventory_history_rows(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Drop parent-style SKUs and single-SKU day totals that are warehouse-column leaks."""
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame(columns=_STORE_COLS)
+    out = df.copy()
+    out["OMS_SKU"] = out["OMS_SKU"].astype(str).str.strip().str.upper()
+    out = out.loc[~out["OMS_SKU"].map(_is_parent_style_inventory_sku)]
+    if out.empty:
+        return pd.DataFrame(columns=[c for c in df.columns])
+    qty = pd.to_numeric(out["Qty"], errors="coerce")
+    out = out.loc[~(qty.fillna(0) >= _ABSURD_SKU_DAY_QTY)]
+    return out.reset_index(drop=True)
+
+
+def coalesce_inventory_history_sku_aliases(
+    df: pd.DataFrame | None,
+    mapping: dict | None = None,
+) -> pd.DataFrame:
+    """Remap BOTTEL/1180-style twins onto one OMS_SKU so Combined matches separate stock."""
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame(columns=_STORE_COLS)
+    try:
+        from .inventory import _inventory_alias_oms_key
+    except Exception:
+        return scrub_absurd_inventory_history_rows(df)
+    out = scrub_absurd_inventory_history_rows(df)
+    if out.empty:
+        return out
+    out = out.copy()
+    out["OMS_SKU"] = out["OMS_SKU"].map(lambda s: _inventory_alias_oms_key(s, mapping))
+    out = out[out["OMS_SKU"].astype(str).str.len() > 0]
+    if out.empty:
+        return out.reset_index(drop=True)
+    out = _ensure_source_column(_ensure_channel_column(out))
+    return _coalesce_history_rows(out)
+
 # Memoize channel views — combine_inventory_channels copies ~600k rows and concurrent
 # Inv History tabs were stacking those temps until the 6.5–7 GB container OOM'd.
 _CHANNEL_VIEW_LOCK = threading.Lock()
@@ -641,14 +688,17 @@ def merge_inventory_history(
 ) -> pd.DataFrame:
     """Union SKU-day rows; snapshot/uploaded rows beat sales-derived duplicates."""
     if incoming is None or incoming.empty:
-        return _ensure_source_column(existing) if existing is not None else pd.DataFrame(columns=_STORE_COLS)
+        base = _ensure_source_column(existing) if existing is not None else pd.DataFrame(columns=_STORE_COLS)
+        return scrub_absurd_inventory_history_rows(base)
     if existing is None or existing.empty:
-        return _ensure_source_column(incoming, default="uploaded")
+        return scrub_absurd_inventory_history_rows(
+            _ensure_source_column(incoming, default="uploaded")
+        )
     combined = pd.concat(
         [_ensure_source_column(existing), _ensure_source_column(incoming, default="uploaded")],
         ignore_index=True,
     )
-    return _coalesce_history_rows(combined)
+    return scrub_absurd_inventory_history_rows(_coalesce_history_rows(combined))
 
 
 def inventory_history_max_date(df: Optional[pd.DataFrame]) -> Optional[pd.Timestamp]:
@@ -1684,6 +1734,11 @@ def _parse_one_sheet(
     canon_map = {r: canonical_oms_key(r, mapping) for r in unique_raw}
     tall["OMS_SKU"] = tall["_raw_sku"].map(canon_map)
     tall = tall[tall["OMS_SKU"].astype(str).str.len() > 0]
+    # Parent-style codes (YR021…) are workbook section headers, not sellable SKUs.
+    # When a day-total leaks into that row it creates the 7×171k Inv History spike.
+    tall = tall.loc[~tall["OMS_SKU"].map(_is_parent_style_inventory_sku)]
+    if tall.empty:
+        return pd.DataFrame(columns=_TALL_COLS)
     tall["Qty"] = pd.to_numeric(tall["Qty"], errors="coerce")
     # Excel/pandas sometimes round-trips integer NA as ``iinfo(int64).min`` — those
     # show up as huge negatives. Coerce those back to NaN so they're treated as
@@ -1697,6 +1752,10 @@ def _parse_one_sheet(
     if tall.empty:
         return pd.DataFrame(columns=_TALL_COLS)
     tall["Qty"] = tall["Qty"].astype(float).clip(lower=0.0)
+    # Reject single-cell warehouse day totals pasted onto a SKU row.
+    tall = tall.loc[tall["Qty"] < _ABSURD_SKU_DAY_QTY]
+    if tall.empty:
+        return pd.DataFrame(columns=_TALL_COLS)
     # File uploads are authoritative census days (same rank family as RAR snapshots).
     tall["Source"] = "snapshot"
     return tall[_STORE_COLS].reset_index(drop=True)

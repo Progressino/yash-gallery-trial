@@ -40,7 +40,7 @@ export const PO2_DEFAULT_PARAMS: PO2Params = {
   lead_time: 45,
   target_days: 180,
   grace_days: 0,
-  demand_basis: 'Sold',
+  demand_basis: 'Net',
   enforce_two_size_minimum: true,
   urgent_all_sizes_days: 45,
 }

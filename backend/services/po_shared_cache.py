@@ -66,7 +66,7 @@ _CALC_PARAM_DEFAULTS: dict[str, Any] = {
     "period_days": 90,
     "lead_time": 30,
     "target_days": 135,
-    "demand_basis": "Sold",
+    "demand_basis": "Net",
     "use_seasonality": False,
     "seasonal_weight": 0.5,
     "group_by_parent": False,

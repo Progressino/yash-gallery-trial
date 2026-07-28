@@ -26,7 +26,7 @@ export const DEFAULT_PO_FRESH_PARAMS: POFreshParams = {
   lead_time: 45,
   target_days: 180,
   grace_days: 0,
-  demand_basis: 'Sold',
+  demand_basis: 'Net',
   group_by_parent: false,
   safety_pct: 0,
   use_seasonality: true,

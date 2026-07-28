@@ -83,7 +83,7 @@ export const usePOStore = create<POState>()(
     period_days: 30,
     lead_time: 45,
     target_days: 180,
-    demand_basis: 'Sold',
+    demand_basis: 'Net',
     use_seasonality: false,
     seasonal_weight: 0.5,
     group_by_parent: false,
@@ -121,7 +121,7 @@ export const usePOStore = create<POState>()(
     }),
     {
       name: 'po-store-v1',
-      version: 7,
+      version: 8,
       migrate: (persisted, fromVersion) => {
         const p = persisted as Partial<POState> | undefined
         if (!p) return persisted as POState
@@ -141,6 +141,10 @@ export const usePOStore = create<POState>()(
         }
         if (fromVersion < 7 && params && params.inventory_history_channel === undefined) {
           params.inventory_history_channel = 'combined'
+        }
+        // Quarterly File / Unnamed:48 validation uses Net (shipments − returns).
+        if (fromVersion < 8 && params) {
+          params.demand_basis = 'Net'
         }
         return p as POState
       },

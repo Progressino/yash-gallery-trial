@@ -2102,6 +2102,8 @@ def load_inventory_consolidated(
         result = consolidated[_keep].reset_index(drop=True)
     else:
         result = consolidated[consolidated["Total_Inventory"] != 0].reset_index(drop=True)
+    # Merge BOTTEL/BOTTLE (and similar) twins so PO Combined matches separate channels.
+    result = coalesce_inventory_by_sku_mapping(result, mapping)
     result = strip_fba_intransit_unless_enabled(result)
     if debug.get("actual_inventory_workbook") and hasattr(result, "attrs"):
         result.attrs["actual_inventory_workbook"] = True
@@ -2115,6 +2117,54 @@ def load_inventory_consolidated(
 _COMPUTED_COLS = {"Total_Inventory", "Marketplace_Total"}
 _FIXED_COLS    = {"OMS_SKU", "OMS_Inventory", "Buffer_Stock"}
 _EXTRA_MKT_COLS = frozenset({"Manual_InTransit", "Not_In_Inventory_Qty"})
+
+# Warehouse typo that must merge with the correctly spelled Amazon/OMS twin.
+_BOTTELGREEN_RE = re.compile(r"BOTTELGREEN", re.I)
+# Legacy marketplace listing family that is the same style as 289YK345YELLOW.
+_1180_YELLOW_RE = re.compile(r"^1180YK?YELLOW-", re.I)
+
+
+def _inventory_alias_oms_key(sku: object, mapping: Optional[Dict[str, str]] = None) -> str:
+    """Canonical inventory key for alias coalescing (sum, never drop)."""
+    from .po_engine import inventory_oms_key
+
+    key = inventory_oms_key(sku)
+    if not key:
+        return ""
+    key = _BOTTELGREEN_RE.sub("BOTTLEGREEN", key)
+    m1180 = _1180_YELLOW_RE.match(key)
+    if m1180:
+        key = "289YK345YELLOW-" + key.split("-", 1)[-1]
+    mp = mapping or {}
+    if key in mp:
+        mapped = str(mp[key] or "").strip().upper()
+        if mapped:
+            key = mapped
+    return key
+
+
+def coalesce_inventory_by_sku_mapping(
+    df: pd.DataFrame,
+    mapping: Optional[Dict[str, str]] = None,
+) -> pd.DataFrame:
+    """Sum inventory rows that are spelling / listing aliases of the same OMS SKU.
+
+    Sales already remap ``BOTTELGREEN→BOTTLEGREEN`` and ``1180YKYELLOW→289…``.
+    Inventory kept both spellings so a naïve ``drop_duplicates`` would discard
+    stock; summing after the same remap restores correct ``Total_Inventory``.
+    """
+    if df is None or getattr(df, "empty", True) or "OMS_SKU" not in df.columns:
+        return df
+    out = df.copy()
+    out["OMS_SKU"] = out["OMS_SKU"].map(lambda s: _inventory_alias_oms_key(s, mapping))
+    out = out[out["OMS_SKU"].astype(str).str.len() > 0]
+    if out.empty:
+        return out.reset_index(drop=True)
+    num_cols = [c for c in out.columns if c != "OMS_SKU"]
+    for c in num_cols:
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
+    out = out.groupby("OMS_SKU", as_index=False)[num_cols].sum()
+    return recompute_inventory_totals(out)
 
 
 def inventory_source_columns(df: pd.DataFrame) -> list[str]:
