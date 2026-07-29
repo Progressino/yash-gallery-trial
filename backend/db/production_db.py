@@ -1179,6 +1179,51 @@ def list_embroidery_stock_for_sku(sku: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_embroidery_stock_for_skus(skus: list[str]) -> list[dict]:
+    """Leftover embroidery stock for styles covered by garment SKUs (deduped by style/type).
+
+    Used by MRP / PO planning so the user sees Border / Yog / Boota leftovers
+    before placing the next purchase or job order for that SKU.
+    """
+    from ..services.set_components import parse_component_sku, style_key_for_set_bom
+
+    style_keys: list[str] = []
+    seen: set[str] = set()
+    sku_by_style: dict[str, list[str]] = {}
+    for raw in skus or []:
+        sku = str(raw or "").strip().upper()
+        if not sku:
+            continue
+        main, _comp = parse_component_sku(sku)
+        style_key = style_key_for_set_bom(main or sku)
+        if not style_key:
+            continue
+        sku_by_style.setdefault(style_key, [])
+        if sku not in sku_by_style[style_key]:
+            sku_by_style[style_key].append(sku)
+        if style_key not in seen:
+            seen.add(style_key)
+            style_keys.append(style_key)
+    if not style_keys:
+        return []
+    conn = _connect()
+    placeholders = ",".join("?" * len(style_keys))
+    rows = conn.execute(
+        f"""SELECT * FROM embroidery_stock
+            WHERE style_key IN ({placeholders}) AND available_qty > 0
+            ORDER BY style_key, component_code, embroidery_type""",
+        tuple(style_keys),
+    ).fetchall()
+    conn.close()
+    out: list[dict] = []
+    for r in rows:
+        item = dict(r)
+        sk = str(item.get("style_key") or "")
+        item["sample_skus"] = (sku_by_style.get(sk) or [])[:5]
+        out.append(item)
+    return out
+
+
 def _resolve_embroidery_jo_plan(
     conn,
     *,

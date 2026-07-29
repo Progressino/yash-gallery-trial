@@ -16,6 +16,7 @@ from ..db.production_db import (
     get_process_report, get_production_stats,
     save_mrp_result, get_last_mrp_result,
     sync_mrp_commitments_from_run, get_mrp_commitments_for_so, check_mrp_commitment,
+    list_embroidery_stock_for_skus,
     soft_reserve_all, release_so_reservations,
     list_soft_reservations_v2, get_soft_reserved_by_material,
     list_reservations, create_reservation, release_reservation, get_reserved_qty,
@@ -23,6 +24,7 @@ from ..db.production_db import (
     preview_set_match, commit_set_match, list_set_split_events, list_set_match_events,
     get_component_routing, preview_bundle_ready, get_partial_wip_board, get_jo_panel_wip,
     list_embroidery_stock_for_sku,
+    list_embroidery_stock_for_skus,
 )
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
@@ -244,11 +246,20 @@ def calculate_mrp(so_numbers):
         mat['net_req'] = max(0., round(mat['total_req'] - avail, 3))
         mat['net_req_with_soft'] = max(0., round(mat['total_req'] - mat['net_available'], 3))
 
+    so_skus = sorted({
+        str(l.get("sku") or "").strip().upper()
+        for l in selected
+        if str(l.get("sku") or "").strip()
+    })
+    embroidery_stock = list_embroidery_stock_for_skus(so_skus)
+
     return {
         "materials": materials,
         "warnings": warnings,
         "matched_sos": sorted(matched_sos),
         "missing_sos": missing_sos,
+        "embroidery_stock": embroidery_stock,
+        "embroidery_stock_skus": so_skus,
     }
 
 
@@ -902,12 +913,16 @@ def _normalize_mrp_payload(payload):
             "warnings": payload.get("warnings") or [],
             "matched_sos": payload.get("matched_sos") or [],
             "missing_sos": payload.get("missing_sos") or [],
+            "embroidery_stock": payload.get("embroidery_stock") or [],
+            "embroidery_stock_skus": payload.get("embroidery_stock_skus") or [],
         }
     return {
         "materials": payload or {},
         "warnings": [],
         "matched_sos": [],
         "missing_sos": [],
+        "embroidery_stock": [],
+        "embroidery_stock_skus": [],
     }
 
 
@@ -921,6 +936,7 @@ def run_mrp_full(body: MRPRunBody):
             'warnings': ['Select at least one SO before running material requirement planning.'],
             'matched_sos': [],
             'missing_sos': [],
+            'embroidery_stock': [],
         }
     payload = calculate_mrp(body.so_numbers)
     save_mrp_result(body.so_numbers, payload)
@@ -933,14 +949,37 @@ def run_mrp_full(body: MRPRunBody):
         'warnings': norm['warnings'],
         'matched_sos': norm['matched_sos'],
         'missing_sos': norm['missing_sos'],
+        'embroidery_stock': norm['embroidery_stock'],
     }
 
 @router.get("/mrp/last")
 def get_last_mrp():
     data = get_last_mrp_result()
     if not data:
-        return {'run_time': None, 'so_numbers': [], 'result': {}, 'warnings': [], 'matched_sos': [], 'missing_sos': []}
+        return {
+            'run_time': None,
+            'so_numbers': [],
+            'result': {},
+            'warnings': [],
+            'matched_sos': [],
+            'missing_sos': [],
+            'embroidery_stock': [],
+        }
     norm = _normalize_mrp_payload(data.get('result'))
+    # Refresh leftover stock live so MRP UI always shows current balances
+    # even when the last planning snapshot is older than a receive/leftover credit.
+    so_skus: list[str] = []
+    try:
+        open_orders = get_open_orders()
+        so_set = set(data.get('so_numbers') or [])
+        so_skus = sorted({
+            str(l.get("sku") or "").strip().upper()
+            for l in open_orders
+            if l.get("so_number") in so_set and str(l.get("sku") or "").strip()
+        })
+    except Exception:
+        so_skus = list(norm.get("embroidery_stock_skus") or [])
+    live_stock = list_embroidery_stock_for_skus(so_skus) if so_skus else list(norm.get("embroidery_stock") or [])
     return {
         'run_time': data.get('run_time'),
         'so_numbers': data.get('so_numbers', []),
@@ -948,7 +987,32 @@ def get_last_mrp():
         'warnings': norm['warnings'],
         'matched_sos': norm['matched_sos'],
         'missing_sos': norm['missing_sos'],
+        'embroidery_stock': live_stock,
     }
+
+@router.get("/mrp/embroidery-stock")
+def mrp_embroidery_stock(so_numbers: str = ""):
+    """Leftover Border / Yog / Boota stock for SKUs on the given SOs.
+
+    Surfaces embroidery leftovers on the MRP / PO planning screen before the
+    next purchase or job order is placed for those styles.
+    """
+    so_list = [s.strip() for s in str(so_numbers or "").split(",") if s.strip()]
+    if not so_list:
+        return {"so_numbers": [], "items": []}
+    so_set = set(so_list)
+    open_orders = get_open_orders()
+    skus = sorted({
+        str(l.get("sku") or "").strip().upper()
+        for l in open_orders
+        if l.get("so_number") in so_set and str(l.get("sku") or "").strip()
+    })
+    return {
+        "so_numbers": so_list,
+        "skus": skus,
+        "items": list_embroidery_stock_for_skus(skus),
+    }
+
 
 @router.get("/mrp/lines-for-so")
 def get_mrp_lines_for_so(so_number: str = ''):

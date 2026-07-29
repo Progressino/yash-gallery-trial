@@ -262,3 +262,94 @@ def test_embroidery_stock_reduces_next_jo(isolated_module_dbs, client):
     child = issue.json().get("child_jo") or {}
     assert int(child.get("planned_qty") or 0) == 35
     assert float(child.get("stock_used") or 0) == 5
+
+
+def test_mrp_surfaces_embroidery_leftover_stock(isolated_module_dbs, client):
+    """MRP / PO planning screen must show leftover Border stock for SO styles."""
+    from backend.db import production_db
+    import sqlite3
+
+    # Seed Item Master BOM so MRP can explode the SO line.
+    conn = sqlite3.connect(isolated_module_dbs["ITEM_DB_PATH"])
+    type_row = conn.execute(
+        "SELECT id FROM item_types WHERE code='FG' OR name LIKE 'Finished%' LIMIT 1"
+    ).fetchone()
+    if type_row is None:
+        cur = conn.execute("INSERT INTO item_types (name, code) VALUES (?, ?)", ("Finished Good", "FG"))
+        type_id = cur.lastrowid
+    else:
+        type_id = type_row[0]
+    cur = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id) VALUES (?, ?, ?)",
+        ("MRPEMB", "MRP Emb Style", type_id),
+    )
+    parent_id = cur.lastrowid
+    cur = conn.execute(
+        "INSERT INTO items (item_code, item_name, item_type_id) VALUES (?, ?, ?)",
+        ("FAB-EMB", "Emb Fabric", type_id),
+    )
+    fab_id = cur.lastrowid
+    cur = conn.execute(
+        "INSERT INTO bom_headers (item_id, bom_name, applies_to, is_default) VALUES (?, 'Default', 'all', 1)",
+        (parent_id,),
+    )
+    bom_id = cur.lastrowid
+    conn.execute(
+        """INSERT INTO bom_lines
+           (bom_id, component_item_id, component_name, component_type, quantity, unit)
+           VALUES (?, ?, 'Emb Fabric', 'RM', 1, 'MTR')""",
+        (bom_id, fab_id),
+    )
+    conn.commit()
+    conn.close()
+
+    # Leftover Border from a prior embroidery receive.
+    pdb = production_db._connect()
+    production_db.adjust_embroidery_stock(
+        pdb,
+        style_key="MRPEMB",
+        component_code="FRONT",
+        embroidery_type="Border",
+        unit="MTR",
+        delta_qty=7.5,
+        so_number="SO-PRIOR",
+        remarks="Leftover from prior JO",
+    )
+    pdb.commit()
+    pdb.close()
+
+    so = client.post(
+        "/api/sales/orders",
+        json={
+            "so_date": "2026-07-29",
+            "buyer": "Acme",
+            "warehouse": "Main",
+            "lines": [{"sku": "MRPEMB-M", "sku_name": "MRPEMB M", "qty": 10, "unit": "PCS"}],
+        },
+    )
+    assert so.status_code == 200, so.text
+    so_number = so.json()["so_number"]
+
+    preview = client.get(
+        f"/api/production/mrp/embroidery-stock?so_numbers={so_number}"
+    )
+    assert preview.status_code == 200, preview.text
+    items = preview.json().get("items") or []
+    assert any(
+        i.get("style_key") == "MRPEMB"
+        and i.get("embroidery_type") == "Border"
+        and float(i.get("available_qty") or 0) == 7.5
+        for i in items
+    ), items
+
+    run = client.post("/api/production/mrp/run", json={"so_numbers": [so_number]})
+    assert run.status_code == 200, run.text
+    emb = run.json().get("embroidery_stock") or []
+    assert any(float(i.get("available_qty") or 0) == 7.5 for i in emb), emb
+
+    last = client.get("/api/production/mrp/last")
+    assert last.status_code == 200
+    assert any(
+        float(i.get("available_qty") or 0) == 7.5
+        for i in (last.json().get("embroidery_stock") or [])
+    )

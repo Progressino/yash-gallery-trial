@@ -422,6 +422,22 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
   })
 
   const activeSONumbers: string[] = mrpResult?.so_numbers || lastMRP?.so_numbers || []
+  const embroideryPreviewSos = selectedSOs.length > 0 ? selectedSOs : activeSONumbers
+
+  const { data: embStockData } = useQuery({
+    queryKey: ['mrp-embroidery-stock', embroideryPreviewSos.join(',')],
+    queryFn: () =>
+      api
+        .get(`/production/mrp/embroidery-stock?so_numbers=${encodeURIComponent(embroideryPreviewSos.join(','))}`)
+        .then(r => r.data),
+    enabled: embroideryPreviewSos.length > 0,
+  })
+
+  const embroideryStock: any[] =
+    (mrpResult?.embroidery_stock as any[]) ||
+    (embStockData?.items as any[]) ||
+    (lastMRP?.embroidery_stock as any[]) ||
+    []
 
   const loadAudit = async () => {
     if (!auditSO.trim()) return
@@ -443,6 +459,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
       const res = await api.post('/production/mrp/run', { so_numbers: selectedSOs })
       setMrpResult(res.data)
       qc.invalidateQueries({ queryKey: ['mrp-last'] })
+      qc.invalidateQueries({ queryKey: ['mrp-embroidery-stock'] })
     } catch (e) { alert('Material requirement planning run failed') }
     setRunning(false)
   }
@@ -484,6 +501,65 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
           <p className="text-xs text-gray-400 mt-2">Last run: {lastMRP.run_time} · SOs: {lastMRP.so_numbers?.join(', ')}</p>
         )}
       </div>
+
+      {/* Embroidery leftovers — show before placing material PO / JO for these styles */}
+      {embroideryPreviewSos.length > 0 && (
+        <div className="bg-white rounded-xl border overflow-hidden">
+          <div className="px-4 py-3 bg-teal-800 text-white flex justify-between items-center">
+            <span className="font-semibold text-sm">
+              Embroidery leftovers in stock
+              {embroideryStock.length > 0
+                ? ` — ${embroideryStock.length} item${embroideryStock.length === 1 ? '' : 's'}`
+                : ''}
+            </span>
+            <span className="text-teal-100 text-xs">Use before placing next PO / embroidery JO</span>
+          </div>
+          {embroideryStock.length === 0 ? (
+            <p className="px-4 py-3 text-xs text-gray-500">
+              No leftover Border / Yog / Boota stock for the selected SO styles.
+            </p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="text-gray-400 text-xs uppercase bg-teal-50">
+                <tr>
+                  <th className="text-left px-4 py-2">Style</th>
+                  <th className="text-left px-4 py-2">Part</th>
+                  <th className="text-left px-4 py-2">Type</th>
+                  <th className="text-right px-4 py-2">Available</th>
+                  <th className="text-left px-4 py-2">Unit</th>
+                  <th className="text-left px-4 py-2">SKUs</th>
+                  <th className="text-left px-4 py-2">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {embroideryStock.map((item: any, idx: number) => (
+                  <tr key={`${item.style_key}-${item.component_code}-${item.embroidery_type}-${idx}`} className="border-t hover:bg-teal-50/40">
+                    <td className="px-4 py-2 font-mono font-semibold text-xs text-[#002B5B]">{item.style_key}</td>
+                    <td className="px-4 py-2 text-xs">{item.component_code || '—'}</td>
+                    <td className="px-4 py-2 text-xs font-semibold">{item.embroidery_type || '—'}</td>
+                    <td className="px-4 py-2 text-right font-bold text-teal-800">
+                      {Number(item.available_qty || 0)}
+                    </td>
+                    <td className="px-4 py-2 text-xs text-gray-500">{item.unit || 'PCS'}</td>
+                    <td className="px-4 py-2 text-xs font-mono text-gray-600">
+                      {(item.sample_skus || []).join(', ') || '—'}
+                    </td>
+                    <td className="px-4 py-2 text-xs text-gray-500 max-w-[220px] truncate" title={item.remarks || ''}>
+                      {item.remarks || (item.so_number ? `SO ${item.so_number}` : '—')}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {embroideryStock.length > 0 && (
+            <p className="px-4 py-2 text-xs text-teal-900 bg-teal-50 border-t border-teal-100">
+              These leftovers will be applied automatically when the next Embroidery job order is created for the same style/part.
+              Reduce any new Border / Yog purchase accordingly.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Warnings — show when SOs/SKUs couldn't be exploded so the user knows what to fix. */}
       {showWarnings && (
