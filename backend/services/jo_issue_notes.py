@@ -289,18 +289,20 @@ def _aggregate_material_lines(material_lines: list[dict]) -> list[dict]:
 
 
 def _finished_items_from_jo(jo: dict, line_rows: list[dict]) -> list[dict]:
+    from .embroidery_measurement import garment_pieces_for_fabric_bom
+
     if line_rows:
         return [
             {
                 "code": ln.get("sku") or jo.get("sku", ""),
                 "name": ln.get("sku_name") or jo.get("sku_name", ""),
-                "qty": float(ln.get("planned_qty") or 0),
+                "qty": garment_pieces_for_fabric_bom(jo, ln),
             }
             for ln in line_rows
-            if float(ln.get("planned_qty") or 0) > 0 and (ln.get("sku") or jo.get("sku"))
+            if garment_pieces_for_fabric_bom(jo, ln) > 0 and (ln.get("sku") or jo.get("sku"))
         ]
     sku = (jo.get("sku") or "").strip()
-    qty = float(jo.get("planned_qty") or 0)
+    qty = garment_pieces_for_fabric_bom(jo)
     if sku and qty > 0:
         return [{"code": sku, "name": jo.get("sku_name", ""), "qty": qty}]
     return []

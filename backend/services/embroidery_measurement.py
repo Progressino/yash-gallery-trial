@@ -134,3 +134,23 @@ def format_embroidery_jo_qty(
             base += f", {stock_used:g} {u} from stock"
         base += ")"
     return base
+
+
+def garment_pieces_for_fabric_bom(jo: dict, line: dict | None = None) -> float:
+    """Garment piece count for fabric BOM — never embroidery measurement qty.
+
+    Embroidery JOs store vendor billing qty in ``planned_qty`` (e.g. 20 MTR border)
+    and garment pieces in ``garment_qty`` (e.g. 10 pcs). Fabric issue must always
+    use garment pieces × consumption per piece.
+    """
+    proc = str((jo or {}).get("process") or "").strip().lower()
+    if proc == "embroidery":
+        if line:
+            g = int(line.get("garment_qty") or jo.get("garment_qty") or 0)
+        else:
+            g = int(jo.get("garment_qty") or 0)
+        if g > 0:
+            return float(g)
+    if line is not None:
+        return float(line.get("planned_qty") or 0)
+    return float(jo.get("planned_qty") or 0)

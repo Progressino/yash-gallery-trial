@@ -264,6 +264,31 @@ def test_embroidery_stock_reduces_next_jo(isolated_module_dbs, client):
     assert float(child.get("stock_used") or 0) == 5
 
 
+def test_garment_pieces_for_fabric_bom_uses_garment_not_measurement():
+    from backend.services.embroidery_measurement import garment_pieces_for_fabric_bom
+
+    jo = {"process": "Embroidery", "planned_qty": 20, "garment_qty": 10}
+    assert garment_pieces_for_fabric_bom(jo) == 10.0
+    assert garment_pieces_for_fabric_bom(jo, {"planned_qty": 20, "garment_qty": 4}) == 4.0
+    assert garment_pieces_for_fabric_bom({"process": "Cutting", "planned_qty": 20}) == 20.0
+
+
+def test_embroidery_issue_note_fabric_uses_garment_qty(isolated_module_dbs):
+    """10 pcs × 1.1 MTR fabric — not 20 MTR embroidery measurement × 1.1."""
+    from backend.services.jo_issue_notes import _finished_items_from_jo
+
+    jo = {
+        "process": "Embroidery",
+        "sku": "FABEMB-M-FRONT",
+        "planned_qty": 20,
+        "garment_qty": 10,
+        "measurement_qty": 20,
+    }
+    items = _finished_items_from_jo(jo, [])
+    assert len(items) == 1
+    assert items[0]["qty"] == 10.0
+
+
 def test_mrp_surfaces_embroidery_leftover_stock(isolated_module_dbs, client):
     """MRP / PO planning screen must show leftover Border stock for SO styles."""
     from backend.db import production_db

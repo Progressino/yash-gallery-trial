@@ -15,6 +15,20 @@ function apiErrorMessage(err: unknown, fallback: string): string {
   return fallback
 }
 
+/** Garment pcs for fabric BOM — embroidery JOs bill in measurement units, not pieces. */
+function garmentPcsForFabricIssue(jo: JO): number {
+  if (jo.process === 'Embroidery') {
+    const lines = (jo.lines || []).filter(l => l.sku)
+    const fromLines = lines.reduce((s, l) => s + (Number((l as JOLine & { garment_qty?: number }).garment_qty) || 0), 0)
+    const header = Number(jo.garment_qty) || 0
+    if (fromLines > 0) return fromLines
+    if (header > 0) return header
+  }
+  const lines = (jo.lines || []).filter(l => (l.planned_qty || 0) > 0 && l.sku)
+  const fromLines = lines.reduce((s, l) => s + (Number(l.planned_qty) || 0), 0)
+  return fromLines || Number(jo.planned_qty) || 1
+}
+
 type ModalType = 'issue-fabric' | 'return-fabric' | 'receive' | 'issue-pieces' | 'add-cost' | 'new-jo' | null
 
 interface JOLine {
@@ -72,6 +86,10 @@ interface JO {
   next_process: string | null
   process_stocks: Record<string, { available: number; in: number; out: number }>
   issue_note?: IssueNote | null
+  garment_qty?: number
+  measurement_qty?: number
+  embroidery_type?: string
+  embroidery_unit?: string
 }
 
 interface IssueNoteLine {
@@ -1107,15 +1125,14 @@ export default function Production() {
     setActiveLineId(lineId || null)
     setModal(type)
     if (type === 'issue-fabric') {
+      const garmentPcs = garmentPcsForFabricIssue(jo)
       setFabricIssueForm(f => ({ ...f, fabric_code: jo.fabric_code || '', issued_qty: jo.fabric_qty || 0, fabric_name: '' }))
-      // Sum BOM fabric across ALL JO size lines (not just the first size × BOM).
+      // Sum BOM fabric across JO lines using garment pieces (not embroidery measurement qty).
       const lines = (jo.lines || []).filter(l => (l.planned_qty || 0) > 0 && l.sku)
-      const totalPcs = lines.reduce((s, l) => s + (Number(l.planned_qty) || 0), 0) || Number(jo.planned_qty) || 1
       const anchorSku = jo.sku || lines[0]?.sku
-      if (anchorSku && totalPcs > 0) {
+      if (anchorSku && garmentPcs > 0) {
         try {
-          // Prefer one call with total pcs on a size/parent SKU — backend resolves parent BOM.
-          const res = await api.get(`/production/bom-inputs/${encodeURIComponent(anchorSku)}`, { params: { qty: totalPcs } })
+          const res = await api.get(`/production/bom-inputs/${encodeURIComponent(anchorSku)}`, { params: { qty: garmentPcs } })
           const inputs = (res.data?.inputs ?? []) as { material_code?: string; material_name?: string; adj_qty?: number; unit?: string }[]
           const fabric = inputs.find(i => String(i.unit || '').toUpperCase().includes('MTR')) || inputs[0]
           if (fabric?.material_code) {
@@ -1133,8 +1150,11 @@ export default function Production() {
             let name = ''
             let unit = 'MTR'
             for (const line of lines) {
+              const linePcs = jo.process === 'Embroidery'
+                ? (Number((line as JOLine & { garment_qty?: number }).garment_qty) || Number(jo.garment_qty) || Number(line.planned_qty) || 1)
+                : (Number(line.planned_qty) || 1)
               const r2 = await api.get(`/production/bom-inputs/${encodeURIComponent(line.sku)}`, {
-                params: { qty: Number(line.planned_qty) || 1 },
+                params: { qty: linePcs },
               })
               const ins = (r2.data?.inputs ?? []) as { material_code?: string; material_name?: string; adj_qty?: number; unit?: string }[]
               const fab = ins.find(i => String(i.unit || '').toUpperCase().includes('MTR')) || ins[0]
@@ -2324,6 +2344,14 @@ export default function Production() {
             </div>
             <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">
               Fabric: <b>{activeJO.fabric_code}</b> · Planned: <b>{activeJO.fabric_qty} {activeJO.fabric_unit}</b> · Already issued: <b>{activeJO.fabric_issued_qty || 0}</b>
+              {activeJO.process === 'Embroidery' && (activeJO.garment_qty || 0) > 0 && (
+                <span className="block mt-1 text-green-800">
+                  Fabric based on <b>{activeJO.garment_qty} garment pcs</b>
+                  {activeJO.measurement_qty
+                    ? ` (embroidery JO qty ${activeJO.measurement_qty} ${activeJO.embroidery_unit || ''} is separate)`
+                    : ''}
+                </span>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-3">
               {([['fabric_code','Fabric Code'],['fabric_name','Fabric Name'],['issued_by','Issued By'],['remarks','Remarks']] as const).map(([k,l]) => (
