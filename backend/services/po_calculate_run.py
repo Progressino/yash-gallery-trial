@@ -298,7 +298,7 @@ def execute_po_calculate(
             urgent_all_sizes_days=int(body.get("urgent_all_sizes_days", 45)),
             use_ly_fallback=bool(body.get("use_ly_fallback", True)),
             use_oms_inventory_only=bool(body.get("use_oms_inventory_only", False)),
-            inventory_history_channel=str(body.get("inventory_history_channel") or "combined"),
+            inventory_history_channel=str(body.get("inventory_history_channel") or "oms"),
             stage_timer=stage_timer,
             manual_existing_po_raise_skus=_manual_raise_skus or None,
             manual_existing_po_raise_date=_manual_raise_date,

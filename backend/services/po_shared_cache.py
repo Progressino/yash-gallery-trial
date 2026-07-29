@@ -80,7 +80,7 @@ _CALC_PARAM_DEFAULTS: dict[str, Any] = {
     "urgent_all_sizes_days": 45,
     "use_ly_fallback": True,
     "use_oms_inventory_only": False,
-    "inventory_history_channel": "combined",
+    "inventory_history_channel": "oms",
 }
 
 

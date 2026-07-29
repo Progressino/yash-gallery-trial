@@ -390,7 +390,7 @@ export default function POEngine() {
         enforce_two_size_minimum: params.enforce_two_size_minimum,
         enforce_lead_time_release_gate: params.enforce_lead_time_release_gate,
         use_oms_inventory_only: params.use_oms_inventory_only,
-        inventory_history_channel: params.inventory_history_channel || 'combined',
+        inventory_history_channel: params.inventory_history_channel || 'oms',
         urgent_all_sizes_days: params.urgent_all_sizes_days,
       }
       const [invRes, auditRes] = await Promise.all([
@@ -1600,7 +1600,7 @@ export default function POEngine() {
                   Eff_Days inventory channel
                 </button>
                 <select
-                  value={params.inventory_history_channel || 'combined'}
+                  value={params.inventory_history_channel || 'oms'}
                   onChange={e =>
                     setParams({
                       ...params,

@@ -95,7 +95,7 @@ function buildBody(p: Params, opts?: { useSharedCache?: boolean }) {
     use_seasonality: p.use_seasonality,
     use_ly_fallback: p.use_ly_fallback,
     use_oms_inventory_only: p.use_oms_inventory_only,
-    inventory_history_channel: p.inventory_history_channel || 'combined',
+    inventory_history_channel: p.inventory_history_channel || 'oms',
     seasonal_weight: 0.5,
     enforce_two_size_minimum: p.enforce_two_size_minimum,
     enforce_lead_time_release_gate: true,
@@ -967,7 +967,7 @@ function POFreshInner() {
                   <label className="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
                     <span className="shrink-0">Eff_Days channel</span>
                     <select
-                      value={params.inventory_history_channel || 'combined'}
+                      value={params.inventory_history_channel || 'oms'}
                       onChange={e =>
                         setParams(p => ({
                           ...p,

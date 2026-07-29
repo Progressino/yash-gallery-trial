@@ -85,7 +85,16 @@ def _platform_display(platform: object) -> str:
 
 PlatformQuarterKey = Tuple[str, str, str]  # (OMS_SKU, quarter_col, platform_display)
 
-_SALES_READ_COLS = ["Sku", "TxnDate", "Quantity", "Transaction Type", "Source"]
+# ``_Combo_Fan`` is required: without it PO_SESSION_ONLY quarterly counts combo
+# component copies as real sales and inflates File-matching quarter columns.
+_SALES_READ_COLS = [
+    "Sku",
+    "TxnDate",
+    "Quantity",
+    "Transaction Type",
+    "Source",
+    "_Combo_Fan",
+]
 
 # Transaction types that contribute positively (net sold) vs negatively (returns/cancels).
 # "ReturnCancel" = customer cancelled their return → unit stays with customer → positive.
@@ -408,7 +417,13 @@ def _load_unified_sales_df() -> pd.DataFrame:
     if not path.is_file():
         return pd.DataFrame()
     try:
-        return pd.read_parquet(path, columns=_SALES_READ_COLS)
+        # Prefer columns that include ``_Combo_Fan``; fall back if an older
+        # parquet predates that column.
+        try:
+            return pd.read_parquet(path, columns=_SALES_READ_COLS)
+        except Exception:
+            cols = [c for c in _SALES_READ_COLS if c != "_Combo_Fan"]
+            return pd.read_parquet(path, columns=cols)
     except Exception:
         try:
             return pd.read_parquet(path)

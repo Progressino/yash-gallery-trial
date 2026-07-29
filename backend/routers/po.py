@@ -284,7 +284,7 @@ class PORequest(BaseModel):
     # When True, PO cover / days-left / quantity use OMS warehouse stock only.
     use_oms_inventory_only: bool = False
     # Inventory-history channel for Eff_Days: combined (max) | oms | amazon.
-    inventory_history_channel: str = "combined"
+    inventory_history_channel: str = "oms"
     # When True (default), reuse another session's PO result on this server if planning
     # date, settings, and data snapshot match (see ``po_shared_cache``).
     use_shared_cache: bool = True
@@ -1508,7 +1508,7 @@ def po_dashboard(request: Request, body: PODashboardRequest):
             urgent_all_sizes_days=body.urgent_all_sizes_days,
             use_ly_fallback=body.use_ly_fallback,
             use_oms_inventory_only=body.use_oms_inventory_only,
-            inventory_history_channel=str(body.inventory_history_channel or "combined"),
+            inventory_history_channel=str(body.inventory_history_channel or "oms"),
         )
     except Exception as e:
         return {"ok": False, "message": f"PO calculation error: {e}"}

@@ -33,7 +33,7 @@ export const DEFAULT_PO_FRESH_PARAMS: POFreshParams = {
   use_ly_fallback: true,
   enforce_two_size_minimum: true,
   use_oms_inventory_only: false,
-  inventory_history_channel: 'combined',
+  inventory_history_channel: 'oms',
   raise_view_date: '2026-05-16',
   raise_ledger_lookback_days: 45,
 }

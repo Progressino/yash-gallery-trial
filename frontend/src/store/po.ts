@@ -93,7 +93,7 @@ export const usePOStore = create<POState>()(
     urgent_all_sizes_days: 45,
     enforce_lead_time_release_gate: false,
     use_oms_inventory_only: false,
-    inventory_history_channel: 'combined',
+    inventory_history_channel: 'oms',
   },
   result: null,
   quarterly: null,
@@ -121,7 +121,7 @@ export const usePOStore = create<POState>()(
     }),
     {
       name: 'po-store-v1',
-      version: 8,
+      version: 9,
       migrate: (persisted, fromVersion) => {
         const p = persisted as Partial<POState> | undefined
         if (!p) return persisted as POState
@@ -145,6 +145,10 @@ export const usePOStore = create<POState>()(
         // Quarterly File / Unnamed:48 validation uses Net (shipments − returns).
         if (fromVersion < 8 && params) {
           params.demand_basis = 'Net'
+        }
+        // Eff_Days must match OMS inventory matrix (not Combined/Amazon FBA days).
+        if (fromVersion < 9 && params) {
+          params.inventory_history_channel = 'oms'
         }
         return p as POState
       },

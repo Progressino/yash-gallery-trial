@@ -71,3 +71,37 @@ def test_eff_days_amazon_only_counts_fba_stock():
     assert int(amazon.iloc[0]["Eff_Days_Inventory"]) == 7
     assert oms.empty or int(oms.iloc[0]["Eff_Days_Inventory"]) == 0
     assert int(combined.iloc[0]["Eff_Days_Inventory"]) == 7
+
+
+def test_oms_channel_ignores_amazon_only_in_stock_days():
+    """OMS Eff_Days must match the OMS matrix — Amazon FBA alone must not inflate."""
+    rows = []
+    for d in pd.date_range("2026-06-30", "2026-07-29"):
+        # OMS in stock first 11 days only.
+        oms_qty = 5.0 if d <= pd.Timestamp("2026-07-10") else 0.0
+        rows.append(
+            {
+                "OMS_SKU": "1024YKMUSTARD-4XL",
+                "Date": d,
+                "Qty": oms_qty,
+                "Channel": "oms",
+                "Source": "snapshot",
+            }
+        )
+        # Amazon stocked on last 3 days while OMS is OOS.
+        amz_qty = 5.0 if d >= pd.Timestamp("2026-07-27") else 0.0
+        rows.append(
+            {
+                "OMS_SKU": "1024YKMUSTARD-4XL",
+                "Date": d,
+                "Qty": amz_qty,
+                "Channel": "amazon",
+                "Source": "snapshot",
+            }
+        )
+    df = pd.DataFrame(rows)
+    start, end = pd.Timestamp("2026-06-30"), pd.Timestamp("2026-07-29")
+    oms = effective_days_from_history(df, start, end, channel="oms")
+    combined = effective_days_from_history(df, start, end, channel="combined")
+    assert int(oms.iloc[0]["Eff_Days_Inventory"]) == 11
+    assert int(combined.iloc[0]["Eff_Days_Inventory"]) == 14

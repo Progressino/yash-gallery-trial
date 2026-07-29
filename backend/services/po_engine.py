@@ -1333,7 +1333,7 @@ def calculate_po_base(
     # (excludes marketplace columns rolled into Total_Inventory).
     use_oms_inventory_only: bool = False,
     # Which inventory-history channel feeds Eff_Days: combined | oms | amazon.
-    inventory_history_channel: str = "combined",
+    inventory_history_channel: str = "oms",
     stage_timer: Any = None,
     manual_existing_po_raise_skus: Optional[set[str]] = None,
     manual_existing_po_raise_date: Optional[str] = None,
@@ -1929,7 +1929,7 @@ def calculate_po_base(
                 inv_window_start,
                 inv_window_end,
                 po_skus=po_skus,
-                channel=str(inventory_history_channel or "combined"),
+                channel=str(inventory_history_channel or "oms"),
             )
             if ih.empty:
                 po_df["Eff_Days_Inventory"] = 0
@@ -1978,7 +1978,7 @@ def calculate_po_base(
                     ih_work,
                     inv_window_start,
                     inv_window_end,
-                    channel=str(inventory_history_channel or "combined"),
+                    channel=str(inventory_history_channel or "oms"),
                 )
                 coverage_days = coverage_days_within(ih_work, inv_window_start, inv_window_end)
                 if not eff_inv.empty and coverage_days > 0:

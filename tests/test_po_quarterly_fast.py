@@ -886,3 +886,58 @@ def test_meesho_blank_oms_backfilled_from_sku_column():
     )
     assert n == 1
     assert quarter_sums[("1379YKGREEN-3XL", "Jan-Mar 2025")] == 31
+
+
+def test_sales_read_cols_include_combo_fan():
+    """PO_SESSION_ONLY parquet load must keep _Combo_Fan or quarterly inflates."""
+    from backend.services.po_quarterly_fast import _SALES_READ_COLS
+
+    assert "_Combo_Fan" in _SALES_READ_COLS
+
+
+def test_accumulate_sales_df_drops_combo_fan_component_copies():
+    """Combo component copies must not land in File-matching quarterly totals."""
+    from collections import defaultdict
+    from datetime import timedelta
+
+    import pandas as pd
+
+    from backend.services.po_engine import quarter_col_name
+    from backend.services.po_quarterly_fast import _accumulate_sales_df_shipments, _quarter_seq
+
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1037YKBLUE-3XL", "1037YKBLUE-3XL", "1037YKBLUE-3XL"],
+            "TxnDate": pd.to_datetime(["2025-02-01", "2025-02-02", "2025-02-03"]),
+            "Quantity": [10, 20, 5],
+            "Transaction Type": ["Shipment", "Shipment", "Shipment"],
+            "Source": ["Amazon", "Amazon", "Myntra"],
+            "_Combo_Fan": [False, True, False],
+        }
+    )
+    start_ts = pd.Timestamp("2024-10-01")
+    end_ts = pd.Timestamp("2025-03-31") + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+    today = pd.Timestamp("2026-07-29")
+    q_label_map = {(fy, qn): quarter_col_name(fy, qn) for fy, qn in _quarter_seq(8)}
+    quarter_sums: dict = defaultdict(int)
+    units_90: dict = defaultdict(int)
+    units_30: dict = defaultdict(int)
+    days_30: dict = defaultdict(set)
+    _accumulate_sales_df_shipments(
+        sales,
+        None,
+        group_by_parent=False,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cutoff_90=today - timedelta(days=90),
+        cutoff_30=today - timedelta(days=30),
+        q_label_map=q_label_map,
+        quarter_sums=quarter_sums,
+        units_90=units_90,
+        units_30=units_30,
+        days_30=days_30,
+        platform_day_keys=set(),
+        demand_basis="Sold",
+    )
+    # 10 + 5 real; the 20 combo-fan units must be excluded.
+    assert quarter_sums[("1037YKBLUE-3XL", "Jan-Mar 2025")] == 15
