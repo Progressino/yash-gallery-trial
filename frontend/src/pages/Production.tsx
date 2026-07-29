@@ -694,7 +694,7 @@ export default function Production() {
   // Modal forms
   const [fabricIssueForm, setFabricIssueForm] = useState({ fabric_code: '', fabric_name: '', issued_qty: 0, unit: 'MTR', issued_by: '', remarks: '' })
   const [fabricReturnForm, setFabricReturnForm] = useState({ fabric_code: '', returned_qty: 0, unit: 'MTR', returned_by: '', remarks: '' })
-  const [receiveForm, setReceiveForm] = useState({ received_qty: 0, rejected_qty: 0, received_by: '', remarks: '', split_components: true })
+  const [receiveForm, setReceiveForm] = useState({ received_qty: 0, rejected_qty: 0, received_by: '', remarks: '', split_components: true, leftover_measurement: 0 })
   const [issuePiecesForm, setIssuePiecesForm] = useState({ issued_qty: 0, to_process: '', issued_by: '', remarks: '' })
   const [issuePiecesSku, setIssuePiecesSku] = useState('')
   const [issueFromProcess, setIssueFromProcess] = useState('')
@@ -997,9 +997,15 @@ export default function Production() {
       const child = res?.data?.child_jo
       if (child?.jo_number) {
         const action = child.created ? 'Created' : 'Updated'
+        const qtyPart = child.measurement_qty && child.embroidery_unit
+          ? `${child.measurement_qty} ${child.embroidery_unit} ${child.embroidery_type || ''}`.trim()
+          : `${child.planned_qty} pcs`
+        const stockNote = child.stock_used > 0
+          ? `\n(${child.stock_used} ${child.embroidery_unit || ''} applied from leftover stock)`
+          : ''
         alert(
           `${action} ${child.process} JO ${child.jo_number} for ${child.sku} `
-          + `(${child.planned_qty} pcs).\nOpen the ${child.process} tab to receive / process / return.`,
+          + `(${qtyPart})${stockNote}.\nOpen the ${child.process} tab to receive / process / return.`,
         )
       }
     },
@@ -1307,6 +1313,10 @@ export default function Production() {
                       issue_to_label?: string
                       embroidery_timing?: string
                       embroidery_before_cutting?: boolean
+                      embroidery_type?: string
+                      embroidery_qty_per_piece?: number
+                      embroidery_unit?: string
+                      embroidery_stock_available?: number
                       issueable_qty: number
                       embroidery_jo?: {
                         id: number
@@ -1314,6 +1324,10 @@ export default function Production() {
                         status: string
                         planned_qty: number
                         received_qty: number
+                        measurement_qty?: number
+                        garment_qty?: number
+                        embroidery_type?: string
+                        embroidery_unit?: string
                       } | null
                     }) => (
                       <tr key={panel.component_sku} className="border-t border-gray-50 hover:bg-indigo-50/40">
@@ -1322,6 +1336,17 @@ export default function Production() {
                         <td className="px-3 py-2 text-gray-600">{panel.routing || '—'}</td>
                         <td className="px-3 py-2 text-[11px] text-purple-800">
                           {panel.embroidery_timing || '—'}
+                          {panel.embroidery_type ? (
+                            <span className="block text-gray-600">
+                              {panel.embroidery_type}
+                              {panel.embroidery_qty_per_piece ? ` · ${panel.embroidery_qty_per_piece}/${panel.embroidery_unit || 'unit'}/pc` : ''}
+                            </span>
+                          ) : null}
+                          {(panel.embroidery_stock_available || 0) > 0 && (
+                            <span className="block text-amber-700 font-semibold">
+                              Stock: {panel.embroidery_stock_available} {panel.embroidery_unit || ''}
+                            </span>
+                          )}
                         </td>
                         <td className="px-3 py-2">{panel.current_location || '—'}</td>
                         <td className="px-3 py-2 text-right">{fmt(panel.available_qty || 0)}</td>
@@ -1332,7 +1357,10 @@ export default function Production() {
                             <span className="text-rose-700" title={panel.embroidery_jo.status}>
                               {panel.embroidery_jo.jo_number}
                               <span className="block text-gray-500 font-sans">
-                                {panel.embroidery_jo.received_qty}/{panel.embroidery_jo.planned_qty} · {panel.embroidery_jo.status}
+                                {panel.embroidery_jo.measurement_qty && panel.embroidery_jo.embroidery_unit
+                                  ? `${panel.embroidery_jo.received_qty}/${panel.embroidery_jo.planned_qty} ${panel.embroidery_jo.embroidery_unit}`
+                                  : `${panel.embroidery_jo.received_qty}/${panel.embroidery_jo.planned_qty} pcs`}
+                                {' · '}{panel.embroidery_jo.status}
                               </span>
                             </span>
                           ) : (
@@ -2281,7 +2309,18 @@ export default function Production() {
               <button onClick={() => setModal(null)} className="text-gray-400 text-xl">✕</button>
             </div>
             <div className="bg-green-50 rounded-lg p-3 text-xs text-green-700">
-              Process: <b>{activeJO.process}</b> · Planned: <b>{activeJO.planned_qty} pcs</b> · Received so far: <b>{activeJO.received_qty} pcs</b>
+              Process: <b>{activeJO.process}</b>
+              {' · '}
+              Planned: <b>
+                {activeJO.process === 'Embroidery' && (activeJO as any).measurement_qty
+                  ? `${(activeJO as any).measurement_qty} ${(activeJO as any).embroidery_unit || ''} ${(activeJO as any).embroidery_type || ''}`.trim()
+                  : `${activeJO.planned_qty} pcs`}
+              </b>
+              {' · '}
+              Received so far: <b>{activeJO.received_qty}{activeJO.process === 'Embroidery' && (activeJO as any).embroidery_unit ? ` ${(activeJO as any).embroidery_unit}` : ' pcs'}</b>
+              {(activeJO as any).garment_qty > 0 && activeJO.process === 'Embroidery' && (
+                <span className="block mt-1 text-green-800">Garment pieces covered: {(activeJO as any).garment_qty}</span>
+              )}
             </div>
             {activeJO.process === 'Cutting' && receiveSetBomInfo?.has_set_bom && (() => {
               const receiveParentCode = receiveSku.includes('-') ? receiveSku.split('-').pop()?.toUpperCase() : ''
@@ -2316,12 +2355,20 @@ export default function Production() {
               )
             })()}
             <div className="grid grid-cols-2 gap-3">
-              <div><label className="text-xs text-gray-500">Received Qty (pcs) *</label>
+              <div><label className="text-xs text-gray-500">Received Qty{activeJO.process === 'Embroidery' ? ` (${(activeJO as any).embroidery_unit || 'units'})` : ' (pcs)'} *</label>
                 <input type="number" value={receiveForm.received_qty} onChange={e => setReceiveForm(f => ({ ...f, received_qty: +e.target.value }))}
                   className="w-full border border-green-200 rounded px-2 py-1.5 text-sm mt-1 bg-green-50 font-semibold" /></div>
               <div><label className="text-xs text-gray-500">Rejected Qty</label>
                 <input type="number" value={receiveForm.rejected_qty} onChange={e => setReceiveForm(f => ({ ...f, rejected_qty: +e.target.value }))}
                   className="w-full border border-red-200 rounded px-2 py-1.5 text-sm mt-1 bg-red-50" /></div>
+              {activeJO.process === 'Embroidery' && (
+                <div className="col-span-2">
+                  <label className="text-xs text-gray-500">Leftover to stock ({(activeJO as any).embroidery_unit || 'units'}) — unused border/Yog returned</label>
+                  <input type="number" step="0.01" min={0} value={receiveForm.leftover_measurement || ''}
+                    onChange={e => setReceiveForm(f => ({ ...f, leftover_measurement: +e.target.value }))}
+                    className="w-full border border-amber-200 rounded px-2 py-1.5 text-sm mt-1 bg-amber-50" />
+                </div>
+              )}
               {([['received_by','Received By'],['remarks','Remarks']] as const).map(([k,l]) => (
                 <div key={k}><label className="text-xs text-gray-500">{l}</label>
                   <input value={(receiveForm as any)[k]} onChange={e => setReceiveForm(f => ({ ...f, [k]: e.target.value }))}

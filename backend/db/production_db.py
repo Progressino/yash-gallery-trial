@@ -321,12 +321,40 @@ def init_db():
         ("set_bom_lines", "parent_component_code", "TEXT DEFAULT ''"),
         ("set_bom_lines", "creates_cutting_jo", "INTEGER DEFAULT 1"),
         ("set_bom_lines", "embroidery_before_cutting", "INTEGER DEFAULT 0"),
+        ("set_bom_lines", "embroidery_type", "TEXT DEFAULT ''"),
+        ("set_bom_lines", "embroidery_qty_per_piece", "REAL DEFAULT 0"),
+        ("set_bom_lines", "embroidery_unit", "TEXT DEFAULT ''"),
+        ("job_orders", "embroidery_type", "TEXT DEFAULT ''"),
+        ("job_orders", "embroidery_unit", "TEXT DEFAULT ''"),
+        ("job_orders", "garment_qty", "INTEGER DEFAULT 0"),
+        ("job_orders", "measurement_qty", "REAL DEFAULT 0"),
+        ("jo_lines", "embroidery_type", "TEXT DEFAULT ''"),
+        ("jo_lines", "embroidery_unit", "TEXT DEFAULT ''"),
+        ("jo_lines", "garment_qty", "INTEGER DEFAULT 0"),
+        ("jo_lines", "measurement_qty", "REAL DEFAULT 0"),
     ]
     for table, col, decl in migrations:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         except Exception:
             pass
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS embroidery_stock (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                style_key TEXT NOT NULL DEFAULT '',
+                component_code TEXT NOT NULL DEFAULT '',
+                embroidery_type TEXT NOT NULL DEFAULT '',
+                unit TEXT NOT NULL DEFAULT 'PCS',
+                available_qty REAL NOT NULL DEFAULT 0,
+                so_number TEXT DEFAULT '',
+                remarks TEXT DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(style_key, component_code, embroidery_type)
+            )"""
+        )
+    except Exception:
+        pass
     # Ensure Embroidery exists as a process step in item master (best-effort).
     try:
         ic = _item_connect()
@@ -1054,6 +1082,186 @@ def issue_pieces(joid: int, data: dict):
     return {"ok": True, "child_jo": child_jo}
 
 
+def _embroidery_stock_key(style_key: str, component_code: str, embroidery_type: str) -> tuple[str, str, str]:
+    return (
+        str(style_key or "").strip().upper(),
+        str(component_code or "").strip().upper(),
+        str(embroidery_type or "").strip().title(),
+    )
+
+
+def get_embroidery_stock_qty(
+    conn,
+    *,
+    style_key: str,
+    component_code: str,
+    embroidery_type: str,
+) -> float:
+    sk, comp, et = _embroidery_stock_key(style_key, component_code, embroidery_type)
+    if not sk or not comp or not et:
+        return 0.0
+    row = conn.execute(
+        """SELECT COALESCE(available_qty,0) FROM embroidery_stock
+           WHERE style_key=? AND component_code=? AND embroidery_type=?""",
+        (sk, comp, et),
+    ).fetchone()
+    return float(row[0] if row else 0.0)
+
+
+def adjust_embroidery_stock(
+    conn,
+    *,
+    style_key: str,
+    component_code: str,
+    embroidery_type: str,
+    unit: str,
+    delta_qty: float,
+    so_number: str = "",
+    remarks: str = "",
+) -> float:
+    """Add (+) or consume (−) embroidery material stock. Returns new balance."""
+    sk, comp, et = _embroidery_stock_key(style_key, component_code, embroidery_type)
+    if not sk or not comp or not et:
+        return 0.0
+    delta = float(delta_qty or 0)
+    if abs(delta) < 1e-9:
+        return get_embroidery_stock_qty(conn, style_key=sk, component_code=comp, embroidery_type=et)
+    row = conn.execute(
+        """SELECT id, available_qty FROM embroidery_stock
+           WHERE style_key=? AND component_code=? AND embroidery_type=?""",
+        (sk, comp, et),
+    ).fetchone()
+    if row:
+        row = dict(row)
+        new_qty = round(max(0.0, float(row.get("available_qty") or 0) + delta), 4)
+        conn.execute(
+            """UPDATE embroidery_stock SET available_qty=?, unit=?, so_number=?, remarks=?,
+               updated_at=datetime('now') WHERE id=?""",
+            (new_qty, str(unit or "PCS").strip().upper(), so_number, remarks, row["id"]),
+        )
+        return new_qty
+    new_qty = round(max(0.0, delta), 4)
+    conn.execute(
+        """INSERT INTO embroidery_stock(
+               style_key, component_code, embroidery_type, unit, available_qty, so_number, remarks)
+           VALUES(?,?,?,?,?,?,?)""",
+        (sk, comp, et, str(unit or "PCS").strip().upper(), new_qty, so_number, remarks),
+    )
+    return new_qty
+
+
+def list_embroidery_stock_for_sku(sku: str) -> list[dict]:
+    """Leftover embroidery material for a style / component SKU."""
+    from ..services.set_components import parse_component_sku, style_key_for_set_bom
+
+    raw = str(sku or "").strip().upper()
+    if not raw:
+        return []
+    main, comp = parse_component_sku(raw)
+    style_key = style_key_for_set_bom(main or raw)
+    comp_code = str(comp or "").strip().upper()
+    conn = _connect()
+    if comp_code:
+        rows = conn.execute(
+            """SELECT * FROM embroidery_stock
+               WHERE style_key=? AND component_code=? AND available_qty > 0
+               ORDER BY embroidery_type""",
+            (style_key, comp_code),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT * FROM embroidery_stock
+               WHERE style_key=? AND available_qty > 0
+               ORDER BY component_code, embroidery_type""",
+            (style_key,),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _resolve_embroidery_jo_plan(
+    conn,
+    *,
+    sku: str,
+    garment_pieces: int,
+) -> dict:
+    """Map garment pieces → embroidery measurement JO qty (with stock deduction)."""
+    from ..services.embroidery_measurement import (
+        compute_embroidery_measurement,
+        find_embroidery_line_for_sku,
+    )
+    from ..services.set_components import parse_component_sku, style_key_for_set_bom
+
+    pieces = max(int(garment_pieces or 0), 0)
+    bom = get_set_bom_for_sku(sku)
+    line = find_embroidery_line_for_sku(bom, sku)
+    if not line:
+        return {
+            "use_measurement": False,
+            "planned_qty": pieces,
+            "measurement_qty": float(pieces),
+            "garment_qty": pieces,
+            "embroidery_type": "",
+            "embroidery_unit": "PCS",
+            "stock_used": 0.0,
+            "gross_measurement": float(pieces),
+            "style_key": "",
+            "component_code": "",
+        }
+    emb_type = str(line.get("embroidery_type") or "").strip().title()
+    per_piece = float(line.get("embroidery_qty_per_piece") or 0)
+    unit = str(line.get("embroidery_unit") or "").strip().upper()
+    if not emb_type or per_piece <= 0:
+        return {
+            "use_measurement": False,
+            "planned_qty": pieces,
+            "measurement_qty": float(pieces),
+            "garment_qty": pieces,
+            "embroidery_type": emb_type,
+            "embroidery_unit": unit or "PCS",
+            "stock_used": 0.0,
+            "gross_measurement": float(pieces),
+            "style_key": style_key_for_set_bom(sku),
+            "component_code": str(line.get("component_code") or "").strip().upper(),
+        }
+    _main, comp = parse_component_sku(str(sku or "").strip().upper())
+    style_key = style_key_for_set_bom(_main or sku)
+    comp_code = str(comp or line.get("component_code") or "").strip().upper()
+    stock_avail = get_embroidery_stock_qty(
+        conn, style_key=style_key, component_code=comp_code, embroidery_type=emb_type
+    )
+    calc = compute_embroidery_measurement(
+        garment_pieces=pieces,
+        qty_per_piece=per_piece,
+        stock_available=stock_avail,
+    )
+    if calc["stock_used"] > 0:
+        adjust_embroidery_stock(
+            conn,
+            style_key=style_key,
+            component_code=comp_code,
+            embroidery_type=emb_type,
+            unit=unit or "PCS",
+            delta_qty=-calc["stock_used"],
+            remarks=f"Consumed for embroidery JO ({pieces} pcs)",
+        )
+    net = float(calc["net_measurement"])
+    planned_int = int(net) if abs(net - int(net)) < 1e-6 else int(net + 0.999)
+    return {
+        "use_measurement": True,
+        "planned_qty": max(planned_int, 0),
+        "measurement_qty": net,
+        "garment_qty": pieces,
+        "embroidery_type": emb_type,
+        "embroidery_unit": unit or "PCS",
+        "stock_used": float(calc["stock_used"]),
+        "gross_measurement": float(calc["gross_measurement"]),
+        "style_key": style_key,
+        "component_code": comp_code,
+        "qty_per_piece": per_piece,
+    }
+
+
 def _ensure_downstream_jo_for_issue(
     conn,
     *,
@@ -1085,8 +1293,44 @@ def _ensure_downstream_jo_for_issue(
     if comp:
         sku_name = f"{sku_name} {comp}".strip() if sku_name else sku
 
+    plan = (
+        _resolve_embroidery_jo_plan(conn, sku=sku, garment_pieces=int(qty))
+        if process == "Embroidery"
+        else {
+            "use_measurement": False,
+            "planned_qty": int(qty),
+            "measurement_qty": float(qty),
+            "garment_qty": int(qty),
+            "embroidery_type": "",
+            "embroidery_unit": "PCS",
+            "stock_used": 0.0,
+            "gross_measurement": float(qty),
+            "style_key": "",
+            "component_code": "",
+        }
+    )
+    jo_qty = int(plan.get("planned_qty") or 0)
+    meas_qty = float(plan.get("measurement_qty") or jo_qty)
+    garment_qty = int(plan.get("garment_qty") or qty)
+    emb_type = str(plan.get("embroidery_type") or "")
+    emb_unit = str(plan.get("embroidery_unit") or "PCS")
+    from ..services.embroidery_measurement import format_embroidery_jo_qty
+
+    qty_label = (
+        format_embroidery_jo_qty(
+            measurement=meas_qty,
+            unit=emb_unit,
+            embroidery_type=emb_type,
+            garment_pieces=garment_qty,
+            stock_used=float(plan.get("stock_used") or 0),
+        )
+        if plan.get("use_measurement")
+        else f"{jo_qty} pcs"
+    )
+
     existing = conn.execute(
-        """SELECT id, jo_number, planned_qty, received_qty, status FROM job_orders
+        """SELECT id, jo_number, planned_qty, received_qty, status, measurement_qty, garment_qty
+           FROM job_orders
            WHERE parent_jo_id=? AND process=? AND UPPER(TRIM(sku))=UPPER(TRIM(?))
              AND so_number=? AND status NOT IN ('Closed','Cancelled')
            ORDER BY id DESC LIMIT 1""",
@@ -1095,45 +1339,68 @@ def _ensure_downstream_jo_for_issue(
 
     if existing:
         existing = dict(existing)
-        new_planned = int(existing.get("planned_qty") or 0) + int(qty)
-        received = int(existing.get("received_qty") or 0)
+        add_meas = meas_qty
+        new_planned = int(existing.get("planned_qty") or 0) + jo_qty
+        new_measurement = float(existing.get("measurement_qty") or 0) + add_meas
+        new_garment = int(existing.get("garment_qty") or 0) + garment_qty
         conn.execute(
             """UPDATE job_orders SET
                 planned_qty=?,
+                measurement_qty=?,
+                garment_qty=?,
+                embroidery_type=COALESCE(NULLIF(embroidery_type,''), ?),
+                embroidery_unit=COALESCE(NULLIF(embroidery_unit,''), ?),
                 balance_qty=MAX(0, ? - COALESCE(received_qty,0)),
                 status = CASE WHEN status='Closed' THEN 'In Progress' ELSE status END,
                 updated_at=datetime('now')
                WHERE id=?""",
-            (new_planned, new_planned, existing["id"]),
+            (
+                new_planned,
+                new_measurement,
+                new_garment,
+                emb_type,
+                emb_unit,
+                new_planned,
+                existing["id"],
+            ),
         )
         line = conn.execute(
-            "SELECT id, planned_qty FROM jo_lines WHERE jo_id=? AND UPPER(TRIM(sku))=UPPER(TRIM(?)) LIMIT 1",
+            "SELECT id, planned_qty, measurement_qty, garment_qty FROM jo_lines WHERE jo_id=? AND UPPER(TRIM(sku))=UPPER(TRIM(?)) LIMIT 1",
             (existing["id"], sku),
         ).fetchone()
         if line:
             line = dict(line)
-            line_planned = int(line.get("planned_qty") or 0) + int(qty)
+            line_planned = int(line.get("planned_qty") or 0) + jo_qty
+            line_meas = float(line.get("measurement_qty") or 0) + add_meas
+            line_garment = int(line.get("garment_qty") or 0) + garment_qty
             conn.execute(
-                """UPDATE jo_lines SET planned_qty=?, balance_qty=MAX(0, ? - COALESCE(received_qty,0))
+                """UPDATE jo_lines SET planned_qty=?, measurement_qty=?, garment_qty=?,
+                   embroidery_type=COALESCE(NULLIF(embroidery_type,''), ?),
+                   embroidery_unit=COALESCE(NULLIF(embroidery_unit,''), ?),
+                   balance_qty=MAX(0, ? - COALESCE(received_qty,0))
                    WHERE id=?""",
-                (line_planned, line_planned, line["id"]),
+                (line_planned, line_meas, line_garment, emb_type, emb_unit, line_planned, line["id"]),
             )
         else:
             conn.execute(
                 """INSERT INTO jo_lines(jo_id,so_number,sku,sku_name,style,planned_qty,balance_qty,
-                    parent_sku,sku_role,component_code)
-                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    parent_sku,sku_role,component_code,embroidery_type,embroidery_unit,garment_qty,measurement_qty)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     existing["id"],
                     so_number,
                     sku,
                     sku_name or sku,
                     "",
-                    qty,
-                    qty,
+                    jo_qty,
+                    jo_qty,
                     main or "",
                     "PANEL" if comp else (str(parent_jo.get("sku_role") or "COMPONENT").upper()),
                     comp or "",
+                    emb_type,
+                    emb_unit,
+                    garment_qty,
+                    meas_qty,
                 ),
             )
         return {
@@ -1142,18 +1409,27 @@ def _ensure_downstream_jo_for_issue(
             "process": process,
             "sku": sku,
             "planned_qty": new_planned,
+            "measurement_qty": new_measurement,
+            "garment_qty": new_garment,
+            "embroidery_type": emb_type,
+            "embroidery_unit": emb_unit,
+            "stock_used": float(plan.get("stock_used") or 0),
             "created": False,
-            "message": f"Updated {process} JO {existing.get('jo_number')} (+{qty} pcs)",
+            "message": f"Updated {process} JO {existing.get('jo_number')} (+{qty_label})",
         }
 
     num = _next_jo(conn)
+    remarks = f"Auto-created from {parent_jo.get('jo_number') or parent_joid} issue → {process}"
+    if plan.get("use_measurement"):
+        remarks += f" | {qty_label}"
     conn.execute(
         """INSERT INTO job_orders(
             jo_number, jo_date, so_number, sku, sku_name, process, stage,
             exec_type, vendor_name, vendor_rate, so_qty, planned_qty, balance_qty, status,
             expected_completion, fabric_code, parent_jo_id, main_sku, component_code, sku_role,
+            embroidery_type, embroidery_unit, garment_qty, measurement_qty,
             remarks, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
         (
             num,
             datetime.now().strftime("%Y-%m-%d"),
@@ -1166,8 +1442,8 @@ def _ensure_downstream_jo_for_issue(
             parent_jo.get("vendor_name") or "",
             float(parent_jo.get("vendor_rate") or 0),
             int(parent_jo.get("so_qty") or 0),
-            int(qty),
-            int(qty),
+            jo_qty,
+            jo_qty,
             "Created",
             parent_jo.get("expected_completion") or "",
             parent_jo.get("fabric_code") or "",
@@ -1175,29 +1451,36 @@ def _ensure_downstream_jo_for_issue(
             main or str(parent_jo.get("main_sku") or "").strip().upper(),
             comp or "",
             "PANEL" if comp else (str(parent_jo.get("sku_role") or "COMPONENT").upper() or "COMPONENT"),
-            f"Auto-created from {parent_jo.get('jo_number') or parent_joid} issue → {process}",
+            emb_type,
+            emb_unit,
+            garment_qty,
+            meas_qty,
+            remarks,
         ),
     )
     new_joid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
     conn.execute(
         """INSERT INTO jo_lines(jo_id,so_number,sku,sku_name,style,planned_qty,balance_qty,
-            parent_sku,sku_role,component_code,remarks)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            parent_sku,sku_role,component_code,remarks,embroidery_type,embroidery_unit,garment_qty,measurement_qty)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             new_joid,
             so_number,
             sku,
             sku_name or sku,
             "",
-            int(qty),
-            int(qty),
+            jo_qty,
+            jo_qty,
             main or "",
             "PANEL" if comp else "COMPONENT",
             comp or "",
             f"Issued from parent JO {parent_jo.get('jo_number') or parent_joid}",
+            emb_type,
+            emb_unit,
+            garment_qty,
+            meas_qty,
         ),
     )
-    # Only set next_stage_jo_id when parent has none yet (multi-panel may spawn several).
     if not parent_jo.get("next_stage_jo_id"):
         conn.execute(
             "UPDATE job_orders SET next_stage_jo_id=?, updated_at=datetime('now') WHERE id=?",
@@ -1208,9 +1491,14 @@ def _ensure_downstream_jo_for_issue(
         "jo_number": num,
         "process": process,
         "sku": sku,
-        "planned_qty": int(qty),
+        "planned_qty": jo_qty,
+        "measurement_qty": meas_qty,
+        "garment_qty": garment_qty,
+        "embroidery_type": emb_type,
+        "embroidery_unit": emb_unit,
+        "stock_used": float(plan.get("stock_used") or 0),
         "created": True,
-        "message": f"Created {process} JO {num} for {sku} ({qty} pcs)",
+        "message": f"Created {process} JO {num} for {sku} ({qty_label})",
     }
 
 # ── Receive Pieces ─────────────────────────────────────────────────────────────
@@ -1325,6 +1613,28 @@ def receive_pieces(joid: int, data: dict):
 
     from ..services.document_qty_control import jo_should_auto_close
 
+    stock_credit = None
+    leftover = float(data.get("leftover_measurement") or 0)
+    if str(process).strip().lower() == "embroidery" and leftover > 0:
+        emb_type = str(jo.get("embroidery_type") or "").strip()
+        emb_unit = str(jo.get("embroidery_unit") or "PCS").strip()
+        if emb_type:
+            from ..services.set_components import parse_component_sku, style_key_for_set_bom
+
+            main, comp = parse_component_sku(str(sku or "").strip().upper())
+            style_key = style_key_for_set_bom(main or sku)
+            comp_code = str(jo.get("component_code") or comp or "").strip().upper()
+            stock_credit = adjust_embroidery_stock(
+                conn,
+                style_key=style_key,
+                component_code=comp_code,
+                embroidery_type=emb_type,
+                unit=emb_unit,
+                delta_qty=leftover,
+                so_number=so_number,
+                remarks=f"Leftover from JO {jo.get('jo_number')}",
+            )
+
     jo_after = dict(conn.execute("SELECT planned_qty, received_qty, status FROM job_orders WHERE id=?", (joid,)).fetchone())
     if jo_after and jo_should_auto_close(int(jo_after["planned_qty"] or 0), int(jo_after["received_qty"] or 0), jo_tol):
         conn.execute(
@@ -1333,7 +1643,11 @@ def receive_pieces(joid: int, data: dict):
         )
     conn.commit()
     conn.close()
-    return {"ok": True, "split": split_info}
+    out = {"ok": True, "split": split_info}
+    if stock_credit is not None:
+        out["embroidery_stock_balance"] = stock_credit
+        out["leftover_credited"] = leftover
+    return out
 
 
 # ── Cost Entry ─────────────────────────────────────────────────────────────────
@@ -1887,6 +2201,9 @@ def upsert_set_bom(data: dict) -> dict:
                 "routing": str(norm.get("routing") or "").strip(),
                 "requires_embroidery": 1 if norm.get("requires_embroidery") else 0,
                 "embroidery_before_cutting": 1 if norm.get("embroidery_before_cutting") else 0,
+                "embroidery_type": str(norm.get("embroidery_type") or "").strip(),
+                "embroidery_qty_per_piece": float(norm.get("embroidery_qty_per_piece") or 0),
+                "embroidery_unit": str(norm.get("embroidery_unit") or "").strip().upper(),
                 "component_role": role,
                 "parent_component_code": parent,
                 "creates_cutting_jo": 0 if role == ROLE_PANEL else 1,
@@ -1968,9 +2285,9 @@ def upsert_set_bom(data: dict) -> dict:
             """INSERT INTO set_bom_lines
                (header_id, component_code, component_name, qty_per_set,
                 default_next_process, routing, requires_embroidery,
-                embroidery_before_cutting,
+                embroidery_before_cutting, embroidery_type, embroidery_qty_per_piece, embroidery_unit,
                 component_role, parent_component_code, creates_cutting_jo, sort_order)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 hid,
                 ln["component_code"],
@@ -1980,6 +2297,9 @@ def upsert_set_bom(data: dict) -> dict:
                 routing,
                 requires_emb,
                 emb_before,
+                ln.get("embroidery_type") or "",
+                float(ln.get("embroidery_qty_per_piece") or 0),
+                ln.get("embroidery_unit") or "",
                 ln["component_role"],
                 ln["parent_component_code"],
                 ln["creates_cutting_jo"],
@@ -2440,7 +2760,8 @@ def get_jo_panel_wip(joid: int) -> dict:
             issue_from = "Embroidery" if emb_out > 0 else "Cutting"
             issue_to = get_next_process(psku, issue_from)
             child = conn.execute(
-                """SELECT id, jo_number, process, status, planned_qty, received_qty
+                """SELECT id, jo_number, process, status, planned_qty, received_qty,
+                          measurement_qty, garment_qty, embroidery_type, embroidery_unit
                    FROM job_orders
                    WHERE parent_jo_id=? AND process='Embroidery'
                      AND UPPER(TRIM(sku))=UPPER(TRIM(?))
@@ -2458,6 +2779,10 @@ def get_jo_panel_wip(joid: int) -> dict:
                     "status": child.get("status"),
                     "planned_qty": int(child.get("planned_qty") or 0),
                     "received_qty": int(child.get("received_qty") or 0),
+                    "measurement_qty": float(child.get("measurement_qty") or child.get("planned_qty") or 0),
+                    "garment_qty": int(child.get("garment_qty") or 0),
+                    "embroidery_type": child.get("embroidery_type") or "",
+                    "embroidery_unit": child.get("embroidery_unit") or "PCS",
                 }
             # Path Cutting>Embroidery>Cutting>Stitching: after emb is done, next is Stitching.
             emb_done = emb_out == 0 and child_jo and (
@@ -2470,6 +2795,18 @@ def get_jo_panel_wip(joid: int) -> dict:
             if emb_done and issue_from == "Cutting" and issue_to == "Embroidery":
                 issue_to = "Stitching"
             emb_before = bool(int(ln.get("embroidery_before_cutting") or 0))
+            emb_type = str(ln.get("embroidery_type") or "").strip()
+            emb_unit = str(ln.get("embroidery_unit") or "").strip()
+            stock_qty = (
+                get_embroidery_stock_qty(
+                    conn,
+                    style_key=str(bom.get("style_key") or ""),
+                    component_code=code,
+                    embroidery_type=emb_type,
+                )
+                if emb_type
+                else 0.0
+            )
             issue_label = embroidery_issue_label(
                 issue_from=issue_from,
                 issue_to=issue_to,
@@ -2488,6 +2825,10 @@ def get_jo_panel_wip(joid: int) -> dict:
                     "embroidery_timing": embroidery_timing_label(before_cutting=emb_before)
                     if bool(int(ln.get("requires_embroidery") or 0)) or "Embroidery" in routing_path_to_string(path)
                     else "",
+                    "embroidery_type": emb_type,
+                    "embroidery_qty_per_piece": float(ln.get("embroidery_qty_per_piece") or 0),
+                    "embroidery_unit": emb_unit,
+                    "embroidery_stock_available": stock_qty,
                     "process_stocks": stock_map,
                     "available_qty": avail,
                     "embroidery_outstanding": emb_out,

@@ -271,6 +271,8 @@ def embroidery_issue_label(
 
 def normalize_embroidery_line_fields(line: dict[str, Any] | None) -> dict[str, Any]:
     """Ensure routing + flags stay aligned for embroidery scenarios."""
+    from .embroidery_measurement import normalize_embroidery_measurement_fields
+
     ln = dict(line or {})
     routing = str(ln.get("routing") or "").strip()
     requires = bool(ln.get("requires_embroidery")) or "Embroidery" in routing
@@ -284,4 +286,4 @@ def normalize_embroidery_line_fields(line: dict[str, Any] | None) -> dict[str, A
     ln["requires_embroidery"] = requires
     ln["embroidery_before_cutting"] = before if requires else False
     ln["routing"] = routing
-    return ln
+    return normalize_embroidery_measurement_fields(ln)

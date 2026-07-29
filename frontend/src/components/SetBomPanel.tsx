@@ -135,12 +135,30 @@ type SetBomLine = {
   routing: string
   requires_embroidery: boolean
   embroidery_before_cutting: boolean
+  embroidery_type: string
+  embroidery_qty_per_piece: number
+  embroidery_unit: string
   component_role: 'SET_COMPONENT' | 'PANEL'
   parent_component_code: string
   materials: SetBomMaterial[]
 }
 
 const EMBROIDERY_PARTIAL_ROUTING = 'Cutting>Embroidery>Cutting>Stitching'
+const EMBROIDERY_TYPES = ['Border', 'Yog', 'Boota', 'Other'] as const
+
+function embroideryUnitForType(t: string): string {
+  if (t === 'Border') return 'MTR'
+  if (t === 'Yog') return 'YOG'
+  if (t === 'Boota') return 'BOOTA'
+  return 'PCS'
+}
+
+function embroideryQtyLabel(t: string): string {
+  if (t === 'Border') return 'Border meters per piece'
+  if (t === 'Yog') return 'Yog per piece'
+  if (t === 'Boota') return 'Boota per piece'
+  return 'Units per piece'
+}
 
 type EmbroideryTiming = '' | 'before_cutting' | 'after_cutting'
 
@@ -160,6 +178,9 @@ function applyEmbroideryTiming(ln: SetBomLine, timing: EmbroideryTiming): SetBom
       ...ln,
       requires_embroidery: false,
       embroidery_before_cutting: false,
+      embroidery_type: '',
+      embroidery_qty_per_piece: 0,
+      embroidery_unit: '',
       routing: keepRouting,
       default_next_process: ln.default_next_process === 'Embroidery' ? 'Stitching' : ln.default_next_process,
     }
@@ -194,9 +215,9 @@ export default function SetBomPanel({
     stitching_requires_complete_set: true,
     bundle_gate_process: 'Cutting',
     lines: [
-      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, embroidery_before_cutting: false, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
-      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, embroidery_before_cutting: false, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
-      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery', routing: 'Cutting>Embroidery>Cutting>Stitching', requires_embroidery: true, embroidery_before_cutting: false, component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
+      { component_code: 'TOP', component_name: 'Top', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, embroidery_before_cutting: false, embroidery_type: '', embroidery_qty_per_piece: 0, embroidery_unit: '', component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
+      { component_code: 'PANT', component_name: 'Pant', qty_per_set: 1, default_next_process: 'Stitching', routing: 'Cutting>Stitching', requires_embroidery: false, embroidery_before_cutting: false, embroidery_type: '', embroidery_qty_per_piece: 0, embroidery_unit: '', component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
+      { component_code: 'DUPATTA', component_name: 'Dupatta', qty_per_set: 1, default_next_process: 'Embroidery', routing: 'Cutting>Embroidery>Cutting>Stitching', requires_embroidery: true, embroidery_before_cutting: false, embroidery_type: '', embroidery_qty_per_piece: 0, embroidery_unit: '', component_role: 'SET_COMPONENT', parent_component_code: '', materials: [] },
     ] as SetBomLine[],
   })
   const [setMatchForm, setSetMatchForm] = useState({
@@ -259,6 +280,9 @@ export default function SetBomPanel({
             routing: l.routing || '',
             requires_embroidery: Boolean(l.requires_embroidery) || String(l.routing || '').includes('Embroidery'),
             embroidery_before_cutting: Boolean(l.embroidery_before_cutting),
+            embroidery_type: String(l.embroidery_type || ''),
+            embroidery_qty_per_piece: Number(l.embroidery_qty_per_piece) || 0,
+            embroidery_unit: String(l.embroidery_unit || ''),
             component_role: (String(l.component_role || '').toUpperCase() === 'PANEL' ? 'PANEL' : 'SET_COMPONENT') as 'SET_COMPONENT' | 'PANEL',
             parent_component_code: l.parent_component_code || '',
             materials: (l.materials || []).map((m: any) => ({
@@ -490,6 +514,67 @@ export default function SetBomPanel({
                     </button>
                   </td>
                 </tr>
+                {embroideryTimingFromLine(ln) ? (
+                  <tr className="border-t bg-amber-50/60">
+                    <td colSpan={9} className="px-2 py-2">
+                      <p className="text-[10px] font-semibold text-amber-900 mb-1.5">
+                        Embroidery measurement — JO qty uses {ln.embroidery_before_cutting ? 'fabric' : 'panel'} pieces × per-piece qty
+                      </p>
+                      <div className="flex flex-wrap gap-3 items-end text-[11px]">
+                        <label className="space-y-0.5">
+                          <span className="text-gray-600 block">Embroidery type{ln.embroidery_before_cutting ? ' *' : ''}</span>
+                          <select
+                            value={ln.embroidery_type || ''}
+                            onChange={e => {
+                              const t = e.target.value
+                              setSetBomForm(f => ({
+                                ...f,
+                                lines: f.lines.map((x, j) => j === i ? {
+                                  ...x,
+                                  embroidery_type: t,
+                                  embroidery_unit: t ? embroideryUnitForType(t) : '',
+                                } : x),
+                              }))
+                            }}
+                            className="border rounded px-1.5 py-0.5 min-w-[7rem]"
+                          >
+                            <option value="">— select —</option>
+                            {EMBROIDERY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                          </select>
+                        </label>
+                        <label className="space-y-0.5">
+                          <span className="text-gray-600 block">
+                            {ln.embroidery_type ? embroideryQtyLabel(ln.embroidery_type) : 'Per-piece qty'}
+                            {ln.embroidery_before_cutting ? ' *' : ''}
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            value={ln.embroidery_qty_per_piece || ''}
+                            onChange={e => setSetBomForm(f => ({
+                              ...f,
+                              lines: f.lines.map((x, j) => j === i ? {
+                                ...x,
+                                embroidery_qty_per_piece: Number(e.target.value) || 0,
+                              } : x),
+                            }))}
+                            className="w-24 border rounded px-1.5 py-0.5"
+                            placeholder="e.g. 2"
+                          />
+                        </label>
+                        <span className="text-gray-600 pb-0.5">
+                          Unit: <span className="font-mono font-semibold">{ln.embroidery_unit || embroideryUnitForType(ln.embroidery_type) || '—'}</span>
+                        </span>
+                        {ln.embroidery_type && ln.embroidery_qty_per_piece > 0 && (
+                          <span className="text-amber-900 pb-0.5">
+                            Example: 10 pcs → <b>{10 * ln.embroidery_qty_per_piece} {ln.embroidery_unit || embroideryUnitForType(ln.embroidery_type)}</b> on Embroidery JO
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ) : null}
                 <tr className="border-t bg-gray-50/80">
                   <td colSpan={9} className="px-2 py-2">
                     <p className="text-[10px] font-semibold text-gray-500 mb-1">
@@ -603,6 +688,9 @@ export default function SetBomPanel({
                 routing: 'Cutting>Stitching',
                 requires_embroidery: false,
                 embroidery_before_cutting: false,
+                embroidery_type: '',
+                embroidery_qty_per_piece: 0,
+                embroidery_unit: '',
                 component_role: 'SET_COMPONENT' as const,
                 parent_component_code: '',
                 materials: [],
@@ -624,6 +712,9 @@ export default function SetBomPanel({
                 routing: EMBROIDERY_PARTIAL_ROUTING,
                 requires_embroidery: true,
                 embroidery_before_cutting: false,
+                embroidery_type: '',
+                embroidery_qty_per_piece: 0,
+                embroidery_unit: '',
                 component_role: 'PANEL' as const,
                 parent_component_code: f.lines.find(x => x.component_role !== 'PANEL' && /TOP/i.test(x.component_code))?.component_code || 'TOP',
                 materials: [],
@@ -662,6 +753,9 @@ export default function SetBomPanel({
                     routing: l.routing || '',
                     requires_embroidery: Boolean(l.requires_embroidery),
                     embroidery_before_cutting: Boolean(l.embroidery_before_cutting),
+                    embroidery_type: String(l.embroidery_type || ''),
+                    embroidery_qty_per_piece: Number(l.embroidery_qty_per_piece) || 0,
+                    embroidery_unit: String(l.embroidery_unit || ''),
                     component_role: (String(l.component_role || '').toUpperCase() === 'PANEL' ? 'PANEL' : 'SET_COMPONENT') as 'SET_COMPONENT' | 'PANEL',
                     parent_component_code: l.parent_component_code || '',
                     materials: (l.materials || []).map((m: any) => ({

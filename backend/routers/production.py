@@ -22,6 +22,7 @@ from ..db.production_db import (
     list_set_boms, get_set_bom, get_set_bom_for_sku, upsert_set_bom, delete_set_bom,
     preview_set_match, commit_set_match, list_set_split_events, list_set_match_events,
     get_component_routing, preview_bundle_ready, get_partial_wip_board, get_jo_panel_wip,
+    list_embroidery_stock_for_sku,
 )
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
@@ -340,6 +341,8 @@ class PieceReceiptIn(BaseModel):
     remarks: Optional[str] = ''
     # Cutting receive: when Set BOM exists, explode into component SKUs (default on)
     split_components: Optional[bool] = True
+    # Embroidery receive: unused border/yog/etc. returned to stock (measurement units)
+    leftover_measurement: Optional[float] = 0
 
 
 class SetBomMaterialIn(BaseModel):
@@ -358,6 +361,9 @@ class SetBomLineIn(BaseModel):
     routing: Optional[str] = ''  # e.g. Cutting>Embroidery>Cutting>Stitching
     requires_embroidery: Optional[bool] = False
     embroidery_before_cutting: Optional[bool] = False
+    embroidery_type: Optional[str] = ''
+    embroidery_qty_per_piece: Optional[float] = 0
+    embroidery_unit: Optional[str] = ''
     # Blank = infer (FRONT/BACK → PANEL; TOP/BOTTOM → SET_COMPONENT)
     component_role: Optional[str] = ''
     parent_component_code: Optional[str] = ''
@@ -423,6 +429,9 @@ def get_routing(sku: str):
     main, comp = parse_component_sku(sku)
     emb_before = False
     requires_emb = False
+    emb_type = ""
+    emb_per_piece = 0.0
+    emb_unit = ""
     if comp:
         bom = get_set_bom_for_sku(main or sku)
         if bom:
@@ -430,6 +439,9 @@ def get_routing(sku: str):
                 if str(ln.get("component_code") or "").strip().upper() == str(comp).upper():
                     requires_emb = bool(int(ln.get("requires_embroidery") or 0))
                     emb_before = bool(int(ln.get("embroidery_before_cutting") or 0))
+                    emb_type = str(ln.get("embroidery_type") or "")
+                    emb_per_piece = float(ln.get("embroidery_qty_per_piece") or 0)
+                    emb_unit = str(ln.get("embroidery_unit") or "")
                     break
     return {
         "sku": sku,
@@ -438,7 +450,17 @@ def get_routing(sku: str):
         "next_after_cutting": get_next_process(sku, "Cutting"),
         "requires_embroidery": requires_emb,
         "embroidery_before_cutting": emb_before,
+        "embroidery_type": emb_type,
+        "embroidery_qty_per_piece": emb_per_piece,
+        "embroidery_unit": emb_unit,
+        "embroidery_stock": list_embroidery_stock_for_sku(sku),
     }
+
+
+@router.get("/embroidery-stock/{sku}")
+def embroidery_stock_for_sku(sku: str):
+    """Leftover embroidery material (border meters, Yog, etc.) for a SKU/style."""
+    return {"sku": sku, "items": list_embroidery_stock_for_sku(sku)}
 
 
 @router.get("/bundle-ready")
