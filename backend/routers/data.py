@@ -2584,9 +2584,9 @@ def _schedule_quarterly_refresh(sess: AppSession | None = None, *, force_full: b
         from ..services.po_quarterly_cache import schedule_quarterly_refresh_if_stale
         from ..services.po_quarterly_warmup import quarterly_cache_key
 
-        # Default Sold (gross) cache; Net cache builds on demand from PO Engine.
-        key = quarterly_cache_key(False, 8, "Sold")
-        schedule_quarterly_refresh_if_stale(key, sess, force_full=force_full)
+        for basis in ("Net", "Sold"):
+            key = quarterly_cache_key(False, 8, basis)
+            schedule_quarterly_refresh_if_stale(key, sess, force_full=force_full)
     except Exception:
         pass
 

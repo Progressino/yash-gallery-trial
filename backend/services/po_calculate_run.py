@@ -253,15 +253,17 @@ def execute_po_calculate(
         # Quarterly LY/seasonal floor — fetched BEFORE calculate_po_base so it's
         # baked into ADS before Days_Left / Projected_Running_Days / Gross_PO_Qty
         # are derived from it (cache-only lookup, never blocks; empty if not warm).
+        from .po_quarterly_warmup import quarterly_ly_floor_dict, resolve_po_demand_basis
+
+        _demand_basis = resolve_po_demand_basis(body)
         _quarterly_floor: dict = {}
         try:
-            from .po_quarterly_warmup import quarterly_ly_floor_dict
-
             _quarterly_floor = quarterly_ly_floor_dict(
                 sess,
                 group_by_parent=group_by_parent,
                 n_quarters=8,
                 planning_date=body.get("planning_date"),
+                demand_basis=_demand_basis,
             )
         except Exception:
             logger.exception("quarterly_ly_floor_dict failed (non-fatal)")
@@ -272,7 +274,7 @@ def execute_po_calculate(
             period_days=_period,
             lead_time=_lead_time,
             target_days=int(body.get("target_days", 135)),
-            demand_basis=str(body.get("demand_basis", "Sold")),
+            demand_basis=_demand_basis,
             min_denominator=int(body.get("min_denominator", 7)),
             grace_days=int(body.get("grace_days", 0)),
             safety_pct=float(body.get("safety_pct", 0.0)),
@@ -318,7 +320,7 @@ def execute_po_calculate(
                 n_quarters=8,
                 planning_date=body.get("planning_date"),
                 period_days=int(body.get("period_days", 30)),
-                demand_basis=str(body.get("demand_basis", "Sold")),
+                demand_basis=_demand_basis,
                 use_ly_fallback=bool(body.get("use_ly_fallback", True)),
                 use_seasonality=bool(body.get("use_seasonality", False)),
                 seasonal_weight=float(body.get("seasonal_weight", 0.5)),
@@ -645,12 +647,12 @@ def background_po_calculate(job_id: str, session_id: str, body: dict) -> None:
             def _refresh_quarterly_if_stale() -> None:
                 try:
                     from .po_quarterly_cache import schedule_quarterly_refresh_if_stale
-                    from .po_quarterly_warmup import quarterly_cache_key
+                    from .po_quarterly_warmup import quarterly_cache_key, resolve_po_demand_basis
 
                     key = quarterly_cache_key(
                         bool(body.get("group_by_parent", False)),
                         8,
-                        str(body.get("demand_basis", "Sold")),
+                        resolve_po_demand_basis(body),
                     )
                     schedule_quarterly_refresh_if_stale(key, sess, force_full=False)
                 except Exception:

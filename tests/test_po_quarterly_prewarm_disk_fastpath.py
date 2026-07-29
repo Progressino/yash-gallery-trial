@@ -38,11 +38,14 @@ def test_prewarm_uses_persisted_disk_payload(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "backend.concurrency.upload_memory_lock_held", _boom, raising=False
     )
+    monkeypatch.setattr(qw, "po_quarterly_demand_bases", lambda: ("Sold",))
 
     qw.schedule_shared_quarterly_prewarm()
     _join_prewarm_threads()
 
-    assert qc.get_shared_quarterly(key) == payload
+    loaded = qc.get_shared_quarterly(key)
+    assert loaded and loaded.get("loaded")
+    assert loaded.get("rows") == [{"SKU": "A1", "Q1": 5, "Oct-Dec 2024": 0, "Jan-Mar 2025": 0, "Apr-Jun 2025": 0, "Jul-Sep 2025": 0, "Oct-Dec 2025": 0, "Jan-Mar 2026": 0, "Apr-Jun 2026": 0, "Jul-Sep 2026": 0}]
 
     with qc._lock:
         qc._payloads.clear()

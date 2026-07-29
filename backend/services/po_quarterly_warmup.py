@@ -11,7 +11,24 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 38  # fix string _Combo_Fan bool parse; PO_SESSION_ONLY sales_df quarters
+QUARTERLY_CACHE_SCHEMA = 39  # prewarm Net quarterly cache; PO columns match demand_basis
+
+
+def po_quarterly_demand_bases() -> tuple[str, ...]:
+    """Shared quarterly caches to keep warm (Net first — PO default demand basis)."""
+    return ("Net", "Sold")
+
+
+def resolve_po_demand_basis(body: dict | None) -> str:
+    """PO calculate demand basis — defaults to Net (matches po_shared_cache fingerprint)."""
+    if body and body.get("demand_basis") not in (None, ""):
+        return str(body["demand_basis"])
+    try:
+        from .po_shared_cache import _CALC_PARAM_DEFAULTS
+
+        return str(_CALC_PARAM_DEFAULTS.get("demand_basis") or "Net")
+    except Exception:
+        return "Net"
 
 
 def normalize_quarterly_demand_basis(demand_basis: object) -> str:
@@ -600,6 +617,7 @@ def quarterly_ly_floor_dict(
     group_by_parent: bool = False,
     n_quarters: int = 8,
     planning_date: str | None = None,
+    demand_basis: str = "Net",
 ) -> dict[str, float]:
     """Per-SKU LY/seasonal floor (rate/day) from the prior-year quarter column.
 
@@ -609,7 +627,10 @@ def quarterly_ly_floor_dict(
     are already computed) leaves them inconsistent with the displayed ADS.
     """
     payload = get_quarterly_payload_for_po(
-        sess, group_by_parent=group_by_parent, n_quarters=n_quarters
+        sess,
+        group_by_parent=group_by_parent,
+        n_quarters=n_quarters,
+        demand_basis=demand_basis,
     )
     rows = payload.get("rows") if payload else None
     if not rows:
@@ -688,7 +709,7 @@ def attach_quarterly_columns_to_po_df(
     n_quarters: int = 8,
     planning_date: str | None = None,
     period_days: int = 30,
-    demand_basis: str = "Sold",
+    demand_basis: str = "Net",
     use_ly_fallback: bool = True,
     use_seasonality: bool = False,
     seasonal_weight: float = 0.5,
@@ -703,6 +724,26 @@ def attach_quarterly_columns_to_po_df(
         n_quarters=n_quarters,
         demand_basis=demand_basis,
     )
+
+    if not payload or not payload.get("loaded") or not payload.get("rows"):
+        payload = try_build_quarterly_payload_sync(
+            sess,
+            group_by_parent=group_by_parent,
+            n_quarters=n_quarters,
+            demand_basis=demand_basis,
+        )
+        if payload and payload.get("loaded") and payload.get("rows"):
+            from .po_quarterly_cache import store_shared_quarterly
+
+            store_shared_quarterly(
+                quarterly_cache_key(group_by_parent, n_quarters, demand_basis),
+                payload,
+            )
+            if not hasattr(sess, "_quarterly_cache"):
+                sess._quarterly_cache = {}
+            sess._quarterly_cache[
+                quarterly_cache_key(group_by_parent, n_quarters, demand_basis)
+            ] = payload
 
     if not payload or not payload.get("loaded") or not payload.get("rows"):
         return po_df
@@ -789,6 +830,57 @@ def attach_quarterly_columns_to_po_df(
     return out
 
 
+def _restore_quarterly_from_disk(basis: str, *, get_shared_quarterly, load_shared_quarterly_from_disk,
+                                 quarterly_is_stale, schedule_quarterly_refresh_if_stale,
+                                 store_shared_quarterly) -> bool:
+    """Load persisted quarterly cache for ``basis`` if present. Returns True when satisfied."""
+    key = quarterly_cache_key(False, 8, basis)
+    existing = get_shared_quarterly(key)
+    if existing and existing.get("loaded") and not quarterly_is_stale(existing):
+        return True
+
+    disk_payload = load_shared_quarterly_from_disk(key)
+    if disk_payload:
+        store_shared_quarterly(key, disk_payload)
+        logger.info(
+            "Shared quarterly cache restored from disk (%s, %d rows)",
+            basis,
+            len(disk_payload.get("rows") or []),
+        )
+        if quarterly_is_stale(disk_payload):
+            schedule_quarterly_refresh_if_stale(key, None, force_full=False)
+        return True
+    return bool(get_shared_quarterly(key))
+
+
+def _schedule_quarterly_streaming_build(
+    basis: str,
+    *,
+    get_shared_quarterly,
+    start_shared_quarterly_build,
+) -> None:
+    key = quarterly_cache_key(False, 8, basis)
+    if get_shared_quarterly(key):
+        return
+    import backend.main as _main
+
+    mapping = (_main._warm_cache or {}).get("sku_mapping") or {}
+    start, end = quarterly_report_window(8)
+
+    def _build(progress_cb):
+        return _build_via_streaming(
+            mapping,
+            start,
+            end,
+            group_by_parent=False,
+            n_quarters=8,
+            progress_cb=progress_cb,
+            demand_basis=basis,
+        )
+
+    start_shared_quarterly_build(key, _build)
+
+
 def schedule_shared_quarterly_prewarm() -> None:
     """Deferred pre-build — wait until warm-cache / restore memory lock is free (OOM-safe)."""
     import os
@@ -811,24 +903,24 @@ def schedule_shared_quarterly_prewarm() -> None:
                 store_shared_quarterly,
             )
 
-            key = quarterly_cache_key(False, 8, "Sold")
-            existing = get_shared_quarterly(key)
-            if existing and existing.get("loaded") and not quarterly_is_stale(existing):
-                return
+            disk_deps = dict(
+                get_shared_quarterly=get_shared_quarterly,
+                load_shared_quarterly_from_disk=load_shared_quarterly_from_disk,
+                quarterly_is_stale=quarterly_is_stale,
+                schedule_quarterly_refresh_if_stale=schedule_quarterly_refresh_if_stale,
+                store_shared_quarterly=store_shared_quarterly,
+            )
+            build_deps = dict(
+                get_shared_quarterly=get_shared_quarterly,
+                start_shared_quarterly_build=start_shared_quarterly_build,
+            )
 
-            # Fast path: a persisted payload from before the last restart is
-            # still correct (it's invalidated whenever sales/platform data
-            # actually changes) — reuse it instead of paying for a 30-180s
-            # streaming rebuild on every restart.
-            disk_payload = load_shared_quarterly_from_disk(key)
-            if disk_payload:
-                store_shared_quarterly(key, disk_payload)
-                logger.info(
-                    "Shared quarterly cache restored from disk (%d rows)",
-                    len(disk_payload.get("rows") or []),
-                )
-                if quarterly_is_stale(disk_payload):
-                    schedule_quarterly_refresh_if_stale(key, None, force_full=False)
+            missing = [
+                b
+                for b in po_quarterly_demand_bases()
+                if not _restore_quarterly_from_disk(b, **disk_deps)
+            ]
+            if not missing:
                 return
 
             # Let warm-cache Phase 1+2 and session restores finish first.
@@ -841,24 +933,12 @@ def schedule_shared_quarterly_prewarm() -> None:
                 logger.info("Quarterly prewarm skipped: upload memory lock still held")
                 return
 
-            if get_shared_quarterly(key):
-                return
-            import backend.main as _main
-
-            mapping = (_main._warm_cache or {}).get("sku_mapping") or {}
-            start, end = quarterly_report_window(8)
-
-            def _build(progress_cb):
-                return _build_via_streaming(
-                    mapping,
-                    start,
-                    end,
-                    group_by_parent=False,
-                    n_quarters=8,
-                    progress_cb=progress_cb,
-                )
-
-            start_shared_quarterly_build(key, _build)
+            for basis in missing:
+                _schedule_quarterly_streaming_build(basis, **build_deps)
+                for _ in range(360):
+                    if get_shared_quarterly(quarterly_cache_key(False, 8, basis)):
+                        break
+                    time.sleep(5)
         except Exception:
             logger.exception("Shared quarterly prewarm failed")
 
