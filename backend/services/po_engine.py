@@ -1920,10 +1920,13 @@ def calculate_po_base(
 
             po_skus = set(po_df["OMS_SKU"].astype(str))
             # Avoid copying the full dense history before trim — trim returns a new frame.
+            # Use inventory_oms_key (no seller→OMS remap). Mapping often has 1:1 cycles
+            # (BOTTLE↔BOTTEL); remapping history while po_df keeps warehouse keys drops
+            # Eff_Days_Inventory joins for those SKUs.
             ih_src = inventory_history_df
             if "OMS_SKU" in ih_src.columns:
                 ih_src = ih_src.copy()
-                ih_src["OMS_SKU"] = ih_src["OMS_SKU"].astype(str).map(_canonical_oms_key)
+                ih_src["OMS_SKU"] = ih_src["OMS_SKU"].astype(str).map(inventory_oms_key)
             ih = trim_inventory_history_for_po(
                 ih_src,
                 inv_window_start,
@@ -1935,7 +1938,7 @@ def calculate_po_base(
                 po_df["Eff_Days_Inventory"] = 0
                 po_df["Inv_Coverage_Days"] = 0
             else:
-                ih["OMS_SKU"] = ih["OMS_SKU"].astype(str).map(_canonical_oms_key)
+                ih["OMS_SKU"] = ih["OMS_SKU"].astype(str).map(inventory_oms_key)
                 ih = ih[ih["OMS_SKU"].str.len() > 0]
                 if group_by_parent and not ih.empty:
                     ih["OMS_SKU"] = ih["OMS_SKU"].map(get_parent_sku)

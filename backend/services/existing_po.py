@@ -1708,7 +1708,16 @@ def fan_bundled_demand_to_sheet_children(
                     touched.add(int(child_idx))
             if child_has_metrics:
                 for col in _BUNDLED_FAN_INTEGER_COLS + _BUNDLED_FAN_FLOAT_COLS + ("Eff_Days",):
-                    if col in out.columns:
+                    if col not in out.columns:
+                        continue
+                    if col == "Eff_Days":
+                        # Keep inventory in-stock days on the band row for matrix parity;
+                        # only wipe sales-derived Eff_Days so ADS demand is not double-counted.
+                        inv_eff = float(
+                            pd.to_numeric(out.at[idx, "Eff_Days_Inventory"], errors="coerce") or 0
+                        ) if "Eff_Days_Inventory" in out.columns else 0.0
+                        out.at[idx, col] = inv_eff if inv_eff > 0 else 0
+                    else:
                         out.at[idx, col] = 0
                 touched.add(int(idx))
             continue
@@ -1737,7 +1746,14 @@ def fan_bundled_demand_to_sheet_children(
                     out.at[child_idx, col] = round(float(val), 3)
 
         for col in _BUNDLED_FAN_INTEGER_COLS + _BUNDLED_FAN_FLOAT_COLS + ("Eff_Days",):
-            if col in out.columns:
+            if col not in out.columns:
+                continue
+            if col == "Eff_Days":
+                inv_eff = float(
+                    pd.to_numeric(out.at[idx, "Eff_Days_Inventory"], errors="coerce") or 0
+                ) if "Eff_Days_Inventory" in out.columns else 0.0
+                out.at[idx, col] = inv_eff if inv_eff > 0 else 0
+            else:
                 out.at[idx, col] = 0
         touched.add(int(idx))
         for child in sheet_children:
