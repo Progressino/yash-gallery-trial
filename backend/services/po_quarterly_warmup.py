@@ -397,6 +397,33 @@ def build_quarterly_payload(
     demand_basis: str = "Sold",
 ) -> dict[str, Any]:
     """Never merge Tier-3 into session — warm-cache frames or streaming aggregate only."""
+    import backend.main as _main
+
+    # Prod PO_SESSION_ONLY: unified sales_df is authoritative; avoid loading full
+    # platform frames into session (OOM) and skip Tier-3 gap-fill blocking.
+    if _main.warm_cache_po_session_only():
+        start, end = quarterly_report_window(n_quarters)
+        mapping = (
+            getattr(sess, "sku_mapping", None)
+            or (_main._warm_cache or {}).get("sku_mapping")
+            or {}
+        )
+        if progress_cb:
+            progress_cb(
+                12,
+                "PO_SESSION_ONLY: building quarterly from unified sales_df…",
+            )
+        return _build_via_streaming(
+            mapping,
+            start,
+            end,
+            group_by_parent=group_by_parent,
+            n_quarters=n_quarters,
+            progress_cb=progress_cb,
+            demand_basis=demand_basis,
+            acquire_memory_lock=False,
+        )
+
     _ensure_session_operational_frames(sess)
 
     from .platform_session_window import session_platform_shorter_than_tier3
