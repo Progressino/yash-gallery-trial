@@ -9,6 +9,7 @@ Optional: set component_code=TOP|PANT|DUPATTA to create only that Cutting JO.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .component_bom import panel_lines, set_component_lines
@@ -68,6 +69,18 @@ def jo_import_template_csv() -> str:
     return "\n".join([header, row_main, row_top, row_pant, row_stitch]) + "\n"
 
 
+def _import_cell_str(raw: Any) -> str:
+    """Normalize CSV/XLSX cell values; treat pandas NaN / blank as empty."""
+    if raw is None:
+        return ""
+    if isinstance(raw, float) and math.isnan(raw):
+        return ""
+    s = str(raw).strip()
+    if s.lower() in {"", "nan", "none", "nat"}:
+        return ""
+    return s
+
+
 def _truthy_yes(raw: Any) -> bool | None:
     """Parse create_component_jos: None = auto, True/False = forced."""
     s = str(raw if raw is not None else "").strip().lower()
@@ -91,8 +104,8 @@ def _looks_like_panel_code(code: str) -> bool:
 
 def build_jo_payload_from_import_row(row: dict[str, Any], *, default_process: str = "Cutting") -> dict[str, Any]:
     """Map one CSV/XLSX row into create_jo payload. Raises ValueError on bad panel rows."""
-    so_number = str(row.get("so_number") or "").strip()
-    sku = str(row.get("sku") or "").strip().upper()
+    so_number = _import_cell_str(row.get("so_number"))
+    sku = _import_cell_str(row.get("sku")).upper()
     if not so_number or not sku:
         raise ValueError("so_number and sku required")
 
@@ -106,7 +119,7 @@ def build_jo_payload_from_import_row(row: dict[str, Any], *, default_process: st
     ).strip()
     create_flag = _truthy_yes(row.get("create_component_jos"))
 
-    raw_comp = str(row.get("component_code") or row.get("component") or "").strip().upper()
+    raw_comp = _import_cell_str(row.get("component_code") or row.get("component")).upper()
     parsed_main, parsed_comp = parse_component_sku(sku)
 
     # Reject panel SKUs / panel component codes for Cutting JO creation.
@@ -143,15 +156,15 @@ def build_jo_payload_from_import_row(row: dict[str, Any], *, default_process: st
     data: dict[str, Any] = {
         "so_number": so_number,
         "sku": main_sku,
-        "sku_name": str(row.get("sku_name") or "").strip(),
+        "sku_name": _import_cell_str(row.get("sku_name")),
         "process": process,
         "exec_type": str(row.get("exec_type") or "Inhouse").strip() or "Inhouse",
         "vendor_name": str(row.get("vendor_name") or "").strip(),
         "vendor_rate": float(row.get("vendor_rate") or row.get("rate") or 0),
         "planned_qty": planned,
         "expected_completion": delivery[:10] if delivery else "",
-        "remarks": str(row.get("remarks") or "").strip(),
-        "fabric_code": str(row.get("fabric_code") or "").strip(),
+        "remarks": _import_cell_str(row.get("remarks")),
+        "fabric_code": _import_cell_str(row.get("fabric_code")),
         "fabric_qty": float(row.get("fabric_qty") or 0),
         "fabric_unit": str(row.get("fabric_unit") or "MTR").strip() or "MTR",
         "create_component_jos": create_component_jos,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import math
 
 import pytest
 
@@ -146,3 +147,48 @@ def test_import_component_code_top_only(isolated_module_dbs, client):
     assert len(jos) == 1
     assert jos[0]["sku"] == "IMPTOP-M-TOP"
     assert jos[0].get("component_code") == "TOP"
+
+
+def test_import_empty_component_code_nan_creates_set_component_jos(isolated_module_dbs, client):
+    """Blank component_code cells from Excel/CSV must not be treated as literal NAN."""
+    client.post(
+        "/api/production/set-bom",
+        json={
+            "style_key": "IMPNAN",
+            "lines": [
+                {"component_code": "TOP", "qty_per_set": 1, "routing": "Cutting>Stitching", "component_role": "SET_COMPONENT"},
+                {"component_code": "PANT", "qty_per_set": 1, "routing": "Cutting>Stitching", "component_role": "SET_COMPONENT"},
+                {"component_code": "DUPATTA", "qty_per_set": 1, "routing": "Cutting>Stitching", "component_role": "SET_COMPONENT"},
+            ],
+        },
+    )
+    csv = (
+        "so_number,sku,component_code,planned_qty,process,create_component_jos\n"
+        "SO-IMP-NAN,IMPNAN-M,,3,Cutting,\n"
+    )
+    res = client.post(
+        "/api/production/orders/import",
+        files={"file": ("jos.csv", io.BytesIO(csv.encode()), "text/csv")},
+        data={"process": "Cutting"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["created"] == 3, body
+    assert not body["errors"]
+
+
+def test_build_jo_payload_treats_pandas_nan_component_code_as_empty(isolated_module_dbs):
+    from backend.services.jo_import import build_jo_payload_from_import_row
+
+    payload = build_jo_payload_from_import_row(
+        {
+            "so_number": "SO-1",
+            "sku": "IMPNAN-M",
+            "component_code": math.nan,
+            "planned_qty": 2,
+            "process": "Cutting",
+        }
+    )
+    assert payload["sku"] == "IMPNAN-M"
+    assert payload.get("component_code", "") == ""
+    assert payload.get("create_component_jos") is None
