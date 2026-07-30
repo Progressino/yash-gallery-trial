@@ -33,12 +33,12 @@ export default function CoverageProvider({
     queryKey: ['coverage-poll'],
     queryFn: async () => {
       let c = await getCoverage({ light: true, timeout: 45_000 })
-      const totallyEmpty =
-        !c.mtr && !c.sales && !c.myntra && !c.meesho && !c.flipkart && !c.inventory
+      // After deploys/restarts the cookie session is empty even when localStorage still
+      // looks "loaded". Hydrate whenever PO datasets are incomplete — not only when
+      // every marketplace flag is false (partial sessions used to stay stuck at 0/8).
       if (
         !operationalDataComplete(c) &&
         !coverageJobsRunning(c) &&
-        totallyEmpty &&
         Date.now() - lastHydrateAt.current > 15_000
       ) {
         lastHydrateAt.current = Date.now()
