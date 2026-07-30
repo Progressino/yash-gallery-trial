@@ -234,17 +234,28 @@ def test_apply_period_burst_cap_used_by_both_main_and_fanout_paths():
     )
     assert capped[0] == pytest.approx(0.2, abs=1e-6)
 
-    # Below the sold>=6 threshold → no cap applied.
-    uncapped = _apply_period_burst_cap(
-        prim_ads=[3.0], sold_units=[5], flat_ads=[0.1], period_days=30
+    # Low-volume short-window bursts (1–5 sold) must also cap — previously sold>=6
+    # left Eff_Days=1 rows at 5.0 ADS and exploded PO.
+    low_vol = _apply_period_burst_cap(
+        prim_ads=[5.0], sold_units=[5], flat_ads=[0.167], period_days=30
     )
-    assert uncapped[0] == pytest.approx(3.0, abs=1e-6)
+    assert low_vol[0] == pytest.approx(0.167, abs=1e-6)
 
     # Flat30 floor still wins when it exceeds the period rate.
     floored = _apply_period_burst_cap(
         prim_ads=[3.0], sold_units=[6], flat_ads=[0.5], period_days=30
     )
     assert floored[0] == pytest.approx(0.5, abs=1e-6)
+
+    # LY-lifted prim is preserved when recent itself is calm.
+    ly_lift = _apply_period_burst_cap(
+        prim_ads=[2.0],
+        sold_units=[5],
+        flat_ads=[0.1],
+        period_days=30,
+        recent_ads=[0.1],
+    )
+    assert ly_lift[0] == pytest.approx(2.0, abs=1e-6)
 
 
 def test_catalog_ads_with_ly_fallback_enabled():

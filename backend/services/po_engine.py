@@ -777,19 +777,34 @@ def _final_ads_from_signals(
     return np.maximum(prim, flat)
 
 
-def _apply_period_burst_cap(prim_ads, sold_units, flat_ads, *, period_days: int):
+def _apply_period_burst_cap(prim_ads, sold_units, flat_ads, *, period_days: int, recent_ads=None):
     """Short-span Recent_ADS cannot exceed the period average (sold ÷ period_days).
 
-    Applies to all sellers — e.g. 6 sold in 30d → max 0.2/day even when Eff_Days=6.
-    Must be applied everywhere ``prim_ads`` is computed (main pass and bundled
-    fan-out recompute) — a burst SKU re-scored after fan-out must obey the same cap.
+    Caps any positive sold volume when the short-window rate exceeds
+    ``max(Flat30, sold/period)`` — e.g. 5 sold with Eff_Days=1 → 5.0/day must
+    fall back to ≤0.167/day. The old ``sold >= 6`` gate left 1–5 unit bursts
+    uncapped after inventory-history set Eff_Days to 1–2, which exploded PO.
+
+    When ``recent_ads`` is provided, only crush rows where *recent* itself
+    exceeds the ceil so LY/seasonal lifts on ``prim_ads`` stay intact.
+    Must be applied everywhere ADS is computed (main pass, bundled fan-out,
+    and post-pipeline Eff_Days refresh).
     """
     sold = np.asarray(pd.to_numeric(pd.Series(sold_units), errors="coerce").fillna(0), dtype=float)
     flat = np.asarray(pd.to_numeric(pd.Series(flat_ads), errors="coerce").fillna(0), dtype=float)
     prim = np.asarray(pd.to_numeric(pd.Series(prim_ads), errors="coerce").fillna(0), dtype=float)
     period_rate = np.clip(sold / float(period_days or 1), 0.0, None)
     ceil = np.maximum(flat, period_rate)
-    cap_mask = (sold >= 6) & (prim > ceil)
+    if recent_ads is None:
+        # Cap the signal being passed (Recent_ADS, or prim when caller already
+        # isolated the burst component). Any sold>0 short-window spike qualifies.
+        cap_mask = (sold > 0) & (prim > ceil)
+    else:
+        recent = np.asarray(
+            pd.to_numeric(pd.Series(recent_ads), errors="coerce").fillna(0),
+            dtype=float,
+        )
+        cap_mask = (sold > 0) & (prim > ceil) & (recent > ceil)
     return np.where(cap_mask, np.minimum(prim, ceil), prim)
 
 
@@ -849,6 +864,16 @@ def apply_quarterly_ads_floors(
     flat_ads = pd.to_numeric(po_df.get("Flat30_ADS", 0), errors="coerce").fillna(0.0)
     ads_window = max(int(period_days), 1)
 
+    _sold_cap = (
+        pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
+        if str(demand_basis).strip().lower() == "net"
+        else pd.to_numeric(po_df.get("Sold_Units", 0), errors="coerce").fillna(0)
+    )
+    recent = pd.Series(
+        _apply_period_burst_cap(recent, _sold_cap, flat_ads, period_days=ads_window),
+        index=po_df.index,
+    )
+    po_df["Recent_ADS"] = recent.round(3)
     prim = _primary_ads_from_signals(
         recent,
         ly_ads,
@@ -856,17 +881,9 @@ def apply_quarterly_ads_floors(
         use_ly_fallback=use_ly_fallback,
         seasonal_weight=seasonal_weight,
     )
-
-    _sold_cap = (
-        pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
-        if str(demand_basis).strip().lower() == "net"
-        else pd.to_numeric(po_df.get("Sold_Units", 0), errors="coerce").fillna(0)
+    prim_ads = _apply_period_burst_cap(
+        prim, _sold_cap, flat_ads, period_days=ads_window, recent_ads=recent
     )
-    _period_rate = (_sold_cap / float(ads_window)).clip(lower=0.0)
-    _ceil = np.maximum(flat_ads, _period_rate)
-    prim_ads = pd.Series(prim, index=po_df.index, dtype=float)
-    _cap_mask = (_sold_cap >= 6) & (prim_ads > _ceil)
-    prim_ads = np.where(_cap_mask, np.minimum(prim_ads, _ceil), prim_ads)
     po_df["ADS"] = _final_ads_from_signals(
         prim_ads, seasonal_ads, flat_ads, use_seasonality=use_seasonality
     ).round(3)
@@ -2235,23 +2252,29 @@ def calculate_po_base(
                 pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0), _q_floor
             ).round(3)
 
-    if use_seasonality:
-        # Weighted blend of recent vs rolling LY window, then floor by seasonal month-pair ADS.
-        blended = np.where(
-            po_df["LY_ADS"] > 0,
-            (po_df["Recent_ADS"] * (1 - seasonal_weight)) + (po_df["LY_ADS"] * seasonal_weight),
-            po_df["Recent_ADS"],
-        )
-    else:
-        blended = po_df["Recent_ADS"]
-
     # Final ADS for PO: recent signal (sold ÷ Eff_Days), optionally lifted by LY,
-    # capped for non-sparse bursty SKUs, then floored by seasonal + Flat30 (sheet FREQ).
+    # capped for short-window bursts (any sold volume), then floored by seasonal + Flat30.
     recent_ads = pd.to_numeric(po_df["Recent_ADS"], errors="coerce").fillna(0.0)
     ly_ads = pd.to_numeric(po_df["LY_ADS"], errors="coerce").fillna(0.0)
     seasonal_ads = pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0)
     flat_ads = pd.to_numeric(po_df["Flat30_ADS"], errors="coerce").fillna(0.0)
+    _sold_cap = (
+        pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
+        if demand_basis == "Net"
+        else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
+    )
+    # Dilute Eff_Days=1–5 noise before LY blend so period-cap does not erase LY lifts.
+    recent_ads = pd.Series(
+        _apply_period_burst_cap(recent_ads, _sold_cap, flat_ads, period_days=ADS_WINDOW),
+        index=po_df.index,
+    )
+    po_df["Recent_ADS"] = recent_ads.round(3)
     if use_seasonality:
+        blended = np.where(
+            ly_ads > 0,
+            (recent_ads * (1 - seasonal_weight)) + (ly_ads * seasonal_weight),
+            recent_ads,
+        )
         prim_ads = pd.to_numeric(pd.Series(blended, index=po_df.index), errors="coerce").fillna(0.0)
     else:
         prim_ads = _primary_ads_from_signals(
@@ -2261,13 +2284,12 @@ def calculate_po_base(
             use_ly_fallback=use_ly_fallback,
             seasonal_weight=seasonal_weight,
         )
-    _sold_cap = (
-        pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
-        if demand_basis == "Net"
-        else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
-    )
     prim_ads = _apply_period_burst_cap(
-        prim_ads, _sold_cap, flat_ads, period_days=ADS_WINDOW
+        prim_ads,
+        _sold_cap,
+        flat_ads,
+        period_days=ADS_WINDOW,
+        recent_ads=recent_ads,
     )
     po_df["ADS"] = _final_ads_from_signals(
         prim_ads, seasonal_ads, flat_ads, use_seasonality=use_seasonality
@@ -2357,10 +2379,24 @@ def calculate_po_base(
                         _ads_demand
                         / pd.to_numeric(po_df.loc[_fan_active, "Eff_Days"], errors="coerce").clip(lower=1)
                     ).round(3)
+                    _fan_sold = (
+                        pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
+                        if demand_basis == "Net"
+                        else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
+                    )
+                    _flat = pd.to_numeric(po_df["Flat30_ADS"], errors="coerce").fillna(0.0)
+                    po_df.loc[_fan_active, "Recent_ADS"] = pd.Series(
+                        _apply_period_burst_cap(
+                            po_df.loc[_fan_active, "Recent_ADS"],
+                            _fan_sold.loc[_fan_active],
+                            _flat.loc[_fan_active],
+                            period_days=ADS_WINDOW,
+                        ),
+                        index=po_df.index[_fan_active],
+                    ).round(3)
                     _recent = pd.to_numeric(po_df["Recent_ADS"], errors="coerce").fillna(0.0)
                     _ly = pd.to_numeric(po_df["LY_ADS"], errors="coerce").fillna(0.0)
                     _seasonal = pd.to_numeric(po_df["Seasonal_Month_ADS"], errors="coerce").fillna(0.0)
-                    _flat = pd.to_numeric(po_df["Flat30_ADS"], errors="coerce").fillna(0.0)
                     if use_seasonality:
                         _prim = np.where(
                             _ly > 0,
@@ -2376,17 +2412,13 @@ def calculate_po_base(
                             seasonal_weight=seasonal_weight,
                         )
                     _prim_series = pd.Series(_prim, index=po_df.index)
-                    _fan_sold = (
-                        pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
-                        if demand_basis == "Net"
-                        else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
-                    )
                     _prim_capped = _prim_series.copy()
                     _prim_capped.loc[_fan_active] = _apply_period_burst_cap(
                         _prim_series.loc[_fan_active],
                         _fan_sold.loc[_fan_active],
                         _flat.loc[_fan_active],
                         period_days=ADS_WINDOW,
+                        recent_ads=_recent.loc[_fan_active],
                     )
                     po_df.loc[_fan_active, "ADS"] = _final_ads_from_signals(
                         _prim_capped.loc[_fan_active],
@@ -3460,10 +3492,24 @@ def calculate_po_base(
                 (_ads_demand.loc[_eff_refreshed] / _eff.loc[_eff_refreshed]).round(3),
                 0.0,
             )
+            _sold_for_cap = (
+                pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
+                if demand_basis == "Net"
+                else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
+            )
+            _flat = pd.to_numeric(po_df.get("Flat30_ADS"), errors="coerce").fillna(0.0)
+            po_df.loc[_eff_refreshed, "Recent_ADS"] = pd.Series(
+                _apply_period_burst_cap(
+                    po_df.loc[_eff_refreshed, "Recent_ADS"],
+                    _sold_for_cap.loc[_eff_refreshed],
+                    _flat.loc[_eff_refreshed],
+                    period_days=ADS_WINDOW,
+                ),
+                index=po_df.index[_eff_refreshed],
+            ).round(3)
             _recent = pd.to_numeric(po_df["Recent_ADS"], errors="coerce").fillna(0.0)
             _ly = pd.to_numeric(po_df.get("LY_ADS"), errors="coerce").fillna(0.0)
             _seasonal = pd.to_numeric(po_df.get("Seasonal_Month_ADS"), errors="coerce").fillna(0.0)
-            _flat = pd.to_numeric(po_df.get("Flat30_ADS"), errors="coerce").fillna(0.0)
             if use_seasonality:
                 _prim = np.where(
                     _ly > 0,
@@ -3479,17 +3525,13 @@ def calculate_po_base(
                     seasonal_weight=seasonal_weight,
                 )
             _prim_series = pd.Series(_prim, index=po_df.index)
-            _sold_for_cap = (
-                pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
-                if demand_basis == "Net"
-                else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
-            )
             _prim_capped = _prim_series.copy()
             _prim_capped.loc[_eff_refreshed] = _apply_period_burst_cap(
                 _prim_series.loc[_eff_refreshed],
                 _sold_for_cap.loc[_eff_refreshed],
                 _flat.loc[_eff_refreshed],
                 period_days=ADS_WINDOW,
+                recent_ads=_recent.loc[_eff_refreshed],
             )
             po_df.loc[_eff_refreshed, "ADS"] = _final_ads_from_signals(
                 _prim_capped.loc[_eff_refreshed],

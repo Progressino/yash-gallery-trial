@@ -2920,6 +2920,57 @@ def test_inventory_matrix_does_not_shorten_eff_days_for_light_non_sparse_sellers
     assert int(row["PO_Qty"]) < 200
 
 
+def test_low_volume_one_day_inventory_does_not_explode_po():
+    """5 sold with Eff_Days_Inventory=1 must not yield ADS=5 and 700+ PO units.
+
+    Regression for export rows like 1949YKPINK-XXL (Recent_ADS=5, Flat30=0.167, PO=790).
+    """
+    sales = pd.DataFrame(
+        {
+            "Sku": ["BURST1D-SKU-XXL"] * 5,
+            "TxnDate": pd.to_datetime(
+                ["2026-07-26", "2026-07-27", "2026-07-28", "2026-07-29", "2026-07-30"]
+            ),
+            "Transaction Type": ["Shipment"] * 5,
+            "Quantity": [1, 1, 1, 1, 1],
+            "Units_Effective": [1, 1, 1, 1, 1],
+            "Source": ["Amazon"] * 5,
+        }
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["BURST1D-SKU-XXL"], "Total_Inventory": [7]})
+    hist_dates = pd.date_range("2026-07-01", periods=30, freq="D")
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["BURST1D-SKU-XXL"] * 30,
+            "Date": hist_dates,
+            # Only the last day in stock — matches noisy OMS restock snapshots.
+            "Qty": [0] * 29 + [7],
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=180,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        inventory_history_df=inv_hist,
+        enforce_lead_time_release_gate=False,
+        use_ly_fallback=False,
+    )
+    row = po.loc[po["OMS_SKU"] == "BURST1D-SKU-XXL"].iloc[0]
+    assert int(row["Sold_Units"]) == 5
+    assert int(row["Eff_Days_Inventory"]) == 1
+    assert int(row["Eff_Days"]) == 1
+    assert float(row["ADS"]) <= 0.2 + 1e-6, (
+        f"Expected period-capped ADS ≤0.2, got {row['ADS']} (uncapped would be ~5.0)"
+    )
+    assert int(row["PO_Qty"]) < 80, (
+        f"Expected modest PO after ADS cap, got {row['PO_Qty']}"
+    )
+
+
 def test_4032_drsgreen_family_gets_po_with_pipeline_and_inventory_history():
     """Regression: parent 4032DRSGREEN must not be zeroed when warehouse stock is low but pipeline exists."""
     base_sales = []
