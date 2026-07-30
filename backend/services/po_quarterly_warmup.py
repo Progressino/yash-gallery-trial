@@ -834,9 +834,22 @@ def attach_quarterly_columns_to_po_df(
                 if "Net_Units" in out.columns:
                     out.loc[_missing, "Net_Units"] = _q_u30[_missing].astype(int)
                 if "Eff_Days" in out.columns:
-                    out.loc[_missing, "Eff_Days"] = _q_f30[_missing].astype(int)
+                    _inv_eff = (
+                        pd.to_numeric(out.get("Eff_Days_Inventory"), errors="coerce").fillna(0)
+                        if "Eff_Days_Inventory" in out.columns
+                        else pd.Series(0.0, index=out.index)
+                    )
+                    _use_q_eff = _missing & (_inv_eff <= 0)
+                    if bool(_use_q_eff.any()):
+                        out.loc[_use_q_eff, "Eff_Days"] = _q_f30[_use_q_eff].astype(int)
                 # Recent_ADS = units / Eff_Days (when Eff_Days > 0), else units / period_days
-                _eff_safe = _q_f30[_missing].clip(lower=1)
+                _eff_for_ads = pd.to_numeric(out.loc[_missing, "Eff_Days"], errors="coerce").fillna(0)
+                if "Eff_Days_Inventory" in out.columns:
+                    _inv_eff_missing = pd.to_numeric(
+                        out.loc[_missing, "Eff_Days_Inventory"], errors="coerce"
+                    ).fillna(0)
+                    _eff_for_ads = _inv_eff_missing.where(_inv_eff_missing > 0, _eff_for_ads)
+                _eff_safe = _eff_for_ads.clip(lower=1)
                 _recalc_recent = (_q_u30[_missing] / _eff_safe).round(3)
                 if "Recent_ADS" in out.columns:
                     out.loc[_missing, "Recent_ADS"] = _recalc_recent
