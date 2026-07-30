@@ -93,6 +93,55 @@ def test_matrix_marks_derived_only_days_as_gap_dates():
     assert "2026-07-05" not in (wide.get("uploaded_dates") or [])
 
 
+def test_snapshot_rollforward_preserves_uploaded_matrix_days():
+    """Daily RAR snapshot must not wipe prior wide-matrix ``uploaded`` census days."""
+    from backend.services.daily_inventory_history import refresh_inventory_history_rollforward
+    from backend.session import AppSession
+
+    rows = []
+    for d, qty in [
+        ("2026-07-01", 100),
+        ("2026-07-02", 98),
+        ("2026-07-03", 95),
+        ("2026-07-04", 90),
+        ("2026-07-05", 88),
+    ]:
+        rows.append(
+            {
+                "OMS_SKU": "S1",
+                "Date": pd.Timestamp(d),
+                "Qty": qty,
+                "Source": "uploaded",
+                "Channel": "oms",
+            }
+        )
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(rows)
+    sess.inventory_snapshot_date = "2026-07-06"
+    sess.inventory_df_variant = pd.DataFrame(
+        {
+            "OMS_SKU": ["S1"],
+            "OMS_Inventory": [80],
+            "Total_Inventory": [80],
+            "Amazon_Inventory": [0],
+        }
+    )
+    sess.sales_df = pd.DataFrame(
+        columns=["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "Source"]
+    )
+    result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+    assert result.get("ok")
+    out = sess.daily_inventory_history_df.copy()
+    out["Date"] = pd.to_datetime(out["Date"]).dt.normalize()
+    oms = out[out["Channel"].astype(str).str.lower().eq("oms")].copy()
+    oms["d"] = oms["Date"].dt.strftime("%Y-%m-%d")
+    src = oms.groupby("d")["Source"].first().astype(str).str.lower()
+    for d in ["2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04", "2026-07-05"]:
+        assert src.get(d) == "uploaded", (d, src.to_dict())
+    assert "2026-07-06" in set(oms["d"])
+    assert (oms.loc[oms["d"] == "2026-07-06", "Source"].astype(str).str.lower() == "snapshot").any()
+
+
 def test_oms_overlay_preserves_amazon_census():
     existing = pd.DataFrame(
         {
