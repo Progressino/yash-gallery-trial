@@ -2053,6 +2053,11 @@ def dedupe_po_rows_by_sku(po_df: pd.DataFrame) -> pd.DataFrame:
         row = grp.loc[best_idx].copy()
         for col in pipeline_cols:
             row[col] = _num(col).loc[grp.index].max()
+        if "Eff_Days_Inventory" in work.columns:
+            inv_max = int(_num("Eff_Days_Inventory").loc[grp.index].max())
+            row["Eff_Days_Inventory"] = inv_max
+            if inv_max > 0 and "Eff_Days" in row.index:
+                row["Eff_Days"] = inv_max
         rows.append(row)
     out = pd.DataFrame(rows).reset_index(drop=True)
     return out.drop(columns=["_dedupe_rank"], errors="ignore")

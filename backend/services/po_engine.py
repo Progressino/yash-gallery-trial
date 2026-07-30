@@ -3498,6 +3498,8 @@ def calculate_po_base(
                 use_seasonality=use_seasonality,
             ).round(3)
 
+    po_df = dedupe_po_rows_by_sku(po_df)
+
     # Bundled listing rows can inherit sales-fanned Eff_Days after inventory override.
     _sync_inv = pd.to_numeric(po_df.get("Eff_Days_Inventory"), errors="coerce").fillna(0)
     _sync_mask = _sync_inv > 0
@@ -3506,4 +3508,4 @@ def calculate_po_base(
             _sync_inv.loc[_sync_mask].clip(upper=float(ADS_WINDOW)).astype(int)
         )
 
-    return dedupe_po_rows_by_sku(po_df)
+    return po_df
