@@ -22,6 +22,22 @@ def test_canonical_pl_sku_key():
     assert canonical_pl_sku_key("1023PLYKBLUE-L") == "1023YKBLUE-L"
 
 
+def test_parse_seller_hyphen_sku_column(tmp_path):
+    """Replace-SKU workbooks often use seller-sku / OMS SKU headers on Sheet1."""
+    import pandas as pd
+
+    p = tmp_path / "replace.xlsx"
+    pd.DataFrame(
+        {
+            "seller-sku": ["1006YKCBLUE-3XL", "5041YKBOTTLEGREEN-6XL"],
+            "OMS SKU": ["1006YKBLUE-3XL", "5041YKBOTTELGREEN-6XL"],
+        }
+    ).to_excel(p, index=False)
+    m = parse_sku_mapping(p.read_bytes())
+    assert m["1006YKCBLUE-3XL"] == "1006YKBLUE-3XL"
+    assert m["5041YKBOTTLEGREEN-6XL"] == "5041YKBOTTELGREEN-6XL"
+
+
 def test_myntra_style_column_embeds_numeric_suffix(tmp_path):
     """MYNTRA tab: alphanumeric STYLE ID cell should register trailing catalog id as key."""
     import pandas as pd

@@ -3992,6 +3992,49 @@ def test_ship150_span_fallback_when_no_inventory_history():
     )
 
 
+def test_oos_sales_only_sku_gets_inventory_history_eff_days():
+    """SKU with ADS-window sales but missing from inventory upload must still match matrix Eff_Days."""
+    sales_dates = pd.date_range("2026-07-01", periods=10, freq="D")
+    sales = pd.DataFrame(
+        [
+            {
+                "Sku": "OOS-HIST",
+                "TxnDate": d,
+                "Transaction Type": "Shipment",
+                "Quantity": 1,
+                "Units_Effective": 1,
+                "Source": "Amazon",
+            }
+            for d in sales_dates
+        ]
+    )
+    inv = pd.DataFrame({"OMS_SKU": ["OTHER-SKU"], "Total_Inventory": [5]})
+    inv_hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["OOS-HIST"] * 20,
+            "Date": pd.date_range("2026-07-01", periods=20, freq="D"),
+            "Qty": [4] * 20,
+            "Channel": "oms",
+            "Source": "snapshot",
+        }
+    )
+    po = calculate_po_base(
+        sales_df=sales,
+        inv_df=inv,
+        period_days=30,
+        lead_time=45,
+        target_days=90,
+        demand_basis="Sold",
+        safety_pct=0.0,
+        group_by_parent=False,
+        inventory_history_df=inv_hist,
+        inventory_history_channel="oms",
+    )
+    row = po.loc[po["OMS_SKU"] == "OOS-HIST"].iloc[0]
+    assert int(row["Eff_Days_Inventory"]) == 20
+    assert int(row["Eff_Days"]) == 20
+
+
 def test_blank_inventory_cells_are_missing_not_oos():
     """Warehouse skips snapshots on Sundays (blank cells). Blanks must not be
     stored as Qty=0 (that would mark OOS). After forward-fill (same as Inv History

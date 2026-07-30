@@ -146,6 +146,135 @@ def inventory_oms_key(raw) -> str:
     )
 
 
+def _apply_inventory_history_eff_days_override(
+    po_df: pd.DataFrame,
+    *,
+    inventory_history_df: Optional[pd.DataFrame],
+    sales_df: pd.DataFrame,
+    max_date: pd.Timestamp,
+    planning_date: Optional[pd.Timestamp],
+    ads_window: int,
+    group_by_parent: bool,
+    inventory_history_channel: str,
+) -> pd.DataFrame:
+    """Apply inventory-history in-stock day counts to Eff_Days / Eff_Days_Inventory."""
+    if inventory_history_df is None or inventory_history_df.empty or po_df is None or po_df.empty:
+        po_df = po_df.copy() if po_df is not None else po_df
+        if po_df is not None:
+            po_df["Eff_Days_Inventory"] = 0
+            po_df["Inv_Coverage_Days"] = 0
+        return po_df
+
+    import logging
+
+    from .daily_inventory_history import (
+        coverage_days_within,
+        effective_days_from_history,
+        extend_history_with_sales,
+        should_skip_inventory_history_extend,
+        trim_inventory_history_for_po,
+    )
+
+    _inv_log = logging.getLogger(__name__)
+    po_df = po_df.copy()
+    try:
+        inv_window_end = pd.Timestamp(max_date).normalize()
+        _ihmax = pd.to_datetime(inventory_history_df["Date"], errors="coerce").max()
+        if pd.notna(_ihmax):
+            sheet_end = pd.Timestamp(_ihmax).normalize()
+            if planning_date is not None:
+                sheet_end = min(sheet_end, planning_date)
+            inv_window_end = max(inv_window_end, sheet_end)
+        inv_window_start = inv_window_end - timedelta(days=int(ads_window) - 1)
+
+        po_skus = set(po_df["OMS_SKU"].astype(str))
+        ih_src = inventory_history_df
+        if "OMS_SKU" in ih_src.columns:
+            ih_src = ih_src.copy()
+            ih_src["OMS_SKU"] = ih_src["OMS_SKU"].astype(str).map(inventory_oms_key)
+        ih = trim_inventory_history_for_po(
+            ih_src,
+            inv_window_start,
+            inv_window_end,
+            po_skus=po_skus,
+            channel=str(inventory_history_channel or "oms"),
+        )
+        if ih.empty:
+            po_df["Eff_Days_Inventory"] = 0
+            po_df["Inv_Coverage_Days"] = 0
+            return po_df
+
+        ih["OMS_SKU"] = ih["OMS_SKU"].astype(str).map(inventory_oms_key)
+        ih = ih[ih["OMS_SKU"].str.len() > 0]
+        if group_by_parent and not ih.empty:
+            ih["OMS_SKU"] = ih["OMS_SKU"].map(get_parent_sku)
+            ih = ih.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"].max()
+
+        _orig_rows = int(len(inventory_history_df))
+        _trim_rows = int(len(ih))
+        if _orig_rows > _trim_rows * 2:
+            _inv_log.info(
+                "PO inventory history trimmed %s → %s rows (ADS window %s..%s)",
+                f"{_orig_rows:,}",
+                f"{_trim_rows:,}",
+                inv_window_start.date(),
+                inv_window_end.date(),
+            )
+
+        sheet_max = pd.to_datetime(ih["Date"], errors="coerce").max()
+        coverage_in_window = coverage_days_within(ih, inv_window_start, inv_window_end)
+        skip_extend = should_skip_inventory_history_extend(
+            sheet_max,
+            inv_window_end,
+            coverage_in_window,
+            ads_window=int(ads_window),
+        )
+        if skip_extend:
+            ih_work = ih
+        else:
+            ih_work = extend_history_with_sales(
+                ih,
+                sales_df=sales_df,
+                cap_date=inv_window_end,
+            )
+            if ih_work is not None and not ih_work.empty:
+                ih_work = ih_work[["OMS_SKU", "Date", "Qty"]].copy()
+            else:
+                ih_work = ih
+
+        eff_inv = effective_days_from_history(
+            ih_work,
+            inv_window_start,
+            inv_window_end,
+            channel=str(inventory_history_channel or "oms"),
+        )
+        coverage_days = coverage_days_within(ih_work, inv_window_start, inv_window_end)
+        if eff_inv.empty or coverage_days <= 0:
+            po_df["Eff_Days_Inventory"] = 0
+            po_df["Inv_Coverage_Days"] = int(coverage_days)
+            return po_df
+
+        po_df = po_df.drop(columns=["Eff_Days_Inventory"], errors="ignore")
+        po_df = po_df.merge(eff_inv, on="OMS_SKU", how="left")
+        inv_days = pd.to_numeric(po_df["Eff_Days_Inventory"], errors="coerce")
+        _has_inv_hist = inv_days.notna()
+        po_df.loc[_has_inv_hist, "Eff_Days"] = (
+            inv_days[_has_inv_hist]
+            .clip(lower=0, upper=float(ads_window))
+            .astype(int)
+        )
+        po_df["_has_inv_hist"] = _has_inv_hist
+        po_df["Eff_Days_Inventory"] = inv_days.fillna(0).astype(int)
+        po_df["Inv_Coverage_Days"] = int(coverage_days)
+    except Exception as _ih_exc:
+        logging.getLogger(__name__).warning(
+            "Inventory-history override skipped: %s", _ih_exc, exc_info=True
+        )
+        po_df["Eff_Days_Inventory"] = 0
+        po_df["Inv_Coverage_Days"] = 0
+    return po_df
+
+
 def get_indian_fy_quarter(date: pd.Timestamp) -> tuple:
     m = date.month
     y = date.year
@@ -1596,6 +1725,22 @@ def calculate_po_base(
                         _pad[_c] = 0
                 inv_work = pd.concat([inv_work, _pad[inv_work.columns]], ignore_index=True)
 
+    # Sales SKUs absent from the inventory upload must enter inv_work before catalog
+    # filtering — otherwise ADS-window demand is dropped and Eff_Days stays sales-only.
+    if not df.empty and "Sku" in df.columns:
+        _have_inv_sales = set(inv_work["OMS_SKU"].astype(str).str.strip())
+        _sales_only_pre = [
+            str(s).strip()
+            for s in df["Sku"].astype(str).unique()
+            if str(s).strip() and str(s).strip() not in _have_inv_sales
+        ]
+        if _sales_only_pre:
+            _pad = pd.DataFrame({"OMS_SKU": _sales_only_pre})
+            for _c in inv_work.columns:
+                if _c != "OMS_SKU":
+                    _pad[_c] = 0
+            inv_work = pd.concat([inv_work, _pad[inv_work.columns]], ignore_index=True)
+
     _catalog_allow = _catalog_sku_allowlist(
         set(inv_work["OMS_SKU"].astype(str)),
         _ep_prepared if not _ep_prepared.empty else None,
@@ -1890,128 +2035,16 @@ def calculate_po_base(
     po_df.drop(columns=["_eff_days_active"], inplace=True, errors="ignore")
 
     # ── Daily-inventory-history override ─────────────────────────────────────
-    # Optional Excel: rows = SKU, columns = dates, cell = on-hand units. Counts
-    # only the days a SKU actually had stock (>=1 unit) inside the ADS window.
-    # That replaces the active-span Eff_Days when available — days the item was
-    # OOS shouldn't pad the ADS denominator and lowball ADS.
-    if inventory_history_df is not None and not inventory_history_df.empty:
-        try:
-            import logging
-
-            from .daily_inventory_history import (
-                coverage_days_within,
-                effective_days_from_history,
-                extend_history_with_sales,
-                should_skip_inventory_history_extend,
-                trim_inventory_history_for_po,
-            )
-
-            _inv_log = logging.getLogger(__name__)
-
-            # Anchor at the most recent date we actually have data for.
-            inv_window_end = pd.Timestamp(max_date).normalize()
-            _ihmax = pd.to_datetime(inventory_history_df["Date"], errors="coerce").max()
-            if pd.notna(_ihmax):
-                sheet_end = pd.Timestamp(_ihmax).normalize()
-                if _plan is not None:
-                    sheet_end = min(sheet_end, _plan)
-                inv_window_end = max(inv_window_end, sheet_end)
-            inv_window_start = inv_window_end - timedelta(days=int(ADS_WINDOW) - 1)
-
-            po_skus = set(po_df["OMS_SKU"].astype(str))
-            # Avoid copying the full dense history before trim — trim returns a new frame.
-            # Use inventory_oms_key (no seller→OMS remap). Mapping often has 1:1 cycles
-            # (BOTTLE↔BOTTEL); remapping history while po_df keeps warehouse keys drops
-            # Eff_Days_Inventory joins for those SKUs.
-            ih_src = inventory_history_df
-            if "OMS_SKU" in ih_src.columns:
-                ih_src = ih_src.copy()
-                ih_src["OMS_SKU"] = ih_src["OMS_SKU"].astype(str).map(inventory_oms_key)
-            ih = trim_inventory_history_for_po(
-                ih_src,
-                inv_window_start,
-                inv_window_end,
-                po_skus=po_skus,
-                channel=str(inventory_history_channel or "oms"),
-            )
-            if ih.empty:
-                po_df["Eff_Days_Inventory"] = 0
-                po_df["Inv_Coverage_Days"] = 0
-            else:
-                ih["OMS_SKU"] = ih["OMS_SKU"].astype(str).map(inventory_oms_key)
-                ih = ih[ih["OMS_SKU"].str.len() > 0]
-                if group_by_parent and not ih.empty:
-                    ih["OMS_SKU"] = ih["OMS_SKU"].map(get_parent_sku)
-                    ih = ih.groupby(["OMS_SKU", "Date"], as_index=False)["Qty"].max()
-
-                _orig_rows = int(len(inventory_history_df))
-                _trim_rows = int(len(ih))
-                if _orig_rows > _trim_rows * 2:
-                    _inv_log.info(
-                        "PO inventory history trimmed %s → %s rows (ADS window %s..%s)",
-                        f"{_orig_rows:,}",
-                        f"{_trim_rows:,}",
-                        inv_window_start.date(),
-                        inv_window_end.date(),
-                    )
-
-                sheet_max = pd.to_datetime(ih["Date"], errors="coerce").max()
-                coverage_in_window = coverage_days_within(ih, inv_window_start, inv_window_end)
-                skip_extend = should_skip_inventory_history_extend(
-                    sheet_max,
-                    inv_window_end,
-                    coverage_in_window,
-                    ads_window=int(ADS_WINDOW),
-                )
-
-                if skip_extend:
-                    ih_work = ih
-                else:
-                    ih_work = extend_history_with_sales(
-                        ih,
-                        sales_df=df,
-                        cap_date=inv_window_end,
-                    )
-                    if ih_work is not None and not ih_work.empty:
-                        ih_work = ih_work[["OMS_SKU", "Date", "Qty"]].copy()
-                    else:
-                        ih_work = ih
-
-                eff_inv = effective_days_from_history(
-                    ih_work,
-                    inv_window_start,
-                    inv_window_end,
-                    channel=str(inventory_history_channel or "oms"),
-                )
-                coverage_days = coverage_days_within(ih_work, inv_window_start, inv_window_end)
-                if not eff_inv.empty and coverage_days > 0:
-                    po_df = po_df.merge(eff_inv, on="OMS_SKU", how="left")
-                    inv_days = pd.to_numeric(po_df["Eff_Days_Inventory"], errors="coerce")
-                    # Match inventory-history matrix Days: Eff_Days_Inventory already
-                    # forward-fills per-SKU gaps (see effective_days_from_history).
-                    _has_inv_hist = inv_days.notna()
-                    po_df.loc[_has_inv_hist, "Eff_Days"] = (
-                        inv_days[_has_inv_hist]
-                        .clip(lower=0, upper=float(ADS_WINDOW))
-                        .astype(int)
-                    )
-                    po_df["_has_inv_hist"] = _has_inv_hist
-                    po_df["Eff_Days_Inventory"] = inv_days.fillna(0).astype(int)
-                    po_df["Inv_Coverage_Days"] = int(coverage_days)
-                else:
-                    po_df["Eff_Days_Inventory"] = 0
-                    po_df["Inv_Coverage_Days"] = int(coverage_days)
-        except Exception as _ih_exc:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "Inventory-history override skipped: %s", _ih_exc, exc_info=True
-            )
-            po_df["Eff_Days_Inventory"] = 0
-            po_df["Inv_Coverage_Days"] = 0
-    else:
-        po_df["Eff_Days_Inventory"] = 0
-        po_df["Inv_Coverage_Days"] = 0
+    po_df = _apply_inventory_history_eff_days_override(
+        po_df,
+        inventory_history_df=inventory_history_df,
+        sales_df=df,
+        max_date=max_date,
+        planning_date=_plan,
+        ads_window=int(ADS_WINDOW),
+        group_by_parent=group_by_parent,
+        inventory_history_channel=str(inventory_history_channel or "oms"),
+    )
 
     if bool(_low_vol.any()) and "_cal_span_days" in po_df.columns:
         _has_inv_hist = po_df.get("_has_inv_hist", pd.Series(False, index=po_df.index)).fillna(False)
@@ -3398,5 +3431,71 @@ def calculate_po_base(
         stage_timer.mark("po logic")
 
     po_df = _apply_sibling_cut_from_pending(po_df, target_cover_days)
+
+    # Pipeline / sheet ghost rows added after the first Eff_Days pass still need
+    # inventory-matrix active days (OOS SKUs with on-hand history).
+    _pre_final_inv = pd.to_numeric(po_df.get("Eff_Days_Inventory"), errors="coerce").fillna(0)
+    po_df = _apply_inventory_history_eff_days_override(
+        po_df,
+        inventory_history_df=inventory_history_df,
+        sales_df=df,
+        max_date=max_date,
+        planning_date=_plan,
+        ads_window=int(ADS_WINDOW),
+        group_by_parent=group_by_parent,
+        inventory_history_channel=str(inventory_history_channel or "oms"),
+    )
+    _post_final_inv = pd.to_numeric(po_df.get("Eff_Days_Inventory"), errors="coerce").fillna(0)
+    _eff_refreshed = _post_final_inv > _pre_final_inv.reindex(po_df.index, fill_value=0)
+    if bool(_eff_refreshed.any()):
+        if "ADS_Net_Units" in po_df.columns and "ADS_Sold_Units" in po_df.columns:
+            _ads_demand = (
+                po_df["ADS_Net_Units"].clip(lower=0)
+                if demand_basis == "Net"
+                else po_df["ADS_Sold_Units"]
+            )
+            _eff = pd.to_numeric(po_df["Eff_Days"], errors="coerce").fillna(0).clip(lower=0)
+            po_df.loc[_eff_refreshed, "Recent_ADS"] = np.where(
+                _eff.loc[_eff_refreshed] > 0,
+                (_ads_demand.loc[_eff_refreshed] / _eff.loc[_eff_refreshed]).round(3),
+                0.0,
+            )
+            _recent = pd.to_numeric(po_df["Recent_ADS"], errors="coerce").fillna(0.0)
+            _ly = pd.to_numeric(po_df.get("LY_ADS"), errors="coerce").fillna(0.0)
+            _seasonal = pd.to_numeric(po_df.get("Seasonal_Month_ADS"), errors="coerce").fillna(0.0)
+            _flat = pd.to_numeric(po_df.get("Flat30_ADS"), errors="coerce").fillna(0.0)
+            if use_seasonality:
+                _prim = np.where(
+                    _ly > 0,
+                    (_recent * (1 - seasonal_weight)) + (_ly * seasonal_weight),
+                    _recent,
+                )
+            else:
+                _prim = _primary_ads_from_signals(
+                    _recent,
+                    _ly,
+                    use_seasonality=False,
+                    use_ly_fallback=use_ly_fallback,
+                    seasonal_weight=seasonal_weight,
+                )
+            _prim_series = pd.Series(_prim, index=po_df.index)
+            _sold_for_cap = (
+                pd.to_numeric(po_df["Net_Units"], errors="coerce").fillna(0)
+                if demand_basis == "Net"
+                else pd.to_numeric(po_df["Sold_Units"], errors="coerce").fillna(0)
+            )
+            _prim_capped = _prim_series.copy()
+            _prim_capped.loc[_eff_refreshed] = _apply_period_burst_cap(
+                _prim_series.loc[_eff_refreshed],
+                _sold_for_cap.loc[_eff_refreshed],
+                _flat.loc[_eff_refreshed],
+                period_days=ADS_WINDOW,
+            )
+            po_df.loc[_eff_refreshed, "ADS"] = _final_ads_from_signals(
+                _prim_capped.loc[_eff_refreshed],
+                _seasonal.loc[_eff_refreshed],
+                _flat.loc[_eff_refreshed],
+                use_seasonality=use_seasonality,
+            ).round(3)
 
     return dedupe_po_rows_by_sku(po_df)
