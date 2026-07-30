@@ -1485,8 +1485,11 @@ def refresh_inventory_history_rollforward(
             auth_end = pd.Timestamp(wide_end).normalize()
         if auth_end is not None and fill_cap > auth_end:
             src_l = merged["Source"].astype(str).str.strip().str.lower()
+            # Keep every census day (snapshot OR uploaded matrix) before this snap.
+            # Previously only Source=snapshot survived the clip — wide-matrix
+            # ``uploaded`` days were discarded and re-derived as CARRIED.
             keep = (merged["Date"] <= auth_end) | (
-                (src_l == "snapshot") & (merged["Date"] < snap_ts)
+                src_l.isin(["snapshot", "uploaded"]) & (merged["Date"] < snap_ts)
             )
             clip = merged.loc[keep].copy()
             # Drop stale derived after the baseline so extend_history_with_sales
@@ -1494,12 +1497,12 @@ def refresh_inventory_history_rollforward(
             clip_src = clip["Source"].astype(str).str.strip().str.lower()
             clip = clip.loc[~((clip["Date"] > auth_end) & (clip_src == "derived"))].copy()
             filled = extend_history_with_sales(clip, sales_df=sales, cap_date=fill_cap)
-            other_snaps = merged[
+            other_auth = merged[
                 (merged["Date"] > auth_end)
                 & (merged["Date"] < snap_ts)
-                & (src_l == "snapshot")
+                & (src_l.isin(["snapshot", "uploaded"]))
             ]
-            merged = merge_inventory_history(filled, other_snaps)
+            merged = merge_inventory_history(filled, other_auth)
             rolled = True
         variant = getattr(sess, "inventory_df_variant", None)
         if variant is not None and not getattr(variant, "empty", True) and "OMS_SKU" in variant.columns:
@@ -3681,6 +3684,18 @@ def iter_inventory_history_parquet_candidates() -> list:
         if p.is_file() and key not in seen:
             seen.add(key)
             out.append(p)
+        # Prefer known-good bak files when live parquet was wiped to derived-only.
+        if root.is_dir():
+            for bak in sorted(root.glob("daily_inventory_history_df.parquet.bak-*"), reverse=True):
+                name = bak.name.lower()
+                if not any(tok in name for tok in ("good", "yr-scrub", "jul1-20", "channel-split", "workbook")):
+                    continue
+                if "broken" in name or "before" in name:
+                    continue
+                bkey = str(bak.resolve())
+                if bak.is_file() and bkey not in seen:
+                    seen.add(bkey)
+                    out.append(bak)
     return out
 
 
@@ -3712,6 +3727,10 @@ def restore_inventory_history_from_best_disk_backups(
     Never extend past ``current``'s max date — intentional tail cleanups (delete
     phantom post-upload days) must not be undone by an older bak-* file that still
     contains those days.
+
+    Prefer a merge that restores more *authoritative* (snapshot/uploaded) days even
+    when calendar day count is unchanged — e.g. after a Jul 30 RAR append that left
+    mid-month days as sales-derived ``CARRIED``.
     """
     paths = iter_inventory_history_parquet_candidates()
     if not paths:
@@ -3742,6 +3761,18 @@ def restore_inventory_history_from_best_disk_backups(
         and merged_days >= cur_days
         and len(merged) > len(current)
     ):
+        return merged
+
+    def _auth_days(df: pd.DataFrame | None) -> int:
+        if df is None or getattr(df, "empty", True) or "Date" not in df.columns:
+            return 0
+        if "Source" not in df.columns:
+            return 0
+        src = df["Source"].astype(str).str.strip().str.lower()
+        dates = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+        return int(dates[src.isin(["snapshot", "uploaded"])].nunique())
+
+    if _auth_days(merged) > _auth_days(current):
         return merged
     return None
 
