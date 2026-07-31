@@ -1,0 +1,112 @@
+name: Fix public access
+
+# After reboot / Contabo firewall drift: ensure host + docker publish 80/443/22,
+# reopen ufw, restart frontend, and verify from the VPS public IP + HTTPS.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fix:
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: /root/app
+    steps:
+      - name: Dump network / firewall state
+        run: |
+          set +e
+          echo '── uptime / hostname ──'
+          uptime; hostname -I || true
+          echo '── listening 22/80/443 ──'
+          ss -ltnp | grep -E ':22|:80|:443' || true
+          echo '── ufw ──'
+          command -v ufw >/dev/null && ufw status verbose || echo 'no ufw'
+          echo '── iptables filter INPUT (top) ──'
+          iptables -L INPUT -n -v --line-numbers 2>/dev/null | head -40 || true
+          echo '── iptables filter FORWARD (top) ──'
+          iptables -L FORWARD -n -v --line-numbers 2>/dev/null | head -40 || true
+          echo '── nftables ──'
+          nft list ruleset 2>/dev/null | head -80 || echo 'no nft'
+
+      - name: Open host firewall for SSH/HTTP/HTTPS
+        run: |
+          set -eu
+          if command -v ufw >/dev/null 2>&1; then
+            ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null 2>&1 || true
+            ufw allow 80/tcp comment 'HTTP public web' >/dev/null 2>&1 || true
+            ufw allow 443/tcp comment 'HTTPS public web' >/dev/null 2>&1 || true
+            # Ensure default allow for established; do not force-enable if inactive historically
+            if ufw status 2>/dev/null | grep -q 'Status: inactive'; then
+              echo 'ufw inactive — leaving inactive (docker publishes directly)'
+            else
+              ufw --force enable || true
+              ufw reload || true
+            fi
+            ufw status verbose || true
+          fi
+          # Belt-and-suspenders ACCEPT for web/ssh if INPUT policy is DROP
+          iptables -C INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 22 -j ACCEPT || true
+          iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 80 -j ACCEPT || true
+          iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT || true
+          iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null \
+            || iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || true
+
+      - name: Ensure compose stack + frontend published
+        run: |
+          set -eu
+          if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
+          $DC -f docker-compose.prod.yml up -d --remove-orphans
+          $DC -f docker-compose.prod.yml up -d --force-recreate frontend
+          sleep 4
+          $DC -f docker-compose.prod.yml ps
+          ss -ltnp | grep -E ':80|:443' || true
+
+      - name: Probe local + public IP paths
+        run: |
+          set +e
+          PUB=$(curl -4 -s --connect-timeout 5 --max-time 8 ifconfig.me || curl -4 -s --connect-timeout 5 --max-time 8 icanhazip.com || true)
+          echo "public_ip=$PUB"
+          echo '── local health ──'
+          curl -sf --max-time 8 http://127.0.0.1:8000/api/health; echo
+          curl -sf --max-time 8 http://127.0.0.1/api/health; echo
+          echo '── host SPA ──'
+          curl -sI --max-time 8 -H 'Host: app.progressino.com' http://127.0.0.1/ | head -15
+          echo '── hairpin to public IP :80/:443 ──'
+          if [ -n "$PUB" ]; then
+            curl -sv --connect-timeout 8 --max-time 12 -H 'Host: app.progressino.com' "http://${PUB}/" -o /dev/null 2>&1 | tail -20
+            curl -skv --connect-timeout 8 --max-time 12 -H 'Host: app.progressino.com' "https://${PUB}/" -o /dev/null 2>&1 | tail -25
+            curl -sk --connect-timeout 8 --max-time 12 "https://app.progressino.com/api/health"; echo
+          fi
+          echo '── ss listen again ──'
+          ss -ltnp | grep -E ':22|:80|:443' || true
+          echo 'PUBLIC_ACCESS_FIX_DONE'
+
+  external_probe:
+    needs: fix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe app.progressino.com from GitHub-hosted
+        run: |
+          set +e
+          echo '── DNS ──'
+          getent hosts app.progressino.com || true
+          IP=$(getent ahostsv4 app.progressino.com | awk '{print $1; exit}')
+          echo "ip=$IP"
+          for port in 80 443 22; do
+            timeout 8 bash -c "echo >/dev/tcp/${IP}/${port}" 2>/dev/null \
+              && echo "tcp ${IP}:${port} open" \
+              || echo "tcp ${IP}:${port} CLOSED_OR_FILTERED"
+          done
+          echo '── HTTPS health ──'
+          curl -sv --connect-timeout 12 --max-time 20 https://app.progressino.com/api/health 2>&1 | tail -40
+          CODE=$(curl -s -o /tmp/h.json -w '%{http_code}' --connect-timeout 12 --max-time 20 https://app.progressino.com/api/health || echo 000)
+          echo "https_health_code=$CODE"
+          head -c 400 /tmp/h.json; echo
+          echo '── HTTPS root ──'
+          curl -sI --connect-timeout 12 --max-time 20 https://app.progressino.com/ | head -20
+          if [ "$CODE" != "200" ]; then
+            echo "EXTERNAL_PROBE_FAIL code=$CODE"
+            exit 1
+          fi
+          echo EXTERNAL_PROBE_OK
