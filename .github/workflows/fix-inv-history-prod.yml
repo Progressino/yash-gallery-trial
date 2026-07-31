@@ -1,0 +1,181 @@
+name: Fix Inv History + SKU Status (prod)
+
+# One-shot ops fix on the VPS self-hosted runner (localhost → backend).
+# Applies authoritative OMS July matrix and SKU Status & Lead Time sheet.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fix:
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: /root/app
+    steps:
+      - name: Checkout fixtures + scripts
+        uses: actions/checkout@v4
+        with:
+          path: fix-src
+          sparse-checkout: |
+            ops/prod-fix
+            backend/scripts/apply_oms_matrix_authoritative_prod.py
+          sparse-checkout-cone-mode: false
+
+      - name: Health before
+        run: |
+          set -eu
+          curl -sf --connect-timeout 5 http://127.0.0.1:8000/api/health | tee /tmp/health_before.json
+          echo
+          python3 -c "import json;d=json.load(open('/tmp/health_before.json'));print('git',d.get('git_sha'),'warm',d.get('warm_cache'),'sessions',d.get('sessions'))"
+
+      - name: Copy fix assets into backend container
+        run: |
+          set -eu
+          docker cp fix-src/ops/prod-fix/inventory-matrix-oms-2026-07-source-authoritative.csv \
+            progressino-backend-1:/tmp/inventory-matrix-oms-2026-07-source-authoritative.csv
+          docker cp "fix-src/ops/prod-fix/Sku Status & Lead Time 3.xlsx" \
+            progressino-backend-1:/tmp/sku-status-lead-3.xlsx
+          docker cp fix-src/backend/scripts/apply_oms_matrix_authoritative_prod.py \
+            progressino-backend-1:/srv/backend/scripts/apply_oms_matrix_authoritative_prod.py
+          ls -lah /tmp >/dev/null
+          docker exec progressino-backend-1 ls -lah \
+            /tmp/inventory-matrix-oms-2026-07-source-authoritative.csv \
+            /tmp/sku-status-lead-3.xlsx \
+            /srv/backend/scripts/apply_oms_matrix_authoritative_prod.py
+
+      - name: Apply authoritative OMS July matrix
+        run: |
+          set -eu
+          docker exec -e PYTHONPATH=/srv -w /srv progressino-backend-1 \
+            python backend/scripts/apply_oms_matrix_authoritative_prod.py \
+            /tmp/inventory-matrix-oms-2026-07-source-authoritative.csv
+
+      - name: Upload SKU Status & Lead Time via API
+        run: |
+          set -eu
+          cd /root/app
+          set -a
+          # shellcheck disable=SC1091
+          . ./.env
+          set +a
+          python3 <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          import requests
+
+          base = "http://127.0.0.1:8000"
+          user = os.environ["AUTH_USERNAME"]
+          pw = os.environ["AUTH_PASSWORD"]
+          s = requests.Session()
+          r = s.post(
+              f"{base}/api/auth/login",
+              json={"username": user, "password": pw},
+              headers={"X-Device-Id": "gha-inv-fix"},
+              timeout=60,
+          )
+          print("login", r.status_code, {k: r.json().get(k) for k in ("ok", "detail", "requires_otp")})
+          r.raise_for_status()
+          body = r.json()
+          if not body.get("ok"):
+              sys.exit(f"login failed: {body}")
+
+          # Ensure warm cache attached
+          h = s.post(f"{base}/api/cache/hydrate-warm", timeout=120)
+          print("hydrate", h.status_code, h.json().get("message") or h.json())
+
+          path = Path("/tmp/sku-status-from-host.xlsx")
+          # Prefer file already in container via API multipart from host path we docker-cp'd out
+          # Read from checkout copy on host runner workspace
+          src = Path("fix-src/ops/prod-fix") / "Sku Status & Lead Time 3.xlsx"
+          files = {
+              "file": (
+                  "Sku Status & Lead Time 3.xlsx",
+                  src.read_bytes(),
+                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              )
+          }
+          up = s.post(f"{base}/api/po/sku-status-lead", files=files, timeout=180)
+          print("status_upload", up.status_code, up.text[:500])
+          up.raise_for_status()
+          data = up.json()
+          if not data.get("ok"):
+              sys.exit(f"status upload failed: {data}")
+          print("status rows", data.get("rows"), data.get("message"))
+
+          g = s.get(f"{base}/api/po/sku-status-lead", timeout=60)
+          print("status_get", g.status_code, {k: g.json().get(k) for k in ("ok", "loaded", "rows") if k != "rows"})
+          gj = g.json()
+          nrows = len(gj.get("rows") or [])
+          print("status_get_rows", nrows)
+          if nrows < 100:
+              sys.exit(f"status sheet too small after upload: {nrows}")
+          PY
+
+      - name: Verify Inv History Jul totals + sample Eff days
+        run: |
+          set -eu
+          docker exec -e PYTHONPATH=/srv -w /srv progressino-backend-1 python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+
+          h = pd.read_parquet("/data/warm_cache/daily_inventory_history_df.parquet")
+          h["Date"] = pd.to_datetime(h["Date"]).dt.normalize()
+          ch = h["Channel"].astype(str).str.lower() if "Channel" in h.columns else pd.Series(["oms"] * len(h))
+          oms = h[ch.isin(["oms", "", "nan", "none"])].copy()
+          print("range", oms["Date"].min().date(), oms["Date"].max().date(), "rows", len(oms))
+          for d in ["2026-07-16", "2026-07-30", "2026-07-31"]:
+              sub = oms[oms["Date"] == d]
+              qty = pd.to_numeric(sub["Qty"], errors="coerce").fillna(0)
+              print(
+                  d,
+                  "skus", int(sub["OMS_SKU"].nunique()),
+                  "qty", float(qty.sum()),
+                  "instock", int((qty > 0).sum()),
+                  "max", float(qty.max()) if len(qty) else 0,
+              )
+          # YR021 corruption check
+          yr = oms[(oms["OMS_SKU"].astype(str).str.upper().str.startswith("YR02")) & (oms["Date"] == "2026-07-16")]
+          if not yr.empty:
+              print("YR Jul16 still present", yr[["OMS_SKU", "Qty"]].head(10).to_string(index=False))
+          else:
+              print("YR021-027 Jul16 gone or not in OMS channel")
+
+          # Compare to authoritative file for Jul30
+          src = pd.read_csv("/tmp/inventory-matrix-oms-2026-07-source-authoritative.csv")
+          src["OMS_SKU"] = src["OMS_SKU"].astype(str).str.strip().str.upper()
+          src30 = pd.to_numeric(src["2026-07-30"], errors="coerce").fillna(0)
+          print("source Jul30 total", float(src30.sum()))
+          d30 = oms[oms["Date"] == "2026-07-30"]
+          got = d30.groupby(d30["OMS_SKU"].astype(str).str.upper())["Qty"].sum()
+          exp = src.set_index("OMS_SKU")["2026-07-30"]
+          exp = pd.to_numeric(exp, errors="coerce").fillna(0)
+          common = sorted(set(got.index) | set(exp.index))
+          mism = 0
+          phant = 0
+          for sku in common:
+              a = float(exp.get(sku, 0) or 0)
+              b = float(got.get(sku, 0) or 0)
+              if abs(a - b) > 0.5:
+                  mism += 1
+                  if b > 0 and a == 0:
+                      phant += 1
+          print("Jul30 SKU mismatches vs source", mism, "phantoms", phant)
+          if mism > 50:
+              raise SystemExit(f"too many Jul30 mismatches: {mism}")
+          print("VERIFY_OK")
+          PY
+
+      - name: Status file on disk
+        run: |
+          set -eu
+          docker exec progressino-backend-1 python - <<'PY'
+          import pandas as pd
+          from pathlib import Path
+          p = Path("/data/warm_cache/sku_status_lead_df.parquet")
+          print("exists", p.exists(), "size", p.stat().st_size if p.exists() else None)
+          if p.exists():
+              df = pd.read_parquet(p)
+              print("rows", len(df), "cols", list(df.columns))
+              print(df["SKU_Sheet_Status"].astype(str).value_counts().head(10).to_string())
+          PY
