@@ -46,11 +46,39 @@ jobs:
             if curl -sf --connect-timeout 5 http://127.0.0.1:8000/api/health; then
               echo ""
               echo "OK: backend healthy on attempt $i"
-              exit 0
+              break
             fi
             echo "… waiting for /api/health (127.0.0.1:8000) attempt $i/12"
             sleep 5
+            if [ "$i" = "12" ]; then
+              echo "ERROR: backend still not healthy after restart" >&2
+              ${{ steps.dc.outputs.cmd }} -f docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
+              exit 1
+            fi
           done
-          echo "ERROR: backend still not healthy after restart" >&2
-          ${{ steps.dc.outputs.cmd }} -f docker-compose.prod.yml logs --tail=120 backend 2>&1 || true
-          exit 1
+
+      - name: Hydrate warm cache after restart
+        run: |
+          set -eu
+          set -a
+          # shellcheck disable=SC1091
+          . ./.env
+          set +a
+          python3 <<'PY'
+          import os, requests
+          base = "http://127.0.0.1:8000"
+          s = requests.Session()
+          r = s.post(
+              f"{base}/api/auth/login",
+              json={"username": os.environ["AUTH_USERNAME"], "password": os.environ["AUTH_PASSWORD"]},
+              headers={"X-Device-Id": "gha-restart"},
+              timeout=60,
+          )
+          r.raise_for_status()
+          h = s.post(f"{base}/api/cache/hydrate-warm", timeout=300)
+          print("hydrate", h.status_code, (h.text or "")[:200])
+          h.raise_for_status()
+          health = s.get(f"{base}/api/health", timeout=30).json()
+          print("warm_cache", health.get("warm_cache"), "git", health.get("git_sha"))
+          assert health.get("warm_cache"), "warm cache not attached"
+          PY

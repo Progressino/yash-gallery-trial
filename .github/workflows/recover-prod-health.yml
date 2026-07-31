@@ -66,9 +66,13 @@ jobs:
           . ./.env
           set +a
           DC="${{ steps.dc.outputs.cmd }}"
-          # If SPA root is 404/failed, recreate frontend
-          if ! curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://127.0.0.1/ | grep -Eq '200|301|302'; then
-            echo "frontend root not OK — recreating frontend container"
+          # Localhost :80 serves /api only by design; SPA is on Host app.progressino.com (HTTPS).
+          # Probe public SPA via Host header (and HTTPS if certs present).
+          ROOT_CODE=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \
+            -H 'Host: app.progressino.com' http://127.0.0.1/ || true)
+          echo "spa_http_host_probe=$ROOT_CODE"
+          if ! echo "$ROOT_CODE" | grep -Eq '200|301|302|308'; then
+            echo "frontend SPA not OK — recreating frontend container"
             $DC -f docker-compose.prod.yml up -d --force-recreate frontend
             sleep 3
             $DC -f docker-compose.prod.yml logs --tail=50 frontend || true
@@ -117,10 +121,26 @@ jobs:
               print("probe", url, rr.status_code, len(rr.content))
               rr.raise_for_status()
 
-          root = requests.get("http://127.0.0.1/", timeout=15, allow_redirects=True)
-          print("probe_root", root.status_code, len(root.content), (root.text or "")[:120].replace("\n", " "))
-          if root.status_code >= 400:
-              sys.exit(f"frontend root HTTP {root.status_code}")
+          # SPA: Host-based HTTP redirect or HTTPS
+          spa = requests.get(
+              "http://127.0.0.1/",
+              headers={"Host": "app.progressino.com"},
+              timeout=15,
+              allow_redirects=False,
+          )
+          print("probe_spa_http", spa.status_code, spa.headers.get("Location", ""))
+          if spa.status_code not in (200, 301, 302, 308):
+              try:
+                  spa2 = requests.get(
+                      "https://app.progressino.com/",
+                      timeout=20,
+                      verify=True,
+                  )
+                  print("probe_spa_https", spa2.status_code, len(spa2.content))
+                  if spa2.status_code >= 400:
+                      sys.exit(f"SPA HTTPS HTTP {spa2.status_code}")
+              except Exception as e:
+                  sys.exit(f"SPA probe failed: http={spa.status_code} https_err={e}")
 
           b = s.get(f"{base}/api/gate/barcode", params={"type": "PO", "number": "PO-RECOVER"}, timeout=30)
           print("barcode", b.status_code)
