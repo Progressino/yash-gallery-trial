@@ -358,7 +358,7 @@ const buildGRNPrintHTML = (grn: GRN, barcodeHtml = '') => {
   return `
     <div class="header">
       <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b;margin-top:4px">Stores Department</div></div>
-      <div><div class="doc-title">GOODS RECEIPT NOTE</div><div class="doc-num">${grn.grn_number}</div></div>
+      <div><div class="doc-title">GOODS RECEIPT NOTE</div><div class="doc-num">${grn.grn_number}</div>${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}</div>
     </div>
     <div class="info-grid">
       <div class="info-box">
