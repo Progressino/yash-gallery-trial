@@ -30,7 +30,11 @@ jobs:
           set -eu
           DC="${{ steps.dc.outputs.cmd }}"
           $DC -f docker-compose.prod.yml up -d --remove-orphans
+          # Explicitly ensure the public nginx/frontend is running (port 80/443)
+          $DC -f docker-compose.prod.yml up -d frontend
           $DC -f docker-compose.prod.yml ps
+          echo '── frontend logs ──'
+          $DC -f docker-compose.prod.yml logs --tail=40 frontend || true
 
       - name: Restart backend if health fails
         run: |
@@ -61,6 +65,14 @@ jobs:
           # shellcheck disable=SC1091
           . ./.env
           set +a
+          DC="${{ steps.dc.outputs.cmd }}"
+          # If SPA root is 404/failed, recreate frontend
+          if ! curl -sf --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://127.0.0.1/ | grep -Eq '200|301|302'; then
+            echo "frontend root not OK — recreating frontend container"
+            $DC -f docker-compose.prod.yml up -d --force-recreate frontend
+            sleep 3
+            $DC -f docker-compose.prod.yml logs --tail=50 frontend || true
+          fi
           python3 <<'PY'
           import json, os, sys, time
           import requests
@@ -91,7 +103,6 @@ jobs:
           health = s.get(f"{base}/api/health", timeout=30).json()
           print("health", json.dumps({k: health.get(k) for k in ("git_sha", "warm_cache", "sessions", "status")}))
           if not health.get("warm_cache"):
-              # one more hydrate pass
               s.post(f"{base}/api/cache/hydrate-warm", timeout=300)
               health = s.get(f"{base}/api/health", timeout=30).json()
               print("health2", health.get("warm_cache"), health.get("git_sha"))
@@ -101,13 +112,16 @@ jobs:
           for url in (
               "http://127.0.0.1:8000/api/health",
               "http://127.0.0.1/api/health",
-              "http://127.0.0.1/",
           ):
               rr = requests.get(url, timeout=15, allow_redirects=True)
               print("probe", url, rr.status_code, len(rr.content))
               rr.raise_for_status()
 
-          # gate smoke
+          root = requests.get("http://127.0.0.1/", timeout=15, allow_redirects=True)
+          print("probe_root", root.status_code, len(root.content), (root.text or "")[:120].replace("\n", " "))
+          if root.status_code >= 400:
+              sys.exit(f"frontend root HTTP {root.status_code}")
+
           b = s.get(f"{base}/api/gate/barcode", params={"type": "PO", "number": "PO-RECOVER"}, timeout=30)
           print("barcode", b.status_code)
           b.raise_for_status()
