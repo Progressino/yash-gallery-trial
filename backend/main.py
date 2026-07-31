@@ -37,6 +37,7 @@ from .routers.stitching import router as stitching_router
 from .routers.hrm import router as hrm_router
 from .routers.erp_admin import router as erp_admin_router
 from .routers.marketplace_connect import router as marketplace_router
+from .routers.gate import router as gate_router
 from .db.finance_db import init_db
 from .db.item_db import init_db as init_item_db
 from .db.marketplace_db import init_db as init_marketplace_db
@@ -3717,6 +3718,7 @@ app.include_router(hrm_router,         prefix="/api/hrm",        tags=["hrm"])
 app.include_router(erp_admin_router,   prefix="/api/erp-admin",  tags=["erp-admin"])
 app.include_router(admin_performance_router, prefix="/api/admin", tags=["admin-performance"])
 app.include_router(marketplace_router, prefix="/api/marketplace", tags=["marketplace"])
+app.include_router(gate_router,        prefix="/api/gate",       tags=["gate"])
 
 
 @app.get("/api/health")

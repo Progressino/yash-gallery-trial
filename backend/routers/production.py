@@ -25,6 +25,7 @@ from ..db.production_db import (
     get_component_routing, preview_bundle_ready, get_partial_wip_board, get_jo_panel_wip,
     list_embroidery_stock_for_sku,
     list_embroidery_stock_for_skus,
+    import_ready_to_wip, ready_to_wip_template_rows, get_previous_process,
 )
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
@@ -505,9 +506,68 @@ def get_wip_board(so_number: str, main_sku: str):
 # ── Ready to Process ───────────────────────────────────────────────────────────
 
 @router.get("/ready-to-process/{process}")
-def ready_to_process(process: str):
-    """Get lines ready to be processed at given stage."""
-    return get_ready_to_process(process)
+def ready_to_process(
+    process: str,
+    q: Optional[str] = None,
+    jo: Optional[str] = None,
+    sku: Optional[str] = None,
+    vendor: Optional[str] = None,
+    min_qty: Optional[float] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+):
+    """Get lines ready to be processed at given stage (with search/filters)."""
+    return get_ready_to_process(
+        process,
+        q=q,
+        jo=jo,
+        sku=sku,
+        vendor=vendor,
+        min_qty=min_qty,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
+@router.get("/ready-to-wip/import-template")
+def ready_to_wip_template(stage: str = "Stitching"):
+    """CSV template for Ready-To WIP migration."""
+    rows = ready_to_wip_template_rows(stage)
+    df = pd.DataFrame(rows)
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="ready_to_{stage.lower()}_wip_template.csv"'
+        },
+    )
+
+
+@router.post("/ready-to-wip/import")
+async def ready_to_wip_import(
+    file: UploadFile = File(...),
+    stage: Optional[str] = Form(None),
+):
+    """Import existing Ready-To WIP into process_stock (from_process feeder)."""
+    raw = await file.read()
+    name = (file.filename or "wip.csv").lower()
+    try:
+        if name.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(io.BytesIO(raw))
+        else:
+            df = pd.read_csv(io.BytesIO(raw))
+    except Exception as e:
+        raise HTTPException(400, f"Could not parse file: {e}") from e
+    if df is None or df.empty:
+        raise HTTPException(400, "Empty import file")
+    rows = df.fillna("").to_dict(orient="records")
+    try:
+        result = import_ready_to_wip(rows, default_stage=stage)
+    except Exception as e:
+        raise HTTPException(400, str(e)) from e
+    return result
 
 
 # ── Process Stock ──────────────────────────────────────────────────────────────

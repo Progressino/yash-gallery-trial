@@ -1,0 +1,57 @@
+name: Smoke Gate GIN (prod)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: self-hosted
+    steps:
+      - name: Health + barcode + scan endpoints
+        run: |
+          set -eu
+          curl -sf --connect-timeout 5 http://127.0.0.1:8000/api/health | tee /tmp/gate_health.json
+          echo
+          python3 - <<'PY'
+          import json, os, sys
+          import requests
+          h = json.load(open("/tmp/gate_health.json"))
+          print("git", h.get("git_sha"), "warm", h.get("warm_cache"))
+          base = "http://127.0.0.1:8000"
+          cd = "/root/app"
+          os.chdir(cd)
+          # load auth from .env
+          env = {}
+          for line in open(".env"):
+              line = line.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              k, _, v = line.partition("=")
+              env[k.strip()] = v.strip().strip('"').strip("'")
+          user, pw = env.get("AUTH_USERNAME"), env.get("AUTH_PASSWORD")
+          if not user or not pw:
+              sys.exit("missing AUTH_USERNAME/PASSWORD")
+          s = requests.Session()
+          r = s.post(f"{base}/api/auth/login", json={"username": user, "password": pw},
+                     headers={"X-Device-Id": "gha-gate-smoke"}, timeout=60)
+          r.raise_for_status()
+          assert r.json().get("ok"), r.text
+          b = s.get(f"{base}/api/gate/barcode", params={"type": "PO", "number": "PO-SMOKE"}, timeout=30)
+          print("barcode", b.status_code, list(b.json().keys()) if b.ok else b.text[:200])
+          b.raise_for_status()
+          assert b.json().get("qr_data_url", "").startswith("data:image")
+          # invalid scan should 400
+          bad = s.get(f"{base}/api/gate/scan", params={"code": "NOPE"}, timeout=30)
+          print("bad_scan", bad.status_code)
+          assert bad.status_code == 400
+          # list gins
+          g = s.get(f"{base}/api/gate/gin?limit=5", timeout=30)
+          print("gins", g.status_code, "count", len(g.json()) if g.ok else g.text[:120])
+          g.raise_for_status()
+          # ready-to template
+          t = s.get(f"{base}/api/production/ready-to-wip/import-template?stage=Stitching", timeout=30)
+          print("wip_template", t.status_code, "bytes", len(t.content))
+          t.raise_for_status()
+          assert b"Ready_To_Stage" in t.content
+          print("GATE_SMOKE_OK")
+          PY

@@ -64,6 +64,7 @@ export const PATH_MODULE: Record<string, ModuleKey> = {
   '/sales': 'sales',
   '/items': 'items',
   '/purchase': 'purchase',
+  '/gate': 'purchase',
   '/tna': 'tna',
   '/production': 'production',
   '/stitching-costing': 'stitching',

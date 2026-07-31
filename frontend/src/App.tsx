@@ -31,6 +31,7 @@ const ItemMaster  = lazy(() => import('./pages/ItemMaster'))
 const Snapdeal    = lazy(() => import('./pages/Snapdeal'))
 const SalesOrders = lazy(() => import('./pages/SalesOrders'))
 const Purchase    = lazy(() => import('./pages/Purchase'))
+const GateInward  = lazy(() => import('./pages/GateInward'))
 const TNA         = lazy(() => import('./pages/TNA'))
 const Production  = lazy(() => import('./pages/Production'))
 const StitchingCosting = lazy(() => import('./pages/StitchingCosting'))
@@ -337,6 +338,7 @@ export default function App() {
               <Route path="snapdeal"  element={<Snapdeal />} />
               <Route path="sales"     element={<SalesOrders />} />
               <Route path="purchase"  element={<Purchase />} />
+              <Route path="gate"      element={<GateInward />} />
               <Route path="tna"       element={<TNA />} />
               <Route path="production" element={<Production />} />
               <Route path="stitching-costing" element={<StitchingCosting />} />

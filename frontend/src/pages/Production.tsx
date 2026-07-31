@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
+import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import SetBomPanel from '../components/SetBomPanel'
 
 function apiErrorMessage(err: unknown, fallback: string): string {
@@ -332,8 +333,13 @@ function VendorExecutionEditor({
 }
 
 // ── Print JO ──────────────────────────────────────────────────────────────────
-const printJO = (jo: JO) => {
+const printJO = async (jo: JO) => {
   const totalCost = jo.lines.reduce((s, l) => s + (l.planned_qty * l.vendor_rate), 0)
+  let barcodeHtml = ''
+  try {
+    const bundle = await fetchDocBarcode('JO', jo.jo_number)
+    barcodeHtml = barcodePrintBlock(bundle)
+  } catch { /* optional */ }
   const win = window.open('', '_blank', 'width=900,height=700')
   if (!win) { alert('Allow popups to print'); return }
   win.document.write(`<!DOCTYPE html><html><head><title>JO - ${jo.jo_number}</title>
@@ -368,7 +374,7 @@ const printJO = (jo: JO) => {
   </style></head><body>
   <div class="header">
     <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b">Production Department</div></div>
-    <div><div class="doc-title">JOB ORDER</div><div class="doc-num">${jo.jo_number}</div></div>
+    <div><div class="doc-title">JOB ORDER</div><div class="doc-num">${jo.jo_number}</div>${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}</div>
   </div>
   <div class="routing-bar">
     ${(jo.routing || []).map(p => `<span class="step ${p === jo.process ? 'active' : ''}">${PROCESS_ICONS[p] || ''} ${p}</span>${p !== jo.routing[jo.routing.length-1] ? '<span class="arrow">→</span>' : ''}`).join('')}
@@ -768,6 +774,10 @@ export default function Production() {
   const [filterSO, setFilterSO] = useState('')
   const [filterSku, setFilterSku] = useState('')
   const [filterVendor, setFilterVendor] = useState('')
+  const [filterJO, setFilterJO] = useState('')
+  const [filterMinQty, setFilterMinQty] = useState('')
+  const [filterDateFrom, setFilterDateFrom] = useState('')
+  const [filterDateTo, setFilterDateTo] = useState('')
   const [sortBy, setSortBy] = useState<'so_number' | 'sku' | 'vendor_name' | 'available_qty' | 'jo_date' | 'status'>('so_number')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [modal, setModal] = useState<ModalType>(null)
@@ -784,6 +794,7 @@ export default function Production() {
   const [newLines, setNewLines] = useState<{ so_number: string; sku: string; sku_name: string; style: string; planned_qty: number; vendor_rate: number; remarks: string }[]>([])
   const [soLineSearch, setSOLineSearch] = useState('')
   const joImportRef = useRef<HTMLInputElement>(null)
+  const wipImportRef = useRef<HTMLInputElement>(null)
 
   // Modal forms
   const [fabricIssueForm, setFabricIssueForm] = useState({ fabric_code: '', fabric_name: '', issued_qty: 0, unit: 'MTR', issued_by: '', remarks: '' })
@@ -826,8 +837,19 @@ export default function Production() {
     enabled: tab === 'tracker',
   })
   const { data: readyLines = [] } = useQuery({
-    queryKey: ['ready-to-process', activeProcess],
-    queryFn: () => api.get(`/production/ready-to-process/${encodeURIComponent(activeProcess)}`).then(r => r.data),
+    queryKey: ['ready-to-process', activeProcess, filterJO, filterSku, filterVendor, filterMinQty, filterDateFrom, filterDateTo, listSearch],
+    queryFn: () => {
+      const params = new URLSearchParams()
+      if (listSearch.trim()) params.set('q', listSearch.trim())
+      if (filterJO) params.set('jo', filterJO)
+      if (filterSku) params.set('sku', filterSku)
+      if (filterVendor) params.set('vendor', filterVendor)
+      if (filterMinQty) params.set('min_qty', filterMinQty)
+      if (filterDateFrom) params.set('date_from', filterDateFrom)
+      if (filterDateTo) params.set('date_to', filterDateTo)
+      const qs = params.toString()
+      return api.get(`/production/ready-to-process/${encodeURIComponent(activeProcess)}${qs ? `?${qs}` : ''}`).then(r => r.data)
+    },
     enabled: tab === 'process',
   })
   const { data: processReport = [] } = useQuery({
@@ -931,15 +953,28 @@ export default function Production() {
   const filteredReadyLines = useMemo(() => {
     let rows = (readyLines as any[]).map(r => ({
       ...r,
-      vendor_name: soBuyerMap.get(String(r.so_number || '').trim()) || '',
+      vendor_name: r.vendor_name || soBuyerMap.get(String(r.so_number || '').trim()) || '',
     }))
     if (filterSO) rows = rows.filter(r => String(r.so_number || '') === filterSO)
     if (filterSku) rows = rows.filter(r => String(r.sku || '') === filterSku)
+    if (filterJO) {
+      const j = filterJO.toUpperCase()
+      rows = rows.filter(r =>
+        String(r.jo_number || '').toUpperCase().includes(j)
+        || (Array.isArray(r.jo_numbers) && r.jo_numbers.some((x: string) => String(x).toUpperCase().includes(j)))
+      )
+    }
     if (filterVendor) {
       rows = rows.filter(r => String(r.vendor_name || '').toLowerCase() === filterVendor.toLowerCase())
     }
+    if (filterMinQty) {
+      const mq = Number(filterMinQty)
+      if (!Number.isNaN(mq)) rows = rows.filter(r => Number(r.available_qty || r.reserved_qty || 0) >= mq)
+    }
+    if (filterDateFrom) rows = rows.filter(r => String(r.updated_at || '').slice(0, 10) >= filterDateFrom)
+    if (filterDateTo) rows = rows.filter(r => !r.updated_at || String(r.updated_at).slice(0, 10) <= filterDateTo)
     rows = rows.filter(r =>
-      matchesListQuery([r.so_number, r.sku, r.vendor_name, r.fabric_code, r.fabric_name]),
+      matchesListQuery([r.so_number, r.sku, r.vendor_name, r.fabric_code, r.fabric_name, r.jo_number, r.from_process, r.to_process, r.batch]),
     )
     const dir = sortDir === 'asc' ? 1 : -1
     rows = [...rows].sort((a, b) => {
@@ -951,7 +986,7 @@ export default function Production() {
       return ak.localeCompare(bk, undefined, { numeric: true }) * dir
     })
     return rows
-  }, [readyLines, soBuyerMap, filterSO, filterSku, filterVendor, listSearch, sortBy, sortDir])
+  }, [readyLines, soBuyerMap, filterSO, filterSku, filterVendor, filterJO, filterMinQty, filterDateFrom, filterDateTo, listSearch, sortBy, sortDir])
 
   const filteredProcessJOs = useMemo(() => {
     let rows = [...processJOs]
@@ -1006,6 +1041,10 @@ export default function Production() {
     setFilterSO('')
     setFilterSku('')
     setFilterVendor('')
+    setFilterJO('')
+    setFilterMinQty('')
+    setFilterDateFrom('')
+    setFilterDateTo('')
     setSortBy('so_number')
     setSortDir('asc')
   }
@@ -1694,6 +1733,25 @@ export default function Production() {
                 <option value="">All vendors / buyers</option>
                 {vendorOptions.map(v => <option key={v} value={v}>{v}</option>)}
               </select>
+              <input
+                type="search"
+                value={filterJO}
+                onChange={e => setFilterJO(e.target.value)}
+                placeholder="Job Order…"
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm w-36"
+              />
+              <input
+                type="number"
+                min={0}
+                value={filterMinQty}
+                onChange={e => setFilterMinQty(e.target.value)}
+                placeholder="Min qty"
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm w-24"
+              />
+              <input type="date" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm" title="From date" />
+              <input type="date" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm" title="To date" />
               <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
                 <option value="">All Statuses</option>
                 {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
@@ -1809,10 +1867,44 @@ export default function Production() {
 
           {/* Ready to process — always visible for stage context */}
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
-            <p className="text-sm font-semibold text-amber-800 mb-2">
-              ⚡ {activeProcess === 'Cutting' ? 'Ready to Cut' : activeProcess === 'Stitching' ? 'Ready to Stitch' : activeProcess === 'Embroidery' ? 'Ready for Embroidery' : `Ready for ${activeProcess}`}
-              {readyLines.length > 0 ? ` — ${filteredReadyLines.length} of ${readyLines.length} line(s)` : ''}
-            </p>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <p className="text-sm font-semibold text-amber-800">
+                ⚡ {activeProcess === 'Cutting' ? 'Ready to Cut' : activeProcess === 'Stitching' ? 'Ready to Stitch' : activeProcess === 'Embroidery' ? 'Ready for Embroidery' : `Ready for ${activeProcess}`}
+                {readyLines.length > 0 ? ` — ${filteredReadyLines.length} of ${readyLines.length} line(s)` : ''}
+              </p>
+              <div className="flex items-center gap-2 ml-auto">
+                <a
+                  className="text-xs text-indigo-700 hover:underline"
+                  href={`/api/production/ready-to-wip/import-template?stage=${encodeURIComponent(activeProcess)}`}
+                >⬇ WIP template</a>
+                <input
+                  ref={wipImportRef}
+                  type="file"
+                  accept=".csv,.xlsx,.xls"
+                  className="hidden"
+                  onChange={async e => {
+                    const f = e.target.files?.[0]
+                    e.target.value = ''
+                    if (!f) return
+                    const fd = new FormData()
+                    fd.append('file', f)
+                    fd.append('stage', activeProcess)
+                    try {
+                      const { data } = await api.post('/production/ready-to-wip/import', fd)
+                      alert(`Imported ${data.imported} WIP row(s)` + (data.errors?.length ? `\n${data.errors.slice(0, 5).join('\n')}` : ''))
+                      invalidateAll()
+                    } catch (err: any) {
+                      alert(err?.response?.data?.detail || err?.message || 'WIP import failed')
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => wipImportRef.current?.click()}
+                  className="text-xs px-2 py-1 rounded border border-indigo-200 text-indigo-800 hover:bg-indigo-50"
+                >Import Ready-To WIP</button>
+              </div>
+            </div>
             {readyLines.length === 0 ? (
               <p className="text-xs text-amber-700">
                 {activeProcess === 'Cutting'

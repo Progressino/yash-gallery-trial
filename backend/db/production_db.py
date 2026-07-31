@@ -332,12 +332,35 @@ def init_db():
         ("jo_lines", "embroidery_unit", "TEXT DEFAULT ''"),
         ("jo_lines", "garment_qty", "INTEGER DEFAULT 0"),
         ("jo_lines", "measurement_qty", "REAL DEFAULT 0"),
+        ("jo_piece_receipts", "gin_id", "INTEGER"),
+        ("process_stock", "batch", "TEXT DEFAULT ''"),
+        ("process_stock", "vendor_name", "TEXT DEFAULT ''"),
+        ("process_stock", "jo_number", "TEXT DEFAULT ''"),
     ]
     for table, col, decl in migrations:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         except Exception:
             pass
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS ready_to_wip_imports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                import_batch TEXT NOT NULL,
+                ready_to_stage TEXT NOT NULL,
+                from_process TEXT NOT NULL,
+                so_number TEXT DEFAULT '',
+                sku TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                jo_number TEXT DEFAULT '',
+                batch TEXT DEFAULT '',
+                vendor_name TEXT DEFAULT '',
+                remarks TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now'))
+            )"""
+        )
+    except Exception:
+        pass
     try:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS embroidery_stock (
@@ -433,6 +456,9 @@ def get_next_process(sku: str, current_process: str) -> Optional[str]:
     """Next process for a SKU — uses component-level routing when Set BOM defines it."""
     from ..services.operation_routing import next_process_in_path, normalize_process_name
 
+    if normalize_process_name(current_process) == "Incoming":
+        return "Cutting"
+
     path = get_component_routing(sku)
     cur = normalize_process_name(current_process)
     # Returning from Embroidery to Cutting: next after Cutting is Stitching (post-embroidery hop).
@@ -451,6 +477,24 @@ def get_next_process(sku: str, current_process: str) -> Optional[str]:
     except ValueError:
         pass
     return None
+
+
+def get_previous_process(sku: str, target_process: str) -> Optional[str]:
+    """Process whose stock feeds Ready-To ``target_process``."""
+    from ..services.operation_routing import normalize_process_name
+
+    target = normalize_process_name(target_process)
+    if target == "Cutting":
+        return "Incoming"
+    path = get_component_routing(sku) or get_item_routing(sku)
+    norm = [normalize_process_name(p) for p in path]
+    try:
+        idx = norm.index(target)
+    except ValueError:
+        return None
+    if idx <= 0:
+        return None
+    return path[idx - 1]
 
 
 def get_all_routing_steps() -> list:
@@ -486,7 +530,18 @@ def get_all_process_stocks(so_number: str, sku: str) -> dict:
     return {r['process']: {'available': int(r['available_qty']), 'in': int(r['total_in']), 'out': int(r['total_out'])} for r in rows}
 
 
-def _update_process_stock(conn, so_number: str, sku: str, process: str, qty_in: int = 0, qty_out: int = 0):
+def _update_process_stock(
+    conn,
+    so_number: str,
+    sku: str,
+    process: str,
+    qty_in: int = 0,
+    qty_out: int = 0,
+    *,
+    batch: str | None = None,
+    vendor_name: str | None = None,
+    jo_number: str | None = None,
+):
     delta = int(qty_in) - int(qty_out)
     conn.execute("""
         INSERT INTO process_stock(so_number, sku, process, available_qty, total_in, total_out, updated_at)
@@ -497,26 +552,239 @@ def _update_process_stock(conn, so_number: str, sku: str, process: str, qty_in: 
             total_out = total_out + excluded.total_out,
             updated_at = datetime('now')
     """, (so_number, sku, process, delta, int(qty_in), int(qty_out)))
+    if batch is not None or vendor_name is not None or jo_number is not None:
+        try:
+            conn.execute(
+                """UPDATE process_stock SET
+                    batch = COALESCE(?, batch),
+                    vendor_name = COALESCE(?, vendor_name),
+                    jo_number = COALESCE(?, jo_number)
+                   WHERE so_number=? AND sku=? AND process=?""",
+                (
+                    batch if batch else None,
+                    vendor_name if vendor_name else None,
+                    jo_number if jo_number else None,
+                    so_number,
+                    sku,
+                    process,
+                ),
+            )
+        except Exception:
+            pass
+
+
+def ready_to_wip_template_rows(stage: str = "Stitching") -> list[dict]:
+    return [
+        {
+            "Ready_To_Stage": stage,
+            "SO_Number": "SO-EXAMPLE",
+            "OMS_SKU": "SKU-EXAMPLE-M",
+            "Quantity": 100,
+            "JO_Number": "",
+            "Batch": "",
+            "Vendor": "",
+            "Remarks": "Migration WIP",
+        }
+    ]
+
+
+def import_ready_to_wip(rows: list[dict], *, default_stage: str | None = None) -> dict:
+    """Credit process_stock at the from_process that feeds Ready_To_Stage."""
+    import uuid
+
+    batch_id = f"WIP-{uuid.uuid4().hex[:8].upper()}"
+    imported = 0
+    errors: list[str] = []
+    conn = _connect()
+    try:
+        for i, raw in enumerate(rows, start=1):
+            stage = str(
+                raw.get("Ready_To_Stage")
+                or raw.get("ready_to_stage")
+                or raw.get("Stage")
+                or default_stage
+                or ""
+            ).strip()
+            sku = str(raw.get("OMS_SKU") or raw.get("SKU") or raw.get("sku") or "").strip()
+            so = str(raw.get("SO_Number") or raw.get("so_number") or raw.get("SO") or "").strip()
+            try:
+                qty = int(float(raw.get("Quantity") or raw.get("Qty") or raw.get("qty") or 0))
+            except Exception:
+                qty = 0
+            jo_num = str(raw.get("JO_Number") or raw.get("jo_number") or "").strip()
+            batch = str(raw.get("Batch") or raw.get("Lot") or "").strip()
+            vendor = str(raw.get("Vendor") or raw.get("vendor_name") or "").strip()
+            remarks = str(raw.get("Remarks") or "").strip()
+            if not stage or not sku or qty <= 0:
+                errors.append(f"row {i}: need Ready_To_Stage, OMS_SKU, Quantity>0")
+                continue
+            from_process = get_previous_process(sku, stage)
+            if not from_process:
+                errors.append(f"row {i}: cannot resolve previous process for {sku} → {stage}")
+                continue
+            if not so and jo_num:
+                jo = get_jo_by_number(jo_num)
+                if jo:
+                    so = jo.get("so_number") or ""
+                    if not vendor:
+                        vendor = jo.get("vendor_name") or ""
+            if not so:
+                so = "MIGRATE"
+            _update_process_stock(
+                conn,
+                so,
+                sku,
+                from_process,
+                qty_in=qty,
+                batch=batch or None,
+                vendor_name=vendor or None,
+                jo_number=jo_num or None,
+            )
+            conn.execute(
+                """INSERT INTO ready_to_wip_imports(
+                    import_batch, ready_to_stage, from_process, so_number, sku, quantity,
+                    jo_number, batch, vendor_name, remarks
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (batch_id, stage, from_process, so, sku, qty, jo_num, batch, vendor, remarks),
+            )
+            imported += 1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return {"ok": True, "import_batch": batch_id, "imported": imported, "errors": errors}
 
 
 # ── Ready to Process Lists ─────────────────────────────────────────────────────
 
-def get_ready_to_process(process: str) -> list:
+def get_ready_to_process(
+    process: str,
+    *,
+    q: str | None = None,
+    jo: str | None = None,
+    sku: str | None = None,
+    vendor: str | None = None,
+    min_qty: float | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list:
     """
     Get lines ready for a process:
-    - Cutting: from printed_fabric_reservations in grey.db
+    - Cutting: from printed_fabric_reservations in grey.db (+ Incoming process_stock)
     - Other: from process_stock of previous process
     """
     if process == 'Cutting':
-        return _get_ready_to_cut()
+        result = _get_ready_to_cut()
     else:
-        return _get_ready_for_process(process)
+        result = _get_ready_for_process(process)
+    return _filter_ready_rows(
+        result,
+        q=q,
+        jo=jo,
+        sku=sku,
+        vendor=vendor,
+        min_qty=min_qty,
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+
+def _filter_ready_rows(
+    rows: list,
+    *,
+    q: str | None = None,
+    jo: str | None = None,
+    sku: str | None = None,
+    vendor: str | None = None,
+    min_qty: float | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list:
+    out = rows
+    if sku:
+        s = sku.strip().upper()
+        out = [r for r in out if s in str(r.get("sku") or "").upper()]
+    if vendor:
+        v = vendor.strip().lower()
+        out = [r for r in out if v in str(r.get("vendor_name") or "").lower()]
+    if jo:
+        j = jo.strip().upper()
+        out = [
+            r
+            for r in out
+            if j in str(r.get("jo_number") or "").upper()
+            or any(j in str(x).upper() for x in (r.get("jo_numbers") or []))
+        ]
+    if min_qty is not None:
+        out = [r for r in out if float(r.get("available_qty") or 0) >= float(min_qty)]
+    if date_from:
+        out = [r for r in out if str(r.get("updated_at") or "")[:10] >= date_from[:10]]
+    if date_to:
+        out = [r for r in out if str(r.get("updated_at") or "9999")[:10] <= date_to[:10]]
+    if q:
+        needle = q.strip().upper()
+        def _hit(r):
+            blob = " ".join(
+                str(r.get(k) or "")
+                for k in (
+                    "so_number",
+                    "sku",
+                    "sku_name",
+                    "jo_number",
+                    "vendor_name",
+                    "from_process",
+                    "to_process",
+                    "batch",
+                )
+            ).upper()
+            jns = " ".join(str(x) for x in (r.get("jo_numbers") or [])).upper()
+            return needle in blob or needle in jns
+        out = [r for r in out if _hit(r)]
+    return out
+
+
+def _enrich_ready_row(d: dict, to_process: str) -> dict:
+    """Attach open JO numbers / vendor / updated_at for Ready-To filters."""
+    conn = _connect()
+    try:
+        so = d.get("so_number") or ""
+        sku = d.get("sku") or ""
+        jos = conn.execute(
+            """SELECT jo_number, vendor_name, status FROM job_orders
+               WHERE so_number=? AND sku=? AND process=? AND status NOT IN ('Cancelled','Closed')
+               ORDER BY id DESC LIMIT 20""",
+            (so, sku, to_process),
+        ).fetchall()
+        jo_numbers = [r["jo_number"] for r in jos if r["jo_number"]]
+        vendor = ""
+        for r in jos:
+            if r["vendor_name"]:
+                vendor = r["vendor_name"]
+                break
+        stock = conn.execute(
+            """SELECT available_qty, updated_at, batch, vendor_name, jo_number
+               FROM process_stock WHERE so_number=? AND sku=? AND process=?""",
+            (so, sku, d.get("from_process") or d.get("process") or ""),
+        ).fetchone()
+        d["jo_numbers"] = jo_numbers
+        d["jo_number"] = jo_numbers[0] if jo_numbers else (stock["jo_number"] if stock and stock["jo_number"] else "")
+        d["vendor_name"] = vendor or (stock["vendor_name"] if stock else "") or d.get("vendor_name") or ""
+        d["updated_at"] = (stock["updated_at"] if stock else None) or d.get("updated_at") or ""
+        d["batch"] = (stock["batch"] if stock else None) or d.get("batch") or ""
+        d["to_process"] = to_process
+        d["from_process"] = d.get("from_process") or d.get("process") or ""
+    finally:
+        conn.close()
+    return d
 
 
 def _get_ready_to_cut() -> list:
     """Get printed fabric reservations ready for cutting — deduct already planned JO qty."""
     grey_db_path = os.environ.get("GREY_DB_PATH",
         os.path.join(os.path.dirname(__file__), "..", "grey.db"))
+    result = []
     try:
         gconn = sqlite3.connect(grey_db_path)
         gconn.row_factory = sqlite3.Row
@@ -535,7 +803,6 @@ def _get_ready_to_cut() -> list:
 
         # Now open production.db separately
         conn = _connect()
-        result = []
         try:
             for d in raw:
                 existing = conn.execute("""
@@ -551,50 +818,48 @@ def _get_ready_to_cut() -> list:
                     d['already_planned'] = already_planned
                     d['available_qty'] = remaining
                     d['routing'] = get_item_routing(d.get('sku', ''))
-                    result.append(d)
+                    d['from_process'] = 'Printed'
+                    d['to_process'] = 'Cutting'
+                    result.append(_enrich_ready_row(d, 'Cutting'))
         finally:
             conn.close()
-        return result
-    except Exception as e:
-        return []
+    except Exception:
+        pass
+
+    # Migrated Ready-To Cutting WIP (Incoming feeder stock)
+    conn2 = _connect()
+    try:
+        stocks = conn2.execute(
+            """SELECT so_number, sku, process, available_qty, updated_at, batch, vendor_name, jo_number
+               FROM process_stock WHERE process='Incoming' AND available_qty > 0"""
+        ).fetchall()
+        for r in stocks:
+            d = dict(r)
+            d['available_qty'] = int(d.get('available_qty') or 0)
+            d['from_process'] = 'Incoming'
+            d['to_process'] = 'Cutting'
+            d['routing'] = get_item_routing(d.get('sku', ''))
+            result.append(_enrich_ready_row(d, 'Cutting'))
+    finally:
+        conn2.close()
+    return result
 
 
 def _get_ready_for_process(process: str) -> list:
     """Get SO+SKU lines with available pieces at previous process."""
-    conn = _connect()
-    rows = conn.execute("""
-        SELECT so_number, sku, process, available_qty, total_in, total_out
-        FROM process_stock
-        WHERE process=? AND available_qty > 0
-        ORDER BY so_number, sku
-    """, (process,)).fetchall()
-    conn.close()
-
-    # Find previous process for each sku
-    result = []
-    for r in rows:
-        d = dict(r)
-        routing = get_item_routing(d['sku'])
-        # Check if this process feeds into the requested process
-        try:
-            idx = routing.index(process)
-            if idx > 0:
-                prev_process = routing[idx - 1]
-                if d['process'] == prev_process:
-                    d['routing'] = routing
-                    d['next_process'] = get_next_process(d['sku'], process)
-                    result.append(d)
-        except ValueError:
-            pass
-
-    # Actually simpler — just get process_stock for the process BEFORE target
-    # Re-query correctly
     conn2 = _connect()
-    all_stocks = conn2.execute("""
-        SELECT so_number, sku, process, available_qty
-        FROM process_stock WHERE available_qty > 0
-        ORDER BY so_number, sku
-    """).fetchall()
+    try:
+        all_stocks = conn2.execute("""
+            SELECT so_number, sku, process, available_qty, updated_at, batch, vendor_name, jo_number
+            FROM process_stock WHERE available_qty > 0
+            ORDER BY so_number, sku
+        """).fetchall()
+    except Exception:
+        all_stocks = conn2.execute("""
+            SELECT so_number, sku, process, available_qty, updated_at
+            FROM process_stock WHERE available_qty > 0
+            ORDER BY so_number, sku
+        """).fetchall()
     conn2.close()
 
     result = []
@@ -604,17 +869,22 @@ def _get_ready_for_process(process: str) -> list:
         routing = get_item_routing(d['sku'])
         next_p = get_next_process(d['sku'], d['process'])
         if next_p == process and d['available_qty'] > 0:
-            key = (d['so_number'], d['sku'])
+            key = (d['so_number'], d['sku'], d['process'])
             if key not in seen:
                 seen.add(key)
-                result.append({
+                row = {
                     'so_number': d['so_number'],
                     'sku': d['sku'],
                     'available_qty': d['available_qty'],
                     'from_process': d['process'],
                     'to_process': process,
                     'routing': routing,
-                })
+                    'updated_at': d.get('updated_at') or '',
+                    'batch': d.get('batch') or '',
+                    'vendor_name': d.get('vendor_name') or '',
+                    'jo_number': d.get('jo_number') or '',
+                }
+                result.append(_enrich_ready_row(row, process))
     return result
 
 
@@ -697,6 +967,19 @@ def get_jo(joid: int):
         jo['issue_note'] = get_issue_note_by_jo_id(jo['id'])
     except Exception:
         jo['issue_note'] = None
+    return jo
+
+
+def get_jo_by_number(jo_number: str):
+    conn = _connect()
+    row = conn.execute(
+        "SELECT id FROM job_orders WHERE upper(jo_number)=upper(?)",
+        (str(jo_number or "").strip(),),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return get_jo(int(row["id"]))
     return jo
 
 
@@ -1608,11 +1891,13 @@ def receive_pieces(joid: int, data: dict):
         conn.close()
         raise
 
-    conn.execute("""INSERT INTO jo_piece_receipts(jo_id,jo_line_id,process,so_number,sku,receipt_date,received_qty,rejected_qty,received_by,remarks)
-        VALUES(?,?,?,?,?,?,?,?,?,?)""",
+    conn.execute("""INSERT INTO jo_piece_receipts(jo_id,jo_line_id,process,so_number,sku,receipt_date,received_qty,rejected_qty,received_by,remarks,gin_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
         (joid, jo_line_id, process, so_number, sku,
          data.get('receipt_date') or datetime.now().strftime('%Y-%m-%d'),
-         received, rejected, data.get('received_by', ''), data.get('remarks', '')))
+         received, rejected, data.get('received_by', ''), data.get('remarks', ''),
+         data.get('gin_id')))
+    receipt_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute("""UPDATE job_orders SET
         received_qty = COALESCE(received_qty,0) + ?,
         output_qty = COALESCE(output_qty,0) + ?,
@@ -1688,7 +1973,7 @@ def receive_pieces(joid: int, data: dict):
         )
     conn.commit()
     conn.close()
-    out = {"ok": True, "split": split_info}
+    out = {"ok": True, "split": split_info, "receipt_id": receipt_id}
     if stock_credit is not None:
         out["embroidery_stock_balance"] = stock_credit
         out["leftover_credited"] = leftover

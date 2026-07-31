@@ -483,9 +483,48 @@ def init_db():
         "ALTER TABLE po_headers ADD COLUMN ship_to_contact TEXT DEFAULT ''",
         "ALTER TABLE po_headers ADD COLUMN ship_to_phone TEXT DEFAULT ''",
         "ALTER TABLE po_headers ADD COLUMN ship_to_gst TEXT DEFAULT ''",
+        "ALTER TABLE grn_headers ADD COLUMN gin_id INTEGER",
     ]:
         try: conn.execute(sql)
         except: pass
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS gin_headers (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        gin_number       TEXT UNIQUE NOT NULL,
+        gin_date         TEXT NOT NULL,
+        source_type      TEXT NOT NULL,
+        source_number    TEXT NOT NULL,
+        party_name       TEXT DEFAULT '',
+        stage            TEXT DEFAULT '',
+        vehicle_no       TEXT DEFAULT '',
+        challan_no       TEXT DEFAULT '',
+        status           TEXT DEFAULT 'Completed',
+        grn_id           INTEGER,
+        jo_id            INTEGER,
+        barcode_payload  TEXT DEFAULT '',
+        created_by       TEXT DEFAULT '',
+        remarks          TEXT DEFAULT '',
+        created_at       TEXT DEFAULT (datetime('now'))
+    )
+    """)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS gin_lines (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        gin_id               INTEGER NOT NULL REFERENCES gin_headers(id) ON DELETE CASCADE,
+        line_key             TEXT DEFAULT '',
+        material_code        TEXT DEFAULT '',
+        material_name        TEXT DEFAULT '',
+        sku                  TEXT DEFAULT '',
+        planned_qty          REAL DEFAULT 0,
+        already_received_qty REAL DEFAULT 0,
+        pending_qty          REAL DEFAULT 0,
+        received_qty         REAL DEFAULT 0,
+        unit                 TEXT DEFAULT 'PCS',
+        jo_id                INTEGER,
+        jo_line_id           INTEGER,
+        jo_receipt_id        INTEGER
+    )
+    """)
     conn.commit()
     conn.close()
 
@@ -1465,8 +1504,8 @@ def create_grn(data: dict):
     )
     conn.execute(
         """INSERT INTO grn_headers(grn_number,grn_date,grn_type,reference_number,party_name,challan_no,
-        invoice_no,invoice_date,vehicle_no,transporter,warehouse,so_reference,total_value,status,remarks,inventory_posted)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)""",
+        invoice_no,invoice_date,vehicle_no,transporter,warehouse,so_reference,total_value,status,remarks,inventory_posted,gin_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)""",
         (
             num,
             data.get("grn_date") or datetime.now().strftime("%Y-%m-%d"),
@@ -1483,6 +1522,7 @@ def create_grn(data: dict):
             total,
             "Draft",
             data.get("remarks") or "",
+            data.get("gin_id"),
         ),
     )
     grnid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -1525,6 +1565,8 @@ def create_grn(data: dict):
     conn.execute("UPDATE grn_headers SET item_stock_posted=1 WHERE id=?", (grnid,))
     conn.commit()
     conn.close()
+    if data.get("return_id"):
+        return {"grn_number": num, "grn_id": grnid}
     return num
 
 
@@ -1816,3 +1858,137 @@ def get_gate_pass_by_number(gp_number: str):
         conn.close(); return d
     except Exception:
         conn.close(); return None
+
+# ── Gate Inward Note (GIN) ─────────────────────────────────────────────────────
+
+def list_gins(status: str | None = None, limit: int = 100):
+    conn = _connect()
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM gin_headers WHERE status=? ORDER BY id DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM gin_headers ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["lines"] = [
+            dict(l)
+            for l in conn.execute(
+                "SELECT * FROM gin_lines WHERE gin_id=?", (d["id"],)
+            ).fetchall()
+        ]
+        result.append(d)
+    conn.close()
+    return result
+
+
+def get_gin(gin_id: int):
+    conn = _connect()
+    row = conn.execute("SELECT * FROM gin_headers WHERE id=?", (gin_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    d = dict(row)
+    d["lines"] = [
+        dict(l)
+        for l in conn.execute("SELECT * FROM gin_lines WHERE gin_id=?", (d["id"],)).fetchall()
+    ]
+    if d.get("grn_id"):
+        grn = conn.execute("SELECT grn_number, status FROM grn_headers WHERE id=?", (d["grn_id"],)).fetchone()
+        if grn:
+            d["grn_number"] = grn["grn_number"]
+            d["grn_status"] = grn["status"]
+    conn.close()
+    return d
+
+
+def get_gin_by_number(gin_number: str):
+    conn = _connect()
+    row = conn.execute(
+        "SELECT id FROM gin_headers WHERE gin_number=?", (gin_number,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return get_gin(int(row["id"]))
+
+
+def create_gin_record(header: dict, lines: list[dict]) -> dict:
+    """Insert GIN header+lines (status Completed). Caller links GRN/JO after."""
+    conn = _connect()
+    num = _next_num(conn, "gin_headers", "gin_number", "GIN")
+    payload = header.get("barcode_payload") or f"{header.get('source_type')}:{header.get('source_number')}"
+    conn.execute(
+        """INSERT INTO gin_headers(
+            gin_number, gin_date, source_type, source_number, party_name, stage,
+            vehicle_no, challan_no, status, grn_id, jo_id, barcode_payload, created_by, remarks
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            num,
+            header.get("gin_date") or datetime.now().strftime("%Y-%m-%d"),
+            header["source_type"],
+            header["source_number"],
+            header.get("party_name") or "",
+            header.get("stage") or "",
+            header.get("vehicle_no") or "",
+            header.get("challan_no") or "",
+            header.get("status") or "Completed",
+            header.get("grn_id"),
+            header.get("jo_id"),
+            payload,
+            header.get("created_by") or "",
+            header.get("remarks") or "",
+        ),
+    )
+    gin_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    for ln in lines:
+        conn.execute(
+            """INSERT INTO gin_lines(
+                gin_id, line_key, material_code, material_name, sku,
+                planned_qty, already_received_qty, pending_qty, received_qty,
+                unit, jo_id, jo_line_id, jo_receipt_id
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                gin_id,
+                ln.get("line_key") or "",
+                ln.get("material_code") or ln.get("sku") or "",
+                ln.get("material_name") or "",
+                ln.get("sku") or ln.get("material_code") or "",
+                float(ln.get("planned_qty") or 0),
+                float(ln.get("already_received_qty") or 0),
+                float(ln.get("pending_qty") or 0),
+                float(ln.get("received_qty") or 0),
+                ln.get("unit") or "PCS",
+                ln.get("jo_id"),
+                ln.get("jo_line_id"),
+                ln.get("jo_receipt_id"),
+            ),
+        )
+    conn.commit()
+    conn.close()
+    return get_gin(gin_id)
+
+
+def link_gin_grn(gin_id: int, grn_id: int):
+    conn = _connect()
+    conn.execute("UPDATE gin_headers SET grn_id=? WHERE id=?", (grn_id, gin_id))
+    try:
+        conn.execute("UPDATE grn_headers SET gin_id=? WHERE id=?", (gin_id, grn_id))
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
+
+
+def update_gin_line_receipt(gin_line_id: int, jo_receipt_id: int):
+    conn = _connect()
+    conn.execute(
+        "UPDATE gin_lines SET jo_receipt_id=? WHERE id=?",
+        (jo_receipt_id, gin_line_id),
+    )
+    conn.commit()
+    conn.close()

@@ -1,6 +1,7 @@
 /** ERP modules backed by SQLite — no PO / warm-cache datasets required. */
 export const ERP_MODULE_PATH_PREFIXES = [
   '/purchase',
+  '/gate',
   '/production',
   '/items',
   '/sales',

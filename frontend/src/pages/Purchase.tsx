@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
+import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 
 type Tab = 'dashboard' | 'suppliers' | 'processors' | 'pr' | 'po' | 'jwo' | 'grn' | 'min' | 'gate-pass' | 'audit'
 type PRSubTab = 'list' | 'new' | 'from-mrp'
@@ -170,7 +171,23 @@ const printDocument = (html: string, title: string) => {
   win.document.close()
 }
 
-const buildPOPrintHTML = (po: PO) => {
+async function printWithBarcode(
+  docType: string,
+  docNumber: string,
+  buildHtml: (barcodeHtml: string) => string,
+  title: string,
+) {
+  let barcodeHtml = ''
+  try {
+    const bundle = await fetchDocBarcode(docType, docNumber)
+    barcodeHtml = barcodePrintBlock(bundle)
+  } catch {
+    /* print without barcode if API unavailable */
+  }
+  printDocument(buildHtml(barcodeHtml), title)
+}
+
+const buildPOPrintHTML = (po: PO, barcodeHtml = '') => {
   const logoUrl = typeof window !== 'undefined' ? `${window.location.origin}/logo.png` : '/logo.png'
   const subtotal = po.lines.reduce((s, l) => s + l.amount, 0)
   const gstTotal = po.lines.reduce((s, l) => s + (l.amount * (l.gst_pct || 0) / 100), 0)
@@ -197,6 +214,7 @@ const buildPOPrintHTML = (po: PO) => {
         <div class="doc-title">PURCHASE ORDER</div>
         <div class="doc-num">${po.po_number}</div>
         <div style="font-size:11px;color:#64748b;text-align:right;margin-top:6px">Date: ${po.po_date || today()}</div>
+        ${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}
       </div>
     </div>
     <div class="party-grid">
@@ -271,12 +289,13 @@ const buildPOPrintHTML = (po: PO) => {
     </div>`
 }
 
-const buildJWOPrintHTML = (jwo: JWO) => {
+const buildJWOPrintHTML = (jwo: JWO, barcodeHtml = '') => {
   const total = jwo.lines.reduce((s, l) => s + (l.output_qty * l.rate), 0)
   return `
     <div class="header">
       <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b;margin-top:4px">Production Department</div></div>
-      <div><div class="doc-title">JOB WORK ORDER</div><div class="doc-num">${jwo.jwo_number}</div></div>
+      <div><div class="doc-title">JOB WORK ORDER</div><div class="doc-num">${jwo.jwo_number}</div>
+      ${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}</div>
     </div>
     <div class="info-grid">
       <div class="info-box">
@@ -335,7 +354,7 @@ const buildJWOPrintHTML = (jwo: JWO) => {
     </div>`
 }
 
-const buildGRNPrintHTML = (grn: GRN) => {
+const buildGRNPrintHTML = (grn: GRN, barcodeHtml = '') => {
   return `
     <div class="header">
       <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b;margin-top:4px">Stores Department</div></div>
@@ -397,11 +416,11 @@ const buildGRNPrintHTML = (grn: GRN) => {
     </div>`
 }
 
-const buildMINPrintHTML = (min: any) => {
+const buildMINPrintHTML = (min: any, barcodeHtml = '') => {
   return `
     <div class="header">
       <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b;margin-top:4px">Stores Department</div></div>
-      <div><div class="doc-title">MATERIAL ISSUE NOTE</div><div class="doc-num">${min.min_number}</div></div>
+      <div><div class="doc-title">MATERIAL ISSUE NOTE / DELIVERY CHALLAN</div><div class="doc-num">${min.min_number}</div>${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}</div>
     </div>
     <div class="info-grid">
       <div class="info-box">
@@ -527,7 +546,7 @@ function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string })
           )}
           <button
             type="button"
-            onClick={() => printDocument(buildMINPrintHTML(note), `MIN - ${note.min_number}`)}
+            onClick={() => void printWithBarcode('MIN', note.min_number, bc => buildMINPrintHTML(note, bc), `MIN - ${note.min_number}`)}
             className="text-xs px-2 py-1 border border-gray-200 rounded bg-white hover:bg-gray-50"
           >
             🖨️ Print MIN
@@ -1662,7 +1681,7 @@ export default function Purchase() {
                     <span className="text-sm font-semibold text-gray-700">{fmt(po.total)}</span>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(po.status)}`}>{po.status}</span>
                     {/* ── Print button for PO ── */}
-                    <button onClick={e => { e.stopPropagation(); printDocument(buildPOPrintHTML(po), `PO - ${po.po_number}`) }}
+                    <button onClick={e => { e.stopPropagation(); void printWithBarcode('PO', po.po_number, bc => buildPOPrintHTML(po, bc), `PO - ${po.po_number}`) }}
                       className="text-xs px-2 py-1 border border-gray-200 rounded text-gray-500 hover:bg-gray-50 flex items-center gap-1" title="Print PO">
                       🖨️ Print
                     </button>
@@ -1829,7 +1848,7 @@ export default function Purchase() {
                     <span className="text-sm font-semibold text-gray-700">{fmt(jwo.total)}</span>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(jwo.status)}`}>{jwo.status}</span>
                     {/* ── Print button for JWO ── */}
-                    <button onClick={e => { e.stopPropagation(); printDocument(buildJWOPrintHTML(jwo), `JWO - ${jwo.jwo_number}`) }}
+                    <button onClick={e => { e.stopPropagation(); void printWithBarcode('JWO', jwo.jwo_number, bc => buildJWOPrintHTML(jwo, bc), `JWO - ${jwo.jwo_number}`) }}
                       className="text-xs px-2 py-1 border border-gray-200 rounded text-gray-500 hover:bg-gray-50 flex items-center gap-1" title="Print JWO">
                       🖨️ Print
                     </button>
@@ -2068,7 +2087,7 @@ export default function Purchase() {
                     <span className="text-sm font-semibold text-gray-700">{fmt(grn.total_value)}</span>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(grn.status)}`}>{grn.status}</span>
                     {/* ── Print button for GRN ── */}
-                    <button onClick={e => { e.stopPropagation(); printDocument(buildGRNPrintHTML(grn), `GRN - ${grn.grn_number}`) }}
+                    <button onClick={e => { e.stopPropagation(); void printWithBarcode('GRN', grn.grn_number, bc => buildGRNPrintHTML(grn, bc), `GRN - ${grn.grn_number}`) }}
                       className="text-xs px-2 py-1 border border-gray-200 rounded text-gray-500 hover:bg-gray-50 flex items-center gap-1" title="Print GRN">
                       🖨️ Print
                     </button>
@@ -2196,7 +2215,7 @@ export default function Purchase() {
                     )}
                     <button
                       type="button"
-                      onClick={e => { e.stopPropagation(); printDocument(buildMINPrintHTML(min), `MIN - ${min.min_number}`) }}
+                      onClick={e => { e.stopPropagation(); void printWithBarcode('MIN', min.min_number, bc => buildMINPrintHTML(min, bc), `MIN - ${min.min_number}`) }}
                       className="text-xs px-2 py-1 border border-gray-200 rounded text-gray-500 hover:bg-gray-50"
                     >
                       🖨️ Print
