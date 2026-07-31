@@ -1,0 +1,85 @@
+name: Deep network diag
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: self-hosted
+    defaults:
+      run:
+        working-directory: /root/app
+    steps:
+      - name: Host network + firewall blocks
+        run: |
+          set +e
+          echo '── uptime / host ──'
+          uptime; hostname; hostname -I
+          echo '── addresses / routes ──'
+          ip -4 addr; echo; ip -4 route
+          echo '── listen ──'
+          ss -ltnp | grep -E ':22|:80|:443' || true
+          echo '── ufw ──'
+          ufw status verbose || true
+          echo '── fail2ban ──'
+          systemctl is-active fail2ban 2>/dev/null; fail2ban-client status 2>/dev/null
+          fail2ban-client status sshd 2>/dev/null
+          fail2ban-client status nginx 2>/dev/null
+          echo '── csf / hostinger / firewalld ──'
+          command -v csf >/dev/null && csf -l 2>/dev/null | head -40 || echo 'no csf'
+          systemctl is-active firewalld 2>/dev/null; firewall-cmd --list-all 2>/dev/null | head -40
+          ls /etc/hostinger* /opt/hostinger* 2>/dev/null | head
+          echo '── iptables REJECT/DROP counters ──'
+          iptables -L INPUT -n -v --line-numbers | head -30
+          iptables -L ufw-user-input -n -v 2>/dev/null | head -40
+          iptables -L ufw-reject-input -n -v 2>/dev/null | head -20
+          echo '── both vhosts ──'
+          curl -skI --max-time 8 https://app.progressino.com/ | head -10
+          curl -skI --max-time 8 https://raisinghanitextiles.com/ | head -10
+          echo '── recent nginx access (last 30) ──'
+          if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
+          $DC -f docker-compose.prod.yml logs --tail=30 frontend 2>&1 || true
+          echo DEEP_NET_DONE
+
+      - name: Unblock common host firewall traps
+        run: |
+          set +e
+          # Flush fail2ban bans if any
+          if command -v fail2ban-client >/dev/null 2>&1; then
+            for j in $(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:\s*//p' | tr ',' ' '); do
+              echo "jail=$j"
+              fail2ban-client status "$j" 2>/dev/null
+              banned=$(fail2ban-client status "$j" 2>/dev/null | sed -n 's/.*Banned IP list:\s*//p')
+              for ip in $banned; do
+                echo "unban $j $ip"
+                fail2ban-client set "$j" unbanip "$ip" 2>/dev/null || true
+              done
+            done
+          fi
+          # Ensure ufw allows web/ssh
+          if command -v ufw >/dev/null 2>&1; then
+            ufw allow OpenSSH || ufw allow 22/tcp || true
+            ufw allow 80/tcp || true
+            ufw allow 443/tcp || true
+            ufw reload || true
+            ufw status verbose || true
+          fi
+          # CSF allow if present
+          if command -v csf >/dev/null 2>&1; then
+            csf -a 0.0.0.0/0 2>/dev/null || true
+            csf -r 2>/dev/null || true
+          fi
+          echo UNBLOCK_DONE
+
+  external:
+    needs: diag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe both domains from GitHub
+        run: |
+          set +e
+          for u in https://app.progressino.com/api/health https://raisinghanitextiles.com/; do
+            echo "=== $u ==="
+            curl -sS -o /tmp/b -w 'code=%{http_code} t=%{time_total}\n' --connect-timeout 12 --max-time 20 "$u" || echo fail
+            head -c 160 /tmp/b; echo
+          done
