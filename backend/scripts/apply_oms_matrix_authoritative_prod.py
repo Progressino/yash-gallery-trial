@@ -82,6 +82,13 @@ def main(argv: list[str]) -> int:
     # Force accept by clearing disk meta uploaded_at comparison path when needed
     ok = persist_inventory_history_authoritative(sess, merged)
     print(f"Persisted={ok}", flush=True)
+    try:
+        from backend.services.po_shared_cache import invalidate_all_shared_caches
+
+        invalidate_all_shared_caches()
+        print("PO shared caches invalidated", flush=True)
+    except Exception as exc:
+        print(f"PO cache invalidate skipped: {exc}", flush=True)
 
     # Spot-check Jul 30 OMS total if present
     m = merged.copy()
