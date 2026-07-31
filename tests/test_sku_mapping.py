@@ -315,3 +315,24 @@ def test_build_meesho_unmapped_skus_df():
     assert list(out["Meesho_SKU"]) == ["MISSING-XL"]
     assert int(out.iloc[0]["row_count"]) == 2
     assert out.iloc[0]["OMS_SKU"] == ""
+
+
+def test_recanonicalize_inventory_history_applies_replace_sku_map():
+    """Replace SKU uploads must rewrite Inv History keys, not only sales."""
+    import pandas as pd
+    from backend.services.daily_inventory_history import recanonicalize_inventory_history_skus
+
+    hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["SELLER-OLD-L", "KEEP-M"],
+            "Date": pd.to_datetime(["2026-07-30", "2026-07-30"]),
+            "Qty": [9, 2],
+            "Source": ["snapshot", "snapshot"],
+            "Channel": ["oms", "oms"],
+        }
+    )
+    out = recanonicalize_inventory_history_skus(hist, {"SELLER-OLD-L": "OMS-NEW-L"})
+    skus = set(out["OMS_SKU"].astype(str))
+    assert "OMS-NEW-L" in skus
+    assert "SELLER-OLD-L" not in skus
+    assert "KEEP-M" in skus

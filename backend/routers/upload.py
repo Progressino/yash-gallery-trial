@@ -2061,6 +2061,7 @@ async def upload_sku_mapping(
                 prior = resolve_active_combo_sku_map(sess=sess)
                 sess.combo_sku_map = merge_combo_sku_map(prior, parsed_combo)
 
+            hist_rewritten = 0
             had_platform = (
                 not sess.mtr_df.empty
                 or not sess.myntra_df.empty
@@ -2078,6 +2079,29 @@ async def upload_sku_mapping(
                     sku_mapping=mapping,
                     **_sales_overlay_build_kwargs(sess),
                 )
+
+            # Inventory History is keyed by OMS_SKU at parse time — remapping the master
+            # must rewrite the tall history frame or Replace SKU never appears there.
+            hist_rewritten = 0
+            _hist = getattr(sess, "daily_inventory_history_df", None)
+            if parsed and _hist is not None and not getattr(_hist, "empty", True):
+                try:
+                    from ..services.daily_inventory_history import (
+                        persist_inventory_history_authoritative,
+                        recanonicalize_inventory_history_skus,
+                    )
+
+                    before = int(len(_hist))
+                    recan = recanonicalize_inventory_history_skus(_hist, mapping)
+                    if recan is not None and not recan.empty:
+                        sess.daily_inventory_history_df = recan
+                        hist_rewritten = before
+                        try:
+                            persist_inventory_history_authoritative(sess, recan)
+                        except Exception:
+                            _log.exception("SKU map: persist rewritten inventory history failed")
+                except Exception:
+                    _log.exception("SKU map: inventory history recanonicalize failed")
 
             gaps = list_sku_mapping_gaps(sess.sales_df, mapping)
             if parsed_combo and not parsed:
@@ -2097,6 +2121,8 @@ async def upload_sku_mapping(
                 msg += f"; combo BOM {len(sess.combo_sku_map):,} keys"
             if had_platform and (parsed or parsed_combo):
                 msg += f"; sales rebuilt ({len(sess.sales_df):,} rows)"
+            if hist_rewritten:
+                msg += f"; inventory history remapped ({hist_rewritten:,} rows)"
             if gaps:
                 msg += (
                     f". Warning: {len(gaps)} SKU(s) in sales are not in this map "
