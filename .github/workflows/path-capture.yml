@@ -16,9 +16,11 @@ jobs:
         run: |
           set +e
           CIP="${{ github.event.inputs.client_ip }}"
-          echo "watching client_ip=$CIP for 25s — curl from that network NOW"
-          timeout 25 tcpdump -ni eth0 "host $CIP and tcp port 80 or tcp port 443 or tcp port 22" -c 50 -tttt 2>&1 | tee /tmp/pcap.txt
-          echo '── capture summary ──'
+          echo "watching client_ip=$CIP for 30s — curl from that network NOW"
+          # Correct precedence: only this client IP on web/ssh ports
+          timeout 30 tcpdump -ni eth0 "host ${CIP} and (tcp port 80 or tcp port 443 or tcp port 22)" -c 40 -tttt 2>&1 | tee /tmp/pcap.txt
+          echo '── lines ──'
           wc -l /tmp/pcap.txt
+          echo '── packets ──'
           cat /tmp/pcap.txt
           echo PATH_CAPTURE_DONE
