@@ -38,7 +38,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { to: '/sales', module: 'sales', label: 'Sales Orders', short: '🧾' },
       { to: '/items', module: 'items', label: 'Item Master', short: '🏭' },
       { to: '/purchase', module: 'purchase', label: 'Purchase', short: '🛒' },
-      { to: '/gate', module: 'purchase', label: 'Gate Inward', short: '🛂' },
+      { to: '/gate', module: 'purchase', label: 'Gate Scan (GIN)', short: '📷' },
       { to: '/tna', module: 'tna', label: 'TNA Calendar', short: '📅' },
       { to: '/production', module: 'production', label: 'Production', short: '⚙️' },
       { to: '/stitching-costing', module: 'stitching', label: 'Stitching Costing', short: '🧵' },

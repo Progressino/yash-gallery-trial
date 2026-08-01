@@ -92,19 +92,70 @@ def test_balck_typo_in_canonical_oms_key():
     assert inventory_oms_key("1415YKBALCK-8XL") == "1415YKBLACK-8XL"
 
 
-def test_history_alias_coalesce_balck():
+def test_coalesce_yeal_typo_inventory():
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["7100YKYEAL-L-XL", "7100YKTEAL-L-XL"],
+            "OMS_Inventory": [120.0, 0.0],
+            "Amazon_Inventory": [0.0, 15.0],
+            "Manual_InTransit": [0.0, 0.0],
+            "Not_In_Inventory_Qty": [0.0, 0.0],
+            "Buffer_Stock": [0.0, 0.0],
+        }
+    )
+    out = coalesce_inventory_by_sku_mapping(inv, {})
+    by = out.set_index("OMS_SKU")
+    assert "7100YKYEAL-L-XL" not in by.index
+    assert float(by.loc["7100YKTEAL-L-XL", "Total_Inventory"]) == 135.0
+
+
+def test_yeal_typo_in_canonical_oms_key():
+    from backend.services.po_engine import canonical_oms_key, inventory_oms_key
+
+    assert canonical_oms_key("7100YKYEAL-L-XL", {}) == "7100YKTEAL-L-XL"
+    assert inventory_oms_key("7100YKYEAL-XXL-3XL") == "7100YKTEAL-XXL-3XL"
+
+
+def test_history_alias_coalesce_yeal():
     from backend.services.daily_inventory_history import coalesce_inventory_history_sku_aliases
 
     hist = pd.DataFrame(
         {
-            "OMS_SKU": ["1415YKBALCK-6XL", "1415YKBLACK-6XL"],
-            "Date": ["2026-07-31", "2026-07-31"],
-            "Qty": [10.0, 4.0],
+            "OMS_SKU": ["7100YKYEAL-L-XL", "7100YKTEAL-L-XL"],
+            "Date": ["2026-07-20", "2026-07-20"],
+            "Qty": [120.0, 0.0],
             "Source": ["uploaded", "uploaded"],
             "Channel": ["oms", "oms"],
         }
     )
     out = coalesce_inventory_history_sku_aliases(hist, {})
     assert len(out) == 1
-    assert str(out.iloc[0]["OMS_SKU"]) == "1415YKBLACK-6XL"
-    assert float(out.iloc[0]["Qty"]) == 14.0
+    assert str(out.iloc[0]["OMS_SKU"]) == "7100YKTEAL-L-XL"
+    assert float(out.iloc[0]["Qty"]) == 120.0
+
+
+def test_matrix_merges_yeal_teal_rows():
+    from backend.services.daily_inventory_history import inventory_history_wide_matrix
+
+    hist = pd.DataFrame(
+        {
+            "OMS_SKU": [
+                "7100YKYEAL-L-XL",
+                "7100YKTEAL-L-XL",
+                "7100YKYEAL-S-M",
+                "7100YKTEAL-S-M",
+            ],
+            "Date": ["2026-07-20", "2026-07-21", "2026-07-20", "2026-07-21"],
+            "Qty": [120.0, 130.0, 50.0, 55.0],
+            "Source": ["uploaded"] * 4,
+            "Channel": ["oms"] * 4,
+        }
+    )
+    out = inventory_history_wide_matrix(
+        hist, q="7100", limit=50, offset=0, days=30, end_date="2026-07-31", channel="combined"
+    )
+    skus = [r["sku"] for r in out["rows"]]
+    assert "7100YKYEAL-L-XL" not in skus
+    assert "7100YKTEAL-L-XL" in skus
+    assert "7100YKTEAL-S-M" in skus
+    assert len([s for s in skus if "7100" in s]) == 2

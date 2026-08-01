@@ -1,0 +1,53 @@
+name: Coalesce Inv History Aliases (prod)
+
+# Remap YEAL→TEAL / BALCK→BLACK / BOTTEL twins in daily inventory history and persist.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  coalesce:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout script
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            backend/scripts/coalesce_inv_history_aliases_prod.py
+          sparse-checkout-cone-mode: false
+
+      - name: Copy + run coalesce in backend container
+        run: |
+          set -eu
+          docker cp backend/scripts/coalesce_inv_history_aliases_prod.py \
+            progressino-backend-1:/srv/backend/scripts/coalesce_inv_history_aliases_prod.py
+          docker exec -e PYTHONPATH=/srv -w /srv progressino-backend-1 \
+            python backend/scripts/coalesce_inv_history_aliases_prod.py | tee /tmp/coalesce_inv.json
+          python3 -c "import json;d=json.load(open('/tmp/coalesce_inv.json'));assert d.get('ok');print(d);assert d.get('yeal_rows_after',0)==0,d"
+
+      - name: Probe matrix for YEAL twins
+        run: |
+          set -eu
+          cd /root/app
+          set -a; . ./.env; set +a
+          python3 - <<'PY'
+          import os, requests
+          base="http://127.0.0.1:8000"
+          s=requests.Session()
+          r=s.post(f"{base}/api/auth/login", json={"username":os.environ["AUTH_USERNAME"],"password":os.environ["AUTH_PASSWORD"]},
+                   headers={"X-Device-Id":"gha-yeal-probe"}, timeout=60)
+          r.raise_for_status()
+          m=s.get(f"{base}/api/po/daily-inventory-history/matrix",
+                  params={"q":"7100","days":30,"end_date":"2026-07-31","channel":"combined","limit":50},
+                  timeout=120)
+          m.raise_for_status()
+          rows=m.json().get("rows") or []
+          skus=[r.get("sku","") for r in rows]
+          yeal=[x for x in skus if "YEAL" in x.upper()]
+          teal=[x for x in skus if "YKTEAL" in x.upper() or "AKTEAL" in x.upper()]
+          print("skus", skus)
+          print("yeal", yeal, "teal", teal)
+          assert not yeal, yeal
+          assert teal, "expected TEAL rows for filter 7100"
+          print("YEAL_PROBE_OK")
+          PY

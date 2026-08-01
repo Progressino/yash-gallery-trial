@@ -2122,6 +2122,8 @@ _EXTRA_MKT_COLS = frozenset({"Manual_InTransit", "Not_In_Inventory_Qty"})
 _BOTTELGREEN_RE = re.compile(r"BOTTELGREEN", re.I)
 # Common warehouse transposition: …BALCK… → …BLACK… (1415YKBALCK-6XL etc.).
 _BALCK_RE = re.compile(r"BALCK", re.I)
+# Warehouse transposition: …YEAL… → …TEAL… (7100YKYEAL-* etc.).
+_YEAL_RE = re.compile(r"YEAL", re.I)
 # Legacy marketplace listing family that is the same style as 289YK345YELLOW.
 _1180_YELLOW_RE = re.compile(r"^1180YK?YELLOW-", re.I)
 
@@ -2135,6 +2137,7 @@ def _inventory_alias_oms_key(sku: object, mapping: Optional[Dict[str, str]] = No
         return ""
     key = _BOTTELGREEN_RE.sub("BOTTLEGREEN", key)
     key = _BALCK_RE.sub("BLACK", key)
+    key = _YEAL_RE.sub("TEAL", key)
     m1180 = _1180_YELLOW_RE.match(key)
     if m1180:
         key = "289YK345YELLOW-" + key.split("-", 1)[-1]

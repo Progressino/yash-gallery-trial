@@ -91,6 +91,8 @@ def canonical_oms_key(raw, sku_mapping: Optional[Dict[str, str]] = None) -> str:
 _YKN_TYPO_RE = re.compile(r"YKN(?!AVY|EON|UDE)", re.I)
 # Warehouse / marketplace transposition: BALCK → BLACK (never a real color token).
 _BALCK_TYPO_RE = re.compile(r"BALCK", re.I)
+# Warehouse transposition: YKYEAL / AKYEAL → YKTEAL / AKTEAL (7100 teal family).
+_YEAL_TYPO_RE = re.compile(r"YEAL", re.I)
 
 
 def _ykn_typo_canonical(sku: str) -> str:
@@ -101,6 +103,11 @@ def _ykn_typo_canonical(sku: str) -> str:
 def _balck_typo_canonical(sku: str) -> str:
     """1415YKBALCK-6XL → 1415YKBLACK-6XL."""
     return _BALCK_TYPO_RE.sub("BLACK", str(sku).strip().upper())
+
+
+def _yeal_typo_canonical(sku: str) -> str:
+    """7100YKYEAL-L-XL → 7100YKTEAL-L-XL (warehouse T/Y transposition)."""
+    return _YEAL_TYPO_RE.sub("TEAL", str(sku).strip().upper())
 
 
 def _strip_pl(
@@ -118,8 +125,8 @@ def _strip_pl(
     """
     raw = str(sku).strip().upper()
     stripped = _PL_RE.sub(r"\1\2", raw)
-    stripped = _balck_typo_canonical(stripped)
-    raw_fixed = _balck_typo_canonical(raw)
+    stripped = _yeal_typo_canonical(_balck_typo_canonical(stripped))
+    raw_fixed = _yeal_typo_canonical(_balck_typo_canonical(raw))
     if apply_sku_mapping:
         if stripped in mapping:
             return mapping[stripped]

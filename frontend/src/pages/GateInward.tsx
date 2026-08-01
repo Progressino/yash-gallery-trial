@@ -31,6 +31,9 @@ type ScanResult = {
 export default function GateInward() {
   const qc = useQueryClient()
   const inputRef = useRef<HTMLInputElement>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const detectingRef = useRef(false)
   const [code, setCode] = useState('')
   const [scan, setScan] = useState<ScanResult | null>(null)
   const [lines, setLines] = useState<ScanLine[]>([])
@@ -39,6 +42,9 @@ export default function GateInward() {
   const [remarks, setRemarks] = useState('')
   const [error, setError] = useState('')
   const [lastGin, setLastGin] = useState<string>('')
+  const [showCameraScanner, setShowCameraScanner] = useState(false)
+  const [scanStatus, setScanStatus] = useState('')
+  const [cameraError, setCameraError] = useState('')
 
   const { data: recent = [] } = useQuery({
     queryKey: ['gins'],
@@ -53,6 +59,7 @@ export default function GateInward() {
     const c = (raw ?? code).trim()
     if (!c) return
     setError('')
+    setCode(c)
     try {
       const { data } = await api.get<ScanResult>('/gate/scan', { params: { code: c } })
       setScan(data)
@@ -71,6 +78,79 @@ export default function GateInward() {
       setError(e?.response?.data?.detail || e?.message || 'Scan failed')
     }
   }, [code])
+
+  const closeCamera = useCallback(() => {
+    detectingRef.current = false
+    streamRef.current?.getTracks().forEach(t => t.stop())
+    streamRef.current = null
+    setShowCameraScanner(false)
+    setCameraError('')
+    setScanStatus('')
+  }, [])
+
+  const startDetecting = useCallback(() => {
+    detectingRef.current = true
+    const hasBarcodeDetector = 'BarcodeDetector' in window
+    if (!hasBarcodeDetector) {
+      setScanStatus('Live decode not supported here — type/paste the code below, or use Chrome/Edge')
+      return
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const detector = new (window as any).BarcodeDetector({
+      formats: ['qr_code', 'code_128', 'code_39', 'ean_13', 'ean_8', 'data_matrix', 'pdf417'],
+    })
+    const tick = async () => {
+      if (!detectingRef.current || !videoRef.current) return
+      try {
+        const codes = await detector.detect(videoRef.current)
+        if (codes.length > 0) {
+          const value: string = codes[0].rawValue
+          closeCamera()
+          void doScan(value)
+          return
+        }
+      } catch {
+        /* keep scanning */
+      }
+      if (detectingRef.current) requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+  }, [closeCamera, doScan])
+
+  const openCameraScanner = useCallback(async () => {
+    setCameraError('')
+    setScanStatus('Opening camera…')
+    setShowCameraScanner(true)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      })
+      streamRef.current = stream
+      setScanStatus('Point camera at PO / JO / JWO barcode')
+      const attach = () => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream
+          videoRef.current.play().catch(() => {})
+          startDetecting()
+        } else {
+          setTimeout(attach, 80)
+        }
+      }
+      attach()
+    } catch (err: unknown) {
+      const msg = (err as Error)?.message || ''
+      if (msg.includes('Permission') || msg.includes('NotAllowed')) {
+        setCameraError('Camera permission denied. Allow camera access and try again.')
+      } else if (msg.includes('NotFound') || msg.includes('Devices')) {
+        setCameraError('No camera found on this device.')
+      } else {
+        setCameraError(`Cannot open camera: ${msg || 'unknown error'}`)
+      }
+      setScanStatus('')
+    }
+  }, [startDetecting])
+
+  useEffect(() => () => { closeCamera() }, [closeCamera])
 
   const saveMut = useMutation({
     mutationFn: async () => {
@@ -129,15 +209,15 @@ export default function GateInward() {
   return (
     <div className="p-4 md:p-6 max-w-5xl mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-[#002B5B]">Gate Inward (GIN)</h1>
+        <h1 className="text-2xl font-bold text-[#002B5B]">Gate Scan (GIN)</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Scan PO / Job Order / JWO barcode — enter received qty only — save to create GIN + GRN / JO receive.
+          Scan PO / Job Order / JWO with camera or barcode wedge — enter received qty — save GIN.
         </p>
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm space-y-3">
         <label className="block text-xs font-semibold uppercase text-gray-500">Scan barcode / paste code</label>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <input
             ref={inputRef}
             value={code}
@@ -149,9 +229,17 @@ export default function GateInward() {
               }
             }}
             placeholder="PO:PO-0001  or  JO:JO-0042"
-            className="flex-1 text-lg px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#002B5B]/outline-none"
+            className="flex-1 min-w-[12rem] text-lg px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-[#002B5B]/outline-none"
             autoComplete="off"
           />
+          <button
+            type="button"
+            onClick={() => void openCameraScanner()}
+            className="px-5 py-3 rounded-lg bg-emerald-600 text-white font-semibold hover:bg-emerald-700"
+            title="Open camera barcode scanner"
+          >
+            📷 Camera
+          </button>
           <button
             type="button"
             onClick={() => void doScan()}
@@ -169,6 +257,28 @@ export default function GateInward() {
           <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>
         )}
       </div>
+
+      {showCameraScanner && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+          <div className="bg-[#0f172a] rounded-xl overflow-hidden w-full max-w-lg shadow-2xl">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+              <h3 className="text-white font-semibold text-sm">📷 Scan PO / JO / JWO barcode</h3>
+              <button type="button" onClick={closeCamera} className="text-white/80 hover:text-white text-sm px-2 py-1">
+                Close
+              </button>
+            </div>
+            <div className="relative aspect-[4/3] bg-black">
+              <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
+              <div className="absolute inset-x-8 top-1/2 -translate-y-1/2 h-24 border-2 border-emerald-400/80 rounded-lg pointer-events-none" />
+            </div>
+            <div className="px-4 py-3 space-y-1">
+              {scanStatus && <p className="text-emerald-300 text-xs">{scanStatus}</p>}
+              {cameraError && <p className="text-red-300 text-xs">{cameraError}</p>}
+              <p className="text-white/50 text-[11px]">Or type/paste the code in the field above if the camera cannot decode.</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {scan && !scan.lookup_only && (
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm space-y-4">

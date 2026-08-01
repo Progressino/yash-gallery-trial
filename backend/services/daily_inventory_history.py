@@ -66,7 +66,7 @@ def coalesce_inventory_history_sku_aliases(
     df: pd.DataFrame | None,
     mapping: dict | None = None,
 ) -> pd.DataFrame:
-    """Remap BOTTEL/BALCK/1180-style twins onto one OMS_SKU and sum qty.
+    """Remap BOTTEL/BALCK/YEAL/1180-style twins onto one OMS_SKU and sum qty.
 
     Same spelling aliases as live inventory coalesce — history previously
     skipped this path, so Combined (max) kept typo SKUs as separate rows and
@@ -2935,19 +2935,36 @@ def inventory_history_wide_matrix(
     # Fast path: no OMS/Amazon channel split — skip coalesce/max combine.
     if channel == "combined" and not split_available:
         work = work.copy()
-        work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+        # Cheap alias remap (YEAL→TEAL, BALCK→BLACK, …) so typo twins share one row.
+        try:
+            from .inventory import _inventory_alias_oms_key
+
+            work["OMS_SKU"] = work["OMS_SKU"].map(lambda s: _inventory_alias_oms_key(s, None))
+        except Exception:
+            work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
         work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
         work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0.0)
         work = work.dropna(subset=["_d"])
-        work = work[work["OMS_SKU"].str.len() > 0]
+        work = work[work["OMS_SKU"].astype(str).str.len() > 0]
         needle = (q or "").strip().upper()
         if needle:
-            work = work[work["OMS_SKU"].str.contains(needle, na=False)]
+            # Match both typed needle and its alias form (filter YEAL still finds TEAL).
+            try:
+                from .inventory import _inventory_alias_oms_key
+
+                needle_alias = _inventory_alias_oms_key(needle, None) or needle
+            except Exception:
+                needle_alias = needle
+            needles = {needle, needle_alias} - {""}
+            mask = pd.Series(False, index=work.index)
+            for n in needles:
+                mask = mask | work["OMS_SKU"].astype(str).str.contains(n, na=False)
+            work = work[mask]
         if work.empty:
             return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
 
-        # Collapse rare duplicate SKU-days with max — cheaper than full source-rank coalesce.
-        daily = work.groupby(["OMS_SKU", "_d"], as_index=False, sort=False)["Qty"].max()
+        # Sum after alias remap so YEAL+TEAL stock on the same day is kept.
+        daily = work.groupby(["OMS_SKU", "_d"], as_index=False, sort=False)["Qty"].sum()
         sku_rank = (
             daily.groupby("OMS_SKU", sort=False)["Qty"]
             .max()
@@ -3031,18 +3048,33 @@ def inventory_history_wide_matrix(
     else:
         work = trimmed
     work = work.copy()
-    work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
+    try:
+        from .inventory import _inventory_alias_oms_key
+
+        work["OMS_SKU"] = work["OMS_SKU"].map(lambda s: _inventory_alias_oms_key(s, None))
+    except Exception:
+        work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
     work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0.0)
 
     needle = (q or "").strip().upper()
     if needle:
-        work = work[work["OMS_SKU"].str.contains(needle, na=False)]
+        try:
+            from .inventory import _inventory_alias_oms_key
+
+            needle_alias = _inventory_alias_oms_key(needle, None) or needle
+        except Exception:
+            needle_alias = needle
+        needles = {needle, needle_alias} - {""}
+        mask = pd.Series(False, index=work.index)
+        for n in needles:
+            mask = mask | work["OMS_SKU"].astype(str).str.contains(n, na=False)
+        work = work[mask]
     if work.empty:
         return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
 
     sku_list = (
         work.groupby("OMS_SKU", as_index=False)["Qty"]
-        .max()
+        .sum()
         .sort_values(["Qty", "OMS_SKU"], ascending=[False, True])["OMS_SKU"]
         .astype(str)
         .tolist()
