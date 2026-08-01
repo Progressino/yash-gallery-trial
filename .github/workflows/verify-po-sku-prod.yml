@@ -1,6 +1,6 @@
 name: Verify PO + SKU map (prod)
 
-# Merge full bundled SKU map, re-coalesce Inv History, run PO calculate, assert core SKUs.
+# Merge full bundled SKU map, re-coalesce Inv History, run PO via API (no second warm load).
 
 on:
   workflow_dispatch:
@@ -22,28 +22,25 @@ jobs:
           curl -sf --connect-timeout 5 http://127.0.0.1:8000/api/health | tee /tmp/health.json
           python3 -c "import json;d=json.load(open('/tmp/health.json'));print('git',d.get('git_sha'),'warm',d.get('warm_cache'))"
 
-      - name: Sync latest code into backend container
+      - name: Sync scripts/modules into backend
         run: |
           set -eu
-          # Deploy may lag; copy critical modules + script from checkout /root/app
           APP=/root/app
-          if [ -d "$APP/backend" ]; then
-            docker cp "$APP/backend/services/sku_mapping.py" progressino-backend-1:/srv/backend/services/sku_mapping.py
-            docker cp "$APP/backend/services/inventory.py" progressino-backend-1:/srv/backend/services/inventory.py
-            docker cp "$APP/backend/services/po_engine.py" progressino-backend-1:/srv/backend/services/po_engine.py
-            docker cp "$APP/backend/services/daily_inventory_history.py" progressino-backend-1:/srv/backend/services/daily_inventory_history.py
-            docker cp "$APP/backend/data/yash_sku_mapping_master.json" progressino-backend-1:/srv/backend/data/yash_sku_mapping_master.json
-          fi
+          docker cp "$APP/backend/services/sku_mapping.py" progressino-backend-1:/srv/backend/services/sku_mapping.py
+          docker cp "$APP/backend/services/inventory.py" progressino-backend-1:/srv/backend/services/inventory.py
+          docker cp "$APP/backend/services/po_engine.py" progressino-backend-1:/srv/backend/services/po_engine.py
+          docker cp "$APP/backend/services/daily_inventory_history.py" progressino-backend-1:/srv/backend/services/daily_inventory_history.py
+          docker cp "$APP/backend/data/yash_sku_mapping_master.json" progressino-backend-1:/srv/backend/data/yash_sku_mapping_master.json
           docker cp "${GITHUB_WORKSPACE}/src/backend/scripts/verify_po_sku_full_prod.py" \
             progressino-backend-1:/srv/backend/scripts/verify_po_sku_full_prod.py
 
-      - name: Run full PO + SKU verify
+      - name: Merge SKU map + Inv History verify
         run: |
           set -eu
           docker exec -e PYTHONPATH=/srv -w /srv progressino-backend-1 \
             python backend/scripts/verify_po_sku_full_prod.py
 
-      - name: API smoke calculate enqueue
+      - name: Hydrate warm + PO calculate via API + assert SKUs
         run: |
           set -eu
           set -a
@@ -52,6 +49,7 @@ jobs:
           set +a
           python3 <<'PY'
           import os, time, requests
+
           base = "http://127.0.0.1:8000"
           s = requests.Session()
           r = s.post(
@@ -60,7 +58,13 @@ jobs:
               headers={"X-Device-Id": "gha-po-sku-verify"},
               timeout=60,
           )
+          print("login", r.status_code)
           r.raise_for_status()
+
+          h = s.post(f"{base}/api/cache/hydrate-warm", timeout=300)
+          print("hydrate", h.status_code, (h.text or "")[:200])
+          h.raise_for_status()
+
           body = {
               "period_days": 30,
               "lead_time": 45,
@@ -71,30 +75,75 @@ jobs:
               "group_by_parent": False,
               "min_denominator": 7,
               "inventory_history_channel": "combined",
-              "use_shared_cache": True,
+              "use_shared_cache": False,
               "use_ly_fallback": True,
           }
           c = s.post(f"{base}/api/po/calculate", json=body, timeout=120)
-          print("calculate", c.status_code, c.text[:300])
+          print("calculate", c.status_code, c.text[:400])
           c.raise_for_status()
           job = c.json().get("job_id")
           assert job, c.text
-          for i in range(90):
+
+          status = ""
+          for i in range(180):
               st = s.get(f"{base}/api/po/calculate/status/{job}", timeout=60)
               st.raise_for_status()
               js = st.json()
-              print("status", i, js.get("status"), js.get("progress"), js.get("message", "")[:80])
-              if js.get("status") in ("done", "error", "failed"):
+              status = str(js.get("status") or "")
+              print("status", i, status, js.get("progress"), str(js.get("message") or "")[:100])
+              if status in ("done", "completed", "success", "error", "failed"):
                   break
-              time.sleep(2)
-          res = s.get(f"{base}/api/po/calculate/result/{job}", timeout=120)
-          print("result", res.status_code, str(res.json())[:400])
+              time.sleep(3)
+          assert status in ("done", "completed", "success"), status
+
+          res = s.get(
+              f"{base}/api/po/calculate/result/{job}",
+              params={"offset": 0, "limit": 500, "compact": 0},
+              timeout=180,
+          )
+          print("result_http", res.status_code)
           res.raise_for_status()
           payload = res.json()
-          assert payload.get("ok") is not False
-          rows = payload.get("rows") or payload.get("data") or []
-          if isinstance(rows, dict):
-              rows = rows.get("rows") or []
-          print("api_po_rows", len(rows) if isinstance(rows, list) else type(rows))
-          print("API_PO_OK")
+          assert payload.get("ok") is not False, payload
+          total = int(payload.get("total") or 0)
+          print("po_total", total, "keys", sorted(payload.keys()))
+          assert total > 1000, total
+
+          all_skus = []
+          off = 0
+          while off < total:
+              page = s.get(
+                  f"{base}/api/po/calculate/result/{job}",
+                  params={"offset": off, "limit": 2000, "compact": 0},
+                  timeout=180,
+              )
+              page.raise_for_status()
+              pj = page.json()
+              rows = pj.get("rows") or []
+              if not rows and pj.get("rows_matrix") and pj.get("columns"):
+                  cols = pj["columns"]
+                  rows = [dict(zip(cols, row)) for row in pj["rows_matrix"]]
+              for r in rows:
+                  all_skus.append(str(r.get("OMS_SKU") or "").upper())
+              if not rows:
+                  break
+              off += len(rows)
+              if not pj.get("has_more"):
+                  break
+
+          balck = [x for x in all_skus if "BALCK" in x]
+          black = sorted({x for x in all_skus if x.startswith("1415YKBLACK")})
+          bottel = [x for x in all_skus if "BOTTELGREEN" in x]
+          assert "1024YKMUSTARD-4XL" in all_skus, "missing 1024YKMUSTARD-4XL"
+          assert "1415YKBLACK-6XL" in all_skus, "missing 1415YKBLACK-6XL"
+          assert not balck, balck[:10]
+          print(
+              {
+                  "scanned": len(all_skus),
+                  "balck": len(balck),
+                  "1415ykblack": black,
+                  "bottelgreen": len(bottel),
+              }
+          )
+          print("API_PO_VERIFY_OK")
           PY
