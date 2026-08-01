@@ -36,8 +36,12 @@ jobs:
             --exclude 'node_modules' \
             --exclude '__pycache__' \
             --exclude '.env' \
+            --exclude '.venv-tests' \
             --exclude 'po_raise_archive_dev' \
             "$GITHUB_WORKSPACE/" "$APP_DIR/"
+          # Never tear down containers if sync left /root/app incomplete.
+          test -f "$APP_DIR/docker-compose.prod.yml"
+          test -f "$APP_DIR/backend/main.py"
           cd "$APP_DIR"
           _SHA="$(git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD 2>/dev/null || echo deploy)"
           _BUILT="$(date -u +%Y-%m-%dT%H:%MZ)"
@@ -111,6 +115,11 @@ jobs:
             fi
           }
           COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-progressino}"
+          if [ ! -f docker-compose.prod.yml ] || [ ! -f backend/main.py ]; then
+            echo "FATAL: /root/app incomplete before rebuild — refusing to remove containers." >&2
+            ls -la /root/app | head -50 >&2 || true
+            exit 1
+          fi
           exec 200>/var/lock/yash-gallery-deploy.lock
           if ! flock -w 1800 200; then
             echo "ERROR: another deploy is still running (lock held >30m)." >&2

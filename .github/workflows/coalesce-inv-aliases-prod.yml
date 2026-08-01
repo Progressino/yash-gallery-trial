@@ -19,9 +19,19 @@ jobs:
       - name: Copy + run coalesce in backend container
         run: |
           set -eu
+          BACKEND="$(docker ps --filter name=progressino-backend --format '{{.Names}}' | head -1)"
+          if [ -z "$BACKEND" ]; then
+            BACKEND="$(docker ps --format '{{.Names}}' | grep -E 'backend' | head -1 || true)"
+          fi
+          if [ -z "$BACKEND" ]; then
+            echo "FATAL: no running backend container" >&2
+            docker ps -a --format 'table {{.Names}}\t{{.Status}}' >&2 || true
+            exit 1
+          fi
+          echo "Using backend container: $BACKEND"
           docker cp backend/scripts/coalesce_inv_history_aliases_prod.py \
-            progressino-backend-1:/srv/backend/scripts/coalesce_inv_history_aliases_prod.py
-          docker exec -e PYTHONPATH=/srv -w /srv progressino-backend-1 \
+            "$BACKEND:/srv/backend/scripts/coalesce_inv_history_aliases_prod.py"
+          docker exec -e PYTHONPATH=/srv -w /srv "$BACKEND" \
             python backend/scripts/coalesce_inv_history_aliases_prod.py | tee /tmp/coalesce_inv.json
           python3 -c "import json;d=json.load(open('/tmp/coalesce_inv.json'));assert d.get('ok');print(d);assert d.get('yeal_rows_after',0)==0,d"
 

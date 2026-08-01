@@ -12,6 +12,11 @@ jobs:
       run:
         working-directory: /root/app
     steps:
+      - name: Checkout main (for re-sync if /root/app broken)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Detect docker compose
         id: dc
         run: |
@@ -25,16 +30,40 @@ jobs:
             exit 1
           fi
 
+      - name: Re-sync /root/app if compose missing
+        run: |
+          set -eu
+          APP_DIR=/root/app
+          if [ -f "$APP_DIR/docker-compose.prod.yml" ] && [ -f "$APP_DIR/backend/main.py" ]; then
+            echo " /root/app looks intact"
+            exit 0
+          fi
+          echo "WARNING: /root/app incomplete — re-syncing from checkout"
+          mkdir -p "$APP_DIR"
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '.local-data' \
+            --exclude 'node_modules' \
+            --exclude '__pycache__' \
+            --exclude '.env' \
+            --exclude '.venv-tests' \
+            --exclude 'po_raise_archive_dev' \
+            "$GITHUB_WORKSPACE/" "$APP_DIR/"
+          test -f "$APP_DIR/docker-compose.prod.yml"
+          test -f "$APP_DIR/backend/main.py"
+
       - name: Ensure stack is up
         run: |
           set -eu
           DC="${{ steps.dc.outputs.cmd }}"
-          $DC -f docker-compose.prod.yml up -d --remove-orphans
+          COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-progressino}"
+          test -f docker-compose.prod.yml
+          $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml up -d --remove-orphans
           # Explicitly ensure the public nginx/frontend is running (port 80/443)
-          $DC -f docker-compose.prod.yml up -d frontend
-          $DC -f docker-compose.prod.yml ps
+          $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml up -d frontend
+          $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml ps
           echo '── frontend logs ──'
-          $DC -f docker-compose.prod.yml logs --tail=40 frontend || true
+          $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml logs --tail=40 frontend || true
 
       - name: Restart backend if health fails
         run: |
@@ -45,7 +74,8 @@ jobs:
             exit 0
           fi
           echo "backend unhealthy — restarting"
-          $DC -f docker-compose.prod.yml restart backend
+          COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-progressino}"
+          $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml restart backend
           for i in $(seq 1 24); do
             if curl -sf --connect-timeout 5 --max-time 10 http://127.0.0.1:8000/api/health; then
               echo ""
@@ -55,7 +85,7 @@ jobs:
             echo "waiting $i/24"
             sleep 5
           done
-          $DC -f docker-compose.prod.yml logs --tail=100 backend || true
+          $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml logs --tail=100 backend || true
           exit 1
 
       - name: Hydrate warm cache + verify public paths
@@ -73,9 +103,10 @@ jobs:
           echo "spa_http_host_probe=$ROOT_CODE"
           if ! echo "$ROOT_CODE" | grep -Eq '200|301|302|308'; then
             echo "frontend SPA not OK — recreating frontend container"
-            $DC -f docker-compose.prod.yml up -d --force-recreate frontend
+            COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-progressino}"
+            $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml up -d --force-recreate frontend
             sleep 3
-            $DC -f docker-compose.prod.yml logs --tail=50 frontend || true
+            $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml logs --tail=50 frontend || true
           fi
           python3 <<'PY'
           import json, os, sys, time

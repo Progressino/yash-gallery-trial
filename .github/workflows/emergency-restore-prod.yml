@@ -1,0 +1,127 @@
+name: Emergency restore prod stack
+
+# Re-sync full checkout to /root/app, then bring the compose stack back up.
+# Use when a failed deploy wiped containers and /root/app is incomplete.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-vps-main
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Verify workspace has compose + backend
+        run: |
+          set -eu
+          test -f "$GITHUB_WORKSPACE/docker-compose.prod.yml"
+          test -f "$GITHUB_WORKSPACE/backend/main.py"
+          ls -la "$GITHUB_WORKSPACE/docker-compose.prod.yml" "$GITHUB_WORKSPACE/backend/main.py"
+          echo "workspace_ok sha=$(git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD)"
+
+      - name: Sync checkout to /root/app (preserve .env)
+        run: |
+          set -eu
+          APP_DIR=/root/app
+          mkdir -p /root/app-data/postgres /root/app-data/finance
+          mkdir -p "$APP_DIR"
+          echo '── disk ──'
+          df -h / /root /var/lib/docker 2>/dev/null || df -h
+          # Phase 1: copy without --delete so a full disk cannot wipe then fail mid-copy
+          rsync -az \
+            --exclude '.git' \
+            --exclude '.local-data' \
+            --exclude 'node_modules' \
+            --exclude '__pycache__' \
+            --exclude '.env' \
+            --exclude '.venv-tests' \
+            --exclude 'po_raise_archive_dev' \
+            "$GITHUB_WORKSPACE/" "$APP_DIR/"
+          test -f "$APP_DIR/docker-compose.prod.yml"
+          test -f "$APP_DIR/backend/main.py"
+          # Phase 2: optional cleanup (non-fatal)
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '.local-data' \
+            --exclude 'node_modules' \
+            --exclude '__pycache__' \
+            --exclude '.env' \
+            --exclude '.venv-tests' \
+            --exclude 'po_raise_archive_dev' \
+            "$GITHUB_WORKSPACE/" "$APP_DIR/" || echo "WARN: cleanup rsync had errors (continuing)"
+          test -f "$APP_DIR/docker-compose.prod.yml"
+          test -f "$APP_DIR/backend/main.py"
+          _SHA="$(git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD)"
+          _BUILT="$(date -u +%Y-%m-%dT%H:%MZ)"
+          cd "$APP_DIR"
+          for _KV in "APP_GIT_SHA=${_SHA}" "APP_BUILT_AT=${_BUILT}"; do
+            _K="${_KV%%=*}"
+            _V="${_KV#*=}"
+            if grep -q "^${_K}=" .env 2>/dev/null; then
+              sed -i "s|^${_K}=.*|${_K}=${_V}|" .env
+            else
+              echo "${_K}=${_V}" >> .env
+            fi
+          done
+          echo "Restored SHA ${_SHA} to ${APP_DIR}"
+
+      - name: Bring stack up
+        run: |
+          set -eu
+          cd /root/app
+          if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC="docker-compose"; fi
+          COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-progressino}"
+          test -f docker-compose.prod.yml
+          $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml up -d --remove-orphans
+          $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml ps
+          for i in $(seq 1 36); do
+            if curl -sf --connect-timeout 3 --max-time 8 http://127.0.0.1:8000/api/health; then
+              echo ""
+              echo "BACKEND_UP attempt=$i"
+              exit 0
+            fi
+            echo "waiting health $i/36"
+            sleep 5
+          done
+          $DC -p "${COMPOSE_PROJECT}" -f docker-compose.prod.yml logs --tail=80 backend || true
+          exit 1
+
+      - name: Hydrate warm cache
+        run: |
+          set -eu
+          cd /root/app
+          set -a; . ./.env; set +a
+          python3 <<'PY'
+          import json, os, sys, time
+          import requests
+          base = "http://127.0.0.1:8000"
+          s = requests.Session()
+          r = s.post(
+              f"{base}/api/auth/login",
+              json={"username": os.environ["AUTH_USERNAME"], "password": os.environ["AUTH_PASSWORD"]},
+              headers={"X-Device-Id": "gha-emergency-restore"},
+              timeout=60,
+          )
+          r.raise_for_status()
+          for attempt in range(1, 8):
+              h = s.post(f"{base}/api/cache/hydrate-warm", timeout=300)
+              print("hydrate", attempt, h.status_code, (h.text or "")[:200])
+              if h.status_code < 400:
+                  break
+              time.sleep(5)
+          else:
+              sys.exit("hydrate failed")
+          health = s.get(f"{base}/api/health", timeout=30).json()
+          print("health", json.dumps({k: health.get(k) for k in ("git_sha", "warm_cache", "status")}))
+          if not health.get("warm_cache"):
+              sys.exit("warm_cache false")
+          print("EMERGENCY_RESTORE_OK")
+          PY
