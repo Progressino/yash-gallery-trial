@@ -34,6 +34,24 @@ jobs:
           docker cp "${GITHUB_WORKSPACE}/src/backend/scripts/verify_po_sku_full_prod.py" \
             progressino-backend-1:/srv/backend/scripts/verify_po_sku_full_prod.py
 
+      - name: Re-apply authoritative OMS July matrix
+        run: |
+          set -eu
+          SRC=/root/app
+          # Prefer checked-out fixtures when present on the runner checkout of main
+          if [ -f "$SRC/ops/prod-fix/inventory-matrix-oms-2026-07-source-authoritative.csv" ]; then
+            CSV="$SRC/ops/prod-fix/inventory-matrix-oms-2026-07-source-authoritative.csv"
+          else
+            echo "ERROR: missing authoritative OMS matrix CSV on /root/app" >&2
+            exit 1
+          fi
+          docker cp "$CSV" progressino-backend-1:/tmp/inventory-matrix-oms-2026-07-source-authoritative.csv
+          docker cp "$SRC/backend/scripts/apply_oms_matrix_authoritative_prod.py" \
+            progressino-backend-1:/srv/backend/scripts/apply_oms_matrix_authoritative_prod.py
+          docker exec -e PYTHONPATH=/srv -w /srv progressino-backend-1 \
+            python backend/scripts/apply_oms_matrix_authoritative_prod.py \
+            /tmp/inventory-matrix-oms-2026-07-source-authoritative.csv
+
       - name: Merge SKU map + Inv History verify
         run: |
           set -eu
