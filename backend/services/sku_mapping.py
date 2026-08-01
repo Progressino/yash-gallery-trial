@@ -79,15 +79,40 @@ def merge_sku_mapping_upload(
     return merged
 
 
+def merge_sku_mapping_layers(
+    *layers: Optional[Dict[str, str]],
+) -> Dict[str, str]:
+    """Merge mapping dicts left→right (later layers win on key conflicts)."""
+    out: Dict[str, str] = {}
+    for layer in layers:
+        if isinstance(layer, dict) and layer:
+            out.update(layer)
+    return out
+
+
 def resolve_sku_mapping_base(sess) -> Dict[str, str]:
-    """Best-effort master map before merging a supplemental upload."""
-    cur = getattr(sess, "sku_mapping", None) or {}
-    if cur:
-        return dict(cur)
+    """Best-effort master map before merging a supplemental upload.
+
+    Always starts from the bundled master so warehouse typos / marketplace
+    aliases that ship in-repo are never dropped when an older disk map exists.
+    """
+    bundled = load_bundled_sku_mapping()
     disk = load_sku_mapping_from_disk()
-    if disk:
-        return dict(disk)
-    return dict(load_bundled_sku_mapping())
+    cur = getattr(sess, "sku_mapping", None) or {}
+    return merge_sku_mapping_layers(bundled, disk, cur)
+
+
+def ensure_sku_mapping_merged_globally(sess=None) -> Dict[str, str]:
+    """Merge bundled + disk (+ session) and persist so every session sees full map."""
+    bundled = load_bundled_sku_mapping()
+    disk = load_sku_mapping_from_disk()
+    cur = getattr(sess, "sku_mapping", None) if sess is not None else None
+    merged = merge_sku_mapping_layers(bundled, disk, cur if isinstance(cur, dict) else None)
+    if merged:
+        persist_sku_mapping_globally(merged)
+        if sess is not None:
+            sess.sku_mapping = dict(merged)
+    return merged
 
 
 def persist_sku_mapping_globally(mapping: Dict[str, str]) -> None:
@@ -113,49 +138,46 @@ def persist_sku_mapping_globally(mapping: Dict[str, str]) -> None:
 
 def restore_sku_mapping_to_session(sess) -> bool:
     """
-    Fill an empty session SKU map from server caches (warm → disk → GitHub → bundled).
+    Fill / refresh session SKU map from bundled master + disk/warm overlays.
     Returns True if a map was applied.
     """
-    if getattr(sess, "sku_mapping", None):
-        return False
-
     paused = bool(getattr(sess, "pause_auto_data_restore", False))
 
+    warm: Dict[str, str] = {}
     try:
         import backend.main as _main
 
         wc = _main._warm_cache.get("sku_mapping") if isinstance(_main._warm_cache, dict) else None
         if isinstance(wc, dict) and wc:
-            sess.sku_mapping = dict(wc)
-            return True
+            warm = dict(wc)
     except Exception:
         pass
 
     disk = load_sku_mapping_from_disk()
-    if disk:
-        sess.sku_mapping = disk
-        persist_sku_mapping_globally(disk)
-        return True
-
-    if not paused:
+    gh: Dict[str, str] = {}
+    if not paused and not disk and not warm:
         try:
             from .github_cache import load_sku_mapping_from_drive
 
-            gh = load_sku_mapping_from_drive()
-            if gh:
-                sess.sku_mapping = gh
-                persist_sku_mapping_globally(gh)
-                return True
+            loaded = load_sku_mapping_from_drive()
+            if loaded:
+                gh = dict(loaded)
         except Exception:
             pass
 
-    # Bundled master map ships with the app — always safe even when pause_auto_data_restore
-    # is set after Delete all (operators still need SKU mapping to upload Tier-1 history).
     bundled = load_bundled_sku_mapping()
-    if bundled:
-        sess.sku_mapping = bundled
-        return True
-    return False
+    existing = getattr(sess, "sku_mapping", None) or {}
+    # Bundled is the base; disk/warm/github/session overlays win so operator uploads stick.
+    merged = merge_sku_mapping_layers(bundled, gh, disk, warm, existing)
+    if not merged:
+        return False
+    if existing and merged == existing:
+        return False
+    sess.sku_mapping = merged
+    # Keep disk warm-cache complete so PO/hydrate always see typo aliases.
+    if len(merged) > len(disk or {}):
+        persist_sku_mapping_globally(merged)
+    return True
 
 
 def ensure_default_sku_mapping_from_bundle(sess) -> None:

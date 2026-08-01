@@ -1,0 +1,100 @@
+name: Verify PO + SKU map (prod)
+
+# Merge full bundled SKU map, re-coalesce Inv History, run PO calculate, assert core SKUs.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          sparse-checkout: |
+            backend/scripts/verify_po_sku_full_prod.py
+          sparse-checkout-cone-mode: false
+
+      - name: Health
+        run: |
+          set -eu
+          curl -sf --connect-timeout 5 http://127.0.0.1:8000/api/health | tee /tmp/health.json
+          python3 -c "import json;d=json.load(open('/tmp/health.json'));print('git',d.get('git_sha'),'warm',d.get('warm_cache'))"
+
+      - name: Sync latest code into backend container
+        run: |
+          set -eu
+          # Deploy may lag; copy critical modules + script from checkout /root/app
+          APP=/root/app
+          if [ -d "$APP/backend" ]; then
+            docker cp "$APP/backend/services/sku_mapping.py" progressino-backend-1:/srv/backend/services/sku_mapping.py
+            docker cp "$APP/backend/services/inventory.py" progressino-backend-1:/srv/backend/services/inventory.py
+            docker cp "$APP/backend/services/po_engine.py" progressino-backend-1:/srv/backend/services/po_engine.py
+            docker cp "$APP/backend/services/daily_inventory_history.py" progressino-backend-1:/srv/backend/services/daily_inventory_history.py
+            docker cp "$APP/backend/data/yash_sku_mapping_master.json" progressino-backend-1:/srv/backend/data/yash_sku_mapping_master.json
+          fi
+          docker cp "${GITHUB_WORKSPACE}/src/backend/scripts/verify_po_sku_full_prod.py" \
+            progressino-backend-1:/srv/backend/scripts/verify_po_sku_full_prod.py
+
+      - name: Run full PO + SKU verify
+        run: |
+          set -eu
+          docker exec -e PYTHONPATH=/srv -w /srv progressino-backend-1 \
+            python backend/scripts/verify_po_sku_full_prod.py
+
+      - name: API smoke calculate enqueue
+        run: |
+          set -eu
+          set -a
+          # shellcheck disable=SC1091
+          . /root/app/.env
+          set +a
+          python3 <<'PY'
+          import os, time, requests
+          base = "http://127.0.0.1:8000"
+          s = requests.Session()
+          r = s.post(
+              f"{base}/api/auth/login",
+              json={"username": os.environ["AUTH_USERNAME"], "password": os.environ["AUTH_PASSWORD"]},
+              headers={"X-Device-Id": "gha-po-sku-verify"},
+              timeout=60,
+          )
+          r.raise_for_status()
+          body = {
+              "period_days": 30,
+              "lead_time": 45,
+              "target_days": 180,
+              "demand_basis": "Net",
+              "use_seasonality": True,
+              "seasonal_weight": 0.5,
+              "group_by_parent": False,
+              "min_denominator": 7,
+              "inventory_history_channel": "combined",
+              "use_shared_cache": True,
+              "use_ly_fallback": True,
+          }
+          c = s.post(f"{base}/api/po/calculate", json=body, timeout=120)
+          print("calculate", c.status_code, c.text[:300])
+          c.raise_for_status()
+          job = c.json().get("job_id")
+          assert job, c.text
+          for i in range(90):
+              st = s.get(f"{base}/api/po/calculate/status/{job}", timeout=60)
+              st.raise_for_status()
+              js = st.json()
+              print("status", i, js.get("status"), js.get("progress"), js.get("message", "")[:80])
+              if js.get("status") in ("done", "error", "failed"):
+                  break
+              time.sleep(2)
+          res = s.get(f"{base}/api/po/calculate/result/{job}", timeout=120)
+          print("result", res.status_code, str(res.json())[:400])
+          res.raise_for_status()
+          payload = res.json()
+          assert payload.get("ok") is not False
+          rows = payload.get("rows") or payload.get("data") or []
+          if isinstance(rows, dict):
+              rows = rows.get("rows") or []
+          print("api_po_rows", len(rows) if isinstance(rows, list) else type(rows))
+          print("API_PO_OK")
+          PY
