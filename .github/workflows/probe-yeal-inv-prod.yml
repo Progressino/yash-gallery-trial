@@ -1,0 +1,71 @@
+name: Probe YEAL Inv matrix (prod)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    steps:
+      - name: Matrix probe filter 7100 (YEAL twins)
+        run: |
+          set -eu
+          cd /root/app
+          set -a; . ./.env; set +a
+          python3 - <<'PY'
+          import os, requests, time
+          base="http://127.0.0.1:8000"
+          s=requests.Session()
+          for attempt in range(1, 4):
+              try:
+                  r=s.post(f"{base}/api/auth/login", json={"username":os.environ["AUTH_USERNAME"],"password":os.environ["AUTH_PASSWORD"]},
+                           headers={"X-Device-Id":"gha-yeal-probe2"}, timeout=60)
+                  r.raise_for_status()
+                  break
+              except Exception as e:
+                  print("login retry", attempt, e)
+                  time.sleep(3)
+          else:
+              raise SystemExit("login failed")
+          t0=time.time()
+          m=s.get(f"{base}/api/po/daily-inventory-history/matrix",
+                  params={"q":"7100","days":30,"end_date":"2026-07-31","channel":"combined","limit":50},
+                  timeout=300)
+          print("status", m.status_code, "elapsed", round(time.time()-t0,1))
+          m.raise_for_status()
+          body=m.json()
+          rows=body.get("rows") or []
+          skus=[r.get("sku","") for r in rows]
+          yeal=[x for x in skus if "YEAL" in x.upper()]
+          teal=[x for x in skus if "YKTEAL" in x.upper() or "AKTEAL" in x.upper()]
+          # Also detect duplicate exact SKUs
+          from collections import Counter
+          c=Counter(skus)
+          dups=[k for k,v in c.items() if v>1 and k]
+          print("sku_count", len(skus))
+          print("skus", skus)
+          print("yeal", yeal)
+          print("teal", teal)
+          print("exact_dups", dups)
+          assert not yeal, yeal
+          assert not dups, dups
+          assert teal, "expected TEAL rows for filter 7100"
+          print("YEAL_PROBE_OK")
+          PY
+
+      - name: Disk YEAL row count in warm parquet
+        run: |
+          set -eu
+          BACKEND="$(docker ps --filter name=progressino-backend --format '{{.Names}}' | head -1)"
+          test -n "$BACKEND"
+          docker exec -e PYTHONPATH=/srv -w /srv "$BACKEND" python3 - <<'PY'
+          import pandas as pd
+          p="/data/warm_cache/daily_inventory_history_df.parquet"
+          h=pd.read_parquet(p)
+          sku=h["OMS_SKU"].astype(str).str.upper()
+          yeal=int(sku.str.contains("YEAL", na=False).sum())
+          teal=int(sku.str.contains("YKTEAL|AKTEAL", regex=True, na=False).sum())
+          print({"path":p,"rows":len(h),"yeal_rows":yeal,"teal_rows":teal})
+          assert yeal==0, yeal
+          print("DISK_YEAL_OK")
+          PY
