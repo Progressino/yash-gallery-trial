@@ -1,0 +1,68 @@
+name: Probe Inv + SKU (prod)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    steps:
+      - name: Probe channel totals + BALCK mapping
+        run: |
+          set -eu
+          cat > /tmp/probe_inv_sku.py <<'PY'
+          import json
+          import pandas as pd
+          from backend.services.daily_inventory_history import (
+              combine_inventory_channels,
+              filter_inventory_history_channel,
+              detect_inventory_history_integrity_issues,
+          )
+          from backend.services.po_engine import canonical_oms_key
+          from backend.services.sku_mapping import load_sku_mapping_from_disk
+
+          h = pd.read_parquet("/data/warm_cache/daily_inventory_history_df.parquet")
+          print("hist rows", len(h))
+          mapping = load_sku_mapping_from_disk() or {}
+          print("sku_mapping size", len(mapping))
+          print("canonical BALCK", canonical_oms_key("1415YKBALCK-6XL", mapping))
+          print("map has BALCK", "1415YKBALCK-6XL" in mapping, mapping.get("1415YKBALCK-6XL"))
+
+          def totals(label, df):
+              if df is None or getattr(df, "empty", True):
+                  print(label, "EMPTY")
+                  return
+              df = df.copy()
+              df["Date"] = pd.to_datetime(df["Date"]).dt.normalize()
+              for d in ["2026-07-29", "2026-07-30", "2026-07-31"]:
+                  sub = df[df["Date"] == d]
+                  q = pd.to_numeric(sub["Qty"], errors="coerce").fillna(0)
+                  print(
+                      label,
+                      d,
+                      "qty",
+                      float(q.sum()),
+                      "skus",
+                      int(sub["OMS_SKU"].nunique()),
+                  )
+
+          totals("OMS", filter_inventory_history_channel(h, "oms"))
+          totals("AMZ", filter_inventory_history_channel(h, "amazon"))
+          totals("COMB", combine_inventory_channels(h))
+
+          hh = h.copy()
+          hh["OMS_SKU"] = hh["OMS_SKU"].astype(str).str.upper()
+          balck = hh[hh["OMS_SKU"].str.contains("BALCK", na=False)]
+          print("BALCK rows remaining", len(balck))
+          if len(balck):
+              print(balck["OMS_SKU"].value_counts().head(10).to_string())
+
+          iss = detect_inventory_history_integrity_issues(h)
+          print(
+              "integrity",
+              {k: iss.get(k) for k in ("ok", "spike_dates", "spike_dates_remaining", "summary")},
+          )
+          print("PROBE_OK")
+          PY
+          docker cp /tmp/probe_inv_sku.py progressino-backend-1:/tmp/probe_inv_sku.py
+          docker exec -e PYTHONPATH=/srv -w /srv progressino-backend-1 python /tmp/probe_inv_sku.py

@@ -89,11 +89,18 @@ def canonical_oms_key(raw, sku_mapping: Optional[Dict[str, str]] = None) -> str:
 # start with N after YK (YKNAVY, YKNEON, YKNUDE) — a bare ``YKN``→``YK`` rewrite
 # turned every NAVY SKU into YKAVY and broke inventory joins.
 _YKN_TYPO_RE = re.compile(r"YKN(?!AVY|EON|UDE)", re.I)
+# Warehouse / marketplace transposition: BALCK → BLACK (never a real color token).
+_BALCK_TYPO_RE = re.compile(r"BALCK", re.I)
 
 
 def _ykn_typo_canonical(sku: str) -> str:
     """1059YKNMUSTARD → 1059YKMUSTARD (marketplace typo). Leaves YKNAVY intact."""
     return _YKN_TYPO_RE.sub("YK", str(sku).strip().upper(), count=1)
+
+
+def _balck_typo_canonical(sku: str) -> str:
+    """1415YKBALCK-6XL → 1415YKBLACK-6XL."""
+    return _BALCK_TYPO_RE.sub("BLACK", str(sku).strip().upper())
 
 
 def _strip_pl(
@@ -111,9 +118,13 @@ def _strip_pl(
     """
     raw = str(sku).strip().upper()
     stripped = _PL_RE.sub(r"\1\2", raw)
+    stripped = _balck_typo_canonical(stripped)
+    raw_fixed = _balck_typo_canonical(raw)
     if apply_sku_mapping:
         if stripped in mapping:
             return mapping[stripped]
+        if raw_fixed in mapping:
+            return mapping[raw_fixed]
         if raw in mapping:
             return mapping[raw]
     fixed = _ykn_typo_canonical(stripped)

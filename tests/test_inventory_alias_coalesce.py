@@ -66,3 +66,45 @@ def test_coalesce_bottel_and_1180_inventory():
     assert float(by.loc["289YK345YELLOW-M", "Total_Inventory"]) == 51.0
     assert "5041YKBOTTELGREEN-XL" not in by.index
     assert "1180YKYELLOW-M" not in by.index
+
+
+def test_coalesce_balck_typo_inventory():
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["1415YKBALCK-6XL", "1415YKBLACK-6XL"],
+            "OMS_Inventory": [12.0, 3.0],
+            "Amazon_Inventory": [0.0, 5.0],
+            "Manual_InTransit": [0.0, 0.0],
+            "Not_In_Inventory_Qty": [0.0, 0.0],
+            "Buffer_Stock": [0.0, 0.0],
+        }
+    )
+    out = coalesce_inventory_by_sku_mapping(inv, {})
+    by = out.set_index("OMS_SKU")
+    assert "1415YKBALCK-6XL" not in by.index
+    assert float(by.loc["1415YKBLACK-6XL", "Total_Inventory"]) == 20.0
+
+
+def test_balck_typo_in_canonical_oms_key():
+    from backend.services.po_engine import canonical_oms_key, inventory_oms_key
+
+    assert canonical_oms_key("1415YKBALCK-7XL", {}) == "1415YKBLACK-7XL"
+    assert inventory_oms_key("1415YKBALCK-8XL") == "1415YKBLACK-8XL"
+
+
+def test_history_alias_coalesce_balck():
+    from backend.services.daily_inventory_history import coalesce_inventory_history_sku_aliases
+
+    hist = pd.DataFrame(
+        {
+            "OMS_SKU": ["1415YKBALCK-6XL", "1415YKBLACK-6XL"],
+            "Date": ["2026-07-31", "2026-07-31"],
+            "Qty": [10.0, 4.0],
+            "Source": ["uploaded", "uploaded"],
+            "Channel": ["oms", "oms"],
+        }
+    )
+    out = coalesce_inventory_history_sku_aliases(hist, {})
+    assert len(out) == 1
+    assert str(out.iloc[0]["OMS_SKU"]) == "1415YKBLACK-6XL"
+    assert float(out.iloc[0]["Qty"]) == 14.0

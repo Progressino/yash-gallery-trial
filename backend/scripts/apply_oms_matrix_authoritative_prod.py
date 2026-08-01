@@ -30,10 +30,13 @@ def main(argv: list[str]) -> int:
     import pandas as pd
 
     from backend.services.daily_inventory_history import (
+        coalesce_inventory_history_sku_aliases,
         merge_inventory_history_preserving_channels,
         parse_daily_inventory_history_upload,
         persist_inventory_history_authoritative,
+        repair_inventory_history_integrity,
     )
+    from backend.services.sku_mapping import load_sku_mapping_from_disk
     from backend.session import AppSession
 
     incoming = parse_daily_inventory_history_upload(
@@ -61,6 +64,12 @@ def main(argv: list[str]) -> int:
 
     merged = merge_inventory_history_preserving_channels(existing, incoming)
     print(f"Merged: {len(merged):,} rows", flush=True)
+
+    merged = coalesce_inventory_history_sku_aliases(
+        merged, load_sku_mapping_from_disk() or {}
+    )
+    merged, report = repair_inventory_history_integrity(merged, persist_report=False)
+    print(f"After alias+repair: {len(merged):,} rows actions={report.get('actions')}", flush=True)
 
     sess = AppSession()
     sess.daily_inventory_history_df = merged

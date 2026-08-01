@@ -66,7 +66,12 @@ def coalesce_inventory_history_sku_aliases(
     df: pd.DataFrame | None,
     mapping: dict | None = None,
 ) -> pd.DataFrame:
-    """Remap BOTTEL/1180-style twins onto one OMS_SKU so Combined matches separate stock."""
+    """Remap BOTTEL/BALCK/1180-style twins onto one OMS_SKU and sum qty.
+
+    Same spelling aliases as live inventory coalesce — history previously
+    skipped this path, so Combined (max) kept typo SKUs as separate rows and
+    PO mapping looked broken for those sizes.
+    """
     if df is None or getattr(df, "empty", True):
         return pd.DataFrame(columns=_STORE_COLS)
     try:
@@ -82,7 +87,23 @@ def coalesce_inventory_history_sku_aliases(
     if out.empty:
         return out.reset_index(drop=True)
     out = _ensure_source_column(_ensure_channel_column(out))
-    return _coalesce_history_rows(out)
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce").dt.normalize()
+    out["Qty"] = pd.to_numeric(out["Qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    out = out.dropna(subset=["Date", "OMS_SKU"])
+    if out.empty:
+        return pd.DataFrame(columns=_STORE_COLS)
+    out["_rank"] = out["Source"].astype(str).str.strip().str.lower().map(_SOURCE_RANK).fillna(1)
+    keys = _history_dedupe_keys(out)
+    out = out.sort_values(
+        list(keys) + ["_rank", "Qty"],
+        ascending=[True] * len(keys) + [False, False],
+    )
+    out = (
+        out.groupby(keys, as_index=False)
+        .agg(Qty=("Qty", "sum"), Source=("Source", "first"))
+        .reset_index(drop=True)
+    )
+    return drop_zero_derived_rows(out)
 
 # Memoize channel views — combine_inventory_channels copies ~600k rows and concurrent
 # Inv History tabs were stacking those temps until the 6.5–7 GB container OOM'd.
@@ -1303,6 +1324,23 @@ def repair_inventory_history_integrity(
         report["duplicates_removed"] = int(removed)
         report["actions"].append(f"coalesced_duplicates:{removed}")
         report["repaired"] = True
+
+    # Merge warehouse spelling twins (BALCK→BLACK, BOTTEL→BOTTLE, 1180→289…)
+    # before spike detection so Combined (max) is not inflated by duplicate SKUs.
+    try:
+        from .sku_mapping import load_sku_mapping_from_disk
+
+        mapping = load_sku_mapping_from_disk() or {}
+    except Exception:
+        mapping = {}
+    aliased = coalesce_inventory_history_sku_aliases(work, mapping)
+    if aliased is not None and not getattr(aliased, "empty", True):
+        if len(aliased) != len(work) or (
+            set(aliased["OMS_SKU"].astype(str)) != set(work["OMS_SKU"].astype(str))
+        ):
+            report["actions"].append("coalesced_sku_aliases")
+            report["repaired"] = True
+        work = aliased
 
     repaired_channels = repair_snapshot_channel_totals(work, variant_df)
     if repaired_channels is not None and len(repaired_channels) != len(work):
@@ -3881,6 +3919,14 @@ def persist_inventory_history_authoritative(sess, df: pd.DataFrame | None = None
     work = df if df is not None else getattr(sess, "daily_inventory_history_df", None)
     if work is None or getattr(work, "empty", True):
         return False
+    try:
+        from .sku_mapping import load_sku_mapping_from_disk
+
+        work = coalesce_inventory_history_sku_aliases(
+            work, load_sku_mapping_from_disk() or {}
+        )
+    except Exception:
+        pass
     clear_inventory_channel_view_cache()
     sess.daily_inventory_history_df = work
     cache = _warm_cache_dir()
