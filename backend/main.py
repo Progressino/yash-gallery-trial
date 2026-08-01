@@ -3087,13 +3087,12 @@ def _apply_warm_cache_if_needed(sess, warm_cache_generation: int) -> bool:
                 return True
         return False
 
-    if not getattr(sess, "sku_mapping", None):
-        try:
-            from .services.sku_mapping import restore_sku_mapping_to_session
+    try:
+        from .services.sku_mapping import ensure_sku_mapping_merged_globally
 
-            restore_sku_mapping_to_session(sess)
-        except Exception:
-            pass
+        ensure_sku_mapping_merged_globally(sess)
+    except Exception:
+        pass
     if not getattr(sess, "combo_sku_map", None):
         try:
             from .services.combo_sku_map import restore_combo_sku_map_to_session
