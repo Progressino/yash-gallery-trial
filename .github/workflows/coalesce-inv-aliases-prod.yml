@@ -9,12 +9,27 @@ jobs:
   coalesce:
     runs-on: self-hosted
     steps:
+      # Do NOT use sparse-checkout on this self-hosted runner — it sticks and
+      # poisons later deploys (rsync --delete of a sparse tree wipes /root/app).
+      - name: Clear stuck sparse-checkout (self-hosted)
+        run: |
+          set +e
+          for d in \
+            "${GITHUB_WORKSPACE}" \
+            /root/actions-runner/_work/yash-gallery-trial/yash-gallery-trial
+          do
+            [ -n "$d" ] && [ -d "$d/.git" ] || continue
+            git -C "$d" sparse-checkout disable 2>/dev/null
+            git -C "$d" config core.sparseCheckout false 2>/dev/null
+            rm -f "$d/.git/info/sparse-checkout" 2>/dev/null
+          done
+          true
+
       - name: Checkout script
         uses: actions/checkout@v4
         with:
-          sparse-checkout: |
-            backend/scripts/coalesce_inv_history_aliases_prod.py
-          sparse-checkout-cone-mode: false
+          fetch-depth: 1
+          clean: true
 
       - name: Copy + run coalesce in backend container
         run: |
@@ -29,6 +44,7 @@ jobs:
             exit 1
           fi
           echo "Using backend container: $BACKEND"
+          test -f backend/scripts/coalesce_inv_history_aliases_prod.py
           docker cp backend/scripts/coalesce_inv_history_aliases_prod.py \
             "$BACKEND:/srv/backend/scripts/coalesce_inv_history_aliases_prod.py"
           docker exec -e PYTHONPATH=/srv -w /srv "$BACKEND" \

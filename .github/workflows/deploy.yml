@@ -19,10 +19,26 @@ jobs:
   deploy:
     runs-on: self-hosted
     steps:
+      - name: Clear stuck sparse-checkout (self-hosted)
+        run: |
+          set +e
+          for d in \
+            "${GITHUB_WORKSPACE}" \
+            /root/actions-runner/_work/yash-gallery-trial/yash-gallery-trial
+          do
+            [ -n "$d" ] && [ -d "$d/.git" ] || continue
+            echo "clearing sparse in $d"
+            git -C "$d" sparse-checkout disable 2>/dev/null
+            git -C "$d" config core.sparseCheckout false 2>/dev/null
+            rm -f "$d/.git/info/sparse-checkout" 2>/dev/null
+          done
+          true
+
       - name: Checkout main
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
+          clean: true
 
       - name: Sync checkout to /root/app
         run: |
