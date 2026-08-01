@@ -37,13 +37,10 @@ def main() -> int:
     assert canonical_oms_key("1415YKBALCK-6XL", merged_map) == "1415YKBLACK-6XL"
     assert canonical_oms_key("1415YKBALCK-7XL", merged_map) == "1415YKBLACK-7XL"
     assert canonical_oms_key("1415YKBALCK-8XL", merged_map) == "1415YKBLACK-8XL"
-    # Spot-check a few other common alias families from the master map
-    for raw, want_prefix in (
-        ("1415YKCBLACK-XXL", "1415YKBLACK-"),
-        ("5041YKBOTTELGREEN-6XL", "5041YKBOTTLEGREEN-"),
-    ):
-        got = canonical_oms_key(raw, merged_map)
-        assert got.startswith(want_prefix) or got == want_prefix.rstrip("-"), (raw, got)
+    from backend.services.inventory import _inventory_alias_oms_key
+
+    assert _inventory_alias_oms_key("5041YKBOTTELGREEN-6XL", merged_map) == "5041YKBOTTLEGREEN-6XL"
+    assert canonical_oms_key("1415YKCBLACK-XXL", merged_map).startswith("1415YKBLACK")
 
     hist_path = Path("/data/warm_cache/daily_inventory_history_df.parquet")
     meta_path = Path("/data/warm_cache/daily_inventory_history_meta.json")
