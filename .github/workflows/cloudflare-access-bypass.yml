@@ -137,26 +137,39 @@ jobs:
           systemctl --no-pager -l status progressino-cf-quick.service || true
 
           URL=""
-          for _ in $(seq 1 50); do
+          for _ in $(seq 1 60); do
             sleep 1
-            URL=$(grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /var/log/progressino-cf-quick.log | tail -1 || true)
+            URL=$(grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' /var/log/progressino-cf-quick.log 2>/dev/null | tail -1 || true)
+            if [ -z "$URL" ]; then
+              URL=$(journalctl -u progressino-cf-quick -n 80 --no-pager 2>/dev/null \
+                | grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' | tail -1 || true)
+            fi
             [ -n "$URL" ] && break
           done
           if [ -z "$URL" ]; then
             echo 'Failed to obtain trycloudflare.com URL'
             tail -120 /var/log/progressino-cf-quick.log || true
+            journalctl -u progressino-cf-quick -n 80 --no-pager || true
             exit 1
           fi
           echo "$URL" | tee /root/app/CF_QUICK_TUNNEL_URL.txt
           echo "QUICK_TUNNEL_URL=$URL"
 
-          CODE=$(curl -sk -o /tmp/cf_health.json -w '%{http_code}' --connect-timeout 20 --max-time 45 \
-            "$URL/api/health" || echo 000)
+          CODE=000
+          for _ in $(seq 1 12); do
+            CODE=$(curl -sk -o /tmp/cf_health.json -w '%{http_code}' --connect-timeout 20 --max-time 45 \
+              "$URL/api/health" || true)
+            echo "cf_health_try code=$CODE"
+            [ "$CODE" = "200" ] && break
+            sleep 3
+          done
           echo "cf_health_code=$CODE"
-          head -c 400 /tmp/cf_health.json; echo
+          head -c 400 /tmp/cf_health.json 2>/dev/null; echo
           if [ "$CODE" != "200" ]; then
-            echo CF_HEALTH_FAIL
+            echo CF_HEALTH_FAIL_BUT_TUNNEL_LEFT_RUNNING
+            echo "Try login anyway: $URL/"
             tail -80 /var/log/progressino-cf-quick.log || true
+            # Do not tear down — origin may still work from client networks via CF edge.
             exit 1
           fi
           curl -skI --connect-timeout 15 --max-time 25 "$URL/" | head -15 || true
