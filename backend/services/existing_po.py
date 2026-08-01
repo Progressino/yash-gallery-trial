@@ -1889,12 +1889,28 @@ _EXISTING_PO_BREAKDOWN_COLS = (
     "PO_Pipeline_Total",
 )
 
+# Finishing-overlay columns that must survive finalize (not summed, kept via first-per-SKU).
+_FINISHING_PASSTHROUGH_COLS = (
+    "Finishing_Issued",
+    "Finishing_Received",
+    "Finishing_Balance",
+    "Finishing_Issue_No",
+    "Finishing_Iss_Date",
+    "Finishing_Receive_No",
+    "Finishing_Receive_Date",
+    "Finishing_JO_No",
+    "Finishing_JO_Date",
+    "Finishing_Status",
+)
+
 
 def finalize_existing_po_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     Canonical Existing PO — one row per SKU, summed breakdown cols, bundled band dedupe.
 
     Applied on parse, disk load, session apply, and persist so pipeline/cutting never double-count.
+    Finishing overlay columns (Finishing_Balance, Finishing_Received, etc.) are preserved via
+    first-value-per-SKU so they survive the groupby without being summed or dropped.
     """
     if df is None or getattr(df, "empty", True) or "OMS_SKU" not in df.columns:
         return pd.DataFrame(columns=["OMS_SKU", "PO_Pipeline_Total"])
@@ -1909,10 +1925,29 @@ def finalize_existing_po_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         breakdown = ["PO_Pipeline_Total"]
     for c in breakdown:
         ep[c] = pd.to_numeric(ep[c], errors="coerce").fillna(0)
-    ep = ep.groupby("OMS_SKU", as_index=False)[breakdown].sum()
+
+    # Numeric finishing cols (sum) + string finishing cols (first) survive the group.
+    finishing_num = [c for c in ("Finishing_Issued", "Finishing_Received", "Finishing_Balance") if c in ep.columns]
+    finishing_str = [c for c in _FINISHING_PASSTHROUGH_COLS if c in ep.columns and c not in finishing_num]
+
+    agg: dict = {c: "sum" for c in breakdown}
+    for c in finishing_num:
+        agg[c] = "sum"
+    for c in finishing_str:
+        agg[c] = "first"
+
+    ep = ep.groupby("OMS_SKU", as_index=False).agg(agg)
+
     for c in breakdown:
         if c in ep.columns:
             ep[c] = ep[c].clip(lower=0).astype(int)
+    for c in finishing_num:
+        if c in ep.columns:
+            ep[c] = pd.to_numeric(ep[c], errors="coerce").fillna(0).clip(lower=0).astype(int)
+    for c in finishing_str:
+        if c in ep.columns:
+            ep[c] = ep[c].fillna("").astype(str)
+
     return ep.reset_index(drop=True)
 
 

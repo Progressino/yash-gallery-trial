@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
@@ -707,10 +707,18 @@ export default function Purchase() {
   const [editJWOForm, setEditJWOForm] = useState({ processor_id: undefined as number | undefined, processor_name: '', expected_return_date: '', pr_reference: '', so_reference: '', issued_by: '', remarks: '' })
   const [editJWOLines, setEditJWOLines] = useState<{ input_material: string; input_qty: number; output_material: string; output_qty: number; process_type: string; rate: number }[]>([])
 
-  // ── NEW: GRN Auto-fill state ───────────────────────────────────────────────
+  // ── GRN Auto-fill / GIN Scanner state ────────────────────────────────────
   const [grnAutoRef, setGrnAutoRef] = useState('')
   const [grnAutoLoading, setGrnAutoLoading] = useState(false)
   const [grnAutoError, setGrnAutoError] = useState('')
+  const [ginDropdownOpen, setGinDropdownOpen] = useState(false)
+  const [showCameraScanner, setShowCameraScanner] = useState(false)
+  const [scanError, setScanError] = useState('')
+  const [scanStatus, setScanStatus] = useState('')
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const detectingRef = useRef(false)
+  const ginInputRef = useRef<HTMLInputElement>(null)
   const [auditSO, setAuditSO] = useState('')
   const [auditData, setAuditData] = useState<{ so_number: string; materials: unknown[] } | null>(null)
   const [auditLoading, setAuditLoading] = useState(false)
@@ -753,8 +761,8 @@ export default function Purchase() {
   const { data: suppliers = [] } = useQuery<Supplier[]>({ queryKey: ['suppliers'], queryFn: () => api.get('/purchase/suppliers').then(r => r.data), enabled: tab === 'suppliers' || tab === 'po' || tab === 'dashboard' || tab === 'pr' })
   const { data: processors = [] } = useQuery<Processor[]>({ queryKey: ['processors'], queryFn: () => api.get('/purchase/processors').then(r => r.data), enabled: tab === 'processors' || tab === 'jwo' || tab === 'pr' })
   const { data: prs = [] } = useQuery<PR[]>({ queryKey: ['prs', filterStatus], queryFn: () => api.get('/purchase/pr' + (filterStatus ? `?status=${filterStatus}` : '')).then(r => r.data), enabled: tab === 'pr' })
-  const { data: pos = [] } = useQuery<PO[]>({ queryKey: ['pos', filterStatus], queryFn: () => api.get('/purchase/po' + (filterStatus ? `?status=${filterStatus}` : '')).then(r => r.data), enabled: tab === 'po' })
-  const { data: jwos = [] } = useQuery<JWO[]>({ queryKey: ['jwos', filterStatus], queryFn: () => api.get('/purchase/jwo' + (filterStatus ? `?status=${filterStatus}` : '')).then(r => r.data), enabled: tab === 'jwo' })
+  const { data: pos = [] } = useQuery<PO[]>({ queryKey: ['pos', filterStatus], queryFn: () => api.get('/purchase/po' + (filterStatus ? `?status=${filterStatus}` : '')).then(r => r.data), enabled: tab === 'po' || tab === 'grn' })
+  const { data: jwos = [] } = useQuery<JWO[]>({ queryKey: ['jwos', filterStatus], queryFn: () => api.get('/purchase/jwo' + (filterStatus ? `?status=${filterStatus}` : '')).then(r => r.data), enabled: tab === 'jwo' || tab === 'grn' })
   const { data: grns = [] } = useQuery<GRN[]>({ queryKey: ['grns', filterStatus], queryFn: () => api.get('/purchase/grn' + (filterStatus ? `?status=${filterStatus}` : '')).then(r => r.data), enabled: tab === 'grn' })
   const { data: mins = [] } = useQuery<any[]>({ queryKey: ['mins'], queryFn: () => api.get('/purchase/min').then(r => r.data), enabled: tab === 'min' })
   const { data: gatePasses = [] } = useQuery<any[]>({ queryKey: ['gate-passes'], queryFn: () => api.get('/purchase/gate-pass').then(r => r.data), enabled: tab === 'gate-pass' })
@@ -982,9 +990,99 @@ export default function Purchase() {
     }
   }
 
-  // ── NEW: GRN Auto-fill from PO/JWO ────────────────────────────────────────
-  const autoFillGRNFromRef = async () => {
-    const ref = grnAutoRef.trim()
+  // ── GIN: close camera and clean up stream ────────────────────────────────
+  const closeCamera = useCallback(() => {
+    detectingRef.current = false
+    streamRef.current?.getTracks().forEach(t => t.stop())
+    streamRef.current = null
+    setShowCameraScanner(false)
+    setScanError('')
+    setScanStatus('')
+  }, [])
+
+  // ── GIN: start camera scanner ────────────────────────────────────────────
+  const openCameraScanner = useCallback(async () => {
+    setScanError('')
+    setScanStatus('Opening camera…')
+    setShowCameraScanner(true)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      })
+      streamRef.current = stream
+      setScanStatus('Point camera at barcode / QR code')
+      // attach stream to video element once modal is rendered
+      const attach = () => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream
+          videoRef.current.play().catch(() => {})
+          startDetecting()
+        } else {
+          setTimeout(attach, 80)
+        }
+      }
+      attach()
+    } catch (err: unknown) {
+      const msg = (err as Error)?.message || ''
+      if (msg.includes('Permission') || msg.includes('NotAllowed')) {
+        setScanError('Camera permission denied. Please allow camera access in your browser and try again.')
+      } else if (msg.includes('NotFound') || msg.includes('Devices')) {
+        setScanError('No camera found on this device.')
+      } else {
+        setScanError(`Cannot open camera: ${msg || 'unknown error'}`)
+      }
+      setScanStatus('')
+    }
+  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startDetecting = useCallback(() => {
+    detectingRef.current = true
+    const hasBarcodeDetector = 'BarcodeDetector' in window
+    if (!hasBarcodeDetector) {
+      setScanStatus('Barcode scanning not supported in this browser — type manually below')
+      return
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const detector = new (window as any).BarcodeDetector({
+      formats: ['qr_code', 'code_128', 'code_39', 'ean_13', 'ean_8', 'data_matrix', 'pdf417'],
+    })
+    const tick = async () => {
+      if (!detectingRef.current || !videoRef.current) return
+      try {
+        const codes = await detector.detect(videoRef.current)
+        if (codes.length > 0) {
+          const value: string = codes[0].rawValue
+          closeCamera()
+          setGrnAutoRef(value)
+          autoFillGRNFromRefValue(value)
+          return
+        }
+      } catch { /* keep scanning */ }
+      if (detectingRef.current) requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+  }, [closeCamera])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // cleanup camera on unmount
+  useEffect(() => () => { closeCamera() }, [closeCamera])
+
+  // ── GIN: dropdown suggestions ─────────────────────────────────────────────
+  const ginSuggestions = (() => {
+    const q = grnAutoRef.trim().toUpperCase()
+    if (q.length < 2) return []
+    const poMatches = pos
+      .filter(p => p.po_number?.toUpperCase().includes(q))
+      .slice(0, 5)
+      .map(p => ({ label: `${p.po_number} — ${p.supplier_name || ''}`, value: p.po_number }))
+    const jwoMatches = jwos
+      .filter(j => j.jwo_number?.toUpperCase().includes(q))
+      .slice(0, 5)
+      .map(j => ({ label: `${j.jwo_number} — ${j.processor_name || ''}`, value: j.jwo_number }))
+    return [...poMatches, ...jwoMatches].slice(0, 8)
+  })()
+
+  // ── GRN Auto-fill from PO/JWO (value passed in) ──────────────────────────
+  const autoFillGRNFromRefValue = async (ref: string) => {
     if (!ref) return
     setGrnAutoLoading(true); setGrnAutoError('')
     try {
@@ -1012,18 +1110,12 @@ export default function Purchase() {
           const bal = await api.get(`/purchase/po/${encodeURIComponent(po.po_number)}/receive-balance`)
           if (bal.data?.grn_blocked) {
             setGrnAutoError(`PO ${po.po_number} is ${bal.data.status} — GRN blocked`)
-            setGrnAutoLoading(false)
-            return
+            setGrnAutoLoading(false); return
           }
           const byCode = Object.fromEntries((bal.data.lines || []).map((bl: { material_code: string; balance_qty: number }) => [bl.material_code, bl.balance_qty]))
           lines = po.lines.map(l => {
             const accept = byCode[l.material_code] != null ? Math.max(0, byCode[l.material_code]) : l.po_qty
-            return {
-              material_code: l.material_code, material_name: l.material_name,
-              po_qty: l.po_qty,
-              received_qty: accept, accepted_qty: accept, rejected_qty: 0,
-              unit: l.unit || 'PCS', rate: l.rate, qc_status: 'Pending'
-            }
+            return { material_code: l.material_code, material_name: l.material_name, po_qty: l.po_qty, received_qty: accept, accepted_qty: accept, rejected_qty: 0, unit: l.unit || 'PCS', rate: l.rate, qc_status: 'Pending' }
           })
         } catch { /* use full PO qty fallback */ }
         setGRNLines(lines)
@@ -1032,26 +1124,19 @@ export default function Purchase() {
         setGRNForm(f => ({ ...f, grn_type: 'JWO Receipt', reference_number: jwo.jwo_number, party_name: jwo.processor_name }))
         let jLines = jwo.lines.map(l => ({
           material_code: l.output_material, material_name: l.output_material,
-          po_qty: l.output_qty,
-          received_qty: l.output_qty, accepted_qty: l.output_qty, rejected_qty: 0,
+          po_qty: l.output_qty, received_qty: l.output_qty, accepted_qty: l.output_qty, rejected_qty: 0,
           unit: l.output_unit || 'MTR', rate: l.rate, qc_status: 'Pending'
         }))
         try {
           const bal = await api.get(`/purchase/jwo/${encodeURIComponent(jwo.jwo_number)}/receive-balance`)
           if (bal.data?.grn_blocked) {
             setGrnAutoError(`JWO ${jwo.jwo_number} is ${bal.data.status} — GRN blocked`)
-            setGrnAutoLoading(false)
-            return
+            setGrnAutoLoading(false); return
           }
           const byCode = Object.fromEntries((bal.data.lines || []).map((bl: { material_code: string; balance_qty: number }) => [bl.material_code, bl.balance_qty]))
           jLines = jwo.lines.map(l => {
             const accept = byCode[l.output_material] != null ? Math.max(0, byCode[l.output_material]) : l.output_qty
-            return {
-              material_code: l.output_material, material_name: l.output_material,
-              po_qty: l.output_qty,
-              received_qty: accept, accepted_qty: accept, rejected_qty: 0,
-              unit: l.output_unit || 'MTR', rate: l.rate, qc_status: 'Pending'
-            }
+            return { material_code: l.output_material, material_name: l.output_material, po_qty: l.output_qty, received_qty: accept, accepted_qty: accept, rejected_qty: 0, unit: l.output_unit || 'MTR', rate: l.rate, qc_status: 'Pending' }
           })
         } catch { /* fallback */ }
         setGRNLines(jLines)
@@ -1060,6 +1145,8 @@ export default function Purchase() {
     } catch { setGrnAutoError('Failed to fetch document. Check the reference number.') }
     setGrnAutoLoading(false)
   }
+
+  const autoFillGRNFromRef = () => autoFillGRNFromRefValue(grnAutoRef.trim())
 
   return (
     <div className="space-y-4">
@@ -1987,12 +2074,43 @@ export default function Purchase() {
               {['Draft','Verified','Posted'].map(s => <option key={s}>{s}</option>)}
             </select>
             <div className="flex items-center gap-2">
-              {/* ── NEW: GRN Auto-fill widget ── */}
-              <div className="flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-3 py-1.5">
-                <span className="text-xs text-blue-700 font-medium whitespace-nowrap">⚡ Auto-fill from:</span>
-                <input value={grnAutoRef} onChange={e => setGrnAutoRef(e.target.value)} onKeyDown={e => e.key === 'Enter' && autoFillGRNFromRef()}
-                  placeholder="PO-0001 or JWO-0001" className="border border-blue-200 rounded px-2 py-1 text-xs w-36 bg-white" />
-                <button onClick={autoFillGRNFromRef} disabled={grnAutoLoading || !grnAutoRef.trim()}
+              {/* ── Gate Inward (GIN) scanner + autocomplete widget ── */}
+              <div className="relative flex items-center gap-2 bg-blue-50 border border-blue-200 rounded-lg px-3 py-1.5">
+                <span className="text-xs text-blue-700 font-medium whitespace-nowrap">⚡ Gate Inward:</span>
+                <div className="relative">
+                  <input
+                    ref={ginInputRef}
+                    value={grnAutoRef}
+                    onChange={e => { setGrnAutoRef(e.target.value); setGinDropdownOpen(true); setGrnAutoError('') }}
+                    onKeyDown={e => { if (e.key === 'Enter') { setGinDropdownOpen(false); autoFillGRNFromRef() } if (e.key === 'Escape') setGinDropdownOpen(false) }}
+                    onFocus={() => grnAutoRef.length >= 2 && setGinDropdownOpen(true)}
+                    onBlur={() => setTimeout(() => setGinDropdownOpen(false), 150)}
+                    placeholder="PO-0001 or JWO-0001"
+                    className="border border-blue-200 rounded px-2 py-1 text-xs w-44 bg-white"
+                  />
+                  {ginDropdownOpen && ginSuggestions.length > 0 && (
+                    <div className="absolute left-0 top-full mt-1 w-72 bg-white border border-gray-200 rounded-lg shadow-lg z-50 overflow-hidden">
+                      {ginSuggestions.map(s => (
+                        <button
+                          key={s.value}
+                          onMouseDown={e => { e.preventDefault(); setGrnAutoRef(s.value); setGinDropdownOpen(false); autoFillGRNFromRefValue(s.value) }}
+                          className="w-full text-left px-3 py-2 text-xs hover:bg-blue-50 border-b border-gray-50 last:border-0"
+                        >
+                          <span className="font-medium text-blue-700">{s.value}</span>
+                          <span className="text-gray-400 ml-1 truncate">{s.label.split('—')[1]?.trim()}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={openCameraScanner}
+                  title="Scan barcode / QR code with camera"
+                  className="px-2 py-1 bg-white border border-blue-300 text-blue-700 rounded text-xs font-medium hover:bg-blue-100 whitespace-nowrap flex items-center gap-1"
+                >
+                  📷 Scan
+                </button>
+                <button onClick={() => { setGinDropdownOpen(false); autoFillGRNFromRef() }} disabled={grnAutoLoading || !grnAutoRef.trim()}
                   className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-medium hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap">
                   {grnAutoLoading ? '…' : 'Load'}
                 </button>
@@ -2001,6 +2119,53 @@ export default function Purchase() {
                 className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">+ New GRN</button>
             </div>
           </div>
+
+          {/* ── Camera Scanner Modal ── */}
+          {showCameraScanner && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={e => { if (e.target === e.currentTarget) closeCamera() }}>
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-3 border-b bg-[#002B5B]">
+                  <h3 className="text-white font-semibold text-sm">📷 Scan PO / JWO Barcode</h3>
+                  <button onClick={closeCamera} className="text-white/80 hover:text-white text-lg leading-none">✕</button>
+                </div>
+                <div className="p-4 space-y-3">
+                  <div className="relative bg-black rounded-xl overflow-hidden" style={{ aspectRatio: '4/3' }}>
+                    <video ref={videoRef} className="w-full h-full object-cover" playsInline muted />
+                    {/* viewfinder overlay */}
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                      <div className="w-48 h-32 border-2 border-white/70 rounded-lg relative">
+                        <div className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-blue-400 rounded-tl" />
+                        <div className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-blue-400 rounded-tr" />
+                        <div className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-blue-400 rounded-bl" />
+                        <div className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-blue-400 rounded-br" />
+                        <div className="absolute left-0 right-0 h-0.5 bg-red-400/70 top-1/2 animate-pulse" />
+                      </div>
+                    </div>
+                  </div>
+                  {scanStatus && !scanError && <p className="text-xs text-center text-gray-500">{scanStatus}</p>}
+                  {scanError && <p className="text-xs text-center text-red-600 bg-red-50 px-3 py-2 rounded-lg">⚠️ {scanError}</p>}
+                  <div className="border-t pt-3">
+                    <p className="text-xs text-gray-400 mb-2 text-center">Or type manually:</p>
+                    <div className="flex gap-2">
+                      <input
+                        value={grnAutoRef}
+                        onChange={e => setGrnAutoRef(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') { closeCamera(); autoFillGRNFromRef() } }}
+                        placeholder="PO-0001 or JWO-0001"
+                        className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm"
+                        autoFocus
+                      />
+                      <button
+                        onClick={() => { closeCamera(); autoFillGRNFromRef() }}
+                        disabled={!grnAutoRef.trim()}
+                        className="px-3 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50"
+                      >Load</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {grnAutoError && <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">⚠️ {grnAutoError}</p>}
 

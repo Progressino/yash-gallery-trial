@@ -604,7 +604,7 @@ export default function SKUDeepDive() {
             <KPICard label="Returns"        value={fmt(s.returns)}   sub="units returned" />
             <KPICard
               label="Return Rate"
-              value={`${s.return_rate}%`}
+              value={`${(+s.return_rate).toFixed(1)}%`}
               sub="of shipped"
               color={s.return_rate > 20 ? 'text-red-600' : s.return_rate > 10 ? 'text-amber-600' : 'text-green-600'}
             />
@@ -652,7 +652,7 @@ export default function SKUDeepDive() {
                           <div key={p.platform}>
                             <div className="flex items-center justify-between mb-1 text-xs">
                               <span className="font-medium text-gray-700">{p.platform}</span>
-                              <span className="text-gray-500">{fmt(p.shipped)} units &nbsp;·&nbsp; {p.return_rate}% returns</span>
+                              <span className="text-gray-500">{fmt(p.shipped)} units &nbsp;·&nbsp; {(+p.return_rate).toFixed(1)}% returns</span>
                             </div>
                             <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                               <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: color }} />
