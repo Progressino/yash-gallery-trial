@@ -1309,13 +1309,31 @@ def issue_fabric(joid: int, data: dict):
     conn.close()
     # Deduct from grey.db AFTER closing production.db
     grey_db = os.environ.get("GREY_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "grey.db"))
+    fabric_code = (data.get("fabric_code") or "").strip()
     try:
         gc = sqlite3.connect(grey_db)
         gc.execute("UPDATE printed_fabric_checked_stock SET available_qty = MAX(0, available_qty - ?) WHERE fabric_code=?",
-                   (issued, data.get('fabric_code','')))
+                   (issued, fabric_code))
         gc.commit()
         gc.close()
-    except: pass
+    except Exception:
+        pass
+
+    # Stage 5: lock printed fabric allocation — reallocation forbidden after cutting issue
+    if fabric_code and issued > 0:
+        try:
+            from ..services.fabric_allocation_engine import lock_printed_on_cutting_issue
+
+            lock_printed_on_cutting_issue(
+                jo_id=joid,
+                fabric_code=fabric_code,
+                so_number=(jo.get("so_number") or data.get("so_number") or "").strip(),
+                sku=(jo.get("sku") or data.get("sku") or "").strip(),
+                issued_qty=issued,
+                user_name=(data.get("issued_by") or "").strip(),
+            )
+        except Exception:
+            pass
 
 
 def return_fabric(joid: int, data: dict):

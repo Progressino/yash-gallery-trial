@@ -18,6 +18,10 @@ _DB = os.environ.get("HRM_DB_PATH", _default_db_path())
 TASK_LOG_STATUSES = frozenset({"Done", "Partial", "Missed", "Blocked", "Leave", "N/A"})
 NEUTRAL_TASK_STATUSES = frozenset({"Leave", "N/A"})
 
+# HR issue lifecycle (Resolved legacy maps to Resolve)
+ISSUE_STATUSES = frozenset({"Open", "Resolve", "Hold", "Cancel"})
+ISSUE_STATUS_ALIASES = {"Resolved": "Resolve", "Closed": "Resolve", "Cancelled": "Cancel"}
+
 
 def _connect():
     conn = sqlite3.connect(_DB)
@@ -101,6 +105,62 @@ def init_db():
         created_at          TEXT DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS issue_history (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id        INTEGER NOT NULL REFERENCES issue_logs(id),
+        action          TEXT NOT NULL,
+        field_name      TEXT DEFAULT '',
+        previous_value  TEXT DEFAULT '',
+        new_value       TEXT DEFAULT '',
+        user_id         INTEGER,
+        user_name       TEXT DEFAULT '',
+        created_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS issue_comments (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id        INTEGER NOT NULL REFERENCES issue_logs(id),
+        comment_text    TEXT NOT NULL,
+        user_id         INTEGER,
+        user_name       TEXT DEFAULT '',
+        created_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS issue_attachments (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id        INTEGER NOT NULL REFERENCES issue_logs(id),
+        file_name       TEXT NOT NULL,
+        file_url        TEXT DEFAULT '',
+        content_type    TEXT DEFAULT '',
+        file_size       INTEGER DEFAULT 0,
+        uploaded_by     TEXT DEFAULT '',
+        uploaded_by_user_id INTEGER,
+        created_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS issue_voice_transcriptions (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id        INTEGER,
+        target_field    TEXT DEFAULT 'description',
+        transcript      TEXT NOT NULL,
+        status          TEXT DEFAULT 'success',
+        error_message   TEXT DEFAULT '',
+        user_id         INTEGER,
+        user_name       TEXT DEFAULT '',
+        created_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS issue_notifications (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        issue_id        INTEGER,
+        event_type      TEXT NOT NULL,
+        recipient_user_id INTEGER,
+        message         TEXT DEFAULT '',
+        channel         TEXT DEFAULT 'in_app',
+        is_read         INTEGER DEFAULT 0,
+        created_at      TEXT DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS one_time_tasks (
         id                  INTEGER PRIMARY KEY AUTOINCREMENT,
         employee_id         INTEGER NOT NULL REFERENCES employees(id),
@@ -126,15 +186,39 @@ def init_db():
     for sql in (
         "ALTER TABLE task_logs ADD COLUMN blocker_employee_id INTEGER REFERENCES employees(id)",
         "ALTER TABLE task_logs ADD COLUMN blocker_reason TEXT DEFAULT ''",
+        "ALTER TABLE issue_logs ADD COLUMN recorded_by_user_id INTEGER",
+        "ALTER TABLE issue_logs ADD COLUMN subject_user_id INTEGER",
+        "ALTER TABLE issue_logs ADD COLUMN caused_by_user_id INTEGER",
+        "ALTER TABLE issue_logs ADD COLUMN subject_user_name TEXT DEFAULT ''",
+        "ALTER TABLE issue_logs ADD COLUMN caused_by_user_name TEXT DEFAULT ''",
+        "ALTER TABLE issue_logs ADD COLUMN updated_at TEXT DEFAULT ''",
+        "ALTER TABLE issue_logs ADD COLUMN designation TEXT DEFAULT ''",
     ):
         try:
             conn.execute(sql)
         except sqlite3.OperationalError:
             pass
 
+    # Lifecycle rename: Resolved → Resolve (keep legacy display mapping)
+    try:
+        conn.execute("UPDATE issue_logs SET status='Resolve' WHERE status='Resolved'")
+    except sqlite3.OperationalError:
+        pass
+
     conn.execute(
         "UPDATE one_time_tasks SET status='Done' WHERE status='Completed'"
     )
+    for idx_sql in (
+        "CREATE INDEX IF NOT EXISTS idx_issue_logs_status ON issue_logs(status)",
+        "CREATE INDEX IF NOT EXISTS idx_issue_logs_emp ON issue_logs(employee_id)",
+        "CREATE INDEX IF NOT EXISTS idx_issue_logs_date ON issue_logs(issue_date)",
+        "CREATE INDEX IF NOT EXISTS idx_issue_history_issue ON issue_history(issue_id, id)",
+        "CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id)",
+    ):
+        try:
+            conn.execute(idx_sql)
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
     conn.close()
 
@@ -605,10 +689,78 @@ def get_task_logs(department_id=None, employee_id=None, from_date=None, to_date=
     return [dict(r) for r in rows]
 
 
-def list_issues(employee_id=None, department_id=None, from_date=None, to_date=None):
+def _now() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _normalize_issue_status(status: str | None) -> str:
+    s = (status or "Open").strip()
+    s = ISSUE_STATUS_ALIASES.get(s, s)
+    if s not in ISSUE_STATUSES:
+        raise ValueError(f"Invalid status '{status}'. Allowed: {', '.join(sorted(ISSUE_STATUSES))}")
+    return s
+
+
+def _append_issue_history(
+    conn: sqlite3.Connection,
+    issue_id: int,
+    *,
+    action: str,
+    field_name: str = "",
+    previous_value: str = "",
+    new_value: str = "",
+    user_id: int | None = None,
+    user_name: str = "",
+) -> None:
+    conn.execute(
+        """INSERT INTO issue_history(
+            issue_id, action, field_name, previous_value, new_value, user_id, user_name, created_at
+        ) VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            issue_id,
+            action,
+            field_name or "",
+            previous_value if previous_value is not None else "",
+            new_value if new_value is not None else "",
+            user_id,
+            user_name or "",
+            _now(),
+        ),
+    )
+
+
+def _notify_issue(
+    conn: sqlite3.Connection,
+    issue_id: int | None,
+    event_type: str,
+    message: str,
+    recipient_user_id: int | None = None,
+) -> None:
+    conn.execute(
+        """INSERT INTO issue_notifications(issue_id, event_type, recipient_user_id, message, channel, is_read, created_at)
+           VALUES (?,?,?,?,?,?,?)""",
+        (issue_id, event_type, recipient_user_id, message, "in_app", 0, _now()),
+    )
+
+
+def list_issues(
+    employee_id=None,
+    department_id=None,
+    from_date=None,
+    to_date=None,
+    *,
+    status: str | None = None,
+    caused_by_employee_id: int | None = None,
+    caused_by_user_id: int | None = None,
+    recorded_by_user_id: int | None = None,
+    recorded_by: str | None = None,
+    subject_user_id: int | None = None,
+    designation: str | None = None,
+    q: str | None = None,
+):
     conn = _connect()
     conditions = []
-    params = []
+    params: list = []
     if employee_id:
         conditions.append("il.employee_id=?")
         params.append(employee_id)
@@ -621,11 +773,51 @@ def list_issues(employee_id=None, department_id=None, from_date=None, to_date=No
     if to_date:
         conditions.append("il.issue_date <= ?")
         params.append(to_date)
+    if status:
+        st = _normalize_issue_status(status) if status not in ("", None) else None
+        if st:
+            conditions.append("il.status=?")
+            params.append(st)
+    if caused_by_employee_id:
+        conditions.append("il.caused_by_employee_id=?")
+        params.append(caused_by_employee_id)
+    if caused_by_user_id:
+        conditions.append("il.caused_by_user_id=?")
+        params.append(caused_by_user_id)
+    if recorded_by_user_id:
+        conditions.append("il.recorded_by_user_id=?")
+        params.append(recorded_by_user_id)
+    if recorded_by:
+        conditions.append("LOWER(il.recorded_by) LIKE ?")
+        params.append(f"%{recorded_by.strip().lower()}%")
+    if subject_user_id:
+        conditions.append("il.subject_user_id=?")
+        params.append(subject_user_id)
+    if designation:
+        conditions.append(
+            "(LOWER(COALESCE(il.designation,'')) LIKE ? OR LOWER(COALESCE(e.designation,'')) LIKE ?)"
+        )
+        d = f"%{designation.strip().lower()}%"
+        params.extend([d, d])
+    if q and str(q).strip():
+        like = f"%{str(q).strip().lower()}%"
+        conditions.append(
+            """(
+            LOWER(e.name) LIKE ? OR LOWER(il.title) LIKE ? OR LOWER(COALESCE(il.description,'')) LIKE ?
+            OR LOWER(COALESCE(il.recorded_by,'')) LIKE ? OR LOWER(COALESCE(il.subject_user_name,'')) LIKE ?
+            OR LOWER(COALESCE(il.caused_by_user_name,'')) LIKE ? OR LOWER(COALESCE(e.emp_code,'')) LIKE ?
+            OR LOWER(COALESCE(ce.name,'')) LIKE ?
+            )"""
+        )
+        params.extend([like] * 8)
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     rows = conn.execute(
         f"""
         SELECT il.*,
-               e.name as employee_name, d.name as department_name,
+               e.name as employee_name, e.emp_code as employee_code,
+               e.designation as employee_designation, e.email as employee_email,
+               e.phone as employee_phone,
+               d.name as department_name,
                ce.name as caused_by_name, cd.name as caused_by_dept_name
         FROM issue_logs il
         JOIN employees e ON e.id=il.employee_id
@@ -633,15 +825,49 @@ def list_issues(employee_id=None, department_id=None, from_date=None, to_date=No
         LEFT JOIN employees ce ON ce.id=il.caused_by_employee_id
         LEFT JOIN departments cd ON cd.id=il.caused_by_dept_id
         {where}
-        ORDER BY il.issue_date DESC
+        ORDER BY COALESCE(NULLIF(il.updated_at,''), il.created_at) DESC, il.id DESC
     """,
         params,
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        # Display helpers: prefer linked ERP user names when set
+        d["display_employee"] = (d.get("subject_user_name") or d.get("employee_name") or "").strip()
+        d["display_caused_by"] = (d.get("caused_by_user_name") or d.get("caused_by_name") or "").strip()
+        d["display_recorded_by"] = (d.get("recorded_by") or "").strip()
+        emp_disp = d["display_employee"].lower()
+        rec_disp = d["display_recorded_by"].lower()
+        d["show_recorded_by"] = bool(rec_disp and emp_disp and rec_disp != emp_disp)
+        # Normalize legacy status for clients
+        if d.get("status") == "Resolved":
+            d["status"] = "Resolve"
+        out.append(d)
+    return out
 
 
-def create_issue(data: dict):
+def get_issue(issue_id: int) -> dict | None:
+    rows = list_issues()
+    for r in rows:
+        if int(r["id"]) == int(issue_id):
+            return r
+    conn = _connect()
+    row = conn.execute(
+        """SELECT il.*, e.name as employee_name, d.name as department_name,
+                  ce.name as caused_by_name
+           FROM issue_logs il
+           JOIN employees e ON e.id=il.employee_id
+           LEFT JOIN departments d ON d.id=il.department_id
+           LEFT JOIN employees ce ON ce.id=il.caused_by_employee_id
+           WHERE il.id=?""",
+        (issue_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def create_issue(data: dict) -> int:
     conn = _connect()
     dept_id = data.get("department_id")
     if not dept_id and data.get("employee_id"):
@@ -650,28 +876,70 @@ def create_issue(data: dict):
         ).fetchone()
         if row:
             dept_id = row["department_id"]
-    conn.execute(
+    title = (data.get("title") or "").strip()
+    if not title:
+        conn.close()
+        raise ValueError("title is required")
+    if not data.get("employee_id"):
+        conn.close()
+        raise ValueError("employee is required")
+    status = _normalize_issue_status(data.get("status") or "Open")
+    # recorded_by must come from auth layer — store what is provided but never allow override later
+    recorded_by = (data.get("recorded_by") or "").strip()
+    recorded_by_user_id = data.get("recorded_by_user_id")
+    now = _now()
+    emp = conn.execute(
+        "SELECT name, designation FROM employees WHERE id=?", (data["employee_id"],)
+    ).fetchone()
+    designation = (data.get("designation") or (emp["designation"] if emp else "") or "").strip()
+    cur = conn.execute(
         """INSERT INTO issue_logs(
         employee_id, department_id, issue_date, issue_type, severity,
-        title, description, recorded_by,
-        caused_by_employee_id, caused_by_dept_id, status)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        title, description, recorded_by, recorded_by_user_id,
+        subject_user_id, subject_user_name, caused_by_user_id, caused_by_user_name,
+        caused_by_employee_id, caused_by_dept_id, status, designation, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             data["employee_id"],
             dept_id,
             data.get("issue_date") or date.today().isoformat(),
             data.get("issue_type", "General"),
             data.get("severity", "Minor"),
-            data["title"],
-            data.get("description", ""),
-            data.get("recorded_by", ""),
+            title,
+            data.get("description", "") or "",
+            recorded_by,
+            recorded_by_user_id,
+            data.get("subject_user_id"),
+            (data.get("subject_user_name") or "").strip(),
+            data.get("caused_by_user_id"),
+            (data.get("caused_by_user_name") or "").strip(),
             data.get("caused_by_employee_id"),
             data.get("caused_by_dept_id"),
-            "Open",
+            status,
+            designation,
+            now,
         ),
+    )
+    issue_id = int(cur.lastrowid)
+    _append_issue_history(
+        conn,
+        issue_id,
+        action="Issue Created",
+        field_name="status",
+        new_value=status,
+        user_id=recorded_by_user_id,
+        user_name=recorded_by,
+    )
+    _notify_issue(
+        conn,
+        issue_id,
+        "created",
+        f"New issue recorded: {title}",
+        recipient_user_id=data.get("subject_user_id"),
     )
     conn.commit()
     conn.close()
+    return issue_id
 
 
 def get_issue_employee_id(issue_id: int) -> int | None:
@@ -681,14 +949,339 @@ def get_issue_employee_id(issue_id: int) -> int | None:
     return int(row["employee_id"]) if row else None
 
 
-def resolve_issue(issue_id: int, resolution: str):
+def get_issue_raw(issue_id: int) -> dict | None:
     conn = _connect()
-    conn.execute(
-        "UPDATE issue_logs SET status='Resolved', resolution=? WHERE id=?",
-        (resolution, issue_id),
+    row = conn.execute("SELECT * FROM issue_logs WHERE id=?", (issue_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def resolve_issue(issue_id: int, resolution: str, *, user_id: int | None = None, user_name: str = ""):
+    """Backward-compatible resolve → status Resolve."""
+    return update_issue_status(
+        issue_id,
+        "Resolve",
+        resolution=resolution,
+        user_id=user_id,
+        user_name=user_name,
+    )
+
+
+def update_issue_status(
+    issue_id: int,
+    status: str,
+    *,
+    resolution: str = "",
+    user_id: int | None = None,
+    user_name: str = "",
+) -> dict:
+    status = _normalize_issue_status(status)
+    conn = _connect()
+    row = conn.execute("SELECT * FROM issue_logs WHERE id=?", (issue_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("Issue not found")
+    old = dict(row)
+    old_status = old.get("status") or ""
+    if old_status == "Resolved":
+        old_status = "Resolve"
+    sets = ["status=?", "updated_at=?"]
+    params: list = [status, _now()]
+    if resolution:
+        sets.append("resolution=?")
+        params.append(resolution)
+    params.append(issue_id)
+    conn.execute(f"UPDATE issue_logs SET {', '.join(sets)} WHERE id=?", params)
+    _append_issue_history(
+        conn,
+        issue_id,
+        action="Status Changed",
+        field_name="status",
+        previous_value=old_status,
+        new_value=status,
+        user_id=user_id,
+        user_name=user_name,
+    )
+    _notify_issue(
+        conn,
+        issue_id,
+        f"status_{status.lower()}",
+        f"Issue #{issue_id} status → {status}",
+        recipient_user_id=old.get("subject_user_id") or old.get("recorded_by_user_id"),
     )
     conn.commit()
     conn.close()
+    return {"ok": True, "id": issue_id, "status": status}
+
+
+def update_issue(
+    issue_id: int,
+    data: dict,
+    *,
+    user_id: int | None = None,
+    user_name: str = "",
+) -> dict:
+    """Edit mutable fields only — never recorded_by / created_at / id."""
+    # recorded_by, created_at, id must never be editable
+    forbidden = {"recorded_by", "recorded_by_user_id", "created_at", "id"}
+    data = {k: v for k, v in (data or {}).items() if k not in forbidden and v is not None}
+
+    conn = _connect()
+    row = conn.execute("SELECT * FROM issue_logs WHERE id=?", (issue_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("Issue not found")
+    old = dict(row)
+
+    field_map = {
+        "title": "title",
+        "description": "description",
+        "employee_id": "employee_id",
+        "department_id": "department_id",
+        "issue_type": "issue_type",
+        "severity": "severity",
+        "caused_by_employee_id": "caused_by_employee_id",
+        "caused_by_dept_id": "caused_by_dept_id",
+        "caused_by_user_id": "caused_by_user_id",
+        "caused_by_user_name": "caused_by_user_name",
+        "subject_user_id": "subject_user_id",
+        "subject_user_name": "subject_user_name",
+        "issue_date": "issue_date",
+        "designation": "designation",
+        "resolution": "resolution",
+    }
+    updates = []
+    params: list = []
+    changes: list[tuple[str, str, str, str]] = []  # action, field, old, new
+
+    if "status" in data and data["status"] is not None:
+        new_st = _normalize_issue_status(data["status"])
+        old_st = ISSUE_STATUS_ALIASES.get(old.get("status") or "", old.get("status") or "")
+        if new_st != old_st:
+            updates.append("status=?")
+            params.append(new_st)
+            changes.append(("Status Changed", "status", old_st, new_st))
+
+    for src, col in field_map.items():
+        if src not in data or data[src] is None:
+            continue
+        new_val = data[src]
+        old_val = old.get(col)
+        if str(new_val if new_val is not None else "") == str(old_val if old_val is not None else ""):
+            continue
+        updates.append(f"{col}=?")
+        params.append(new_val)
+        action = "Issue Updated"
+        if col == "employee_id":
+            action = "Employee Changed"
+        elif col in ("caused_by_employee_id", "caused_by_user_id", "caused_by_user_name"):
+            action = "Caused By Changed"
+        changes.append((action, col, str(old_val if old_val is not None else ""), str(new_val if new_val is not None else "")))
+
+    if "employee_id" in data and data["employee_id"] and not data.get("department_id"):
+        er = conn.execute(
+            "SELECT department_id FROM employees WHERE id=?", (data["employee_id"],)
+        ).fetchone()
+        if er and er["department_id"] != old.get("department_id"):
+            updates.append("department_id=?")
+            params.append(er["department_id"])
+            changes.append(
+                (
+                    "Issue Updated",
+                    "department_id",
+                    str(old.get("department_id") or ""),
+                    str(er["department_id"] or ""),
+                )
+            )
+
+    if not updates:
+        conn.close()
+        return {"ok": True, "id": issue_id, "changed": False}
+
+    updates.append("updated_at=?")
+    params.append(_now())
+    params.append(issue_id)
+    conn.execute(f"UPDATE issue_logs SET {', '.join(updates)} WHERE id=?", params)
+    for action, field, prev, new in changes:
+        _append_issue_history(
+            conn,
+            issue_id,
+            action=action,
+            field_name=field,
+            previous_value=prev,
+            new_value=new,
+            user_id=user_id,
+            user_name=user_name,
+        )
+    _notify_issue(
+        conn,
+        issue_id,
+        "updated",
+        f"Issue #{issue_id} updated",
+        recipient_user_id=old.get("subject_user_id"),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": issue_id, "changed": True, "changes": len(changes)}
+
+
+def add_issue_comment(
+    issue_id: int,
+    comment_text: str,
+    *,
+    user_id: int | None = None,
+    user_name: str = "",
+) -> int:
+    text = (comment_text or "").strip()
+    if not text:
+        raise ValueError("comment is required")
+    conn = _connect()
+    if not conn.execute("SELECT id FROM issue_logs WHERE id=?", (issue_id,)).fetchone():
+        conn.close()
+        raise ValueError("Issue not found")
+    cur = conn.execute(
+        """INSERT INTO issue_comments(issue_id, comment_text, user_id, user_name, created_at)
+           VALUES (?,?,?,?,?)""",
+        (issue_id, text, user_id, user_name, _now()),
+    )
+    cid = int(cur.lastrowid)
+    _append_issue_history(
+        conn,
+        issue_id,
+        action="Comments Added",
+        field_name="comment",
+        new_value=text[:500],
+        user_id=user_id,
+        user_name=user_name,
+    )
+    _notify_issue(conn, issue_id, "comment", f"Comment on issue #{issue_id}", recipient_user_id=None)
+    conn.execute("UPDATE issue_logs SET updated_at=? WHERE id=?", (_now(), issue_id))
+    conn.commit()
+    conn.close()
+    return cid
+
+
+def list_issue_comments(issue_id: int) -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM issue_comments WHERE issue_id=? ORDER BY id ASC", (issue_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_issue_attachment(
+    issue_id: int,
+    data: dict,
+    *,
+    user_id: int | None = None,
+    user_name: str = "",
+) -> int:
+    file_name = (data.get("file_name") or "").strip()
+    if not file_name:
+        raise ValueError("file_name is required")
+    conn = _connect()
+    if not conn.execute("SELECT id FROM issue_logs WHERE id=?", (issue_id,)).fetchone():
+        conn.close()
+        raise ValueError("Issue not found")
+    cur = conn.execute(
+        """INSERT INTO issue_attachments(
+            issue_id, file_name, file_url, content_type, file_size,
+            uploaded_by, uploaded_by_user_id, created_at
+        ) VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            issue_id,
+            file_name,
+            data.get("file_url") or "",
+            data.get("content_type") or "",
+            int(data.get("file_size") or 0),
+            user_name,
+            user_id,
+            _now(),
+        ),
+    )
+    aid = int(cur.lastrowid)
+    _append_issue_history(
+        conn,
+        issue_id,
+        action="Attachments Added",
+        field_name="attachment",
+        new_value=file_name,
+        user_id=user_id,
+        user_name=user_name,
+    )
+    conn.execute("UPDATE issue_logs SET updated_at=? WHERE id=?", (_now(), issue_id))
+    conn.commit()
+    conn.close()
+    return aid
+
+
+def list_issue_attachments(issue_id: int) -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM issue_attachments WHERE issue_id=? ORDER BY id DESC", (issue_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_issue_history(issue_id: int) -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM issue_history WHERE issue_id=? ORDER BY id ASC", (issue_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def log_voice_transcription(data: dict) -> int:
+    conn = _connect()
+    cur = conn.execute(
+        """INSERT INTO issue_voice_transcriptions(
+            issue_id, target_field, transcript, status, error_message, user_id, user_name, created_at
+        ) VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            data.get("issue_id"),
+            data.get("target_field") or "description",
+            data.get("transcript") or "",
+            data.get("status") or "success",
+            data.get("error_message") or "",
+            data.get("user_id"),
+            data.get("user_name") or "",
+            _now(),
+        ),
+    )
+    tid = int(cur.lastrowid)
+    if data.get("issue_id") and (data.get("status") or "success") == "success":
+        _append_issue_history(
+            conn,
+            int(data["issue_id"]),
+            action="Voice Transcription Created",
+            field_name=data.get("target_field") or "description",
+            new_value=(data.get("transcript") or "")[:500],
+            user_id=data.get("user_id"),
+            user_name=data.get("user_name") or "",
+        )
+    conn.commit()
+    conn.close()
+    return tid
+
+
+def list_issue_notifications(*, limit: int = 50, unread_only: bool = False) -> list[dict]:
+    conn = _connect()
+    q = "SELECT * FROM issue_notifications WHERE 1=1"
+    if unread_only:
+        q += " AND is_read=0"
+    q += " ORDER BY id DESC LIMIT ?"
+    rows = conn.execute(q, (int(limit),)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_issue(issue_id: int, *, user_id: int | None = None, user_name: str = "") -> bool:
+    """Soft-cancel via Cancel status rather than hard delete (audit preserved)."""
+    update_issue_status(issue_id, "Cancel", user_id=user_id, user_name=user_name)
+    return True
 
 
 def get_hod_dashboard(

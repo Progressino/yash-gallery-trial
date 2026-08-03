@@ -7,12 +7,23 @@ type Tab =
   | 'locations'
   | 'tracker'
   | 'mrp'
+  | 'planning'
   | 'jobwork'
   | 'qc'
   | 'ledger'
   | 'reservations'
   | 'printed-fabric'
   | 'reports'
+
+const planColor = (c: string) => {
+  switch (c) {
+    case 'green': return 'bg-green-100 text-green-800 border-green-200'
+    case 'blue': return 'bg-blue-100 text-blue-800 border-blue-200'
+    case 'orange': return 'bg-orange-100 text-orange-800 border-orange-200'
+    case 'red': return 'bg-red-100 text-red-800 border-red-200'
+    default: return 'bg-gray-100 text-gray-600 border-gray-200'
+  }
+}
 
 interface GreyStats {
   total_trackers: number
@@ -150,6 +161,21 @@ export default function GreyFabric() {
   const [pfSkuSearch, setPFSkuSearch] = useState('')
   const [pfSelectedSkus, setPFSelectedSkus] = useState<string[]>([])
   const [pfSkuQtyMap, setPFSkuQtyMap] = useState<Record<string, number>>({})
+
+  // Planning / Allocation
+  const [planView, setPlanView] = useState<'tree' | 'allocate' | 'reallocate' | 'print-jo' | 'history' | 'report'>('tree')
+  const [expandedGrey, setExpandedGrey] = useState<Record<string, boolean>>({})
+  const [expandedPrinted, setExpandedPrinted] = useState<Record<string, boolean>>({})
+  const [greyAllocForm, setGreyAllocForm] = useState({
+    grey_code: '', printed_code: '', qty: 0, so_number: '', fg_sku: '', reason: '',
+  })
+  const [pfAllocForm, setPfAllocForm] = useState({
+    printed_code: '', so_number: '', fg_sku: '', qty: 0, reason: '',
+  })
+  const [reallocForm, setReallocForm] = useState({
+    reservation_id: '', from_so: '', from_sku: '', to_so: '', to_sku: '', printed_code: '', qty: '', reason: '',
+  })
+  const [planMsg, setPlanMsg] = useState('')
 
   // ── Queries ──────────────────────────────────────────────────────────────────
   const { data: stats } = useQuery<GreyStats>({
@@ -301,6 +327,64 @@ export default function GreyFabric() {
     mutationFn: ({ id, body }: { id: number; body: object }) => api.post(`/grey/${id}/return-vendor`, body),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['grey'] }); setReturnModal(null) },
   })
+  const { data: planTree, isFetching: planTreeLoading } = useQuery({
+    queryKey: ['grey-planning-tree'],
+    queryFn: () => api.get('/grey/planning/tree').then(r => r.data),
+    enabled: tab === 'planning' && planView === 'tree',
+  })
+  const { data: planGreyStock = [] } = useQuery({
+    queryKey: ['grey-planning-stock'],
+    queryFn: () => api.get('/grey/planning/grey-stock').then(r => r.data),
+    enabled: tab === 'planning' && (planView === 'allocate' || planView === 'tree'),
+  })
+  const { data: planHistory = [] } = useQuery({
+    queryKey: ['grey-planning-history'],
+    queryFn: () => api.get('/grey/planning/history', { params: { limit: 100 } }).then(r => r.data),
+    enabled: tab === 'planning' && planView === 'history',
+  })
+  const { data: planPrintJo = [] } = useQuery({
+    queryKey: ['grey-planning-print-jo'],
+    queryFn: () => api.get('/grey/planning/printing-jo-status').then(r => r.data),
+    enabled: tab === 'planning' && planView === 'print-jo',
+  })
+  const { data: planFgReport = [] } = useQuery({
+    queryKey: ['grey-planning-fg-report'],
+    queryFn: () => api.get('/grey/planning/fg-status-report').then(r => r.data),
+    enabled: tab === 'planning' && planView === 'report',
+  })
+  const { data: planPfAlloc = [] } = useQuery({
+    queryKey: ['grey-planning-pf-alloc'],
+    queryFn: () => api.get('/grey/planning/printed-allocations', { params: { status: 'Active' } }).then(r => r.data),
+    enabled: tab === 'planning' && (planView === 'reallocate' || planView === 'allocate'),
+  })
+
+  const invalidatePlanning = () => {
+    qc.invalidateQueries({ queryKey: ['grey-planning-tree'] })
+    qc.invalidateQueries({ queryKey: ['grey-planning-stock'] })
+    qc.invalidateQueries({ queryKey: ['grey-planning-history'] })
+    qc.invalidateQueries({ queryKey: ['grey-planning-print-jo'] })
+    qc.invalidateQueries({ queryKey: ['grey-planning-fg-report'] })
+    qc.invalidateQueries({ queryKey: ['grey-planning-pf-alloc'] })
+    qc.invalidateQueries({ queryKey: ['printed-fabric-checked'] })
+    qc.invalidateQueries({ queryKey: ['printed-ready-to-cut'] })
+  }
+
+  const greyAllocMut = useMutation({
+    mutationFn: (b: object) => api.post('/grey/planning/allocate-grey', b),
+    onSuccess: () => { setPlanMsg('Grey allocated'); invalidatePlanning() },
+    onError: (e: any) => setPlanMsg(e?.response?.data?.detail || e?.message || 'Allocate failed'),
+  })
+  const pfAllocMut = useMutation({
+    mutationFn: (b: object) => api.post('/grey/planning/allocate-printed', b),
+    onSuccess: () => { setPlanMsg('Printed fabric allocated'); invalidatePlanning() },
+    onError: (e: any) => setPlanMsg(e?.response?.data?.detail || e?.message || 'Allocate failed'),
+  })
+  const reallocMut = useMutation({
+    mutationFn: (b: object) => api.post('/grey/planning/reallocate-printed', b),
+    onSuccess: () => { setPlanMsg('Reallocated (print history unchanged)'); invalidatePlanning() },
+    onError: (e: any) => setPlanMsg(e?.response?.data?.detail || e?.message || 'Reallocate failed'),
+  })
+
   const mrpCreateMut = useMutation({
     mutationFn: (b: object) => api.post('/grey/mrp/requirements', b),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['grey-mrp'] }); qc.invalidateQueries({ queryKey: ['grey-mrp-totals'] }) },
@@ -459,6 +543,7 @@ export default function GreyFabric() {
     ['locations', '📍 Locations'],
     ['tracker', '🚛 Tracker'],
     ['mrp', '📐 Material Req. Planning / SO'],
+    ['planning', '🧩 Planning & Allocation'],
     ['jobwork', '🖨 Job work'],
     ['qc', '✅ QC'],
     ['ledger', '📜 Ledger'],
@@ -898,6 +983,341 @@ export default function GreyFabric() {
       )}
 
       {/* Material requirement planning */}
+      {tab === 'planning' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-xl border p-4">
+            <p className="text-sm text-gray-600 max-w-3xl">
+              Grey is planned against <b>Printed Fabric (P-Code)</b>, not FG directly.
+              Hierarchy: Grey → Printed → FG SKU → Sales Order.
+              Reallocate received printed fabric until Cutting Issue; then allocation is locked.
+            </p>
+            <div className="flex flex-wrap gap-1 mt-3">
+              {([
+                ['tree', 'MRP Tree'],
+                ['allocate', 'Allocate'],
+                ['reallocate', 'Reallocate'],
+                ['print-jo', 'Printing JO'],
+                ['report', 'FG Status'],
+                ['history', 'Audit Trail'],
+              ] as const).map(([k, lab]) => (
+                <button key={k} type="button" onClick={() => { setPlanView(k); setPlanMsg('') }}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium ${planView === k ? 'bg-[#002B5B] text-white' : 'bg-gray-100 text-gray-600'}`}>
+                  {lab}
+                </button>
+              ))}
+            </div>
+            {planMsg && <p className="mt-2 text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1">{planMsg}</p>}
+            <div className="flex flex-wrap gap-2 mt-3 text-[10px]">
+              {[
+                ['green', 'Allocated'],
+                ['blue', 'Printed / Locked'],
+                ['orange', 'Partial / Reserved'],
+                ['grey', 'Pending'],
+                ['red', 'Shortage'],
+              ].map(([c, lab]) => (
+                <span key={c} className={`px-2 py-0.5 rounded border ${planColor(c)}`}>{lab}</span>
+              ))}
+            </div>
+          </div>
+
+          {planView === 'tree' && (
+            <div className="bg-white rounded-xl border overflow-hidden">
+              <div className="px-4 py-2 border-b flex justify-between items-center">
+                <span className="text-sm font-semibold text-gray-700">Planning tree</span>
+                <button type="button" onClick={() => qc.invalidateQueries({ queryKey: ['grey-planning-tree'] })}
+                  className="text-xs text-blue-600">Refresh</button>
+              </div>
+              {planTreeLoading && <p className="p-4 text-sm text-gray-400">Loading…</p>}
+              {!planTreeLoading && (!(planTree as any)?.nodes?.length) && (
+                <p className="p-4 text-sm text-gray-400">No open SO lines or BOM links. Ensure SOs and FG→SFG→GF BOM exist.</p>
+              )}
+              <ul className="divide-y">
+                {((planTree as any)?.nodes || []).map((g: any) => (
+                  <li key={g.code} className="px-3 py-2">
+                    <button type="button" className="w-full flex items-center gap-2 text-left"
+                      onClick={() => setExpandedGrey(e => ({ ...e, [g.code]: !e[g.code] }))}>
+                      <span className="text-gray-400">{expandedGrey[g.code] ? '▼' : '▶'}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded border ${planColor(g.color)}`}>Grey</span>
+                      <span className="font-mono font-semibold text-sm">{g.code}</span>
+                      <span className="text-xs text-gray-500">{g.name}</span>
+                      <span className="ml-auto text-xs text-gray-500">
+                        free {Number(g.free_qty || 0).toFixed(0)} · alloc {Number(g.allocated_qty || 0).toFixed(0)} m
+                      </span>
+                    </button>
+                    {expandedGrey[g.code] && (g.printed || []).map((p: any) => {
+                      const pk = `${g.code}::${p.code}`
+                      return (
+                        <div key={p.code} className="ml-6 mt-2 border-l-2 border-blue-100 pl-3">
+                          <button type="button" className="w-full flex items-center gap-2 text-left"
+                            onClick={() => setExpandedPrinted(e => ({ ...e, [pk]: !e[pk] }))}>
+                            <span className="text-gray-400 text-xs">{expandedPrinted[pk] ? '▼' : '▶'}</span>
+                            <span className={`text-xs px-2 py-0.5 rounded border ${planColor(p.color)}`}>P-Code</span>
+                            <span className="font-mono text-sm font-semibold text-blue-800">{p.code}</span>
+                            <span className="text-xs text-gray-500">avail {Number(p.available_qty || 0).toFixed(0)} m</span>
+                          </button>
+                          {expandedPrinted[pk] && (
+                            <ul className="mt-1 space-y-1">
+                              {(p.fg_lines || []).map((fl: any, i: number) => (
+                                <li key={i} className="ml-4 flex flex-wrap items-center gap-2 text-xs py-1">
+                                  <span className="font-semibold">{fl.sku}</span>
+                                  <span className="text-gray-400">→</span>
+                                  <span className="font-mono">{fl.so_number}</span>
+                                  <span className={`px-2 py-0.5 rounded border ${planColor(fl.color)}`}>{fl.status}</span>
+                                  <span className="text-gray-500">
+                                    PF {Number(fl.allocated_printed || 0).toFixed(0)}/{Number(fl.req_printed || 0).toFixed(0)} ·
+                                    Grey intent {Number(fl.allocated_grey || 0).toFixed(0)} m
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {planView === 'allocate' && (
+            <div className="grid md:grid-cols-2 gap-4">
+              <div className="bg-white rounded-xl border p-4 space-y-3">
+                <h3 className="text-sm font-semibold">Stage 1 — Allocate Grey → P-Code</h3>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <label className="block">Grey code
+                    <input className="mt-1 w-full border rounded px-2 py-1.5" list="plan-grey-list"
+                      value={greyAllocForm.grey_code}
+                      onChange={e => setGreyAllocForm(f => ({ ...f, grey_code: e.target.value }))} />
+                  </label>
+                  <label className="block">Printed (P-code)
+                    <input className="mt-1 w-full border rounded px-2 py-1.5" value={greyAllocForm.printed_code}
+                      onChange={e => setGreyAllocForm(f => ({ ...f, printed_code: e.target.value }))} />
+                  </label>
+                  <label className="block">Qty (m)
+                    <input type="number" className="mt-1 w-full border rounded px-2 py-1.5" value={greyAllocForm.qty}
+                      onChange={e => setGreyAllocForm(f => ({ ...f, qty: +e.target.value }))} />
+                  </label>
+                  <label className="block">Reason
+                    <input className="mt-1 w-full border rounded px-2 py-1.5" value={greyAllocForm.reason}
+                      onChange={e => setGreyAllocForm(f => ({ ...f, reason: e.target.value }))} />
+                  </label>
+                  <label className="block">SO (optional intent)
+                    <input className="mt-1 w-full border rounded px-2 py-1.5" value={greyAllocForm.so_number}
+                      onChange={e => setGreyAllocForm(f => ({ ...f, so_number: e.target.value }))} />
+                  </label>
+                  <label className="block">FG SKU (optional intent)
+                    <input className="mt-1 w-full border rounded px-2 py-1.5" value={greyAllocForm.fg_sku}
+                      onChange={e => setGreyAllocForm(f => ({ ...f, fg_sku: e.target.value }))} />
+                  </label>
+                </div>
+                <datalist id="plan-grey-list">
+                  {(planGreyStock as any[]).map((s: any) => (
+                    <option key={s.fabric_code} value={s.fabric_code}>{s.grey_free_qty ?? s.available_qty} free</option>
+                  ))}
+                </datalist>
+                <button type="button" disabled={!greyAllocForm.grey_code || !greyAllocForm.printed_code || greyAllocForm.qty <= 0 || greyAllocMut.isPending}
+                  onClick={() => greyAllocMut.mutate(greyAllocForm)}
+                  className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
+                  Allocate Grey
+                </button>
+              </div>
+              <div className="bg-white rounded-xl border p-4 space-y-3">
+                <h3 className="text-sm font-semibold">Stage 4 — Allocate Printed → FG + SO</h3>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <label className="block">Printed code
+                    <input className="mt-1 w-full border rounded px-2 py-1.5" value={pfAllocForm.printed_code}
+                      onChange={e => setPfAllocForm(f => ({ ...f, printed_code: e.target.value }))} />
+                  </label>
+                  <label className="block">Qty (m)
+                    <input type="number" className="mt-1 w-full border rounded px-2 py-1.5" value={pfAllocForm.qty}
+                      onChange={e => setPfAllocForm(f => ({ ...f, qty: +e.target.value }))} />
+                  </label>
+                  <label className="block">SO number
+                    <input className="mt-1 w-full border rounded px-2 py-1.5" value={pfAllocForm.so_number}
+                      onChange={e => setPfAllocForm(f => ({ ...f, so_number: e.target.value }))} />
+                  </label>
+                  <label className="block">FG SKU
+                    <input className="mt-1 w-full border rounded px-2 py-1.5" value={pfAllocForm.fg_sku}
+                      onChange={e => setPfAllocForm(f => ({ ...f, fg_sku: e.target.value }))} />
+                  </label>
+                </div>
+                <button type="button" disabled={!pfAllocForm.printed_code || !pfAllocForm.so_number || !pfAllocForm.fg_sku || pfAllocForm.qty <= 0 || pfAllocMut.isPending}
+                  onClick={() => pfAllocMut.mutate({
+                    printed_code: pfAllocForm.printed_code,
+                    so_number: pfAllocForm.so_number,
+                    fg_sku: pfAllocForm.fg_sku,
+                    qty: pfAllocForm.qty,
+                    reason: pfAllocForm.reason,
+                  })}
+                  className="px-4 py-2 bg-blue-700 text-white rounded-lg text-sm disabled:opacity-50">
+                  Allocate Printed
+                </button>
+                <div className="text-[11px] text-gray-500 max-h-32 overflow-auto">
+                  Active PF allocations: {(planPfAlloc as any[]).length}
+                  {(planPfAlloc as any[]).slice(0, 8).map((r: any) => (
+                    <div key={r.id} className="font-mono">#{r.id} {r.fabric_code} → {r.sku}/{r.so_number} {r.qty}m</div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {planView === 'reallocate' && (
+            <div className="bg-white rounded-xl border p-4 space-y-3 max-w-2xl">
+              <h3 className="text-sm font-semibold">Reallocate Printed Fabric between FG SKUs</h3>
+              <p className="text-xs text-gray-500">Does not change grey purchase, printing JO, or consumption. Blocked after Cutting Issue.</p>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <label className="block col-span-2">Source reservation
+                  <select className="mt-1 w-full border rounded px-2 py-1.5"
+                    value={reallocForm.reservation_id}
+                    onChange={e => {
+                      const id = e.target.value
+                      const r = (planPfAlloc as any[]).find((x: any) => String(x.id) === id)
+                      setReallocForm(f => ({
+                        ...f,
+                        reservation_id: id,
+                        from_so: r?.so_number || '',
+                        from_sku: r?.sku || '',
+                        printed_code: r?.fabric_code || '',
+                        qty: r ? String(r.qty) : f.qty,
+                      }))
+                    }}>
+                    <option value="">Select Active reservation…</option>
+                    {(planPfAlloc as any[]).map((r: any) => (
+                      <option key={r.id} value={r.id}>#{r.id} {r.fabric_code} · {r.sku} · {r.so_number} · {r.qty}m</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">To SO
+                  <input className="mt-1 w-full border rounded px-2 py-1.5" value={reallocForm.to_so}
+                    onChange={e => setReallocForm(f => ({ ...f, to_so: e.target.value }))} />
+                </label>
+                <label className="block">To FG SKU
+                  <input className="mt-1 w-full border rounded px-2 py-1.5" value={reallocForm.to_sku}
+                    onChange={e => setReallocForm(f => ({ ...f, to_sku: e.target.value }))} />
+                </label>
+                <label className="block">Qty (blank = full)
+                  <input className="mt-1 w-full border rounded px-2 py-1.5" value={reallocForm.qty}
+                    onChange={e => setReallocForm(f => ({ ...f, qty: e.target.value }))} />
+                </label>
+                <label className="block">Reason (required)
+                  <input className="mt-1 w-full border rounded px-2 py-1.5" value={reallocForm.reason}
+                    onChange={e => setReallocForm(f => ({ ...f, reason: e.target.value }))} />
+                </label>
+              </div>
+              <button type="button"
+                disabled={!reallocForm.reservation_id || !reallocForm.to_so || !reallocForm.to_sku || !reallocForm.reason || reallocMut.isPending}
+                onClick={() => reallocMut.mutate({
+                  reservation_id: Number(reallocForm.reservation_id),
+                  to_so: reallocForm.to_so,
+                  to_sku: reallocForm.to_sku,
+                  printed_code: reallocForm.printed_code,
+                  qty: reallocForm.qty === '' ? null : Number(reallocForm.qty),
+                  reason: reallocForm.reason,
+                })}
+                className="px-4 py-2 bg-orange-600 text-white rounded-lg text-sm disabled:opacity-50">
+                Reallocate
+              </button>
+            </div>
+          )}
+
+          {planView === 'print-jo' && (
+            <div className="bg-white rounded-xl border overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 text-xs text-gray-500">
+                  <tr>
+                    <th className="text-left px-3 py-2">P-Code</th>
+                    <th className="text-left px-3 py-2">Grey</th>
+                    <th className="text-right px-3 py-2">Grey Allocated</th>
+                    <th className="text-left px-3 py-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(planPrintJo as any[]).map((r: any, i: number) => (
+                    <tr key={i} className="border-t">
+                      <td className="px-3 py-2 font-mono font-semibold text-blue-800">{r.printed_code}</td>
+                      <td className="px-3 py-2 font-mono">{r.grey_code} <span className="text-gray-400">{r.grey_name}</span></td>
+                      <td className="px-3 py-2 text-right font-semibold">{Number(r.grey_allocated || 0).toFixed(0)} m</td>
+                      <td className="px-3 py-2">
+                        <span className={`text-xs px-2 py-0.5 rounded border ${r.ready_to_issue ? planColor('green') : planColor('grey')}`}>
+                          {r.status_label}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!(planPrintJo as any[])?.length && <p className="p-4 text-sm text-gray-400">No active grey allocations yet.</p>}
+            </div>
+          )}
+
+          {planView === 'report' && (
+            <div className="bg-white rounded-xl border overflow-hidden">
+              <p className="px-3 py-2 text-xs text-gray-500 border-b">Status from <b>current</b> printed fabric allocation (not original grey intent)</p>
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 text-xs text-gray-500">
+                  <tr>
+                    <th className="text-left px-3 py-2">P-Code</th>
+                    <th className="text-left px-3 py-2">FG SKU</th>
+                    <th className="text-left px-3 py-2">SO</th>
+                    <th className="text-right px-3 py-2">Qty</th>
+                    <th className="text-left px-3 py-2">Report status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(planFgReport as any[]).map((r: any, i: number) => (
+                    <tr key={i} className="border-t">
+                      <td className="px-3 py-2 font-mono">{r.printed_code}</td>
+                      <td className="px-3 py-2 font-semibold">{r.fg_sku}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{r.so_number}</td>
+                      <td className="px-3 py-2 text-right">{Number(r.qty || 0).toFixed(0)}</td>
+                      <td className="px-3 py-2">
+                        <span className={`text-xs px-2 py-0.5 rounded border ${planColor(r.color)}`}>{r.report_status}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!(planFgReport as any[])?.length && <p className="p-4 text-sm text-gray-400">No printed allocations to report.</p>}
+            </div>
+          )}
+
+          {planView === 'history' && (
+            <div className="bg-white rounded-xl border overflow-auto max-h-[28rem]">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-50 text-gray-500 sticky top-0">
+                  <tr>
+                    <th className="text-left px-2 py-2">When</th>
+                    <th className="text-left px-2 py-2">Event</th>
+                    <th className="text-left px-2 py-2">From → To</th>
+                    <th className="text-right px-2 py-2">Qty</th>
+                    <th className="text-left px-2 py-2">User / Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(planHistory as any[]).map((h: any) => (
+                    <tr key={h.id} className="border-t">
+                      <td className="px-2 py-1.5 whitespace-nowrap">{h.created_at}</td>
+                      <td className="px-2 py-1.5 font-mono">{h.event_type}</td>
+                      <td className="px-2 py-1.5">
+                        {(h.printed_code || h.grey_code || '')}{' '}
+                        {h.from_sku || h.from_so ? `${h.from_sku}/${h.from_so}` : '—'}
+                        {' → '}
+                        {h.to_sku || h.to_so ? `${h.to_sku}/${h.to_so}` : '—'}
+                      </td>
+                      <td className="px-2 py-1.5 text-right">{Number(h.qty || 0).toFixed(0)}</td>
+                      <td className="px-2 py-1.5 text-gray-600">{h.user_name} {h.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!(planHistory as any[])?.length && <p className="p-4 text-sm text-gray-400">No allocation events yet.</p>}
+            </div>
+          )}
+        </div>
+      )}
+
       {tab === 'mrp' && (
         <div className="space-y-4">
           <div className="bg-white rounded-xl border p-4 space-y-3">

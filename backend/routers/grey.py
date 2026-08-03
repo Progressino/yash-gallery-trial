@@ -329,6 +329,180 @@ def mrp_stock_snapshot():
     return gdb.mrp_stock_snapshot()
 
 
+# ── Planning / Allocation / Reallocation (Grey → P-Code → FG → SO) ───────────
+class GreyAllocateIn(BaseModel):
+    grey_code: str
+    printed_code: str
+    qty: float
+    grey_name: str = ""
+    printed_name: str = ""
+    so_number: str = ""
+    fg_sku: str = ""
+    unit: str = "MTR"
+    jwo_ref: str = ""
+    user_name: str = ""
+    reason: str = ""
+    remarks: str = ""
+    document_ref: str = ""
+
+
+class GreyReleaseIn(BaseModel):
+    user_name: str = ""
+    reason: str = ""
+
+
+class PrintedAllocateIn(BaseModel):
+    printed_code: str = ""
+    fabric_code: str = ""
+    printed_name: str = ""
+    fabric_name: str = ""
+    so_number: str
+    fg_sku: str = ""
+    sku: str = ""
+    qty: float
+    remarks: str = ""
+    reason: str = ""
+    user_name: str = ""
+
+
+class PrintedReallocateIn(BaseModel):
+    reservation_id: Optional[int] = None
+    from_reservation_id: Optional[int] = None
+    from_so: str = ""
+    from_sku: str = ""
+    to_so: str
+    to_sku: str
+    printed_code: str = ""
+    fabric_code: str = ""
+    qty: Optional[float] = None
+    reason: str
+    user_name: str = ""
+    remarks: str = ""
+    document_ref: str = ""
+
+
+class PrintedReleaseIn(BaseModel):
+    user_name: str = ""
+    reason: str = ""
+
+
+@router.get("/planning/tree")
+def planning_tree(so_numbers: Optional[str] = None):
+    """MRP tree: Grey → Printed (P-Code/SFG) → FG SKU → Sales Order."""
+    from ..services.fabric_allocation_engine import build_planning_tree
+
+    sos = [s.strip() for s in (so_numbers or "").split(",") if s.strip()] or None
+    return build_planning_tree(so_numbers=sos)
+
+
+@router.get("/planning/grey-stock")
+def planning_grey_stock(grey_code: Optional[str] = None):
+    from ..services.fabric_allocation_engine import grey_stock_snapshot
+
+    return grey_stock_snapshot(grey_code)
+
+
+@router.get("/planning/grey-allocations")
+def planning_grey_allocations(status: str = "Active"):
+    from ..services.fabric_allocation_engine import list_grey_allocations
+
+    return list_grey_allocations(status)
+
+
+@router.post("/planning/allocate-grey")
+def planning_allocate_grey(body: GreyAllocateIn):
+    from ..services.fabric_allocation_engine import FabricAllocationError, allocate_grey
+
+    try:
+        return allocate_grey(body.model_dump())
+    except FabricAllocationError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/planning/release-grey/{allocation_id}")
+def planning_release_grey(allocation_id: int, body: GreyReleaseIn):
+    from ..services.fabric_allocation_engine import FabricAllocationError, release_grey_allocation
+
+    try:
+        return release_grey_allocation(
+            allocation_id, user_name=body.user_name, reason=body.reason
+        )
+    except FabricAllocationError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/planning/allocate-printed")
+def planning_allocate_printed(body: PrintedAllocateIn):
+    from ..services.fabric_allocation_engine import FabricAllocationError, allocate_printed
+
+    try:
+        return allocate_printed(body.model_dump())
+    except FabricAllocationError as e:
+        raise HTTPException(400, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/planning/reallocate-printed")
+def planning_reallocate_printed(body: PrintedReallocateIn):
+    from ..services.fabric_allocation_engine import FabricAllocationError, reallocate_printed
+
+    try:
+        return reallocate_printed(body.model_dump())
+    except FabricAllocationError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/planning/release-printed/{reservation_id}")
+def planning_release_printed(reservation_id: int, body: PrintedReleaseIn):
+    from ..services.fabric_allocation_engine import FabricAllocationError, release_printed_allocation
+
+    try:
+        return release_printed_allocation(
+            reservation_id, user_name=body.user_name, reason=body.reason
+        )
+    except FabricAllocationError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.get("/planning/printed-allocations")
+def planning_printed_allocations(status: str = ""):
+    from ..services.fabric_allocation_engine import list_printed_allocations
+
+    return list_printed_allocations(status)
+
+
+@router.get("/planning/history")
+def planning_history(
+    limit: int = 200,
+    printed_code: Optional[str] = None,
+    grey_code: Optional[str] = None,
+):
+    from ..services.fabric_allocation_engine import list_allocation_history
+
+    return list_allocation_history(
+        limit=limit,
+        printed_code=printed_code or "",
+        grey_code=grey_code or "",
+    )
+
+
+@router.get("/planning/printing-jo-status")
+def planning_printing_jo_status(printed_code: Optional[str] = None):
+    """Grey allocated per P-code — for Printing department / JO display."""
+    from ..services.fabric_allocation_engine import printing_jo_grey_status
+
+    return printing_jo_grey_status(printed_code or "")
+
+
+@router.get("/planning/fg-status-report")
+def planning_fg_status_report(printed_code: Optional[str] = None):
+    """FG status from *current* printed allocation (not original grey intent)."""
+    from ..services.fabric_allocation_engine import fg_status_report
+
+    return fg_status_report(printed_code or "")
+
+
 # ── Printer Issues ────────────────────────────────────────────────────────────
 @router.post("/printer-issue")
 def post_printer_issue(body: PrinterIssueIn):

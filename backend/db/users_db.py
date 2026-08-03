@@ -324,6 +324,62 @@ def list_users(active_only=True):
         result.append(d)
     conn.close(); return result
 
+
+def search_active_users(q: str = "", limit: int = 100) -> list[dict]:
+    """Active erp users for HR issue pickers — searchable by name/id/email/phone."""
+    conn = _connect()
+    sql = """SELECT u.id, u.username, u.full_name, u.email, u.phone, u.employee_id,
+                    u.hrm_department_id, u.department, r.role_name
+             FROM erp_users u
+             LEFT JOIN roles r ON r.id=u.role_id
+             WHERE u.active=1"""
+    params: list = []
+    term = (q or "").strip()
+    if term:
+        like = f"%{term.lower()}%"
+        sql += """ AND (
+            LOWER(COALESCE(u.full_name,'')) LIKE ?
+            OR LOWER(COALESCE(u.username,'')) LIKE ?
+            OR LOWER(COALESCE(u.email,'')) LIKE ?
+            OR COALESCE(u.phone,'') LIKE ?
+            OR CAST(u.id AS TEXT) LIKE ?
+            OR CAST(COALESCE(u.employee_id,0) AS TEXT) LIKE ?
+        )"""
+        params.extend([like, like, like, f"%{term}%", f"%{term}%", f"%{term}%"])
+    sql += " ORDER BY COALESCE(NULLIF(TRIM(u.full_name),''), u.username) LIMIT ?"
+    params.append(int(limit or 100))
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        display = (d.get("full_name") or d.get("username") or f"User {d['id']}").strip()
+        d["display_name"] = display
+        d["search_label"] = (
+            f"{display}"
+            + (f" · {d['role_name']}" if d.get("role_name") else "")
+            + (f" · {d['email']}" if d.get("email") else "")
+            + (f" · {d['phone']}" if d.get("phone") else "")
+            + (f" · EMP#{d['employee_id']}" if d.get("employee_id") else "")
+        )
+        out.append(d)
+    return out
+
+
+def get_user_by_id(uid: int) -> dict | None:
+    conn = _connect()
+    row = conn.execute(
+        """SELECT u.*, r.role_name FROM erp_users u
+           LEFT JOIN roles r ON r.id=u.role_id WHERE u.id=?""",
+        (uid,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d.pop("password_hash", None)
+    return d
+
 def _normalize_email(value) -> str | None:
     """Blank / whitespace-only email → NULL in DB (avoids UNIQUE collisions on '')."""
     if value is None:

@@ -117,6 +117,26 @@ class HrmScope:
         """Delete/cancel responsibilities, tasks, etc. — HOD or Admin, never Employee."""
         return self.can_edit_assignments
 
+    @property
+    def can_create_issues(self) -> bool:
+        """Any HRM-scoped role may create issues within their data scope."""
+        return self.role != ROLE_KARIGAR
+
+    @property
+    def can_edit_issues(self) -> bool:
+        """Admin/HR/HOD edit issues; employees may only create/view unless policy expands."""
+        return self.can_edit_assignments
+
+    @property
+    def can_change_issue_status(self) -> bool:
+        """Open→Hold/Resolve/Cancel transitions — HOD or Admin."""
+        return self.can_edit_assignments
+
+    @property
+    def can_delete_issues(self) -> bool:
+        """Hard delete reserved for Admin org managers (soft-cancel via status for others)."""
+        return self.can_manage_org
+
 
 def _parse_module_access(raw: str | None) -> list[str] | None:
     if not raw or not str(raw).strip():

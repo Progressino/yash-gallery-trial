@@ -206,6 +206,60 @@ def init_db():
     ]:
         _add_col(conn, "fabric_checked_stock", name, decl)
 
+    # ── Grey / Printed Fabric planning & allocation spine ─────────────────
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS grey_fabric_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            grey_code TEXT NOT NULL,
+            grey_name TEXT DEFAULT '',
+            printed_code TEXT NOT NULL,
+            printed_name TEXT DEFAULT '',
+            so_number TEXT DEFAULT '',
+            fg_sku TEXT DEFAULT '',
+            qty REAL NOT NULL DEFAULT 0,
+            unit TEXT DEFAULT 'MTR',
+            stage TEXT DEFAULT 'GREY_ALLOCATED',
+            status TEXT DEFAULT 'Active',
+            jwo_ref TEXT DEFAULT '',
+            tracker_id INTEGER,
+            created_by TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now')),
+            remarks TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS fabric_allocation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            entity_type TEXT DEFAULT '',
+            entity_id INTEGER,
+            grey_code TEXT DEFAULT '',
+            printed_code TEXT DEFAULT '',
+            from_so TEXT DEFAULT '',
+            from_sku TEXT DEFAULT '',
+            to_so TEXT DEFAULT '',
+            to_sku TEXT DEFAULT '',
+            qty REAL DEFAULT 0,
+            old_status TEXT DEFAULT '',
+            new_status TEXT DEFAULT '',
+            user_name TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            document_ref TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_gfa_grey ON grey_fabric_allocations(grey_code, status);
+        CREATE INDEX IF NOT EXISTS idx_gfa_printed ON grey_fabric_allocations(printed_code, status);
+        CREATE INDEX IF NOT EXISTS idx_fah_printed ON fabric_allocation_history(printed_code, id DESC);
+        """
+    )
+    for name, decl in [
+        ("stage", "TEXT DEFAULT 'RESERVED'"),
+        ("locked_at", "TEXT DEFAULT ''"),
+        ("locked_reason", "TEXT DEFAULT ''"),
+        ("jo_id", "INTEGER"),
+        ("cutting_issued_qty", "REAL DEFAULT 0"),
+    ]:
+        _add_col(conn, "printed_fabric_reservations", name, decl)
+
     _repair_printed_fabric_partial_qc_rows(conn)
     conn.executescript(
         """

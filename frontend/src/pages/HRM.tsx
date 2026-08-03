@@ -10,8 +10,17 @@ const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Reject
 const TASK_LOG_STATUSES = ['Done', 'Partial', 'Missed', 'Blocked', 'Leave', 'N/A'] as const
 type ItemType = 'responsibility' | 'task'
 const CATEGORIES = ['General', 'Quality', 'Production', 'Accounts', 'Purchase', 'Sales', 'Store', 'HR', 'Other']
-const ISSUE_TYPES = ['General', 'Discipline', 'Quality', 'Attendance', 'Behaviour', 'Task Failure', 'Dependency Missed']
+const ISSUE_TYPES = ['General', 'Discipline', 'Quality', 'Attendance', 'Behaviour', 'Task Failure', 'Dependency Missed', 'Policy Violation', 'Workplace Incident', 'Performance', 'Complaint']
 const SEVERITIES = ['Minor', 'Moderate', 'Major']
+const ISSUE_STATUSES = ['Open', 'Resolve', 'Hold', 'Cancel'] as const
+
+const issueStatusStyle = (s: string) => {
+  if (s === 'Resolve' || s === 'Resolved') return 'bg-green-100 text-green-800'
+  if (s === 'Open') return 'bg-blue-100 text-blue-800'
+  if (s === 'Hold') return 'bg-orange-100 text-orange-800'
+  if (s === 'Cancel') return 'bg-red-100 text-red-800'
+  return 'bg-gray-100 text-gray-600'
+}
 
 const today = () => new Date().toISOString().split('T')[0]
 const fmt7Days = () => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().split('T')[0] }
@@ -123,7 +132,30 @@ export default function HRM() {
   const [empForm, setEmpForm] = useState({ name: '', department_id: '' as any, designation: '', phone: '', email: '', join_date: '' })
   const [respForm, setRespForm] = useState({ item_type: 'responsibility' as ItemType, employee_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General', added_by: '', due_date: '' })
   const [taskForm, setTaskForm] = useState({ item_type: 'task' as ItemType, employee_id: '' as any, title: '', description: '', due_date: '', assigned_by: '' })
-  const [issueForm, setIssueForm] = useState({ employee_id: '' as any, issue_type: 'General', severity: 'Minor', title: '', description: '', recorded_by: '', caused_by_employee_id: '' as any })
+  const [issueForm, setIssueForm] = useState({
+    subject_user_id: '' as any,
+    employee_id: '' as any,
+    issue_type: 'General',
+    severity: 'Minor',
+    title: '',
+    description: '',
+    caused_by_user_id: '' as any,
+    caused_by_employee_id: '' as any,
+    status: 'Open',
+  })
+  const [issueEmpSearch, setIssueEmpSearch] = useState('')
+  const [issueCauseSearch, setIssueCauseSearch] = useState('')
+  const [issueStatusFilter, setIssueStatusFilter] = useState('')
+  const [issueQ, setIssueQ] = useState('')
+  const [editIssue, setEditIssue] = useState<any | null>(null)
+  const [issueHistory, setIssueHistory] = useState<any[]>([])
+  const [showHistoryId, setShowHistoryId] = useState<number | null>(null)
+  const [issueVoiceTarget, setIssueVoiceTarget] = useState<'title' | 'description'>('description')
+  const [issueListening, setIssueListening] = useState(false)
+  const [issueVoiceStatus, setIssueVoiceStatus] = useState('')
+  const issueRecRef = useRef<any>(null)
+  const [issueComment, setIssueComment] = useState('')
+  const [issueAttachmentName, setIssueAttachmentName] = useState('')
 
   // Quick resp + voice
   const [quickResp, setQuickResp] = useState({ item_type: 'responsibility' as ItemType, employee_id: '' as any, department_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General', added_by: '', due_date: '' })
@@ -221,8 +253,29 @@ export default function HRM() {
     enabled: !!hodDept,
   })
   const { data: issues = [] } = useQuery({
-    queryKey: ['hrm-issues', selDept, selEmp, fromDate, toDate],
-    queryFn: () => api.get(`/hrm/issues?${selDept ? `department_id=${selDept}&` : ''}${selEmp ? `employee_id=${selEmp}&` : ''}from_date=${fromDate}&to_date=${toDate}`).then(r => r.data),
+    queryKey: ['hrm-issues', selDept, selEmp, fromDate, toDate, issueStatusFilter, issueQ],
+    queryFn: () => {
+      const p = new URLSearchParams()
+      if (selDept) p.set('department_id', String(selDept))
+      if (selEmp) p.set('employee_id', String(selEmp))
+      if (fromDate) p.set('from_date', fromDate)
+      if (toDate) p.set('to_date', toDate)
+      if (issueStatusFilter) p.set('status', issueStatusFilter)
+      if (issueQ.trim()) p.set('q', issueQ.trim())
+      return api.get(`/hrm/issues?${p.toString()}`).then(r => r.data)
+    },
+    enabled: tab === 'issues',
+  })
+  const { data: issueUsers = [] } = useQuery({
+    queryKey: ['hrm-issue-users', issueEmpSearch || issueCauseSearch],
+    queryFn: () => api.get('/hrm/issues/users', {
+      params: { q: issueEmpSearch || issueCauseSearch || '', limit: 80 },
+    }).then(r => r.data),
+    enabled: tab === 'issues' && (showIssueForm || !!editIssue),
+  })
+  const { data: issueUsersForFilter = [] } = useQuery({
+    queryKey: ['hrm-issue-users-all'],
+    queryFn: () => api.get('/hrm/issues/users', { params: { limit: 200 } }).then(r => r.data),
     enabled: tab === 'issues',
   })
   const { data: appraisalData } = useQuery({
@@ -325,8 +378,142 @@ export default function HRM() {
       alert(`Imported ${created} task row(s).${errors?.length ? `\n\nIssues:\n${errors.slice(0, 5).join('\n')}` : ''}`)
     },
   })
-  const createIssueMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/issues', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-issues'] }); setShowIssueForm(false) } })
-  const resolveIssueMut = useMutation({ mutationFn: ({ id, res }: { id: number; res: string }) => api.patch(`/hrm/issues/${id}/resolve`, { resolution: res }), onSuccess: () => qc.invalidateQueries({ queryKey: ['hrm-issues'] }) })
+  const invalidateIssues = () => {
+    qc.invalidateQueries({ queryKey: ['hrm-issues'] })
+    qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
+    qc.invalidateQueries({ queryKey: ['hrm-perf'] })
+  }
+  const createIssueMut = useMutation({
+    mutationFn: (b: object) => api.post('/hrm/issues', b),
+    onSuccess: () => {
+      invalidateIssues()
+      setShowIssueForm(false)
+      setIssueForm({
+        subject_user_id: '', employee_id: '', issue_type: 'General', severity: 'Minor',
+        title: '', description: '', caused_by_user_id: '', caused_by_employee_id: '', status: 'Open',
+      })
+    },
+    onError: (e: any) => alert(e?.response?.data?.detail || 'Failed to create issue'),
+  })
+  const resolveIssueMut = useMutation({
+    mutationFn: ({ id, res }: { id: number; res: string }) => api.patch(`/hrm/issues/${id}/resolve`, { resolution: res }),
+    onSuccess: () => invalidateIssues(),
+  })
+  const updateIssueMut = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/issues/${id}`, data),
+    onSuccess: () => { invalidateIssues(); setEditIssue(null) },
+    onError: (e: any) => alert(e?.response?.data?.detail || 'Update failed'),
+  })
+  const statusIssueMut = useMutation({
+    mutationFn: ({ id, status, resolution }: { id: number; status: string; resolution?: string }) =>
+      api.patch(`/hrm/issues/${id}/status`, { status, resolution: resolution || '' }),
+    onSuccess: () => invalidateIssues(),
+    onError: (e: any) => alert(e?.response?.data?.detail || 'Status change failed'),
+  })
+  const commentIssueMut = useMutation({
+    mutationFn: ({ id, text }: { id: number; text: string }) =>
+      api.post(`/hrm/issues/${id}/comments`, { comment_text: text }),
+    onSuccess: () => { setIssueComment(''); invalidateIssues() },
+  })
+  const attachIssueMut = useMutation({
+    mutationFn: ({ id, file_name }: { id: number; file_name: string }) =>
+      api.post(`/hrm/issues/${id}/attachments`, { file_name }),
+    onSuccess: () => { setIssueAttachmentName(''); invalidateIssues() },
+  })
+
+  const stopIssueVoice = () => {
+    try { issueRecRef.current?.stop?.() } catch { /* ignore */ }
+    setIssueListening(false)
+  }
+
+  const startIssueVoice = (target: 'title' | 'description', mode: 'append' | 'replace' = 'append') => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    if (!SR) {
+      setIssueVoiceStatus('Speech recognition requires Chrome or Edge. Type manually.')
+      api.post('/hrm/issues/voice-log', {
+        transcript: '', target_field: target, status: 'failed',
+        error_message: 'SpeechRecognition unsupported',
+      }).catch(() => {})
+      return
+    }
+    if (issueListening && issueRecRef.current) {
+      stopIssueVoice()
+      setIssueVoiceStatus('Paused')
+      return
+    }
+    setIssueVoiceTarget(target)
+    const recognition = new SR()
+    recognition.lang = 'en-IN'
+    recognition.continuous = true
+    recognition.interimResults = true
+    let finalChunk = ''
+    recognition.onstart = () => {
+      setIssueListening(true)
+      setIssueVoiceStatus(`Listening for ${target}…`)
+    }
+    recognition.onend = () => {
+      setIssueListening(false)
+      if (finalChunk.trim()) {
+        const apply = (prev: string) => {
+          if (mode === 'replace' || !prev.trim()) return finalChunk.trim()
+          return `${prev.trim()} ${finalChunk.trim()}`.trim()
+        }
+        setIssueForm(f => target === 'title'
+          ? { ...f, title: apply(f.title) }
+          : { ...f, description: apply(f.description) })
+        if (editIssue) {
+          setEditIssue((f: any) => target === 'title'
+            ? { ...f, title: apply(f.title || '') }
+            : { ...f, description: apply(f.description || '') })
+        }
+        api.post('/hrm/issues/voice-log', {
+          transcript: finalChunk.trim(),
+          target_field: target,
+          status: 'success',
+          issue_id: editIssue?.id || null,
+        }).catch(() => {})
+        setIssueVoiceStatus('Transcribed — edit freely')
+      } else {
+        setIssueVoiceStatus('Stopped')
+      }
+    }
+    recognition.onerror = (ev: any) => {
+      setIssueListening(false)
+      setIssueVoiceStatus(`Voice error: ${ev?.error || 'failed'} — type manually`)
+      api.post('/hrm/issues/voice-log', {
+        transcript: finalChunk,
+        target_field: target,
+        status: 'failed',
+        error_message: String(ev?.error || 'error'),
+        issue_id: editIssue?.id || null,
+      }).catch(() => {})
+    }
+    recognition.onresult = (e: any) => {
+      let interim = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript
+        if (e.results[i].isFinal) finalChunk += `${t} `
+        else interim += t
+      }
+      if (interim) setIssueVoiceStatus(`Listening… ${interim}`)
+    }
+    issueRecRef.current = recognition
+    recognition.start()
+  }
+
+  const openIssueHistory = async (id: number) => {
+    if (showHistoryId === id) {
+      setShowHistoryId(null)
+      return
+    }
+    const { data } = await api.get(`/hrm/issues/${id}/history`)
+    setIssueHistory(data || [])
+    setShowHistoryId(id)
+  }
+
+  const recordedByName = authUser?.full_name || authUser?.username || 'You'
+  const canEditIssues = canEditAssignments
+  const canChangeIssueStatus = canEditAssignments
   const invalidateTaskMetrics = () => {
     qc.invalidateQueries({ queryKey: ['hrm-one-time-tasks'] })
     qc.invalidateQueries({ queryKey: ['hrm-my-tasks'] })
@@ -1479,91 +1666,342 @@ export default function HRM() {
       {tab === 'issues' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-2 flex-wrap">
-            <div className="flex gap-2 flex-wrap">
+            <div className="flex gap-2 flex-wrap items-center">
               {!isEmployeeScope && (
                 <select value={selDept} onChange={e => setSelDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
                   <option value="">All Departments</option>
                   {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
                 </select>
               )}
+              <select value={issueStatusFilter} onChange={e => setIssueStatusFilter(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm">
+                <option value="">All Statuses</option>
+                {ISSUE_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
               <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
               <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+              <input
+                value={issueQ}
+                onChange={e => setIssueQ(e.target.value)}
+                placeholder="Search title, employee, ID…"
+                className="border rounded-lg px-3 py-1.5 text-sm min-w-[12rem]"
+              />
             </div>
             <button onClick={() => setShowIssueForm(true)} className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium">+ Record Issue</button>
           </div>
 
-          {showIssueForm && (
+          {(showIssueForm || editIssue) && (
             <div className="bg-white rounded-xl border p-4 space-y-3">
-              <h3 className="font-semibold text-gray-700">⚠️ Record Issue / Problem</h3>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                <div><label className="text-xs text-gray-500">Employee *</label>
-                  <select value={issueForm.employee_id} onChange={e => setIssueForm(f => ({ ...f, employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    <option value="">Select</option>
-                    {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
+              <div className="flex justify-between items-center">
+                <h3 className="font-semibold text-gray-700">{editIssue ? `✏️ Edit Issue #${editIssue.id}` : '⚠️ Record Issue / Problem'}</h3>
+                <button type="button" onClick={() => { setShowIssueForm(false); setEditIssue(null); stopIssueVoice() }} className="text-gray-400 text-sm">Close</button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="md:col-span-1">
+                  <label className="text-xs text-gray-500">Employee * (active users)</label>
+                  <input
+                    value={issueEmpSearch}
+                    onChange={e => setIssueEmpSearch(e.target.value)}
+                    placeholder="Search name, email, phone, ID…"
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                  />
+                  <select
+                    value={(editIssue || issueForm).subject_user_id || (editIssue || issueForm).employee_id || ''}
+                    onChange={e => {
+                      const v = e.target.value
+                      const u = (issueUsers as any[]).find((x: any) => String(x.id) === v)
+                        || (issueUsersForFilter as any[]).find((x: any) => String(x.id) === v)
+                      if (editIssue) {
+                        setEditIssue((f: any) => ({
+                          ...f,
+                          subject_user_id: v ? +v : null,
+                          employee_id: u?.employee_id || f.employee_id,
+                          subject_user_name: u?.display_name,
+                        }))
+                      } else {
+                        setIssueForm(f => ({
+                          ...f,
+                          subject_user_id: v,
+                          employee_id: u?.employee_id || '',
+                        }))
+                      }
+                    }}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                  >
+                    <option value="">Select employee / user</option>
+                    {(issueUsers as any[]).length > 0
+                      ? (issueUsers as any[]).map((u: any) => (
+                          <option key={u.id} value={u.id}>{u.search_label || u.display_name}</option>
+                        ))
+                      : (issueUsersForFilter as any[]).map((u: any) => (
+                          <option key={u.id} value={u.id}>{u.search_label || u.display_name}</option>
+                        ))}
+                    {/* Fallback HR employees not linked as users */}
+                    {pickerEmps.map((e: any) => (
+                      <option key={`e-${e.id}`} value={`emp:${e.id}`}>{e.name} (HR · {e.emp_code || e.id})</option>
+                    ))}
                   </select>
                 </div>
-                <div><label className="text-xs text-gray-500">Issue Type</label>
-                  <select value={issueForm.issue_type} onChange={e => setIssueForm(f => ({ ...f, issue_type: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                <div>
+                  <label className="text-xs text-gray-500">Caused By (active users)</label>
+                  <input
+                    value={issueCauseSearch}
+                    onChange={e => setIssueCauseSearch(e.target.value)}
+                    placeholder="Search caused-by…"
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                  />
+                  <select
+                    value={(editIssue || issueForm).caused_by_user_id || ''}
+                    onChange={e => {
+                      const v = e.target.value
+                      if (editIssue) setEditIssue((f: any) => ({ ...f, caused_by_user_id: v ? +v : null }))
+                      else setIssueForm(f => ({ ...f, caused_by_user_id: v }))
+                    }}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                  >
+                    <option value="">None / same person ok</option>
+                    {(issueUsers as any[]).concat(issueUsersForFilter as any[]).filter((u: any, i: number, a: any[]) => a.findIndex(x => x.id === u.id) === i).map((u: any) => (
+                      <option key={u.id} value={u.id}>{u.search_label || u.display_name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">Recorded By</label>
+                  <input
+                    value={editIssue ? (editIssue.recorded_by || recordedByName) : recordedByName}
+                    readOnly
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1 bg-gray-50 text-gray-600 cursor-not-allowed"
+                    title="Always the logged-in user — not editable"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">Issue Type</label>
+                  <select
+                    value={(editIssue || issueForm).issue_type}
+                    onChange={e => editIssue ? setEditIssue((f: any) => ({ ...f, issue_type: e.target.value })) : setIssueForm(f => ({ ...f, issue_type: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                  >
                     {ISSUE_TYPES.map(t => <option key={t}>{t}</option>)}
                   </select>
                 </div>
-                <div><label className="text-xs text-gray-500">Severity</label>
-                  <select value={issueForm.severity} onChange={e => setIssueForm(f => ({ ...f, severity: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                <div>
+                  <label className="text-xs text-gray-500">Severity</label>
+                  <select
+                    value={(editIssue || issueForm).severity}
+                    onChange={e => editIssue ? setEditIssue((f: any) => ({ ...f, severity: e.target.value })) : setIssueForm(f => ({ ...f, severity: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                  >
                     {SEVERITIES.map(s => <option key={s}>{s}</option>)}
                   </select>
                 </div>
-                <div className="col-span-2"><label className="text-xs text-gray-500">Issue Title *</label>
-                  <input value={issueForm.title} onChange={e => setIssueForm(f => ({ ...f, title: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                <div><label className="text-xs text-gray-500">Recorded By</label>
-                  <input value={issueForm.recorded_by} onChange={e => setIssueForm(f => ({ ...f, recorded_by: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                <div className="col-span-3"><label className="text-xs text-gray-500">Description</label>
-                  <input value={issueForm.description} onChange={e => setIssueForm(f => ({ ...f, description: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                <div><label className="text-xs text-gray-500">Caused By (cross-dept)</label>
-                  <select value={issueForm.caused_by_employee_id} onChange={e => setIssueForm(f => ({ ...f, caused_by_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    <option value="">None</option>
-                    {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
+                <div>
+                  <label className="text-xs text-gray-500">Status</label>
+                  <select
+                    value={(editIssue || issueForm).status || 'Open'}
+                    onChange={e => editIssue ? setEditIssue((f: any) => ({ ...f, status: e.target.value })) : setIssueForm(f => ({ ...f, status: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                    disabled={!canChangeIssueStatus && !!editIssue}
+                  >
+                    {ISSUE_STATUSES.map(s => <option key={s}>{s}</option>)}
                   </select>
                 </div>
+                <div className="md:col-span-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-xs text-gray-500">Issue Title *</label>
+                    <button type="button" onClick={() => startIssueVoice('title')}
+                      className={`text-xs px-2 py-0.5 rounded border ${issueListening && issueVoiceTarget === 'title' ? 'bg-red-100 border-red-300 text-red-700' : 'bg-white'}`}>
+                      🎤 {issueListening && issueVoiceTarget === 'title' ? 'Pause' : 'Voice'}
+                    </button>
+                  </div>
+                  <input
+                    value={(editIssue || issueForm).title || ''}
+                    onChange={e => editIssue ? setEditIssue((f: any) => ({ ...f, title: e.target.value })) : setIssueForm(f => ({ ...f, title: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                  />
+                </div>
+                <div className="md:col-span-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-xs text-gray-500">Description</label>
+                    <button type="button" onClick={() => startIssueVoice('description')}
+                      className={`text-xs px-2 py-0.5 rounded border ${issueListening && issueVoiceTarget === 'description' ? 'bg-red-100 border-red-300 text-red-700' : 'bg-white'}`}>
+                      🎤 {issueListening && issueVoiceTarget === 'description' ? 'Pause' : 'Dictate'}
+                    </button>
+                  </div>
+                  <textarea
+                    value={(editIssue || issueForm).description || ''}
+                    onChange={e => editIssue ? setEditIssue((f: any) => ({ ...f, description: e.target.value })) : setIssueForm(f => ({ ...f, description: e.target.value }))}
+                    rows={3}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                  />
+                  {issueVoiceStatus && <p className="text-[11px] text-blue-700 mt-1">{issueVoiceStatus}</p>}
+                </div>
               </div>
-              <div className="flex gap-2">
-                <button onClick={() => createIssueMut.mutate({ ...issueForm, employee_id: +issueForm.employee_id, caused_by_employee_id: issueForm.caused_by_employee_id ? +issueForm.caused_by_employee_id : null })}
-                  disabled={!issueForm.employee_id || !issueForm.title}
-                  className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm disabled:opacity-50">Record Issue</button>
-                <button onClick={() => setShowIssueForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
+              {editIssue && canEditIssues && (
+                <div className="grid md:grid-cols-2 gap-2 text-xs border-t pt-3">
+                  <div className="flex gap-1">
+                    <input value={issueComment} onChange={e => setIssueComment(e.target.value)} placeholder="Add comment…" className="flex-1 border rounded px-2 py-1.5" />
+                    <button type="button" disabled={!issueComment.trim()} onClick={() => commentIssueMut.mutate({ id: editIssue.id, text: issueComment })}
+                      className="px-2 py-1 bg-gray-800 text-white rounded disabled:opacity-50">Comment</button>
+                  </div>
+                  <div className="flex gap-1">
+                    <input value={issueAttachmentName} onChange={e => setIssueAttachmentName(e.target.value)} placeholder="Attachment file name…" className="flex-1 border rounded px-2 py-1.5" />
+                    <button type="button" disabled={!issueAttachmentName.trim()} onClick={() => attachIssueMut.mutate({ id: editIssue.id, file_name: issueAttachmentName })}
+                      className="px-2 py-1 border rounded disabled:opacity-50">Attach</button>
+                  </div>
+                </div>
+              )}
+              <div className="flex gap-2 flex-wrap">
+                {!editIssue ? (
+                  <button
+                    onClick={() => {
+                      const f = issueForm
+                      const payload: any = {
+                        title: f.title,
+                        description: f.description,
+                        issue_type: f.issue_type,
+                        severity: f.severity,
+                        status: f.status || 'Open',
+                      }
+                      if (String(f.subject_user_id).startsWith('emp:')) {
+                        payload.employee_id = +String(f.subject_user_id).replace('emp:', '')
+                      } else if (f.subject_user_id) {
+                        payload.subject_user_id = +f.subject_user_id
+                        if (f.employee_id) payload.employee_id = +f.employee_id
+                      } else if (f.employee_id) {
+                        payload.employee_id = +f.employee_id
+                      }
+                      if (f.caused_by_user_id) payload.caused_by_user_id = +f.caused_by_user_id
+                      createIssueMut.mutate(payload)
+                    }}
+                    disabled={
+                      !(issueForm.subject_user_id || issueForm.employee_id) || !issueForm.title || createIssueMut.isPending
+                    }
+                    className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm disabled:opacity-50"
+                  >
+                    Record Issue
+                  </button>
+                ) : canEditIssues ? (
+                  <button
+                    onClick={() => {
+                      const f = editIssue
+                      const data: any = {
+                        title: f.title,
+                        description: f.description,
+                        issue_type: f.issue_type,
+                        severity: f.severity,
+                        status: f.status,
+                      }
+                      if (f.subject_user_id) data.subject_user_id = +f.subject_user_id
+                      if (f.employee_id) data.employee_id = +f.employee_id
+                      if (f.caused_by_user_id) data.caused_by_user_id = +f.caused_by_user_id
+                      updateIssueMut.mutate({ id: f.id, data })
+                    }}
+                    className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm"
+                  >
+                    Save Changes
+                  </button>
+                ) : null}
+                <button onClick={() => { setShowIssueForm(false); setEditIssue(null); stopIssueVoice() }} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               </div>
             </div>
           )}
 
-          <div className="space-y-2">
-            {(issues as any[]).map((issue: any) => (
-              <div key={issue.id} className={`bg-white rounded-xl border p-4 border-l-4 ${issue.severity === 'Major' ? 'border-l-red-500' : issue.severity === 'Moderate' ? 'border-l-amber-500' : 'border-l-yellow-300'}`}>
-                <div className="flex items-start justify-between">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="font-semibold text-gray-800">{issue.employee_name}</span>
-                      <span className="text-xs text-gray-400">{issue.department_name}</span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${issue.severity === 'Major' ? 'bg-red-100 text-red-700' : issue.severity === 'Moderate' ? 'bg-amber-100 text-amber-700' : 'bg-yellow-100 text-yellow-700'}`}>{issue.severity}</span>
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{issue.issue_type}</span>
-                    </div>
-                    <p className="text-sm font-medium text-gray-700">{issue.title}</p>
-                    {issue.description && <p className="text-xs text-gray-500 mt-0.5">{issue.description}</p>}
-                    {issue.caused_by_name && (
-                      <p className="text-xs text-purple-600 mt-1">🔗 Caused by: <b>{issue.caused_by_name}</b> ({issue.caused_by_dept_name})</p>
-                    )}
-                    <p className="text-xs text-gray-400 mt-1">{issue.issue_date} · By: {issue.recorded_by || '—'}</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs px-2 py-0.5 rounded-full ${issue.status === 'Resolved' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{issue.status}</span>
-                    {issue.status === 'Open' && canEditAssignments && (
-                      <button onClick={() => { const res = prompt('Resolution:'); if (res) resolveIssueMut.mutate({ id: issue.id, res }) }}
-                        className="text-xs px-2 py-1 bg-green-600 text-white rounded hover:bg-green-700">Resolve</button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
+          <div className="bg-white rounded-xl border overflow-x-auto">
+            <table className="w-full text-sm min-w-[720px]">
+              <thead className="bg-gray-50 text-xs text-gray-500">
+                <tr>
+                  <th className="text-left px-3 py-2">Employee</th>
+                  <th className="text-left px-3 py-2">Issue Title</th>
+                  <th className="text-left px-3 py-2">Caused By</th>
+                  <th className="text-left px-3 py-2">Recorded By</th>
+                  <th className="text-left px-3 py-2">Status</th>
+                  <th className="text-left px-3 py-2">Created</th>
+                  <th className="text-left px-3 py-2">Updated</th>
+                  <th className="text-left px-3 py-2">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(issues as any[]).map((issue: any) => {
+                  const empName = issue.display_employee || issue.employee_name || '—'
+                  const causeName = issue.display_caused_by || issue.caused_by_name || '—'
+                  const showRec = issue.show_recorded_by !== false && issue.recorded_by
+                    && (issue.recorded_by || '').toLowerCase() !== (empName || '').toLowerCase()
+                  const st = issue.status === 'Resolved' ? 'Resolve' : issue.status
+                  return (
+                    <tr key={issue.id} className="border-t hover:bg-gray-50">
+                      <td className="px-3 py-2 font-medium text-gray-800">
+                        {empName}
+                        <div className="text-[10px] text-gray-400">{issue.department_name}</div>
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="font-medium text-gray-700">{issue.title}</div>
+                        {issue.description && <div className="text-[11px] text-gray-400 line-clamp-1">{issue.description}</div>}
+                      </td>
+                      <td className="px-3 py-2 text-purple-700 text-xs">{causeName}</td>
+                      <td className="px-3 py-2 text-xs text-gray-600">{showRec ? issue.recorded_by : '—'}</td>
+                      <td className="px-3 py-2">
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${issueStatusStyle(st)}`}>{st}</span>
+                      </td>
+                      <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">{fmtDate(issue.created_at || issue.issue_date)}</td>
+                      <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">{fmtDateTime(issue.updated_at || issue.created_at || '')}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex flex-wrap gap-1">
+                          {canEditIssues && (
+                            <button type="button" onClick={() => { setEditIssue({ ...issue }); setShowIssueForm(false) }}
+                              className="text-xs px-2 py-0.5 border rounded hover:bg-gray-100">Edit</button>
+                          )}
+                          <button type="button" onClick={() => openIssueHistory(issue.id)}
+                            className="text-xs px-2 py-0.5 border rounded hover:bg-gray-100">History</button>
+                          {canChangeIssueStatus && st === 'Open' && (
+                            <>
+                              <button type="button" onClick={() => statusIssueMut.mutate({ id: issue.id, status: 'Hold' })}
+                                className="text-xs px-2 py-0.5 rounded bg-orange-100 text-orange-800">Hold</button>
+                              <button type="button" onClick={() => {
+                                const res = prompt('Resolution notes (optional):') ?? ''
+                                resolveIssueMut.mutate({ id: issue.id, res })
+                              }} className="text-xs px-2 py-0.5 rounded bg-green-600 text-white">Resolve</button>
+                            </>
+                          )}
+                          {canChangeIssueStatus && st === 'Hold' && (
+                            <button type="button" onClick={() => statusIssueMut.mutate({ id: issue.id, status: 'Open' })}
+                              className="text-xs px-2 py-0.5 rounded bg-blue-100 text-blue-800">Reopen</button>
+                          )}
+                          {canChangeIssueStatus && st !== 'Cancel' && st !== 'Resolve' && (
+                            <button type="button" onClick={() => {
+                              if (confirm('Cancel this issue?')) statusIssueMut.mutate({ id: issue.id, status: 'Cancel' })
+                            }} className="text-xs px-2 py-0.5 rounded bg-red-50 text-red-700">Cancel</button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
             {(issues as any[]).length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No issues found.</p>}
           </div>
+
+          {showHistoryId && (
+            <div className="bg-white rounded-xl border p-4">
+              <div className="flex justify-between items-center mb-2">
+                <h4 className="text-sm font-semibold">Audit trail · Issue #{showHistoryId}</h4>
+                <button type="button" className="text-xs text-gray-500" onClick={() => setShowHistoryId(null)}>Close</button>
+              </div>
+              <ul className="space-y-1 max-h-48 overflow-auto text-xs">
+                {issueHistory.map((h: any) => (
+                  <li key={h.id} className="border-b border-gray-50 py-1">
+                    <span className="text-gray-400">{h.created_at}</span>{' '}
+                    <b>{h.action}</b>
+                    {h.field_name ? ` · ${h.field_name}` : ''}
+                    {h.previous_value || h.new_value ? (
+                      <span className="text-gray-600">: {h.previous_value || '∅'} → {h.new_value || '∅'}</span>
+                    ) : null}
+                    <span className="text-gray-400"> · {h.user_name || 'system'}</span>
+                  </li>
+                ))}
+                {issueHistory.length === 0 && <li className="text-gray-400">No history yet.</li>}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 

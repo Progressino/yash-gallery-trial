@@ -25,6 +25,17 @@ from ..db.hrm_db import (
     list_issues,
     create_issue,
     resolve_issue,
+    update_issue,
+    update_issue_status,
+    get_issue_raw,
+    add_issue_comment,
+    list_issue_comments,
+    add_issue_attachment,
+    list_issue_attachments,
+    list_issue_history,
+    log_voice_transcription,
+    list_issue_notifications,
+    delete_issue,
     get_hod_dashboard,
     get_appraisal,
     get_employee_day_check,
@@ -41,7 +52,7 @@ from ..db.hrm_db import (
     approve_one_time_task,
     reject_one_time_task,
 )
-from ..db.users_db import get_user_auth_profile
+from ..db.users_db import get_user_auth_profile, search_active_users, get_user_by_id
 from ..services.rbac import (
     build_hrm_scope,
     hrm_scope_filters,
@@ -64,6 +75,59 @@ def _scope_from_request(request: Request) -> HrmScope:
     profile = get_user_auth_profile(username) if username else None
     role = (profile or {}).get("role_name") or payload.get("role")
     return build_hrm_scope(profile, role=role)
+
+
+def _recorder_from_request(request: Request) -> tuple[int | None, str]:
+    """Immutable Recorded By = current logged-in user (id + display name)."""
+    payload = getattr(request.state, "auth", None) or {}
+    username = payload.get("sub")
+    profile = get_user_auth_profile(username) if username else None
+    if profile:
+        uid = profile.get("id")
+        try:
+            uid = int(uid) if uid is not None else None
+        except (TypeError, ValueError):
+            uid = None
+        name = (
+            (profile.get("full_name") or "").strip()
+            or (profile.get("username") or username or "").strip()
+            or "Unknown"
+        )
+        return uid, name
+    name = (payload.get("full_name") or payload.get("sub") or "Unknown").strip()
+    return None, name
+
+
+def _resolve_subject_from_user(subject_user_id: int | None, employee_id: int | None) -> dict:
+    """Map ERP user selection to HR employee_id + display names for issue create/update."""
+    result: dict = {
+        "employee_id": employee_id,
+        "subject_user_id": subject_user_id,
+        "subject_user_name": "",
+        "department_id": None,
+        "designation": "",
+        "caused_by_user_id": None,
+        "caused_by_user_name": "",
+        "caused_by_employee_id": None,
+    }
+    if subject_user_id:
+        u = get_user_by_id(int(subject_user_id))
+        if not u or not int(u.get("active") or 0):
+            raise HTTPException(400, "Employee user is inactive or not found")
+        result["subject_user_id"] = int(u["id"])
+        result["subject_user_name"] = (u.get("full_name") or u.get("username") or "").strip()
+        if u.get("employee_id"):
+            result["employee_id"] = int(u["employee_id"])
+        if u.get("hrm_department_id"):
+            result["department_id"] = int(u["hrm_department_id"])
+        result["designation"] = (u.get("role_name") or u.get("department") or "").strip()
+    if not result["employee_id"]:
+        raise HTTPException(
+            400,
+            "Selected user is not linked to an HR employee profile. "
+            "Link employee_id on the ERP user (Admin) or pick a linked user / HR employee.",
+        )
+    return result
 
 
 def _enforce_list_employee_scope(scope: HrmScope, employee_id: int | None) -> None:
@@ -132,20 +196,68 @@ class TaskMarkIn(BaseModel):
 
 
 class IssueIn(BaseModel):
-    employee_id: int
+    employee_id: Optional[int] = None
+    subject_user_id: Optional[int] = None
     department_id: Optional[int] = None
     issue_date: Optional[str] = None
     issue_type: Optional[str] = "General"
     severity: Optional[str] = "Minor"
     title: str
     description: Optional[str] = ""
-    recorded_by: Optional[str] = ""
+    # recorded_by ignored from client — always set from auth
+    recorded_by: Optional[str] = None
     caused_by_employee_id: Optional[int] = None
+    caused_by_user_id: Optional[int] = None
     caused_by_dept_id: Optional[int] = None
+    status: Optional[str] = "Open"
+    designation: Optional[str] = None
+
+
+class IssueUpdateIn(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    employee_id: Optional[int] = None
+    subject_user_id: Optional[int] = None
+    caused_by_employee_id: Optional[int] = None
+    caused_by_user_id: Optional[int] = None
+    department_id: Optional[int] = None
+    issue_type: Optional[str] = None
+    severity: Optional[str] = None
+    status: Optional[str] = None
+    resolution: Optional[str] = None
+    issue_date: Optional[str] = None
+    designation: Optional[str] = None
+    # must be ignored even if sent
+    recorded_by: Optional[str] = None
+    recorded_by_user_id: Optional[int] = None
 
 
 class IssueResolveIn(BaseModel):
-    resolution: str
+    resolution: str = ""
+
+
+class IssueStatusIn(BaseModel):
+    status: str
+    resolution: Optional[str] = ""
+
+
+class IssueCommentIn(BaseModel):
+    comment_text: str
+
+
+class IssueAttachmentIn(BaseModel):
+    file_name: str
+    file_url: Optional[str] = ""
+    content_type: Optional[str] = ""
+    file_size: Optional[int] = 0
+
+
+class VoiceTranscriptionIn(BaseModel):
+    transcript: str = ""
+    target_field: str = "description"
+    status: str = "success"
+    error_message: str = ""
+    issue_id: Optional[int] = None
 
 
 class OneTimeTaskIn(BaseModel):
@@ -186,6 +298,10 @@ def get_hrm_scope(request: Request):
         "can_edit_assignments": scope.can_edit_assignments,
         "can_view_employee_list": scope.can_view_employee_list,
         "can_delete_hrm_records": scope.can_delete_hrm_records,
+        "can_create_issues": scope.can_create_issues,
+        "can_edit_issues": scope.can_edit_issues,
+        "can_change_issue_status": scope.can_change_issue_status,
+        "can_delete_issues": scope.can_delete_issues,
     }
 
 
@@ -403,6 +519,41 @@ def get_logs(
     return get_task_logs(dept_f, emp_f, from_date, to_date)
 
 
+@router.get("/issues/users")
+def get_issue_users(request: Request, q: Optional[str] = None, limit: int = 100):
+    """Active ERP users for Employee / Caused By searchable pickers."""
+    _scope_from_request(request)  # must be authenticated
+    return search_active_users(q or "", limit=min(max(limit, 1), 500))
+
+
+@router.get("/issues/meta")
+def get_issue_meta(request: Request):
+    _scope_from_request(request)
+    return {
+        "statuses": ["Open", "Resolve", "Hold", "Cancel"],
+        "status_colors": {
+            "Open": "blue",
+            "Resolve": "green",
+            "Hold": "orange",
+            "Cancel": "red",
+        },
+        "issue_types": [
+            "General",
+            "Discipline",
+            "Quality",
+            "Attendance",
+            "Behaviour",
+            "Task Failure",
+            "Dependency Missed",
+            "Policy Violation",
+            "Workplace Incident",
+            "Performance",
+            "Complaint",
+        ],
+        "severities": ["Minor", "Moderate", "Major"],
+    }
+
+
 @router.get("/issues")
 def get_issues(
     request: Request,
@@ -410,23 +561,231 @@ def get_issues(
     department_id: Optional[int] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    status: Optional[str] = None,
+    caused_by_employee_id: Optional[int] = None,
+    caused_by_user_id: Optional[int] = None,
+    recorded_by_user_id: Optional[int] = None,
+    recorded_by: Optional[str] = None,
+    subject_user_id: Optional[int] = None,
+    designation: Optional[str] = None,
+    q: Optional[str] = None,
 ):
     scope = _scope_from_request(request)
     dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
     if emp_f == -1 or dept_f == -1:
         return []
     _enforce_list_employee_scope(scope, emp_f)
-    return list_issues(emp_f, dept_f, from_date, to_date)
+    return list_issues(
+        emp_f,
+        dept_f,
+        from_date,
+        to_date,
+        status=status,
+        caused_by_employee_id=caused_by_employee_id,
+        caused_by_user_id=caused_by_user_id,
+        recorded_by_user_id=recorded_by_user_id,
+        recorded_by=recorded_by,
+        subject_user_id=subject_user_id,
+        designation=designation,
+        q=q,
+    )
+
+
+@router.get("/issues/notifications")
+def get_issue_notifications(request: Request, limit: int = 50, unread_only: bool = False):
+    _scope_from_request(request)
+    return list_issue_notifications(limit=limit, unread_only=unread_only)
+
+
+@router.get("/issues/{issue_id}/history")
+def get_issue_history(issue_id: int, request: Request):
+    scope = _scope_from_request(request)
+    from ..db.hrm_db import get_issue_employee_id
+
+    eid = get_issue_employee_id(issue_id)
+    if eid is None:
+        raise HTTPException(404, "Issue not found")
+    assert_employee_in_scope(scope, eid)
+    return list_issue_history(issue_id)
+
+
+@router.get("/issues/{issue_id}/comments")
+def get_issue_comments_route(issue_id: int, request: Request):
+    scope = _scope_from_request(request)
+    from ..db.hrm_db import get_issue_employee_id
+
+    eid = get_issue_employee_id(issue_id)
+    if eid is None:
+        raise HTTPException(404, "Issue not found")
+    assert_employee_in_scope(scope, eid)
+    return list_issue_comments(issue_id)
+
+
+@router.post("/issues/{issue_id}/comments")
+def post_issue_comment(issue_id: int, body: IssueCommentIn, request: Request):
+    scope = _scope_from_request(request)
+    from ..db.hrm_db import get_issue_employee_id
+
+    eid = get_issue_employee_id(issue_id)
+    if eid is None:
+        raise HTTPException(404, "Issue not found")
+    assert_employee_in_scope(scope, eid)
+    uid, uname = _recorder_from_request(request)
+    try:
+        cid = add_issue_comment(issue_id, body.comment_text, user_id=uid, user_name=uname)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "id": cid}
+
+
+@router.get("/issues/{issue_id}/attachments")
+def get_issue_attachments_route(issue_id: int, request: Request):
+    scope = _scope_from_request(request)
+    from ..db.hrm_db import get_issue_employee_id
+
+    eid = get_issue_employee_id(issue_id)
+    if eid is None:
+        raise HTTPException(404, "Issue not found")
+    assert_employee_in_scope(scope, eid)
+    return list_issue_attachments(issue_id)
+
+
+@router.post("/issues/{issue_id}/attachments")
+def post_issue_attachment(issue_id: int, body: IssueAttachmentIn, request: Request):
+    scope = _scope_from_request(request)
+    if not scope.can_edit_issues:
+        raise HTTPException(403, "Not permitted to add attachments")
+    from ..db.hrm_db import get_issue_employee_id
+
+    eid = get_issue_employee_id(issue_id)
+    if eid is None:
+        raise HTTPException(404, "Issue not found")
+    assert_employee_in_scope(scope, eid)
+    uid, uname = _recorder_from_request(request)
+    try:
+        aid = add_issue_attachment(
+            issue_id, body.model_dump(), user_id=uid, user_name=uname
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "id": aid}
 
 
 @router.post("/issues")
 def post_issue(body: IssueIn, request: Request):
     scope = _scope_from_request(request)
-    assert_employee_in_scope(scope, body.employee_id)
-    if body.caused_by_employee_id:
+    if not scope.can_create_issues:
+        raise HTTPException(403, "Not permitted to create issues")
+    payload = body.model_dump()
+    # Never trust client recorded_by
+    payload.pop("recorded_by", None)
+    uid, uname = _recorder_from_request(request)
+    payload["recorded_by"] = uname
+    payload["recorded_by_user_id"] = uid
+
+    employee_id = body.employee_id
+    subject_user_id = body.subject_user_id
+    if subject_user_id:
+        try:
+            resolved = _resolve_subject_from_user(subject_user_id, employee_id)
+        except HTTPException:
+            raise
+        payload["employee_id"] = resolved["employee_id"]
+        payload["subject_user_id"] = resolved["subject_user_id"]
+        payload["subject_user_name"] = resolved["subject_user_name"]
+        if not payload.get("department_id") and resolved.get("department_id"):
+            payload["department_id"] = resolved["department_id"]
+        if not payload.get("designation") and resolved.get("designation"):
+            payload["designation"] = resolved["designation"]
+        employee_id = resolved["employee_id"]
+    if not employee_id:
+        raise HTTPException(400, "employee_id or subject_user_id is required")
+    assert_employee_in_scope(scope, int(employee_id))
+
+    if body.caused_by_user_id:
+        cu = get_user_by_id(int(body.caused_by_user_id))
+        if not cu or not int(cu.get("active") or 0):
+            raise HTTPException(400, "Caused By user is inactive or not found")
+        payload["caused_by_user_id"] = int(cu["id"])
+        payload["caused_by_user_name"] = (cu.get("full_name") or cu.get("username") or "").strip()
+        if cu.get("employee_id"):
+            payload["caused_by_employee_id"] = int(cu["employee_id"])
+            try:
+                assert_employee_in_scope(scope, int(cu["employee_id"]))
+            except HTTPException:
+                # Caused-by may be outside scope (cross-dept) when recording for own team — allow name store
+                pass
+    elif body.caused_by_employee_id:
         assert_employee_in_scope(scope, body.caused_by_employee_id)
-    create_issue(body.model_dump())
-    return {"ok": True}
+
+    try:
+        iid = create_issue(payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "id": iid, "recorded_by": uname, "recorded_by_user_id": uid}
+
+
+@router.patch("/issues/{issue_id}")
+def patch_issue(issue_id: int, body: IssueUpdateIn, request: Request):
+    scope = _scope_from_request(request)
+    if not scope.can_edit_issues:
+        raise HTTPException(403, "Not permitted to edit issues")
+    from ..db.hrm_db import get_issue_employee_id
+
+    eid = get_issue_employee_id(issue_id)
+    if eid is None:
+        raise HTTPException(404, "Issue not found")
+    assert_employee_in_scope(scope, eid)
+    uid, uname = _recorder_from_request(request)
+    data = body.model_dump(exclude_unset=True)
+    # Strip immutable fields if client tries
+    data.pop("recorded_by", None)
+    data.pop("recorded_by_user_id", None)
+    if data.get("subject_user_id"):
+        resolved = _resolve_subject_from_user(int(data["subject_user_id"]), data.get("employee_id"))
+        data["employee_id"] = resolved["employee_id"]
+        data["subject_user_id"] = resolved["subject_user_id"]
+        data["subject_user_name"] = resolved["subject_user_name"]
+        assert_employee_in_scope(scope, int(data["employee_id"]))
+    elif data.get("employee_id"):
+        assert_employee_in_scope(scope, int(data["employee_id"]))
+    if data.get("caused_by_user_id"):
+        cu = get_user_by_id(int(data["caused_by_user_id"]))
+        if not cu or not int(cu.get("active") or 0):
+            raise HTTPException(400, "Caused By user is inactive or not found")
+        data["caused_by_user_id"] = int(cu["id"])
+        data["caused_by_user_name"] = (cu.get("full_name") or cu.get("username") or "").strip()
+        if cu.get("employee_id"):
+            data["caused_by_employee_id"] = int(cu["employee_id"])
+    try:
+        result = update_issue(issue_id, data, user_id=uid, user_name=uname)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return result
+
+
+@router.patch("/issues/{issue_id}/status")
+def patch_issue_status(issue_id: int, body: IssueStatusIn, request: Request):
+    scope = _scope_from_request(request)
+    if not scope.can_change_issue_status:
+        raise HTTPException(403, "Not permitted to change issue status")
+    from ..db.hrm_db import get_issue_employee_id
+
+    eid = get_issue_employee_id(issue_id)
+    if eid is None:
+        raise HTTPException(404, "Issue not found")
+    assert_employee_in_scope(scope, eid)
+    uid, uname = _recorder_from_request(request)
+    try:
+        return update_issue_status(
+            issue_id,
+            body.status,
+            resolution=body.resolution or "",
+            user_id=uid,
+            user_name=uname,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.patch("/issues/{issue_id}/resolve")
@@ -439,8 +798,39 @@ def patch_resolve_issue(issue_id: int, body: IssueResolveIn, request: Request):
     if eid is None:
         raise HTTPException(404, "Issue not found")
     assert_employee_in_scope(scope, eid)
-    resolve_issue(issue_id, body.resolution)
-    return {"ok": True}
+    uid, uname = _recorder_from_request(request)
+    resolve_issue(issue_id, body.resolution or "", user_id=uid, user_name=uname)
+    return {"ok": True, "status": "Resolve"}
+
+
+@router.delete("/issues/{issue_id}")
+def delete_issue_route(issue_id: int, request: Request):
+    scope = _scope_from_request(request)
+    if not scope.can_delete_issues:
+        raise HTTPException(403, "Only Admin can cancel/delete issues via this action")
+    from ..db.hrm_db import get_issue_employee_id
+
+    eid = get_issue_employee_id(issue_id)
+    if eid is None:
+        raise HTTPException(404, "Issue not found")
+    assert_employee_in_scope(scope, eid)
+    uid, uname = _recorder_from_request(request)
+    delete_issue(issue_id, user_id=uid, user_name=uname)
+    return {"ok": True, "status": "Cancel"}
+
+
+@router.post("/issues/voice-log")
+def post_voice_log(body: VoiceTranscriptionIn, request: Request):
+    """Audit voice transcription (success or failure). Failures never block issue create."""
+    uid, uname = _recorder_from_request(request)
+    tid = log_voice_transcription(
+        {
+            **body.model_dump(),
+            "user_id": uid,
+            "user_name": uname,
+        }
+    )
+    return {"ok": True, "id": tid}
 
 
 @router.get("/hod-dashboard/{department_id}")
