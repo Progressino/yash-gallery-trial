@@ -102,15 +102,28 @@ def _looks_like_panel_code(code: str) -> bool:
     return any(tok in c for tok in ("FRONT", "BACK", "SLEEVE", "PANEL"))
 
 
+def looks_like_ready_to_wip_columns(columns: list[Any] | tuple[Any, ...] | None) -> bool:
+    """True when file is Ready-To WIP migration template, not Job Order import."""
+    cols = {str(c or "").strip().lower().replace(" ", "_") for c in (columns or [])}
+    if "ready_to_stage" in cols and ("oms_sku" in cols or "sku" in cols):
+        return True
+    # ready_to_*_wip_template.csv: OMS_SKU + Quantity, no JO planned_qty/sku
+    if "oms_sku" in cols and "quantity" in cols and "sku" not in cols and "planned_qty" not in cols:
+        return True
+    return False
+
+
 def build_jo_payload_from_import_row(row: dict[str, Any], *, default_process: str = "Cutting") -> dict[str, Any]:
     """Map one CSV/XLSX row into create_jo payload. Raises ValueError on bad panel rows."""
-    so_number = _import_cell_str(row.get("so_number"))
-    sku = _import_cell_str(row.get("sku")).upper()
+    so_number = _import_cell_str(row.get("so_number") or row.get("so"))
+    sku = _import_cell_str(row.get("sku") or row.get("oms_sku")).upper()
     if not so_number or not sku:
-        raise ValueError("so_number and sku required")
+        raise ValueError("so_number and sku required (use production JO template, not Ready-To WIP template)")
 
-    planned = float(row.get("planned_qty") or row.get("qty") or 0)
-    process = str(row.get("process") or default_process or "Cutting").strip() or "Cutting"
+    planned = float(row.get("planned_qty") or row.get("qty") or row.get("quantity") or 0)
+    process = str(
+        row.get("process") or row.get("ready_to_stage") or default_process or "Cutting"
+    ).strip() or "Cutting"
     delivery = str(
         row.get("expected_completion")
         or row.get("delivery_date")

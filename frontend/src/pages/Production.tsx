@@ -1805,7 +1805,12 @@ export default function Production() {
                     })
                     qc.invalidateQueries({ queryKey: ['jos-process'] })
                     qc.invalidateQueries({ queryKey: ['ready-to-process'] })
-                    alert(res.data?.message || `Imported ${res.data?.created ?? 0} job order(s).`)
+                    const errs = (res.data?.errors || []).slice(0, 6).join('\n')
+                    alert(
+                      (res.data?.message || `Imported ${res.data?.created ?? 0} job order(s).`)
+                      + (errs ? `\n\n${errs}` : '')
+                      + (res.data?.hint ? `\n\n${res.data.hint}` : ''),
+                    )
                   } catch (err) {
                     alert(apiErrorMessage(err, 'Import failed'))
                   }
@@ -1891,7 +1896,12 @@ export default function Production() {
                     fd.append('stage', activeProcess)
                     try {
                       const { data } = await api.post('/production/ready-to-wip/import', fd)
-                      alert(`Imported ${data.imported} WIP row(s)` + (data.errors?.length ? `\n${data.errors.slice(0, 5).join('\n')}` : ''))
+                      const errs = (data.errors || []).slice(0, 6).join('\n')
+                      alert(
+                        `Imported ${data.imported ?? 0} Ready-To WIP row(s)`
+                        + (errs ? `\n\n${errs}` : '')
+                        + (data.import_batch ? `\nBatch: ${data.import_batch}` : ''),
+                      )
                       invalidateAll()
                     } catch (err: any) {
                       alert(err?.response?.data?.detail || err?.message || 'WIP import failed')

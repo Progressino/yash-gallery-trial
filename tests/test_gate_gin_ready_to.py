@@ -181,6 +181,32 @@ def test_ready_to_wip_import(isolated_module_dbs, client):
     assert len(filtered.json()) >= 1
 
 
+def test_jo_import_autoroute_ready_to_wip_template(isolated_module_dbs, client):
+    """ready_to_*_wip_template.csv must credit stock even if uploaded via JO import."""
+    csv = (
+        "Ready_To_Stage,SO_Number,OMS_SKU,Quantity,JO_Number,Batch,Vendor,Remarks\n"
+        "Stitching,03-2627,1112YKBLACK-M,150,,,,\n"
+        "Stitching,03-2627,1112YKBLACK-L,230,,,,\n"
+    )
+    r = client.post(
+        "/api/production/orders/import",
+        files={"file": ("ready_to_stitching_wip_template.csv", io.BytesIO(csv.encode()), "text/csv")},
+        data={"process": "Stitching"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("kind") == "ready_to_wip"
+    assert body.get("imported") == 2, body
+    assert body.get("created") == 0
+    assert "Ready-To WIP" in (body.get("message") or "")
+
+    ready = client.get("/api/production/ready-to-process/Stitching")
+    assert ready.status_code == 200
+    skus = {str(x.get("sku")) for x in ready.json()}
+    assert "1112YKBLACK-M" in skus
+    assert "1112YKBLACK-L" in skus
+
+
 def test_gin_jo_receive(isolated_module_dbs, client):
     from backend.db import production_db
 

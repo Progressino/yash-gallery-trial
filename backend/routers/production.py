@@ -30,7 +30,11 @@ from ..db.production_db import (
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
 from ..services import jo_issue_notes
-from ..services.jo_import import build_jo_payload_from_import_row, jo_import_template_csv
+from ..services.jo_import import (
+    build_jo_payload_from_import_row,
+    jo_import_template_csv,
+    looks_like_ready_to_wip_columns,
+)
 
 router = APIRouter()
 
@@ -636,6 +640,35 @@ async def import_jos(
         raise HTTPException(400, f"Could not read file: {e}") from e
     if df.empty:
         raise HTTPException(400, "Import file is empty")
+    # Preserve original headers for Ready-To WIP detection, then normalize for JO parse.
+    raw_columns = [str(c) for c in df.columns]
+    if looks_like_ready_to_wip_columns(raw_columns):
+        # User often uploads ready_to_*_wip_template.csv via the JO import button.
+        rows = df.fillna("").to_dict(orient="records")
+        try:
+            wip = import_ready_to_wip(rows, default_stage=process or "Stitching")
+        except Exception as e:
+            raise HTTPException(400, str(e)) from e
+        errs = wip.get("errors") or []
+        imported = int(wip.get("imported") or 0)
+        return {
+            "ok": True,
+            "kind": "ready_to_wip",
+            "created": 0,
+            "imported": imported,
+            "import_batch": wip.get("import_batch"),
+            "jo_numbers": [],
+            "errors": errs,
+            "message": (
+                f"Detected Ready-To WIP template — credited {imported} stock row(s)"
+                + (f"; {len(errs)} failed" if errs else "")
+                + ". (Use ⬇ WIP template + Import Ready-To WIP for this format.)"
+            ),
+            "hint": (
+                "This file stocks Ready-To for the stage (Cutting → Stitching feeder). "
+                "To create Job Orders, download production_jo_import_template.csv instead."
+            ),
+        }
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
     created: list[str] = []
     errors: list[str] = []
@@ -651,10 +684,11 @@ async def import_jos(
             else:
                 created.append(result)
         except Exception as e:
-            sku_hint = str(row.get("sku") or "").strip() or "?"
+            sku_hint = str(row.get("sku") or row.get("oms_sku") or "").strip() or "?"
             errors.append(f"Row {int(i) + 2} ({sku_hint}): {e}")
     return {
         "ok": True,
+        "kind": "job_order",
         "created": len(created),
         "jo_numbers": created,
         "errors": errors,
@@ -662,7 +696,8 @@ async def import_jos(
         + (f"; {len(errors)} failed" if errors else ""),
         "hint": (
             "FRONT/BACK are panels inside the TOP Cutting JO after Receive — "
-            "not separate import rows. Use one main size SKU row, or component_code=TOP/PANT/DUPATTA."
+            "not separate import rows. Use one main size SKU row, or component_code=TOP/PANT/DUPATTA. "
+            "For existing Ready-To stock, use ready_to_*_wip_template.csv + Import Ready-To WIP."
         ),
     }
 
