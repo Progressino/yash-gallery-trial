@@ -1,0 +1,128 @@
+name: Monitor production deploy
+
+# Ensures deploys stay visible and healthy:
+# - public /api/health ok
+# - prod git_sha matches origin/main tip (after deploys settle)
+# Failing runs surface under Actions → Monitor production deploy
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Deploy to VPS"]
+    types: [completed]
+
+permissions:
+  contents: read
+  statuses: write
+  actions: read
+
+concurrency:
+  group: monitor-production-deploy
+  cancel-in-progress: true
+
+jobs:
+  monitor:
+    name: verify-production
+    runs-on: ubuntu-latest
+    # Only after successful deploys for workflow_run; always for schedule/manual
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Probe production health
+        id: health
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            if curl -sfS --connect-timeout 10 --max-time 30 \
+              "https://app.progressino.com/api/health" -o /tmp/health.json; then
+              cat /tmp/health.json
+              echo ""
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              PROD_SHA="$(python3 -c 'import json;print(json.load(open("/tmp/health.json")).get("git_sha",""))')"
+              echo "prod_sha=${PROD_SHA}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "retry $i…"
+            sleep 5
+          done
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+          echo "prod_sha=" >> "$GITHUB_OUTPUT"
+          exit 1
+
+      - name: Compare with main tip
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          MAIN_SHA="$(gh api "repos/${{ github.repository }}/commits/main" --jq '.sha[0:7]')"
+          PROD_SHA="${{ steps.health.outputs.prod_sha }}"
+          echo "main_tip=${MAIN_SHA}"
+          echo "prod_sha=${PROD_SHA}"
+          echo "main_sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
+          if [ -z "$PROD_SHA" ]; then
+            echo "match=unknown" >> "$GITHUB_OUTPUT"
+            echo "::warning::Health payload missing git_sha"
+            exit 0
+          fi
+          if [ "$PROD_SHA" = "$MAIN_SHA" ]; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+            echo "OK: production matches main (${MAIN_SHA})"
+          else
+            echo "match=false" >> "$GITHUB_OUTPUT"
+            # After deploy, SHA can lag a few minutes during rebuild — warn not fail for schedule.
+            # On workflow_run (post-deploy) a mismatch is a hard fail.
+            if [ "${{ github.event_name }}" = "workflow_run" ]; then
+              echo "::error::Production git_sha (${PROD_SHA}) != main (${MAIN_SHA}) after Deploy to VPS"
+              exit 1
+            fi
+            echo "::warning::Production git_sha (${PROD_SHA}) != main tip (${MAIN_SHA}) — deploy may still be rolling or failed"
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Production deploy monitor"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Health | ${{ steps.health.outputs.ok }} |"
+            echo "| Prod SHA | \`${{ steps.health.outputs.prod_sha }}\` |"
+            echo "| Main tip | \`${{ steps.compare.outputs.main_sha }}\` |"
+            echo "| Match | ${{ steps.compare.outputs.match }} |"
+            echo "| Event | ${{ github.event_name }} |"
+            echo ""
+            echo "- [Deploy to VPS workflow](${{ github.server_url }}/${{ github.repository }}/actions/workflows/deploy.yml)"
+            echo "- [Monitor workflow](${{ github.server_url }}/${{ github.repository }}/actions/workflows/monitor-production-deploy.yml)"
+            echo "- Prod: https://app.progressino.com/api/health"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish commit status on main tip
+        if: always() && steps.health.outputs.ok == 'true'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const main = await github.rest.repos.getCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'main',
+            });
+            const sha = main.data.sha;
+            const match = '${{ steps.compare.outputs.match }}' === 'true';
+            const prod = '${{ steps.health.outputs.prod_sha }}';
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha,
+              state: match ? 'success' : 'pending',
+              context: 'production health',
+              description: match
+                ? `Prod healthy @ ${prod}`
+                : `Prod @ ${prod} (main tip may differ)`,
+              target_url: 'https://app.progressino.com/api/health',
+            });
