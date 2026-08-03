@@ -172,6 +172,9 @@ export interface CoverageResponse {
   existing_po_upload_status?: 'idle' | 'running' | 'done' | 'error'
   existing_po_upload_message?: string
   existing_po_upload_progress?: number
+  sku_mapping_upload_status?: 'idle' | 'running' | 'done' | 'error'
+  sku_mapping_upload_message?: string
+  sku_mapping_upload_progress?: number
   daily_inventory_upload_status?: 'idle' | 'running' | 'done' | 'error'
   daily_inventory_upload_message?: string
   /** Session holds PO essentials (8/8 + row floors) — ignores background jobs. */
@@ -384,7 +387,27 @@ async function uploadFile(endpoint: string, file: File, extraFields?: Record<str
   }
 }
 
-export const uploadSkuMapping = (file: File) => uploadFile('/upload/sku-mapping', file)
+export async function uploadSkuMapping(
+  file: File,
+  onProgress?: (pct: number, phase: 'upload' | 'server') => void,
+): Promise<UploadResponse & { ingest_async?: boolean }> {
+  const fd = new FormData()
+  fd.append('file', file)
+  try {
+    const { data } = await api.post<UploadResponse & { ingest_async?: boolean }>('/upload/sku-mapping', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: UPLOAD_TIMEOUT_MS,
+      onUploadProgress: (e) => {
+        if (!onProgress || !e.total) return
+        onProgress(Math.round((e.loaded / e.total) * 100), 'upload')
+      },
+    })
+    onProgress?.(100, 'server')
+    return data
+  } catch (e: unknown) {
+    throw new Error(_errMessage(e, 'SKU mapping upload failed'))
+  }
+}
 export const uploadMtr        = (file: File) => uploadFile('/upload/mtr', file)
 export const uploadMyntra     = (file: File) => uploadFile('/upload/myntra', file)
 export const uploadMeesho     = (file: File) => uploadFile('/upload/meesho', file)

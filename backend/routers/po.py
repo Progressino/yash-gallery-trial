@@ -22,6 +22,16 @@ _SALES_READ_COLS = ["Sku", "TxnDate", "Units_Effective", "Source", "Transaction 
 _PARQUET_DISK_CACHE: dict[tuple, tuple[float, pd.DataFrame]] = {}
 
 
+def clear_warm_cache_parquet_cache(name: str | None = None) -> None:
+    """Drop mtime-cached parquet frames so matrix/PO re-read after history rewrite."""
+    if name is None:
+        _PARQUET_DISK_CACHE.clear()
+        return
+    for key in list(_PARQUET_DISK_CACHE.keys()):
+        if key and key[0] == name:
+            _PARQUET_DISK_CACHE.pop(key, None)
+
+
 def _warm_cache_parquet(name: str, *, columns: list[str] | None = None) -> pd.DataFrame:
     """Read a warm-cache parquet directly from disk (shared across sessions)."""
     import os

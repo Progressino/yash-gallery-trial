@@ -2027,123 +2027,256 @@ def _clear_stuck_tier1_bulk(sess: AppSession, *, force: bool = False) -> bool:
 
 # ── SKU Mapping ───────────────────────────────────────────────
 
+def _history_df_for_sku_map_rewrite(sess):
+    """Prefer disk/warm history so map upload rewrites the matrix source of truth."""
+    try:
+        from ..routers.po import _warm_cache_parquet
+
+        disk = _warm_cache_parquet("daily_inventory_history_df")
+        if disk is not None and not getattr(disk, "empty", True):
+            return disk
+    except Exception:
+        pass
+    try:
+        import backend.main as _main
+
+        wc = (_main._warm_cache or {}).get("daily_inventory_history_df")
+        if wc is not None and not getattr(wc, "empty", True):
+            return wc
+    except Exception:
+        pass
+    hist = getattr(sess, "daily_inventory_history_df", None)
+    if hist is not None and not getattr(hist, "empty", True):
+        return hist
+    return None
+
+
+def _apply_sku_mapping_into_session(sess, file_bytes: bytes, *, progress=None):
+    """Parse/merge SKU map, rebuild sales, rewrite inventory history.
+
+    Returns (UploadResponse, had_sales_rebuild).
+    """
+
+    def _prog(pct: int, msg: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(pct, msg)
+        except Exception:
+            pass
+
+    from ..services.combo_sku_map import (
+        combo_keys_as_identity_sku_mapping,
+        merge_combo_sku_map,
+        parse_combo_sku_map,
+        resolve_active_combo_sku_map,
+    )
+    from ..services.daily_inventory_history import (
+        coalesce_inventory_history_sku_aliases,
+        persist_inventory_history_authoritative,
+        recanonicalize_inventory_history_skus,
+    )
+
+    _prog(8, "Parsing SKU mapping workbook…")
+    parsed_combo = parse_combo_sku_map(file_bytes)
+    parsed = parse_sku_mapping(file_bytes)
+    _prog(35, f"Parsed {len(parsed):,} map rows — merging into master…")
+    base = resolve_sku_mapping_base(sess)
+    if parsed_combo:
+        parsed = {**combo_keys_as_identity_sku_mapping(parsed_combo), **(parsed or {})}
+    mapping = merge_sku_mapping_upload(base, parsed) if parsed else dict(base)
+    if parsed:
+        updated = sum(1 for k, v in parsed.items() if base.get(k) != v)
+    else:
+        updated = 0
+    sess.sku_mapping = mapping
+
+    if parsed_combo:
+        prior = resolve_active_combo_sku_map(sess=sess)
+        sess.combo_sku_map = merge_combo_sku_map(prior, parsed_combo)
+
+    hist_rewritten = 0
+    had_platform = (
+        not sess.mtr_df.empty
+        or not sess.myntra_df.empty
+        or not sess.meesho_df.empty
+        or not sess.flipkart_df.empty
+        or not sess.snapdeal_df.empty
+    )
+    if had_platform and (parsed or parsed_combo):
+        _prog(45, "Rebuilding sales with new map (large histories take a few minutes)…")
+        sess.sales_df = build_sales_df(
+            mtr_df=sess.mtr_df,
+            myntra_df=sess.myntra_df,
+            meesho_df=sess.meesho_df,
+            flipkart_df=sess.flipkart_df,
+            snapdeal_df=sess.snapdeal_df,
+            sku_mapping=mapping,
+            **_sales_overlay_build_kwargs(sess),
+        )
+        _prog(70, f"Sales rebuilt ({len(sess.sales_df):,} rows)…")
+    else:
+        _prog(55, "No platform sales in session — skipping sales rebuild…")
+
+    # Always rewrite warm disk history when possible so Inv. History / PO Eff_Days update.
+    _hist = _history_df_for_sku_map_rewrite(sess)
+    if _hist is not None and not getattr(_hist, "empty", True):
+        try:
+            _prog(75, "Remapping inventory history SKUs and coalescing typo twins…")
+            before = int(len(_hist))
+            if parsed or mapping:
+                recan = recanonicalize_inventory_history_skus(_hist, mapping)
+            else:
+                recan = coalesce_inventory_history_sku_aliases(_hist, mapping)
+            if recan is not None and not recan.empty:
+                sess.daily_inventory_history_df = recan
+                hist_rewritten = before
+                try:
+                    persist_inventory_history_authoritative(sess, recan)
+                except Exception:
+                    _log.exception("SKU map: persist rewritten inventory history failed")
+                try:
+                    import backend.main as _main
+
+                    if not getattr(_main, "_warm_cache", None):
+                        _main._warm_cache = {}
+                    _main._warm_cache["daily_inventory_history_df"] = recan
+                    _main._warm_cache["sku_mapping"] = dict(mapping)
+                except Exception:
+                    pass
+        except Exception:
+            _log.exception("SKU map: inventory history recanonicalize failed")
+
+    _prog(90, "Checking sales map gaps…")
+    gaps = list_sku_mapping_gaps(sess.sales_df, mapping)
+    if parsed_combo and not parsed:
+        msg = f"Combo SKU map loaded: {len(parsed_combo):,} combo listings"
+    else:
+        msg = f"SKU mapping loaded: {len(parsed):,} rows from file"
+    if parsed_combo and parsed:
+        msg += f" + {len(parsed_combo):,} combo listings"
+    if base and parsed:
+        msg += f" merged into master ({len(mapping):,} total"
+        if updated:
+            msg += f", {updated:,} updated"
+        msg += ")"
+    elif parsed and not base:
+        msg += f" ({len(mapping):,} total entries)"
+    if getattr(sess, "combo_sku_map", None):
+        msg += f"; combo BOM {len(sess.combo_sku_map):,} keys"
+    if had_platform and (parsed or parsed_combo):
+        msg += f"; sales rebuilt ({len(sess.sales_df):,} rows)"
+    if hist_rewritten:
+        msg += f"; inventory history remapped ({hist_rewritten:,} rows)"
+    if gaps:
+        msg += (
+            f". Warning: {len(gaps)} SKU(s) in sales are not in this map "
+            f"(as seller key or OMS value) — add them to the master or fix typos."
+        )
+    msg += ". Recalculate PO (shared cache off once) so pipeline uses the new map."
+
+    _session_data_changed(sess)
+    try:
+        from ..services.po_raise_remove import invalidate_po_calculate_result
+        from ..services.po_shared_cache import invalidate_all_shared_caches
+
+        invalidate_po_calculate_result(sess)
+        invalidate_all_shared_caches()
+    except Exception:
+        pass
+    _prog(98, "Finishing…")
+    return UploadResponse(
+        ok=True,
+        message=msg,
+        sku_count=len(mapping),
+        unmapped_skus=gaps or None,
+    ), had_platform and bool(parsed or parsed_combo)
+
+
+def _run_sku_mapping_worker(session_id: str, file_bytes: bytes, orig_fn: str) -> None:
+    sess = _resolve_upload_session(session_id)
+    if sess is None:
+        return
+    sess.sku_mapping_upload_status = "running"
+    sess.sku_mapping_upload_message = f"Parsing {orig_fn}…"
+    sess.sku_mapping_upload_progress = 5
+    sess.sku_mapping_upload_started = time.time()
+    had_sales = False
+
+    def _progress(pct: int, msg: str) -> None:
+        sess.sku_mapping_upload_progress = int(pct)
+        sess.sku_mapping_upload_message = str(msg or "")
+
+    try:
+        with sess._daily_restore_lock:
+            resp, had_sales = _apply_sku_mapping_into_session(
+                sess, file_bytes, progress=_progress
+            )
+        try:
+            _auto_save_sku_mapping_cache(sess)
+        except Exception:
+            _log.exception("SKU map: auto-save after async upload failed")
+        if had_sales:
+            try:
+                _auto_save_cache(sess)
+            except Exception:
+                _log.exception("SKU map: full cache save after async upload failed")
+        sess.sku_mapping_upload_status = "done"
+        sess.sku_mapping_upload_progress = 100
+        sess.sku_mapping_upload_message = resp.message
+        sess.sku_mapping_upload_result = resp.model_dump()
+    except Exception as e:
+        _log.warning("sku-mapping upload failed: %s", e, exc_info=True)
+        msg = f"Failed to parse SKU mapping: {e}"
+        sess.sku_mapping_upload_status = "error"
+        sess.sku_mapping_upload_progress = 0
+        sess.sku_mapping_upload_message = msg
+        sess.sku_mapping_upload_result = {"ok": False, "message": msg}
+    finally:
+        sess.sku_mapping_upload_started = 0.0
+
+
 @router.post("/sku-mapping", response_model=UploadResponse)
 async def upload_sku_mapping(
     request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)
 ):
+    """Upload SKU master map.
+
+    Processing can exceed Cloudflare's ~120s proxy limit, so with a session id we
+    return immediately and finish in a background worker. Poll
+    coverage.sku_mapping_upload_* for status.
+    """
     sess = _get_session(request)
     try:
+        if getattr(sess, "sku_mapping_upload_status", "idle") == "running":
+            return UploadResponse(
+                ok=False,
+                message="SKU mapping upload already in progress — wait for it to finish.",
+            )
         file_bytes = await file.read()
+        orig_fn = file.filename or "sku_mapping.xlsx"
+        sid = getattr(request.state, "session_id", None)
+        if sid:
+            sess.sku_mapping_upload_status = "running"
+            sess.sku_mapping_upload_message = f"Upload received — processing {orig_fn}…"
+            sess.sku_mapping_upload_progress = 3
+            sess.sku_mapping_upload_started = time.time()
+            sess.sku_mapping_upload_result = {}
+            HEAVY_EXECUTOR.submit(_run_sku_mapping_worker, sid, file_bytes, orig_fn)
+            return JSONResponse(
+                content={
+                    "ok": True,
+                    "ingest_async": True,
+                    "message": (
+                        "Upload accepted — parsing SKU map on the server. "
+                        "Progress updates below; large workbooks may take 1–5 minutes "
+                        "(avoids Cloudflare 120s timeout)."
+                    ),
+                }
+            )
 
         def work():
-            from ..services.combo_sku_map import (
-                combo_keys_as_identity_sku_mapping,
-                merge_combo_sku_map,
-                parse_combo_sku_map,
-                resolve_active_combo_sku_map,
-            )
-
-            parsed_combo = parse_combo_sku_map(file_bytes)
-            parsed = parse_sku_mapping(file_bytes)
-            base = resolve_sku_mapping_base(sess)
-            # Recognition stubs so combo listing keys appear in the master map;
-            # demand explode still uses combo_sku_map component lists.
-            if parsed_combo:
-                parsed = {**combo_keys_as_identity_sku_mapping(parsed_combo), **(parsed or {})}
-            mapping = merge_sku_mapping_upload(base, parsed) if parsed else dict(base)
-            if parsed:
-                updated = sum(1 for k, v in parsed.items() if base.get(k) != v)
-            else:
-                updated = 0
-            sess.sku_mapping = mapping
-
-            if parsed_combo:
-                prior = resolve_active_combo_sku_map(sess=sess)
-                sess.combo_sku_map = merge_combo_sku_map(prior, parsed_combo)
-
-            hist_rewritten = 0
-            had_platform = (
-                not sess.mtr_df.empty
-                or not sess.myntra_df.empty
-                or not sess.meesho_df.empty
-                or not sess.flipkart_df.empty
-                or not sess.snapdeal_df.empty
-            )
-            if had_platform and (parsed or parsed_combo):
-                sess.sales_df = build_sales_df(
-                    mtr_df=sess.mtr_df,
-                    myntra_df=sess.myntra_df,
-                    meesho_df=sess.meesho_df,
-                    flipkart_df=sess.flipkart_df,
-                    snapdeal_df=sess.snapdeal_df,
-                    sku_mapping=mapping,
-                    **_sales_overlay_build_kwargs(sess),
-                )
-
-            # Inventory History is keyed by OMS_SKU at parse time — remapping the master
-            # must rewrite the tall history frame or Replace SKU never appears there.
-            hist_rewritten = 0
-            _hist = getattr(sess, "daily_inventory_history_df", None)
-            if parsed and _hist is not None and not getattr(_hist, "empty", True):
-                try:
-                    from ..services.daily_inventory_history import (
-                        persist_inventory_history_authoritative,
-                        recanonicalize_inventory_history_skus,
-                    )
-
-                    before = int(len(_hist))
-                    recan = recanonicalize_inventory_history_skus(_hist, mapping)
-                    if recan is not None and not recan.empty:
-                        sess.daily_inventory_history_df = recan
-                        hist_rewritten = before
-                        try:
-                            persist_inventory_history_authoritative(sess, recan)
-                        except Exception:
-                            _log.exception("SKU map: persist rewritten inventory history failed")
-                except Exception:
-                    _log.exception("SKU map: inventory history recanonicalize failed")
-
-            gaps = list_sku_mapping_gaps(sess.sales_df, mapping)
-            if parsed_combo and not parsed:
-                msg = f"Combo SKU map loaded: {len(parsed_combo):,} combo listings"
-            else:
-                msg = f"SKU mapping loaded: {len(parsed):,} rows from file"
-            if parsed_combo and parsed:
-                msg += f" + {len(parsed_combo):,} combo listings"
-            if base and parsed:
-                msg += f" merged into master ({len(mapping):,} total"
-                if updated:
-                    msg += f", {updated:,} updated"
-                msg += ")"
-            elif parsed and not base:
-                msg += f" ({len(mapping):,} total entries)"
-            if getattr(sess, "combo_sku_map", None):
-                msg += f"; combo BOM {len(sess.combo_sku_map):,} keys"
-            if had_platform and (parsed or parsed_combo):
-                msg += f"; sales rebuilt ({len(sess.sales_df):,} rows)"
-            if hist_rewritten:
-                msg += f"; inventory history remapped ({hist_rewritten:,} rows)"
-            if gaps:
-                msg += (
-                    f". Warning: {len(gaps)} SKU(s) in sales are not in this map "
-                    f"(as seller key or OMS value) — add them to the master or fix typos."
-                )
-
-            _session_data_changed(sess)
-            try:
-                from ..services.po_raise_remove import invalidate_po_calculate_result
-                from ..services.po_shared_cache import invalidate_all_shared_caches
-
-                invalidate_po_calculate_result(sess)
-                invalidate_all_shared_caches()
-            except Exception:
-                pass
-            return UploadResponse(
-                ok=True,
-                message=msg,
-                sku_count=len(mapping),
-                unmapped_skus=gaps or None,
-            ), had_platform and bool(parsed or parsed_combo)
+            return _apply_sku_mapping_into_session(sess, file_bytes)
 
         resp, had_platform = await _session_lock_apply(sess, work)
         background_tasks.add_task(_auto_save_sku_mapping_cache, sess)

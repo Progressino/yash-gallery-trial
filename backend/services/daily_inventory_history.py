@@ -821,12 +821,17 @@ def recanonicalize_inventory_history_skus(
     df: pd.DataFrame | None,
     sku_mapping: dict | None,
 ) -> pd.DataFrame:
-    """Re-key history rows with the current SKU mapping (same keys PO engine uses)."""
+    """Re-key history rows with the current SKU mapping (same keys PO engine uses).
+
+    Qty is **summed** for twins that collapse onto one OMS_SKU (max used to drop
+    half of YEAL+TEAL or dual-warehouse same-day stock).
+    """
     if df is None or getattr(df, "empty", True):
         return pd.DataFrame(columns=_TALL_COLS)
     mapping = sku_mapping if isinstance(sku_mapping, dict) else {}
     if not mapping:
-        return df
+        # Still coalesce spelling aliases even without a seller→OMS map.
+        return coalesce_inventory_history_sku_aliases(df, None)
     from .po_engine import canonical_oms_key
 
     out = df.copy()
@@ -846,12 +851,14 @@ def recanonicalize_inventory_history_skus(
         if out["Channel"].astype(str).str.strip().str.lower().isin(["oms", "amazon"]).any()
         else ["OMS_SKU", "Date"]
     )
-    return (
+    out = (
         out.groupby(keys, as_index=False)
-        .agg(Qty=("Qty", "max"), Source=("Source", "first"))
+        .agg(Qty=("Qty", "sum"), Source=("Source", "first"))
         .sort_values(keys)
         .reset_index(drop=True)
     )
+    # Apply YEAL/BALCK/BOTTEL spelling aliases after seller→OMS remap.
+    return coalesce_inventory_history_sku_aliases(out, mapping)
 
 
 def today_ist_timestamp() -> pd.Timestamp:
@@ -3960,6 +3967,12 @@ def persist_inventory_history_authoritative(sess, df: pd.DataFrame | None = None
     except Exception:
         pass
     clear_inventory_channel_view_cache()
+    try:
+        from ..routers.po import clear_warm_cache_parquet_cache
+
+        clear_warm_cache_parquet_cache("daily_inventory_history_df")
+    except Exception:
+        pass
     sess.daily_inventory_history_df = work
     cache = _warm_cache_dir()
     cache.mkdir(parents=True, exist_ok=True)

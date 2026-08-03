@@ -144,6 +144,9 @@ class CoverageResponse(BaseModel):
     existing_po_upload_status: str = "idle"
     existing_po_upload_message: str = ""
     existing_po_upload_progress: Optional[int] = None
+    sku_mapping_upload_status: str = "idle"
+    sku_mapping_upload_message: str = ""
+    sku_mapping_upload_progress: Optional[int] = None
     # Wide daily inventory matrix (PO) background parse
     daily_inventory_upload_status: str = "idle"
     daily_inventory_upload_message: str = ""

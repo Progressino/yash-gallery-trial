@@ -79,13 +79,21 @@ _PL_INFIX_RE = re.compile(r"^(.*?)-PL-(.*?)$", re.I)
 
 def existing_po_merge_key(raw: object) -> str:
     """
-    Canonicalize Existing PO / pipeline merge keys without sku_mapping.
+    Canonicalize Existing PO / pipeline merge keys without seller→OMS sku_mapping.
 
     sku_mapping maps individual sizes (1917YKBLUE-4XL) to bundled listings
     (1917YKBLUE-4XL-5XL). The uploaded PO sheet already uses the correct per-size
-    keys — applying sku_mapping would collapse pipeline onto bundled rows.
+    keys — applying full sku_mapping would collapse pipeline onto bundled rows.
+
+    Spelling aliases (YEAL→TEAL, BALCK→BLACK) *are* applied so pipeline stock
+    merges with inventory/sales that already use those corrected warehouse keys.
     """
     try:
+        from ..services.po_engine import inventory_oms_key
+
+        k = inventory_oms_key(raw)
+        if k:
+            return k
         from ..services.po_engine import normalize_id_token_for_mapping, clean_sku
         from .helpers import collapse_duplicate_trailing_size_suffix
 

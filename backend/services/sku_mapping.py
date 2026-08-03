@@ -401,7 +401,8 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
 
     for _sheet_name in xls.sheet_names:
-        df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=_sheet_name)
+        # Reuse open workbook — re-reading file_bytes per sheet is very slow on large maps.
+        df = pd.read_excel(xls, sheet_name=_sheet_name)
         if df.empty or len(df.columns) < 2:
             continue
 
@@ -492,7 +493,7 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
                 if meesho_sheet and " " in k:
                     mapping[re.sub(r"\s+", "-", k.strip())] = o_val
 
-        for _, row in df.iterrows():
+        for row in df.to_dict(orient="records"):
             s = _clean(row.get(seller_col, ""))
             o = _row_oms(row)
             if o in ("", "NAN", "OMS SKU", "SELLER-SKU"):

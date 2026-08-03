@@ -1085,9 +1085,44 @@ export default function Upload() {
               try {
                 await withUploadGuard(async () => {
                   const res = await uploadSkuMapping(file)
-                  setSkuMapGaps(res.unmapped_skus ?? [])
-                  if (res.ok) {
+                  if (res.ingest_async) {
+                    showToast(
+                      'success',
+                      res.message || 'SKU map accepted — processing on server (avoids proxy timeout)…',
+                      8000,
+                    )
+                    const deadline = Date.now() + 12 * 60_000
+                    while (Date.now() < deadline) {
+                      await new Promise(r => setTimeout(r, 2500))
+                      const cov = await getCoverageResilient({ light: true, timeout: 60_000 })
+                      const st = cov.sku_mapping_upload_status ?? 'idle'
+                      if (st === 'running') continue
+                      if (st === 'error') {
+                        throw new Error(cov.sku_mapping_upload_message || 'SKU mapping failed')
+                      }
+                      if (st === 'done' || cov.sku_mapping) {
+                        const finalMsg =
+                          cov.sku_mapping_upload_message || res.message || 'SKU mapping loaded.'
+                        const gaps = (cov as { unmapped_skus?: string[] }).unmapped_skus
+                        setSkuMapGaps(Array.isArray(gaps) ? gaps : [])
+                        captureUploadAlerts('sku_mapping', {
+                          ...res,
+                          ok: true,
+                          message: finalMsg,
+                        })
+                        usePOStore.getState().setResult(null)
+                        usePOStore.getState().setSkipSharedCacheOnce(true)
+                        showToast('success', finalMsg, 10000)
+                        await refresh()
+                        return
+                      }
+                    }
+                    throw new Error('SKU mapping still processing — wait and refresh, then recalculate PO.')
+                  } else if (res.ok) {
+                    setSkuMapGaps(res.unmapped_skus ?? [])
                     captureUploadAlerts('sku_mapping', res)
+                    usePOStore.getState().setResult(null)
+                    usePOStore.getState().setSkipSharedCacheOnce(true)
                     showToast('success', res.message)
                     await refresh()
                   } else showToast('error', res.message)

@@ -142,6 +142,13 @@ class AppSession:
     existing_po_upload_started: float = 0.0
     existing_po_upload_result: dict = field(default_factory=dict)
 
+    # Async SKU mapping upload (parse + sales rebuild can exceed Cloudflare 120s).
+    sku_mapping_upload_status: str = "idle"  # idle | running | done | error
+    sku_mapping_upload_message: str = ""
+    sku_mapping_upload_progress: int = 0
+    sku_mapping_upload_started: float = 0.0
+    sku_mapping_upload_result: dict = field(default_factory=dict)
+
     # Async Tier-1 bulk ZIP/RAR (MTR / Myntra / etc.) — avoids gateway timeout on large archives.
     tier1_bulk_status: str = "idle"  # idle | running | done | error
     tier1_bulk_message: str = ""
