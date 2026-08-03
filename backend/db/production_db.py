@@ -484,17 +484,56 @@ def get_previous_process(sku: str, target_process: str) -> Optional[str]:
     from ..services.operation_routing import normalize_process_name
 
     target = normalize_process_name(target_process)
+    if not target:
+        return None
     if target == "Cutting":
         return "Incoming"
-    path = get_component_routing(sku) or get_item_routing(sku)
+    # Migration / default feeder chain when item routing is incomplete.
+    _DEFAULT_FEEDER = {
+        "Stitching": "Cutting",
+        "Embroidery": "Cutting",
+        "Printing": "Cutting",
+        "Finishing": "Stitching",
+        "Packing": "Finishing",
+    }
+    path = get_component_routing(sku) or get_item_routing(sku) or []
     norm = [normalize_process_name(p) for p in path]
     try:
         idx = norm.index(target)
     except ValueError:
-        return None
+        return _DEFAULT_FEEDER.get(target)
     if idx <= 0:
-        return None
+        # Target is first/only step (e.g. routing starts at Stitching) — still credit feeder.
+        return _DEFAULT_FEEDER.get(target)
     return path[idx - 1]
+
+
+def _wip_cell(raw: dict, *keys: str) -> str:
+    """Case-insensitive cell lookup (handles BOM, Excel renames, lower columns)."""
+    if not isinstance(raw, dict):
+        return ""
+    for k in keys:
+        if k in raw:
+            v = raw.get(k)
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s and s.lower() not in {"nan", "none", "nat", ""}:
+                return s
+    lower_map = {}
+    for k, v in raw.items():
+        nk = str(k or "").strip().lstrip("\ufeff").lower().replace(" ", "_")
+        if nk and nk not in lower_map:
+            lower_map[nk] = v
+    for k in keys:
+        nk = str(k).strip().lstrip("\ufeff").lower().replace(" ", "_")
+        v = lower_map.get(nk)
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s and s.lower() not in {"nan", "none", "nat", ""}:
+            return s
+    return ""
 
 
 def get_all_routing_steps() -> list:
@@ -504,7 +543,7 @@ def get_all_routing_steps() -> list:
         rows = conn.execute("SELECT name FROM routing_steps ORDER BY sort_order").fetchall()
         conn.close()
         return [r['name'] for r in rows]
-    except:
+    except Exception:
         return ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Finishing', 'Packing']
 
 
@@ -598,25 +637,28 @@ def import_ready_to_wip(rows: list[dict], *, default_stage: str | None = None) -
     conn = _connect()
     try:
         for i, raw in enumerate(rows, start=1):
-            stage = str(
-                raw.get("Ready_To_Stage")
-                or raw.get("ready_to_stage")
-                or raw.get("Stage")
-                or default_stage
-                or ""
+            if not isinstance(raw, dict):
+                errors.append(f"row {i}: invalid row")
+                continue
+            stage = _wip_cell(raw, "Ready_To_Stage", "ready_to_stage", "Stage", "stage") or str(
+                default_stage or ""
             ).strip()
-            sku = str(raw.get("OMS_SKU") or raw.get("SKU") or raw.get("sku") or "").strip()
-            so = str(raw.get("SO_Number") or raw.get("so_number") or raw.get("SO") or "").strip()
+            sku = _wip_cell(raw, "OMS_SKU", "oms_sku", "SKU", "sku", "Sku")
+            so = _wip_cell(raw, "SO_Number", "so_number", "SO", "so")
+            qty_raw = _wip_cell(raw, "Quantity", "quantity", "Qty", "qty", "planned_qty", "Planned_Qty")
             try:
-                qty = int(float(raw.get("Quantity") or raw.get("Qty") or raw.get("qty") or 0))
+                qty = int(float(qty_raw or 0))
             except Exception:
                 qty = 0
-            jo_num = str(raw.get("JO_Number") or raw.get("jo_number") or "").strip()
-            batch = str(raw.get("Batch") or raw.get("Lot") or "").strip()
-            vendor = str(raw.get("Vendor") or raw.get("vendor_name") or "").strip()
-            remarks = str(raw.get("Remarks") or "").strip()
+            jo_num = _wip_cell(raw, "JO_Number", "jo_number", "JO")
+            batch = _wip_cell(raw, "Batch", "batch", "Lot", "lot")
+            vendor = _wip_cell(raw, "Vendor", "vendor", "vendor_name", "Vendor_Name")
+            remarks = _wip_cell(raw, "Remarks", "remarks", "Remark")
             if not stage or not sku or qty <= 0:
-                errors.append(f"row {i}: need Ready_To_Stage, OMS_SKU, Quantity>0")
+                errors.append(
+                    f"row {i}: need Ready_To_Stage, OMS_SKU, Quantity>0 "
+                    f"(got stage={stage!r} sku={sku!r} qty={qty_raw!r})"
+                )
                 continue
             from_process = get_previous_process(sku, stage)
             if not from_process:
@@ -654,7 +696,17 @@ def import_ready_to_wip(rows: list[dict], *, default_stage: str | None = None) -
         raise
     finally:
         conn.close()
-    return {"ok": True, "import_batch": batch_id, "imported": imported, "errors": errors}
+    return {
+        "ok": True,
+        "import_batch": batch_id,
+        "imported": imported,
+        "failed": len(errors),
+        "errors": errors,
+        "message": (
+            f"Imported {imported} Ready-To WIP row(s)"
+            + (f"; {len(errors)} failed" if errors else "")
+        ),
+    }
 
 
 # ── Ready to Process Lists ─────────────────────────────────────────────────────

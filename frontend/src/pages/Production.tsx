@@ -1895,10 +1895,14 @@ export default function Production() {
                     fd.append('file', f)
                     fd.append('stage', activeProcess)
                     try {
-                      const { data } = await api.post('/production/ready-to-wip/import', fd)
-                      const errs = (data.errors || []).slice(0, 6).join('\n')
+                      const { data } = await api.post('/production/ready-to-wip/import', fd, {
+                        headers: { 'Content-Type': 'multipart/form-data' },
+                      })
+                      const failed = data.failed ?? (data.errors?.length ?? 0)
+                      const errs = (data.errors || []).slice(0, 8).join('\n')
                       alert(
-                        `Imported ${data.imported ?? 0} Ready-To WIP row(s)`
+                        (data.message || `Imported ${data.imported ?? 0} Ready-To WIP row(s)`)
+                        + (failed && !data.message?.includes('failed') ? `; ${failed} failed` : '')
                         + (errs ? `\n\n${errs}` : '')
                         + (data.import_batch ? `\nBatch: ${data.import_batch}` : ''),
                       )

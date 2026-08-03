@@ -181,6 +181,39 @@ def test_ready_to_wip_import(isolated_module_dbs, client):
     assert len(filtered.json()) >= 1
 
 
+def test_ready_to_wip_import_lowercase_columns_and_bom(isolated_module_dbs, client):
+    """Excel/Mac CSV often uses lower headers or a BOM — must still import."""
+    csv = (
+        "\ufeffready_to_stage,so_number,oms_sku,quantity\n"
+        "Stitching,SO-LOWER,LOWER-SKU-M,25\n"
+    )
+    r = client.post(
+        "/api/production/ready-to-wip/import",
+        files={"file": ("wip.csv", io.BytesIO(csv.encode("utf-8")), "text/csv")},
+        data={"stage": "Stitching"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["imported"] == 1, body
+    assert body.get("failed", 0) == 0
+
+
+def test_ready_to_wip_uses_feeder_fallback_when_routing_omits_stage(isolated_module_dbs, client, monkeypatch):
+    """If item routing does not list Stitching, still credit Cutting stock."""
+    from backend.db import production_db
+
+    monkeypatch.setattr(production_db, "get_item_routing", lambda sku: ["Cutting", "Finishing"])
+    monkeypatch.setattr(production_db, "get_component_routing", lambda sku: ["Cutting", "Finishing"])
+    csv = "Ready_To_Stage,SO_Number,OMS_SKU,Quantity\nStitching,SO-FALL,FALL-SKU-M,12\n"
+    r = client.post(
+        "/api/production/ready-to-wip/import",
+        files={"file": ("wip.csv", io.BytesIO(csv.encode()), "text/csv")},
+        data={"stage": "Stitching"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["imported"] == 1, r.json()
+
+
 def test_jo_import_autoroute_ready_to_wip_template(isolated_module_dbs, client):
     """ready_to_*_wip_template.csv must credit stock even if uploaded via JO import."""
     csv = (

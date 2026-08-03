@@ -561,11 +561,18 @@ async def ready_to_wip_import(
         if name.endswith((".xlsx", ".xls")):
             df = pd.read_excel(io.BytesIO(raw))
         else:
-            df = pd.read_csv(io.BytesIO(raw))
+            # utf-8-sig strips Excel BOM; sep=None with engine python can mis-detect —
+            # try comma first then semicolon.
+            try:
+                df = pd.read_csv(io.BytesIO(raw), encoding="utf-8-sig")
+            except Exception:
+                df = pd.read_csv(io.BytesIO(raw), encoding="utf-8-sig", sep=";")
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}") from e
     if df is None or df.empty:
         raise HTTPException(400, "Empty import file")
+    # Strip BOM / whitespace from headers so OMS_SKU etc. resolve after Excel exports.
+    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
     rows = df.fillna("").to_dict(orient="records")
     try:
         result = import_ready_to_wip(rows, default_stage=stage)
