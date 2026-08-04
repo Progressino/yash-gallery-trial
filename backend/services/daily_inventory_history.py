@@ -2893,9 +2893,24 @@ def inventory_history_wide_matrix(
     end_date: str | None = None,
     sales_df: pd.DataFrame | None = None,
     channel: str = "combined",
+    sku_mapping: dict | None = None,
 ) -> dict:
     """Pivot tall history to Excel-style wide matrix: SKU rows × date columns."""
     channel = (channel or "combined").strip().lower()
+    mapping = sku_mapping if isinstance(sku_mapping, dict) else None
+    if mapping is None:
+        try:
+            from .sku_mapping import (
+                load_bundled_sku_mapping,
+                load_sku_mapping_from_disk,
+                resolve_sku_replacement_map,
+            )
+
+            mapping = resolve_sku_replacement_map(
+                {**(load_bundled_sku_mapping() or {}), **(load_sku_mapping_from_disk() or {})}
+            )
+        except Exception:
+            mapping = {}
     empty = {
         "loaded": False,
         "dates": [],
@@ -2942,11 +2957,13 @@ def inventory_history_wide_matrix(
     # Fast path: no OMS/Amazon channel split — skip coalesce/max combine.
     if channel == "combined" and not split_available:
         work = work.copy()
-        # Cheap alias remap (YEAL→TEAL, BALCK→BLACK, …) so typo twins share one row.
+        # Alias + full seller→OMS replacement map so twins sum onto one matrix row.
         try:
             from .inventory import _inventory_alias_oms_key
 
-            work["OMS_SKU"] = work["OMS_SKU"].map(lambda s: _inventory_alias_oms_key(s, None))
+            work["OMS_SKU"] = work["OMS_SKU"].map(
+                lambda s: _inventory_alias_oms_key(s, mapping)
+            )
         except Exception:
             work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
         work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
@@ -2959,7 +2976,7 @@ def inventory_history_wide_matrix(
             try:
                 from .inventory import _inventory_alias_oms_key
 
-                needle_alias = _inventory_alias_oms_key(needle, None) or needle
+                needle_alias = _inventory_alias_oms_key(needle, mapping) or needle
             except Exception:
                 needle_alias = needle
             needles = {needle, needle_alias} - {""}
@@ -3058,17 +3075,26 @@ def inventory_history_wide_matrix(
     try:
         from .inventory import _inventory_alias_oms_key
 
-        work["OMS_SKU"] = work["OMS_SKU"].map(lambda s: _inventory_alias_oms_key(s, None))
+        work["OMS_SKU"] = work["OMS_SKU"].map(lambda s: _inventory_alias_oms_key(s, mapping))
     except Exception:
         work["OMS_SKU"] = work["OMS_SKU"].astype(str).str.strip().str.upper()
     work["Qty"] = pd.to_numeric(work["Qty"], errors="coerce").fillna(0.0)
+    work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    work = work.dropna(subset=["_d"])
+    work = work[work["OMS_SKU"].astype(str).str.len() > 0]
+    # After replacement map, sum twins so date totals are not double-counted.
+    work = (
+        work.groupby(["OMS_SKU", "_d"], as_index=False, sort=False)["Qty"]
+        .sum()
+        .reset_index(drop=True)
+    )
 
     needle = (q or "").strip().upper()
     if needle:
         try:
             from .inventory import _inventory_alias_oms_key
 
-            needle_alias = _inventory_alias_oms_key(needle, None) or needle
+            needle_alias = _inventory_alias_oms_key(needle, mapping) or needle
         except Exception:
             needle_alias = needle
         needles = {needle, needle_alias} - {""}
@@ -3090,7 +3116,6 @@ def inventory_history_wide_matrix(
     start_i = max(0, int(offset))
     end_i = start_i + max(1, int(limit))
     page_skus = sku_list[start_i:end_i]
-    work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     totals = work.groupby("_d", sort=False)["Qty"].sum()
     date_totals = [float(totals.get(d, 0.0) or 0.0) for d in dates_sorted]
     gap_dates = non_uploaded_inventory_dates(source_probe, dates_sorted)
@@ -3136,7 +3161,7 @@ def inventory_history_wide_matrix(
             }
         page = (
             page.groupby(["OMS_SKU", "_d"], as_index=False)["Qty"]
-            .max()
+            .sum()
             .rename(columns={"_d": "Date"})
         )
         pivot = page.pivot(index="OMS_SKU", columns="Date", values="Qty")
@@ -3361,6 +3386,7 @@ def inventory_history_wide_matrix_csv(
     days: int | None = None,
     end_date: str | None = None,
     channel: str = "combined",
+    sku_mapping: dict | None = None,
 ) -> tuple[bytes, str]:
     """Build the wide Inv History matrix as UTF-8 CSV bytes (server-side export).
 
@@ -3380,6 +3406,7 @@ def inventory_history_wide_matrix_csv(
         end_date=end_date,
         sales_df=None,
         channel=channel,
+        sku_mapping=sku_mapping,
     )
     dates = list(wide.get("dates") or [])
     rows = list(wide.get("rows") or [])

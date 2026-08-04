@@ -118,26 +118,28 @@ def _strip_pl(
 ) -> str:
     """Strip Amazon PL infix; optionally apply seller→OMS sku_mapping.
 
-    Inventory frames must call with ``apply_sku_mapping=False``. Mapping often
-    points distinct in-warehouse OMS rows at each other (BOTTLE↔BOTTEL,
-    POWER→POWDER, banded size A→B), and ``drop_duplicates`` then throws away
-    real stock — which made PO Total_Inventory look wrong across the grid.
+    Inventory frames must call with ``apply_sku_mapping=False`` for raw keys,
+    then coalesce via :func:`coalesce_inventory_by_sku_mapping` so twins **sum**
+    after the replacement map is applied (never drop_duplicates half the stock).
     """
+    from .sku_mapping import follow_sku_replacement
+
     raw = str(sku).strip().upper()
     stripped = _PL_RE.sub(r"\1\2", raw)
     stripped = _yeal_typo_canonical(_balck_typo_canonical(stripped))
     raw_fixed = _yeal_typo_canonical(_balck_typo_canonical(raw))
-    if apply_sku_mapping:
-        if stripped in mapping:
-            return mapping[stripped]
-        if raw_fixed in mapping:
-            return mapping[raw_fixed]
-        if raw in mapping:
-            return mapping[raw]
+    if apply_sku_mapping and mapping:
+        for candidate in (stripped, raw_fixed, raw):
+            if candidate in mapping:
+                return follow_sku_replacement(candidate, mapping)
+        fixed = _ykn_typo_canonical(stripped)
+        if fixed != stripped:
+            if fixed in mapping:
+                return follow_sku_replacement(fixed, mapping)
+            return fixed
+        return stripped
     fixed = _ykn_typo_canonical(stripped)
     if fixed != stripped:
-        if apply_sku_mapping:
-            return mapping.get(fixed, mapping.get(stripped, fixed))
         return fixed
     return stripped
 

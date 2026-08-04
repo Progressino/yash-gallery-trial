@@ -123,12 +123,17 @@ def _inventory_matrix_payload(
     channel: str = "combined",
 ) -> dict:
     from ..services.daily_inventory_history import inventory_history_wide_matrix
+    from ..services.sku_mapping import resolve_sku_mapping_base
 
     try:
         df = _inventory_history_df_for_matrix_read(sess)
         # Integrity repair (duplicate/spike detection) intentionally NOT on this path —
         # it scanned/copied ~400k rows and hung the UI at "Loading matrix…". Repair runs
         # on snapshot upload / warm-cache load instead.
+        try:
+            mapping = resolve_sku_mapping_base(sess)
+        except Exception:
+            mapping = getattr(sess, "sku_mapping", None) or {}
         out = inventory_history_wide_matrix(
             df,
             q=q,
@@ -138,6 +143,7 @@ def _inventory_matrix_payload(
             end_date=end_date,
             sales_df=None,
             channel=channel,
+            sku_mapping=mapping,
         )
         out["ok"] = True
         out["integrity"] = {"ok": True, "repaired": False, "warnings": [], "actions": []}
@@ -722,12 +728,19 @@ async def po_daily_inventory_history_matrix_csv(
 
     def _build():
         df = _inventory_history_df_for_matrix_read(sess)
+        from ..services.sku_mapping import resolve_sku_mapping_base
+
+        try:
+            mapping = resolve_sku_mapping_base(sess)
+        except Exception:
+            mapping = getattr(sess, "sku_mapping", None) or {}
         return inventory_history_wide_matrix_csv(
             df,
             q=q,
             days=min(max(1, int(days)), 120),
             end_date=end_date,
             channel=channel,
+            sku_mapping=mapping,
         )
 
     try:

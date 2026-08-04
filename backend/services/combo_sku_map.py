@@ -86,13 +86,38 @@ def sheet_looks_like_combo_bom(df: pd.DataFrame) -> bool:
     if df is None or df.empty or len(df.columns) < 2:
         return False
     norms = [_col_norm(c) for c in df.columns]
+    # Marketplace / warehouse 1:1 Replace SKU sheets (seller-sku → OMS SKU)
+    # must never be treated as combo BOM. The old left/right multi-target
+    # heuristic used column[0]=Date vs seller-sku and always returned True.
+    has_seller = any(
+        ("seller" in n and "sku" in n)
+        or n in ("seller-sku", "seller sku", "replace sku", "replace_sku")
+        for n in norms
+    )
+    has_oms = any(
+        n in ("oms sku", "oms_sku", "oms")
+        or (n.startswith("oms") and "sku" in n)
+        for n in norms
+    )
+    if has_seller and has_oms:
+        return False
+
     has_combo_key = any(
         n in _COMBO_KEY_HINTS or n.startswith("dpt") or "combo" in n
         for n in norms
     )
     if not has_combo_key:
         # Heuristic: same left key maps to 2+ distinct right values → BOM sheet.
-        left, right = df.columns[0], df.columns[1]
+        # Skip pure date/meta columns as the left key.
+        data_cols = [
+            c
+            for c in df.columns
+            if _col_norm(c) not in ("date", "dt", "day", "brand")
+            and "date" not in _col_norm(c)
+        ]
+        if len(data_cols) < 2:
+            return False
+        left, right = data_cols[0], data_cols[1]
         g = (
             df[[left, right]]
             .dropna()

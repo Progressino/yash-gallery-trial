@@ -2131,6 +2131,7 @@ _1180_YELLOW_RE = re.compile(r"^1180YK?YELLOW-", re.I)
 def _inventory_alias_oms_key(sku: object, mapping: Optional[Dict[str, str]] = None) -> str:
     """Canonical inventory key for alias coalescing (sum, never drop)."""
     from .po_engine import inventory_oms_key
+    from .sku_mapping import follow_sku_replacement
 
     key = inventory_oms_key(sku)
     if not key:
@@ -2142,10 +2143,8 @@ def _inventory_alias_oms_key(sku: object, mapping: Optional[Dict[str, str]] = No
     if m1180:
         key = "289YK345YELLOW-" + key.split("-", 1)[-1]
     mp = mapping or {}
-    if key in mp:
-        mapped = str(mp[key] or "").strip().upper()
-        if mapped:
-            key = mapped
+    if mp:
+        key = follow_sku_replacement(key, mp)
     return key
 
 

@@ -73,10 +73,14 @@ def merge_sku_mapping_upload(
     existing: Optional[Dict[str, str]],
     parsed: Dict[str, str],
 ) -> Dict[str, str]:
-    """Overlay uploaded rows onto the current master map (uploaded keys win)."""
+    """Overlay uploaded rows onto the current master map (uploaded keys win).
+
+    After overlay, chains and A↔B reverse pairs are resolved so inventory
+    coalescing never keeps both ends of a replacement as separate stock rows.
+    """
     merged = dict(existing or {})
     merged.update(parsed or {})
-    return merged
+    return resolve_sku_replacement_map(merged)
 
 
 def merge_sku_mapping_layers(
@@ -87,7 +91,120 @@ def merge_sku_mapping_layers(
     for layer in layers:
         if isinstance(layer, dict) and layer:
             out.update(layer)
-    return out
+    return resolve_sku_replacement_map(out)
+
+
+def resolve_sku_replacement_map(mapping: Optional[Dict[str, str]]) -> Dict[str, str]:
+    """Normalize seller→OMS map: UPPERCASE, collapse chains, break A↔B cycles.
+
+    Reverse pairs (A→B and B→A) are common when two "Replace SKU" files use
+    opposite CMB↔MB conventions for different sizes.  Without consolidation,
+    Inv History shows both SKUs and totals diverge from the OMS matrix after
+    human consolidation.
+    """
+    if not mapping:
+        return {}
+    raw: Dict[str, str] = {}
+    identities: Dict[str, str] = {}
+    for k, v in mapping.items():
+        src = str(k or "").strip().upper()
+        dst = str(v or "").strip().upper()
+        if not src or not dst or src in ("NAN", "NONE", "NAT"):
+            continue
+        if dst in ("NAN", "NONE", "NAT"):
+            continue
+        if src == dst:
+            identities[src] = src
+            continue
+        raw[src] = dst
+    if not raw:
+        return dict(identities)
+
+    def _cycle_canonical(nodes: set[str]) -> str:
+        """Pick one stable OMS code for a strongly-connected replacement set."""
+
+        def score(n: str) -> tuple:
+            u = n.upper()
+            s = 0
+            # Prefer correctly spelled color / fabric tokens
+            if "BOTTLEGREEN" in u and "BOTTELGREEN" not in u:
+                s += 20
+            if "YEAL" in u:
+                s -= 20
+            if "BALCK" in u:
+                s -= 20
+            # Prefer CMB (color-code middle) form when conflicting with bare MB-
+            if re.search(r"YKCM[A-Z0-9]", u):
+                s += 5
+            # Prefer longer (more specific) codes when tied
+            return (s, len(u), u)
+
+        return max(nodes, key=score)
+
+    resolved: Dict[str, str] = {}
+    for start in raw:
+        path: list[str] = []
+        seen: dict[str, int] = {}
+        cur = start
+        cycle_nodes: set[str] | None = None
+        while True:
+            if cur in seen:
+                cycle_nodes = set(path[seen[cur] :])
+                break
+            seen[cur] = len(path)
+            path.append(cur)
+            nxt = raw.get(cur)
+            if not nxt or nxt == cur:
+                break
+            cur = nxt
+            if len(path) > 32:
+                break
+        if cycle_nodes:
+            terminal = _cycle_canonical(cycle_nodes)
+            for n in cycle_nodes:
+                if n != terminal:
+                    resolved[n] = terminal
+            # Predecessors on path before cycle also map to terminal
+            for n in path:
+                if n in cycle_nodes:
+                    break
+                if n != terminal:
+                    resolved[n] = terminal
+        else:
+            terminal = path[-1]
+            for n in path[:-1]:
+                if n != terminal:
+                    resolved[n] = terminal
+    # Preserve identity registrations (marketplace listed keys) not overwritten by rewrites.
+    for k, v in identities.items():
+        resolved.setdefault(k, v)
+    return resolved
+
+
+def follow_sku_replacement(
+    sku: str,
+    mapping: Optional[Dict[str, str]],
+    *,
+    max_hops: int = 16,
+) -> str:
+    """Follow replacement map to a terminal OMS code (safe on cycles)."""
+    cur = str(sku or "").strip().upper()
+    if not cur or not mapping:
+        return cur
+    seen: set[str] = set()
+    for _ in range(max_hops):
+        if cur in seen:
+            # Should be rare after resolve_sku_replacement_map; break deterministically
+            return min(seen | {cur})
+        seen.add(cur)
+        nxt = mapping.get(cur)
+        if not nxt:
+            return cur
+        nxt = str(nxt).strip().upper()
+        if not nxt or nxt == cur:
+            return cur
+        cur = nxt
+    return cur
 
 
 def resolve_sku_mapping_base(sess) -> Dict[str, str]:
@@ -531,4 +648,4 @@ def parse_sku_mapping(file_bytes: bytes) -> Dict[str, str]:
                         if nid and o:
                             mapping[nid] = o
 
-    return mapping
+    return resolve_sku_replacement_map(mapping)
