@@ -144,12 +144,25 @@ def _resolve_bom_anchor(conn, sku: str):
     return None, None, f"SKU '{sku}' is not in Item Master"
 
 
+def _is_printed_component(ctype: str, code: str) -> bool:
+    t = (ctype or "").upper()
+    c = (code or "").strip().upper()
+    if t in ("SFG", "PRINTED", "PRINTED FABRIC", "PF"):
+        return True
+    # Heuristic: P-codes are often P###… (printed fabric)
+    return bool(c) and c.startswith("P") and any(ch.isdigit() for ch in c[:6])
+
+
 def calculate_mrp(so_numbers):
     """
     Returns ``{"materials": {...}, "warnings": [...]}``.
 
     Warnings surface every SKU that couldn't be exploded so newly created SOs
     don't fail silently when their items / BOMs are missing on the server.
+
+    Breakdown rows keep full hierarchy for traceability:
+      FG SKU · P-Code · Required · Allocated · Status
+    Grey planning still targets **P-Code**; FG stays visible for SKU status.
     """
     open_orders = get_open_orders()
     requested = set(so_numbers or [])
@@ -170,7 +183,7 @@ def calculate_mrp(so_numbers):
 
     stock_consumed: dict[str, float] = {}
 
-    def explode(item_code, qty, so_no, sku, depth=0):
+    def explode(item_code, qty, so_no, sku, depth=0, parent_printed_code=""):
         if depth > 10 or qty <= 0:
             return
         item = _get_item_by_code(conn, item_code)
@@ -196,6 +209,8 @@ def calculate_mrp(so_numbers):
                 1 + float(line.get('shrinkage_pct') or 0) / 100 + float(line.get('wastage_pct') or 0) / 100
             )
             total = round(adj_qty * qty, 3)
+            is_printed = _is_printed_component(ctype, code)
+            p_code = code if is_printed else (parent_printed_code or "")
             if code not in materials:
                 materials[code] = {
                     'name': comp.get('item_name', code) if comp else code,
@@ -208,7 +223,16 @@ def calculate_mrp(so_numbers):
                     'level': depth,
                 }
             materials[code]['total_req'] = round(materials[code]['total_req'] + total, 3)
-            materials[code]['breakdown'].append({'so_no': so_no, 'sku': sku, 'qty_req': total})
+            materials[code]['breakdown'].append({
+                'so_no': so_no,
+                'sku': sku,
+                'fg_sku': sku,
+                'p_code': p_code,
+                'printed_code': p_code,
+                'qty_req': total,
+                'allocated_qty': 0.0,
+                'status': 'Pending',
+            })
             if comp:
                 sub = _get_default_bom(conn, comp['id'])
                 if sub and [
@@ -220,7 +244,15 @@ def calculate_mrp(so_numbers):
                     remaining_stock = max(0., comp_stock - already_used)
                     net_for_sub = max(0., round(total - remaining_stock, 3))
                     stock_consumed[code] = already_used + min(remaining_stock, total)
-                    explode(comp['item_code'], net_for_sub, so_no, sku, depth + 1)
+                    next_printed = code if is_printed else parent_printed_code
+                    explode(
+                        comp['item_code'],
+                        net_for_sub,
+                        so_no,
+                        sku,
+                        depth + 1,
+                        parent_printed_code=next_printed,
+                    )
 
     for line in selected:
         so_no = line.get('so_number', '') or ''
@@ -250,6 +282,13 @@ def calculate_mrp(so_numbers):
         mat['net_available'] = max(0., avail - soft)
         mat['net_req'] = max(0., round(mat['total_req'] - avail, 3))
         mat['net_req_with_soft'] = max(0., round(mat['total_req'] - mat['net_available'], 3))
+
+    try:
+        from ..services.fabric_allocation_engine import annotate_mrp_breakdown_with_allocations
+
+        annotate_mrp_breakdown_with_allocations(materials)
+    except Exception:
+        pass
 
     so_skus = sorted({
         str(l.get("sku") or "").strip().upper()
@@ -1043,6 +1082,12 @@ def run_mrp_full(body: MRPRunBody):
     payload = calculate_mrp(body.so_numbers)
     save_mrp_result(body.so_numbers, payload)
     norm = _normalize_mrp_payload(payload)
+    try:
+        from ..services.fabric_allocation_engine import annotate_mrp_breakdown_with_allocations
+
+        annotate_mrp_breakdown_with_allocations(norm["materials"])
+    except Exception:
+        pass
     sync_mrp_commitments_from_run(body.so_numbers, norm['materials'])
     return {
         'run_time': datetime.now().isoformat(),
@@ -1068,6 +1113,13 @@ def get_last_mrp():
             'embroidery_stock': [],
         }
     norm = _normalize_mrp_payload(data.get('result'))
+    # Live allocation status so hierarchy columns stay current without re-run.
+    try:
+        from ..services.fabric_allocation_engine import annotate_mrp_breakdown_with_allocations
+
+        annotate_mrp_breakdown_with_allocations(norm["materials"])
+    except Exception:
+        pass
     # Refresh leftover stock live so MRP UI always shows current balances
     # even when the last planning snapshot is older than a receive/leftover credit.
     so_skus: list[str] = []

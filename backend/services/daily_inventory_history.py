@@ -1332,7 +1332,7 @@ def repair_inventory_history_integrity(
         report["actions"].append(f"coalesced_duplicates:{removed}")
         report["repaired"] = True
 
-    # Merge warehouse spelling twins (BALCK→BLACK, BOTTEL→BOTTLE, 1180→289…)
+    # Merge warehouse spelling twins (BALCK→BLACK, BOTTLE→BOTTEL, 1180→289…)
     # before spike detection so Combined (max) is not inflated by duplicate SKUs.
     try:
         from .sku_mapping import load_sku_mapping_from_disk

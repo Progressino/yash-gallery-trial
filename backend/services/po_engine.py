@@ -1694,6 +1694,13 @@ def calculate_po_base(
 
     inv_work = inv_df.copy()
     from .existing_po import existing_po_merge_key, is_bundled_size_range_sku
+    from .inventory import coalesce_inventory_by_sku_mapping
+
+    # Re-apply Replace-SKU + spelling aliases on every PO run. Warm/session inventory
+    # can still hold twin rows (BOTTLE vs BOTTEL, POWDER vs POWER) when the map was
+    # missing at upload time — without this, PO keeps both keys and inventory splits.
+    if "OMS_SKU" in inv_work.columns and not inv_work.empty:
+        inv_work = coalesce_inventory_by_sku_mapping(inv_work, _map)
 
     _bundled_from_per_size_inv: set[str] = set()
     if "OMS_SKU" in inv_work.columns:
@@ -1707,7 +1714,7 @@ def calculate_po_base(
             if mapped and is_bundled_size_range_sku(mapped):
                 _bundled_from_per_size_inv.add(mapped)
     _ep_prepared = pd.DataFrame()
-    _unique_inv_skus = inv_work["OMS_SKU"].unique()
+    _unique_inv_skus = inv_work["OMS_SKU"].unique() if "OMS_SKU" in inv_work.columns else []
     _inv_canon_cache = {s: inventory_oms_key(s) for s in _unique_inv_skus}
     inv_work["OMS_SKU"] = inv_work["OMS_SKU"].map(_inv_canon_cache).fillna("")
     inv_work = inv_work[inv_work["OMS_SKU"].str.len() > 0]

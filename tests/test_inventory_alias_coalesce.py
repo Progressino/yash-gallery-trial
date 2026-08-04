@@ -62,10 +62,30 @@ def test_coalesce_bottel_and_1180_inventory():
     )
     out = coalesce_inventory_by_sku_mapping(inv, {})
     by = out.set_index("OMS_SKU")
-    assert float(by.loc["5041YKBOTTLEGREEN-XL", "Total_Inventory"]) == 61.0
+    # Ops / Replace-SKU terminal is BOTTEL (not warehouse BOTTLE typo).
+    assert float(by.loc["5041YKBOTTELGREEN-XL", "Total_Inventory"]) == 61.0
     assert float(by.loc["289YK345YELLOW-M", "Total_Inventory"]) == 51.0
-    assert "5041YKBOTTELGREEN-XL" not in by.index
+    assert "5041YKBOTTLEGREEN-XL" not in by.index
     assert "1180YKYELLOW-M" not in by.index
+
+
+def test_coalesce_bottle_twins_follow_replace_map():
+    """Explicit replace map BOTTLE→BOTTEL consolidates stock onto Right SKU."""
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["5041YKBOTTLEGREEN-3XL", "5041YKBOTTELGREEN-3XL"],
+            "OMS_Inventory": [32.0, 0.0],
+            "Amazon_Inventory": [0.0, 0.0],
+            "Manual_InTransit": [0.0, 0.0],
+            "Not_In_Inventory_Qty": [0.0, 0.0],
+            "Buffer_Stock": [0.0, 0.0],
+        }
+    )
+    mp = {"5041YKBOTTLEGREEN-3XL": "5041YKBOTTELGREEN-3XL"}
+    out = coalesce_inventory_by_sku_mapping(inv, mp)
+    by = out.set_index("OMS_SKU")
+    assert list(by.index) == ["5041YKBOTTELGREEN-3XL"]
+    assert float(by.loc["5041YKBOTTELGREEN-3XL", "Total_Inventory"]) == 32.0
 
 
 def test_coalesce_balck_typo_inventory():

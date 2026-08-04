@@ -126,9 +126,11 @@ def resolve_sku_replacement_map(mapping: Optional[Dict[str, str]]) -> Dict[str, 
         def score(n: str) -> tuple:
             u = n.upper()
             s = 0
-            # Prefer correctly spelled color / fabric tokens
-            if "BOTTLEGREEN" in u and "BOTTELGREEN" not in u:
+            # Prefer ops / Replace-SKU BOTTEL form over warehouse BOTTLE typo
+            if "BOTTELGREEN" in u:
                 s += 20
+            if "BOTTLEGREEN" in u and "BOTTELGREEN" not in u:
+                s -= 10
             if "YEAL" in u:
                 s -= 20
             if "BALCK" in u:

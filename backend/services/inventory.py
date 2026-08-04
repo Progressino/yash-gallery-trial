@@ -2118,8 +2118,10 @@ _COMPUTED_COLS = {"Total_Inventory", "Marketplace_Total"}
 _FIXED_COLS    = {"OMS_SKU", "OMS_Inventory", "Buffer_Stock"}
 _EXTRA_MKT_COLS = frozenset({"Manual_InTransit", "Not_In_Inventory_Qty"})
 
-# Warehouse typo that must merge with the correctly spelled Amazon/OMS twin.
-_BOTTELGREEN_RE = re.compile(r"BOTTELGREEN", re.I)
+# Warehouse BOTTLE typo (double-T "bottle") vs ops canonical BOTTEL (…TEL…).
+# Replace-SKU sheets and status sheets use BOTTEL as the "Right SKU"; coalesce
+# both forms onto BOTTELGREEN *before* applying any further seller→OMS map.
+_BOTTLEGREEN_RE = re.compile(r"BOTTLEGREEN", re.I)
 # Common warehouse transposition: …BALCK… → …BLACK… (1415YKBALCK-6XL etc.).
 _BALCK_RE = re.compile(r"BALCK", re.I)
 # Warehouse transposition: …YEAL… → …TEAL… (7100YKYEAL-* etc.).
@@ -2129,14 +2131,24 @@ _1180_YELLOW_RE = re.compile(r"^1180YK?YELLOW-", re.I)
 
 
 def _inventory_alias_oms_key(sku: object, mapping: Optional[Dict[str, str]] = None) -> str:
-    """Canonical inventory key for alias coalescing (sum, never drop)."""
+    """Canonical inventory key for alias coalescing (sum, never drop).
+
+    Order matters:
+      1. Inventory token normalize (PL strip / YEAL / BALCK in inventory_oms_key path)
+      2. Built-in twin spellings (BOTTLE→BOTTEL, 1180 yellow, BALCK, YEAL)
+      3. Replace-SKU / seller→OMS map (source of truth; can override 2)
+
+    Replace sheets map old listing codes onto the operational OMS code used on the
+    status sheet. Twins must land on that terminal before summing inventory.
+    """
     from .po_engine import inventory_oms_key
     from .sku_mapping import follow_sku_replacement
 
     key = inventory_oms_key(sku)
     if not key:
         return ""
-    key = _BOTTELGREEN_RE.sub("BOTTLEGREEN", key)
+    # Prefer BOTTEL (ops / Replace SKU terminal) over warehouse BOTTLE typo.
+    key = _BOTTLEGREEN_RE.sub("BOTTELGREEN", key)
     key = _BALCK_RE.sub("BLACK", key)
     key = _YEAL_RE.sub("TEAL", key)
     m1180 = _1180_YELLOW_RE.match(key)
@@ -2154,9 +2166,9 @@ def coalesce_inventory_by_sku_mapping(
 ) -> pd.DataFrame:
     """Sum inventory rows that are spelling / listing aliases of the same OMS SKU.
 
-    Sales already remap ``BOTTELGREEN→BOTTLEGREEN`` and ``1180YKYELLOW→289…``.
-    Inventory kept both spellings so a naïve ``drop_duplicates`` would discard
-    stock; summing after the same remap restores correct ``Total_Inventory``.
+    Built-in aliases (BOTTLE→BOTTEL, BALCK→BLACK, YEAL→TEAL, 1180→289…) plus the
+    Replace-SKU map. Inventory kept both spellings so a naïve ``drop_duplicates``
+    would discard stock; summing after remap restores correct ``Total_Inventory``.
     """
     if df is None or getattr(df, "empty", True) or "OMS_SKU" not in df.columns:
         return df

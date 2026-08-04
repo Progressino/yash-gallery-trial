@@ -680,23 +680,57 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
                     <tr key={`${code}-breakdown`}>
                       <td colSpan={7} className="px-4 py-0 bg-blue-50">
                         <div className="py-2 space-y-1">
-                          <p className="text-xs font-semibold text-gray-500 uppercase mb-1">Breakdown — quantity allocation:</p>
+                          <p className="text-xs font-semibold text-gray-500 uppercase mb-1">
+                            Breakdown — Grey → P-Code → FG hierarchy:
+                          </p>
+                          <p className="text-[11px] text-gray-500 mb-1">
+                            Allocation is planned at P-Code; FG stays visible for full SKU status traceability.
+                          </p>
                           <table className="w-full text-xs">
                             <thead>
                               <tr className="text-gray-400">
-                                <th className="text-left py-1 pr-4">SO Number</th>
-                                <th className="text-left py-1 pr-4">SKU / FG</th>
-                                <th className="text-right py-1">Qty Required</th>
+                                <th className="text-left py-1 pr-3">SO Number</th>
+                                <th className="text-left py-1 pr-3">FG SKU</th>
+                                <th className="text-left py-1 pr-3">P-Code / Printed Fabric</th>
+                                <th className="text-right py-1 pr-3">Required Qty</th>
+                                <th className="text-right py-1 pr-3">Allocated Qty</th>
+                                <th className="text-left py-1">Status</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {mat.breakdown.map((b: any, i: number) => (
+                              {mat.breakdown.map((b: any, i: number) => {
+                                const status = String(b.status || 'Pending')
+                                const statusColor =
+                                  status === 'Allocated' || status === 'Printed Available' || status === 'Grey Allocated'
+                                    ? 'text-green-700 bg-green-50'
+                                    : status === 'Partial' || status === 'Partial Printed'
+                                      ? 'text-amber-700 bg-amber-50'
+                                      : status === 'Locked-Cut'
+                                        ? 'text-blue-700 bg-blue-100'
+                                        : status === '—'
+                                          ? 'text-gray-500 bg-gray-50'
+                                          : 'text-red-700 bg-red-50'
+                                const alloc = Number(b.allocated_qty ?? 0)
+                                return (
                                 <tr key={i} className="border-t border-blue-100">
-                                  <td className="py-1 pr-4 font-semibold text-[#002B5B]">{b.so_no}</td>
-                                  <td className="py-1 pr-4 font-mono text-gray-600">{b.sku}</td>
-                                  <td className="py-1 text-right font-semibold">{b.qty_req} {mat.unit}</td>
+                                  <td className="py-1 pr-3 font-semibold text-[#002B5B]">{b.so_no}</td>
+                                  <td className="py-1 pr-3 font-mono text-gray-700">{b.sku || b.fg_sku || '—'}</td>
+                                  <td className="py-1 pr-3 font-mono text-[#002B5B]">
+                                    {b.p_code || b.printed_code || '—'}
+                                  </td>
+                                  <td className="py-1 pr-3 text-right font-semibold">
+                                    {b.qty_req} {mat.unit}
+                                  </td>
+                                  <td className="py-1 pr-3 text-right font-semibold text-gray-700">
+                                    {alloc} {mat.unit}
+                                  </td>
+                                  <td className="py-1">
+                                    <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] font-semibold ${statusColor}`}>
+                                      {status}
+                                    </span>
+                                  </td>
                                 </tr>
-                              ))}
+                              )})}
                             </tbody>
                           </table>
                         </div>

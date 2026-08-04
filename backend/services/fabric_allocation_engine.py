@@ -1028,3 +1028,177 @@ def fg_status_report(printed_code: str = "") -> list[dict[str, Any]]:
         return out
     finally:
         conn.close()
+
+
+def _material_is_printed(mat_type: str, mat_code: str) -> bool:
+    t = (mat_type or "").upper()
+    c = (mat_code or "").strip().upper()
+    if t in ("SFG", "PRINTED", "PRINTED FABRIC", "PF"):
+        return True
+    return bool(c) and (c.startswith("P") and any(ch.isdigit() for ch in c[:6]))
+
+
+def _material_is_grey_or_fabric(mat_type: str, mat_code: str, unit: str = "") -> bool:
+    t = (mat_type or "").upper()
+    if t in ("GF", "GREY", "GREY FABRIC", "RM", "FABRIC"):
+        return True
+    if (unit or "").upper() in ("MTR", "M", "METER", "METRE"):
+        return True
+    return False
+
+
+def resolve_p_code_for_fg(fg_sku: str, preferred: str = "") -> str:
+    """Best-effort FG → P-Code via Item Master BOM (first printed SFG child)."""
+    pref = (preferred or "").strip()
+    if pref:
+        return pref
+    sku = (fg_sku or "").strip()
+    if not sku:
+        return ""
+    children = _bom_children(sku)
+    printed = [
+        c
+        for c in children
+        if (c.get("type") or "").upper() in ("SFG", "PRINTED", "PRINTED FABRIC", "PF")
+        or str(c.get("code") or "").upper().startswith("P")
+    ]
+    if printed:
+        return str(printed[0].get("code") or "").strip()
+    if children:
+        return str(children[0].get("code") or "").strip()
+    return ""
+
+
+def annotate_mrp_breakdown_with_allocations(materials: dict[str, Any] | None) -> dict[str, Any]:
+    """Enrich Production MRP material breakdowns with Grey→P-Code→FG visibility.
+
+    Mutates and returns ``materials``. Each breakdown line gains:
+      - ``p_code`` / ``printed_code``
+      - ``allocated_qty`` (grey intent for GF material rows, PF reservation for SFG)
+      - ``status`` + ``color`` (Allocated / Partial / Pending / Locked-Cut / …)
+
+    Grey is still planned at **P-Code** level; FG remains on each line so SKU-level
+    status dashboards can trace requirement → allocation → issue.
+    """
+    if not isinstance(materials, dict) or not materials:
+        return materials or {}
+
+    conn = None
+    try:
+        conn = _conn()
+    except Exception:
+        conn = None
+
+    def _pf_alloc(p_code: str, so: str, sku: str) -> float:
+        if conn is None or not p_code:
+            return 0.0
+        r = conn.execute(
+            """SELECT COALESCE(SUM(qty),0) FROM printed_fabric_reservations
+               WHERE status IN ('Active','JO Created','CUTTING_ISSUED','Issued','Consumed')
+                 AND TRIM(fabric_code)=? AND TRIM(so_number)=? AND TRIM(sku)=?""",
+            (p_code, so, sku),
+        ).fetchone()
+        return float(r[0] if r else 0)
+
+    def _grey_alloc(grey_code: str, p_code: str, so: str, sku: str) -> float:
+        if conn is None or not grey_code:
+            return 0.0
+        # Prefer FG-intent rows first so multi-SKU P-codes do not double-count.
+        r = conn.execute(
+            """SELECT COALESCE(SUM(qty),0) FROM grey_fabric_allocations
+               WHERE status='Active' AND TRIM(grey_code)=?
+                 AND (? = '' OR TRIM(printed_code)=?)
+                 AND TRIM(so_number)=? AND TRIM(fg_sku)=?""",
+            (grey_code, p_code, p_code, so, sku),
+        ).fetchone()
+        specific = float(r[0] if r else 0)
+        if specific > 0:
+            return specific
+        # Fall back to P-code-level grey only when no FG-specific intent exists
+        # for this SO+SKU (shared pool — report for status, not exclusive claim).
+        r2 = conn.execute(
+            """SELECT COALESCE(SUM(qty),0) FROM grey_fabric_allocations
+               WHERE status='Active' AND TRIM(grey_code)=?
+                 AND (? = '' OR TRIM(printed_code)=?)
+                 AND (so_number IS NULL OR TRIM(so_number)='' OR TRIM(so_number)=?)
+                 AND (fg_sku IS NULL OR TRIM(fg_sku)='')""",
+            (grey_code, p_code, p_code, so),
+        ).fetchone()
+        return float(r2[0] if r2 else 0)
+
+    def _locked(p_code: str, so: str, sku: str) -> bool:
+        if conn is None or not p_code:
+            return False
+        try:
+            return bool(_pf_reservation_locked_for_so_sku(conn, so, sku, p_code))
+        except Exception:
+            return False
+
+    try:
+        for mat_code, mat in materials.items():
+            if not isinstance(mat, dict):
+                continue
+            mat_type = str(mat.get("type") or "")
+            unit = str(mat.get("unit") or "")
+            is_printed = _material_is_printed(mat_type, mat_code)
+            is_fabric = is_printed or _material_is_grey_or_fabric(mat_type, mat_code, unit)
+            breakdown = mat.get("breakdown") or []
+            if not isinstance(breakdown, list):
+                continue
+            for bd in breakdown:
+                if not isinstance(bd, dict):
+                    continue
+                so = str(bd.get("so_no") or bd.get("so_number") or "").strip()
+                sku = str(bd.get("sku") or bd.get("fg_sku") or "").strip()
+                qty_req = float(bd.get("qty_req") or 0)
+                p_code = str(bd.get("p_code") or bd.get("printed_code") or "").strip()
+                if not p_code and is_printed:
+                    p_code = str(mat_code or "").strip()
+                if not p_code and is_fabric and sku:
+                    p_code = resolve_p_code_for_fg(sku)
+                bd["p_code"] = p_code
+                bd["printed_code"] = p_code
+                bd.setdefault("fg_sku", sku)
+
+                if not is_fabric:
+                    bd["allocated_qty"] = float(bd.get("allocated_qty") or 0)
+                    bd["status"] = bd.get("status") or "—"
+                    bd["color"] = bd.get("color") or "grey"
+                    continue
+
+                pf_alloc = _pf_alloc(p_code, so, sku)
+                grey_alloc = _grey_alloc(str(mat_code), p_code, so, sku) if not is_printed else 0.0
+                # Row lives on the material being exploded: use the matching pool.
+                allocated = pf_alloc if is_printed else (grey_alloc if grey_alloc > 0 else 0.0)
+                # If grey row has no grey intent but PF is already reserved for FG, surface that.
+                if not is_printed and allocated <= 0 and pf_alloc > 0:
+                    allocated = pf_alloc
+
+                bd["allocated_qty"] = round(float(allocated), 3)
+                bd["allocated_printed"] = round(float(pf_alloc), 3)
+                bd["allocated_grey"] = round(float(grey_alloc), 3)
+
+                locked = _locked(p_code, so, sku)
+                if locked:
+                    bd["status"] = "Locked-Cut"
+                    bd["color"] = "blue"
+                elif qty_req > 0 and allocated + 0.001 >= qty_req:
+                    bd["status"] = "Allocated"
+                    bd["color"] = "green"
+                elif allocated > 0:
+                    bd["status"] = "Partial"
+                    bd["color"] = "orange"
+                elif is_printed and pf_alloc <= 0:
+                    bd["status"] = "Pending"
+                    bd["color"] = "red" if qty_req > 0 else "grey"
+                else:
+                    bd["status"] = "Pending"
+                    bd["color"] = "red" if qty_req > 0 else "grey"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    return materials

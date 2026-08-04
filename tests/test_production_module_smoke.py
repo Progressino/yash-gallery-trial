@@ -805,6 +805,103 @@ def test_mrp_sub_bom_applies_grey_bom_ratio(isolated_module_dbs, client):
     assert grey["net_req"] == 945.0
 
 
+def test_mrp_breakdown_hierarchy_fg_pcode_allocated_status(isolated_module_dbs, client, monkeypatch, tmp_path):
+    """MRP breakdown keeps FG + P-Code and surfaces grey allocation status per FG."""
+    import sqlite3
+
+    from backend.db import grey_db
+    from backend.services import fabric_allocation_engine as fae
+
+    grey_path = str(tmp_path / "grey_mrp_hier.db")
+    monkeypatch.setenv("GREY_DB_PATH", grey_path)
+    monkeypatch.setattr(grey_db, "_DB", grey_path)
+    grey_db.init_db()
+
+    _seed_printed_grey_bom_chain(
+        isolated_module_dbs["ITEM_DB_PATH"],
+        printed_stock=0.0,
+        grey_bom_qty=1.0,
+        parent_code="STYLE-HIER",
+    )
+    conn = sqlite3.connect(isolated_module_dbs["ITEM_DB_PATH"])
+    parent = conn.execute("SELECT id, item_type_id FROM items WHERE item_code='STYLE-HIER'").fetchone()
+    pid, tid = parent
+    for sku in ("SKU1001", "SKU1002"):
+        conn.execute(
+            "INSERT INTO items (item_code, item_name, item_type_id, parent_id) VALUES (?,?,?,?)",
+            (sku, sku, tid, pid),
+        )
+    conn.commit()
+    conn.close()
+
+    so_r = client.post(
+        "/api/sales/orders",
+        json={
+            "so_date": "2026-08-01",
+            "buyer": "Acme",
+            "warehouse": "Main",
+            "lines": [
+                {"sku": "SKU1001", "sku_name": "1001", "qty": 1000, "unit": "PCS"},
+                {"sku": "SKU1002", "sku_name": "1002", "qty": 1000, "unit": "PCS"},
+            ],
+        },
+    )
+    assert so_r.status_code == 200, so_r.text
+    so = so_r.json()["so_number"]
+
+    grey_db.save_fabric_check(
+        {
+            "fabric_code": "GREY-FAB",
+            "fabric_name": "Grey Fabric",
+            "checked_qty": 5000,
+            "passed_qty": 5000,
+            "rejected_qty": 0,
+            "rework_qty": 0,
+            "checked_by": "test",
+        }
+    )
+    fae.allocate_grey(
+        {
+            "grey_code": "GREY-FAB",
+            "printed_code": "PRINTED-FAB",
+            "qty": 1000,
+            "so_number": so,
+            "fg_sku": "SKU1001",
+            "user_name": "planner",
+            "reason": "priority",
+        }
+    )
+
+    r = client.post("/api/production/mrp/run", json={"so_numbers": [so]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    printed = body["result"]["PRINTED-FAB"]
+    grey = body["result"]["GREY-FAB"]
+
+    assert {b["sku"] for b in printed["breakdown"]} == {"SKU1001", "SKU1002"}
+    for b in printed["breakdown"]:
+        assert b.get("p_code") == "PRINTED-FAB"
+        assert b.get("qty_req") == 1000.0
+
+    by_sku = {b["sku"]: b for b in grey["breakdown"]}
+    assert set(by_sku) == {"SKU1001", "SKU1002"}
+    assert by_sku["SKU1001"]["p_code"] == "PRINTED-FAB"
+    assert by_sku["SKU1002"]["p_code"] == "PRINTED-FAB"
+    assert by_sku["SKU1001"]["qty_req"] == 1000.0
+    assert by_sku["SKU1002"]["qty_req"] == 1000.0
+    assert by_sku["SKU1001"]["allocated_qty"] == pytest.approx(1000.0)
+    assert by_sku["SKU1001"]["status"] == "Allocated"
+    assert by_sku["SKU1002"]["allocated_qty"] == pytest.approx(0.0)
+    assert by_sku["SKU1002"]["status"] == "Pending"
+
+    last = client.get("/api/production/mrp/last")
+    assert last.status_code == 200
+    g2 = last.json()["result"]["GREY-FAB"]
+    by2 = {b["sku"]: b for b in g2["breakdown"]}
+    assert by2["SKU1001"]["status"] == "Allocated"
+    assert by2["SKU1002"]["status"] == "Pending"
+
+
 def _create_so_with_sku(client, sku: str, qty: int = 5):
     r = client.post(
         "/api/sales/orders",
@@ -876,6 +973,10 @@ def test_mrp_legacy_payload_still_renders_via_last(isolated_module_dbs, client):
     body = r.json()
     assert "MAT-LEGACY" in body["result"]
     assert body["warnings"] == []
+    bd = body["result"]["MAT-LEGACY"]["breakdown"][0]
+    assert "status" in bd
+    assert "allocated_qty" in bd
+    assert "p_code" in bd
 
 
 def test_mrp_lines_for_so_skip_zero_net_requirement(isolated_module_dbs, client):

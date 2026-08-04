@@ -28,6 +28,10 @@ Grey Fabric → Printed Fabric (P-Code) → FG SKU → Sales Order
 ### Reporting
 `fg_status_report` and the planning tree leaf status use **current** `printed_fabric_reservations`, not original grey allocation intent.
 
+**Production MRP breakdown** (Material Requirement screen) shows the same hierarchy for every material line:
+`FG SKU | P-Code | Required Qty | Allocated Qty | Status`
+Allocation remains **P-Code-centric** (grey allocate → P-Code); FG is retained so SKU-level dashboards can trace Grey ordered/allocated/issued through to Dispatch.
+
 ### Audit
 Every allocate / reallocate / release / lock appends `fabric_allocation_history` (never deleted). Fields: timestamp, user, from/to SO+SKU, qty, reason, document_ref, statuses.
 

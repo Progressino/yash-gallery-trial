@@ -39,7 +39,8 @@ def main() -> int:
     assert canonical_oms_key("1415YKBALCK-8XL", merged_map) == "1415YKBLACK-8XL"
     from backend.services.inventory import _inventory_alias_oms_key
 
-    assert _inventory_alias_oms_key("5041YKBOTTELGREEN-6XL", merged_map) == "5041YKBOTTLEGREEN-6XL"
+    assert _inventory_alias_oms_key("5041YKBOTTELGREEN-6XL", merged_map) == "5041YKBOTTELGREEN-6XL"
+    assert _inventory_alias_oms_key("5041YKBOTTLEGREEN-6XL", merged_map) == "5041YKBOTTELGREEN-6XL"
     assert canonical_oms_key("1415YKCBLACK-XXL", merged_map).startswith("1415YKBLACK")
 
     hist_path = Path("/data/warm_cache/daily_inventory_history_df.parquet")
