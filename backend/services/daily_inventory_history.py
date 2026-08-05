@@ -54,6 +54,9 @@ def scrub_absurd_inventory_history_rows(df: pd.DataFrame | None) -> pd.DataFrame
         return pd.DataFrame(columns=_STORE_COLS)
     out = df.copy()
     out["OMS_SKU"] = out["OMS_SKU"].astype(str).str.strip().str.upper()
+    # Difference reports include "Total inv." summary rows — never store as a SKU.
+    bad_label = out["OMS_SKU"].str.replace(r"[\s.\-_]+", "", regex=True)
+    out = out.loc[~bad_label.isin({"TOTALINV", "TOTALINVENTORY", "TOTAL", "GRANDTOTAL"})]
     out = out.loc[~out["OMS_SKU"].map(_is_parent_style_inventory_sku)]
     if out.empty:
         return pd.DataFrame(columns=[c for c in df.columns])
@@ -66,23 +69,24 @@ def coalesce_inventory_history_sku_aliases(
     df: pd.DataFrame | None,
     mapping: dict | None = None,
 ) -> pd.DataFrame:
-    """Remap BOTTEL/BALCK/YEAL/1180-style twins onto one OMS_SKU and sum qty.
+    """Remap BOTTEL/BALCK/YEAL/POWDER/1180-style twins onto one OMS_SKU.
 
-    Same spelling aliases as live inventory coalesce — history previously
-    skipped this path, so Combined (max) kept typo SKUs as separate rows and
-    PO mapping looked broken for those sizes.
+    Casefold twins (``6xl`` vs ``6XL``) collapse with **max** first so re-uploads
+    do not double daily qty; spelling aliases use smart merge (near-equal max, else
+    sum) — same as live inventory — so BOTTLE≡BOTTEL full dual-census does not 2×.
     """
     if df is None or getattr(df, "empty", True):
         return pd.DataFrame(columns=_STORE_COLS)
     try:
-        from .inventory import _inventory_alias_oms_key
+        from .inventory import _inventory_alias_oms_key, smart_coalesce_qty
     except Exception:
         return scrub_absurd_inventory_history_rows(df)
     out = scrub_absurd_inventory_history_rows(df)
     if out.empty:
         return out
     out = out.copy()
-    out["OMS_SKU"] = out["OMS_SKU"].map(lambda s: _inventory_alias_oms_key(s, mapping))
+    # 1) Pure case collapse — max qty per upper SKU-day-channel
+    out["OMS_SKU"] = out["OMS_SKU"].astype(str).str.strip().str.upper()
     out = out[out["OMS_SKU"].astype(str).str.len() > 0]
     if out.empty:
         return out.reset_index(drop=True)
@@ -92,6 +96,17 @@ def coalesce_inventory_history_sku_aliases(
     out = out.dropna(subset=["Date", "OMS_SKU"])
     if out.empty:
         return pd.DataFrame(columns=_STORE_COLS)
+    keys_case = _history_dedupe_keys(out)
+    out = (
+        out.groupby(keys_case, as_index=False)
+        .agg(Qty=("Qty", "max"), Source=("Source", "first"))
+        .reset_index(drop=True)
+    )
+    # 2) Spelling / Replace-SKU aliases — smart merge (max near-dups, sum splits)
+    out["OMS_SKU"] = out["OMS_SKU"].map(lambda s: _inventory_alias_oms_key(s, mapping))
+    out = out[out["OMS_SKU"].astype(str).str.len() > 0]
+    if out.empty:
+        return out.reset_index(drop=True)
     out["_rank"] = out["Source"].astype(str).str.strip().str.lower().map(_SOURCE_RANK).fillna(1)
     keys = _history_dedupe_keys(out)
     out = out.sort_values(
@@ -100,7 +115,7 @@ def coalesce_inventory_history_sku_aliases(
     )
     out = (
         out.groupby(keys, as_index=False)
-        .agg(Qty=("Qty", "sum"), Source=("Source", "first"))
+        .agg(Qty=("Qty", smart_coalesce_qty), Source=("Source", "first"))
         .reset_index(drop=True)
     )
     return drop_zero_derived_rows(out)

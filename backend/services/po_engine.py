@@ -110,6 +110,14 @@ def _yeal_typo_canonical(sku: str) -> str:
     return _YEAL_TYPO_RE.sub("TEAL", str(sku).strip().upper())
 
 
+_POWDER_TYPO_RE = re.compile(r"POWDERBLUE", re.I)
+
+
+def _powder_typo_canonical(sku: str) -> str:
+    """7114YKPOWDERBLUE-F → 7114YKPOWERBLUE-F (ops status / New SKU spelling)."""
+    return _POWDER_TYPO_RE.sub("POWERBLUE", str(sku).strip().upper())
+
+
 def _strip_pl(
     sku: str,
     mapping: Dict[str, str],
@@ -126,8 +134,8 @@ def _strip_pl(
 
     raw = str(sku).strip().upper()
     stripped = _PL_RE.sub(r"\1\2", raw)
-    stripped = _yeal_typo_canonical(_balck_typo_canonical(stripped))
-    raw_fixed = _yeal_typo_canonical(_balck_typo_canonical(raw))
+    stripped = _powder_typo_canonical(_yeal_typo_canonical(_balck_typo_canonical(stripped)))
+    raw_fixed = _powder_typo_canonical(_yeal_typo_canonical(_balck_typo_canonical(raw)))
     if apply_sku_mapping and mapping:
         for candidate in (stripped, raw_fixed, raw):
             if candidate in mapping:

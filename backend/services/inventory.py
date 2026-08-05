@@ -438,6 +438,14 @@ def sync_inventory_snapshot_from_postgres(sess: Any) -> bool:
         return False
 
     frame = strip_fba_intransit_unless_enabled(df.copy())
+    try:
+        mapping = getattr(sess, "sku_mapping", None) or {}
+        frame = coalesce_inventory_by_sku_mapping(frame, mapping)
+    except Exception:
+        try:
+            frame = coalesce_inventory_by_sku_mapping(frame, {})
+        except Exception:
+            pass
     sess.inventory_df_variant = frame
     try:
         from .helpers import get_parent_sku
@@ -2122,6 +2130,8 @@ _EXTRA_MKT_COLS = frozenset({"Manual_InTransit", "Not_In_Inventory_Qty"})
 # Replace-SKU sheets and status sheets use BOTTEL as the "Right SKU"; coalesce
 # both forms onto BOTTELGREEN *before* applying any further seller→OMS map.
 _BOTTLEGREEN_RE = re.compile(r"BOTTLEGREEN", re.I)
+# Ops SKU sheet uses POWERBLUE; older OMS/history rows keep POWDERBLUE stock.
+_POWDERBLUE_RE = re.compile(r"POWDERBLUE", re.I)
 # Common warehouse transposition: …BALCK… → …BLACK… (1415YKBALCK-6XL etc.).
 _BALCK_RE = re.compile(r"BALCK", re.I)
 # Warehouse transposition: …YEAL… → …TEAL… (7100YKYEAL-* etc.).
@@ -2135,7 +2145,7 @@ def _inventory_alias_oms_key(sku: object, mapping: Optional[Dict[str, str]] = No
 
     Order matters:
       1. Inventory token normalize (PL strip / YEAL / BALCK in inventory_oms_key path)
-      2. Built-in twin spellings (BOTTLE→BOTTEL, 1180 yellow, BALCK, YEAL)
+      2. Built-in twin spellings (BOTTLE→BOTTEL, POWDER→POWER, 1180 yellow, …)
       3. Replace-SKU / seller→OMS map (source of truth; can override 2)
 
     Replace sheets map old listing codes onto the operational OMS code used on the
@@ -2149,6 +2159,8 @@ def _inventory_alias_oms_key(sku: object, mapping: Optional[Dict[str, str]] = No
         return ""
     # Prefer BOTTEL (ops / Replace SKU terminal) over warehouse BOTTLE typo.
     key = _BOTTLEGREEN_RE.sub("BOTTELGREEN", key)
+    # Prefer POWERBLUE (ops status / New SKU) over warehouse POWDERBLUE typo.
+    key = _POWDERBLUE_RE.sub("POWERBLUE", key)
     key = _BALCK_RE.sub("BLACK", key)
     key = _YEAL_RE.sub("TEAL", key)
     m1180 = _1180_YELLOW_RE.match(key)
@@ -2157,22 +2169,94 @@ def _inventory_alias_oms_key(sku: object, mapping: Optional[Dict[str, str]] = No
     mp = mapping or {}
     if mp:
         key = follow_sku_replacement(key, mp)
-    return key
+    return str(key).strip().upper()
+
+
+def _collapse_case_duplicate_inventory_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Upper-case OMS_SKU then collapse exact casefold twins with **max** per key.
+
+    Re-uploads of the same physical row with different case (``6xl`` vs ``6XL``)
+    must **not** sum into 2× stock. True spelling aliases (YEAL/TEAL, BOTTLE/BOTTEL)
+    remain distinct after upper-case and are merged later by
+    :func:`coalesce_inventory_by_sku_mapping`.
+    """
+    if df is None or getattr(df, "empty", True) or "OMS_SKU" not in df.columns:
+        return df
+    out = df.copy()
+    out["OMS_SKU"] = out["OMS_SKU"].map(
+        lambda s: str(s or "").strip().upper() if s is not None and not (isinstance(s, float) and pd.isna(s)) else ""
+    )
+    out = out[out["OMS_SKU"].astype(str).str.len() > 0]
+    if out.empty:
+        return out.reset_index(drop=True)
+    if not out["OMS_SKU"].duplicated().any():
+        return out.reset_index(drop=True)
+    num_cols = [
+        c for c in out.columns
+        if c != "OMS_SKU" and pd.api.types.is_numeric_dtype(out[c])
+    ]
+    other = [c for c in out.columns if c not in num_cols and c != "OMS_SKU"]
+    agg = {c: "max" for c in num_cols}
+    for c in other:
+        agg[c] = "first"
+    if not agg:
+        return out.drop_duplicates(subset=["OMS_SKU"], keep="first").reset_index(drop=True)
+    return out.groupby("OMS_SKU", as_index=False).agg(agg)
+
+
+# When two alias spellings both carry nearly the same qty, they are full-census
+# twins (BOTTLE≡BOTTEL on FBA); summing would 2× stock. True splits (YEAL 81 +
+# TEAL 3) have low ratio and still need sum.
+_ALIAS_NEAR_DUP_RATIO = 0.85
+
+
+def smart_coalesce_qty(values) -> float:
+    """Merge alias quantities: drop near-duplicates (keep max), sum true splits."""
+    vals: list[float] = []
+    for x in values if values is not None else []:
+        try:
+            if x is None or (isinstance(x, float) and pd.isna(x)):
+                continue
+            v = float(x)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            vals.append(v)
+    if not vals:
+        return 0.0
+    vals.sort(reverse=True)
+    kept: list[float] = []
+    for v in vals:
+        if any(
+            (min(v, k) / max(v, k)) >= _ALIAS_NEAR_DUP_RATIO
+            for k in kept
+            if k > 0
+        ):
+            continue
+        kept.append(v)
+    return float(sum(kept)) if kept else float(vals[0])
 
 
 def coalesce_inventory_by_sku_mapping(
     df: pd.DataFrame,
     mapping: Optional[Dict[str, str]] = None,
 ) -> pd.DataFrame:
-    """Sum inventory rows that are spelling / listing aliases of the same OMS SKU.
+    """Merge inventory rows that are spelling / listing aliases of the same OMS SKU.
 
-    Built-in aliases (BOTTLE→BOTTEL, BALCK→BLACK, YEAL→TEAL, 1180→289…) plus the
-    Replace-SKU map. Inventory kept both spellings so a naïve ``drop_duplicates``
-    would discard stock; summing after remap restores correct ``Total_Inventory``.
+    Pipeline:
+      1. Case-collapse (upper + max) so ``6xl``/``6XL`` re-uploads do not 2× stock
+      2. Built-in + Replace-SKU aliases → smart merge (near-equal max, else sum)
+
+    Built-in aliases (BOTTLE→BOTTEL, POWDER→POWER, BALCK→BLACK, YEAL→TEAL, 1180→289…)
+    plus the Replace-SKU map. Twin warehouse rows that **partition** stock still sum;
+    full dual-census twins (same qty under BOTTLE and BOTTEL) take max only.
     """
     if df is None or getattr(df, "empty", True) or "OMS_SKU" not in df.columns:
         return df
-    out = df.copy()
+    out = _collapse_case_duplicate_inventory_rows(df)
+    if out is None or out.empty:
+        return out if out is not None else df
+    out = out.copy()
     out["OMS_SKU"] = out["OMS_SKU"].map(lambda s: _inventory_alias_oms_key(s, mapping))
     out = out[out["OMS_SKU"].astype(str).str.len() > 0]
     if out.empty:
@@ -2180,7 +2264,10 @@ def coalesce_inventory_by_sku_mapping(
     num_cols = [c for c in out.columns if c != "OMS_SKU"]
     for c in num_cols:
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0)
-    out = out.groupby("OMS_SKU", as_index=False)[num_cols].sum()
+    if not out["OMS_SKU"].duplicated().any():
+        return recompute_inventory_totals(out.reset_index(drop=True))
+    agg = {c: smart_coalesce_qty for c in num_cols}
+    out = out.groupby("OMS_SKU", as_index=False).agg(agg)
     return recompute_inventory_totals(out)
 
 

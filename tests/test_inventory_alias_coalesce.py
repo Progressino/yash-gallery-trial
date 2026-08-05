@@ -154,28 +154,146 @@ def test_history_alias_coalesce_yeal():
     assert float(out.iloc[0]["Qty"]) == 120.0
 
 
-def test_matrix_merges_yeal_teal_rows():
-    from backend.services.daily_inventory_history import inventory_history_wide_matrix
+def test_coalesce_powder_to_power_inventory():
+    """Warehouse POWDERBLUE stock must land on ops POWERBLUE Status SKU."""
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["7114YKPOWDERBLUE-F", "7114YKPOWERBLUE-F"],
+            "OMS_Inventory": [175.0, 0.0],
+            "Amazon_Inventory": [0.0, 0.0],
+            "Manual_InTransit": [0.0, 0.0],
+            "Not_In_Inventory_Qty": [0.0, 0.0],
+            "Buffer_Stock": [0.0, 0.0],
+        }
+    )
+    out = coalesce_inventory_by_sku_mapping(inv, {})
+    by = out.set_index("OMS_SKU")
+    assert "7114YKPOWDERBLUE-F" not in by.index
+    assert float(by.loc["7114YKPOWERBLUE-F", "Total_Inventory"]) == 175.0
+
+
+def test_coalesce_case_twins_max_not_double():
+    """6xl vs 6XL re-upload must not sum to 2× stock."""
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["1130YKPURPLE-6XL", "1130YKPURPLE-6xl"],
+            "OMS_Inventory": [81.0, 81.0],
+            "Amazon_Inventory": [0.0, 0.0],
+            "Manual_InTransit": [0.0, 0.0],
+            "Not_In_Inventory_Qty": [0.0, 0.0],
+            "Buffer_Stock": [0.0, 0.0],
+        }
+    )
+    out = coalesce_inventory_by_sku_mapping(inv, {})
+    by = out.set_index("OMS_SKU")
+    assert list(by.index) == ["1130YKPURPLE-6XL"]
+    assert float(by.loc["1130YKPURPLE-6XL", "Total_Inventory"]) == 81.0
+
+
+def test_history_case_and_powder_coalesce():
+    from backend.services.daily_inventory_history import coalesce_inventory_history_sku_aliases
+    from backend.services.po_engine import inventory_oms_key, canonical_oms_key
+
+    assert inventory_oms_key("7114YKPOWDERBLUE-F") == "7114YKPOWERBLUE-F"
+    assert canonical_oms_key("7114YKPOWDERBLUE-F", {}) == "7114YKPOWERBLUE-F"
 
     hist = pd.DataFrame(
         {
             "OMS_SKU": [
-                "7100YKYEAL-L-XL",
-                "7100YKTEAL-L-XL",
-                "7100YKYEAL-S-M",
-                "7100YKTEAL-S-M",
+                "1130YKPURPLE-6XL",
+                "1130YKPURPLE-6xl",
+                "7114YKPOWDERBLUE-F",
+                "7114YKPOWERBLUE-F",
             ],
-            "Date": ["2026-07-20", "2026-07-21", "2026-07-20", "2026-07-21"],
-            "Qty": [120.0, 130.0, 50.0, 55.0],
+            "Date": ["2026-08-05"] * 4,
+            "Qty": [81.0, 81.0, 175.0, 0.0],
             "Source": ["uploaded"] * 4,
             "Channel": ["oms"] * 4,
         }
     )
-    out = inventory_history_wide_matrix(
-        hist, q="7100", limit=50, offset=0, days=30, end_date="2026-07-31", channel="combined"
+    out = coalesce_inventory_history_sku_aliases(hist, {})
+    by = out.set_index("OMS_SKU")["Qty"].to_dict()
+    assert float(by["1130YKPURPLE-6XL"]) == 81.0
+    assert float(by["7114YKPOWERBLUE-F"]) == 175.0
+    assert "7114YKPOWDERBLUE-F" not in by
+
+
+def test_scrub_drops_total_inv_label():
+    from backend.services.daily_inventory_history import scrub_absurd_inventory_history_rows
+
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["Total inv.", "1219YKBLACK-M"],
+            "Date": ["2026-08-05", "2026-08-05"],
+            "Qty": [198827.0, 120.0],
+            "Source": ["uploaded", "uploaded"],
+        }
     )
-    skus = [r["sku"] for r in out["rows"]]
-    assert "7100YKYEAL-L-XL" not in skus
-    assert "7100YKTEAL-L-XL" in skus
-    assert "7100YKTEAL-S-M" in skus
-    assert len([s for s in skus if "7100" in s]) == 2
+    out = scrub_absurd_inventory_history_rows(df)
+    assert list(out["OMS_SKU"]) == ["1219YKBLACK-M"]
+
+
+def test_yeal_teal_still_sums_after_case_collapse():
+    """True spelling twins must still sum (not max)."""
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["7100YKYEAL-L-XL", "7100YKTEAL-L-XL"],
+            "OMS_Inventory": [81.0, 3.0],
+            "Amazon_Inventory": [0.0, 3.0],
+            "Manual_InTransit": [0.0, 0.0],
+            "Not_In_Inventory_Qty": [0.0, 0.0],
+            "Buffer_Stock": [0.0, 0.0],
+        }
+    )
+    out = coalesce_inventory_by_sku_mapping(inv, {})
+    by = out.set_index("OMS_SKU")
+    assert float(by.loc["7100YKTEAL-L-XL", "OMS_Inventory"]) == 84.0
+    assert float(by.loc["7100YKTEAL-L-XL", "Total_Inventory"]) == 87.0
+
+
+def test_bottle_dual_census_max_not_double():
+    """When BOTTLE and BOTTEL both hold the full FBA/OMS census, do not 2×."""
+    from backend.services.inventory import smart_coalesce_qty
+
+    assert smart_coalesce_qty([27, 27]) == 27.0
+    assert smart_coalesce_qty([81, 3]) == 84.0
+    assert smart_coalesce_qty([41, 41, 0]) == 41.0
+
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["5041YKBOTTLEGREEN-XL", "5041YKBOTTELGREEN-XL"],
+            "OMS_Inventory": [27.0, 27.0],
+            "Amazon_Inventory": [41.0, 41.0],
+            "Manual_InTransit": [0.0, 0.0],
+            "Not_In_Inventory_Qty": [0.0, 0.0],
+            "Buffer_Stock": [0.0, 0.0],
+        }
+    )
+    out = coalesce_inventory_by_sku_mapping(inv, {})
+    by = out.set_index("OMS_SKU")
+    assert float(by.loc["5041YKBOTTELGREEN-XL", "OMS_Inventory"]) == 27.0
+    assert float(by.loc["5041YKBOTTELGREEN-XL", "Amazon_Inventory"]) == 41.0
+    assert float(by.loc["5041YKBOTTELGREEN-XL", "Total_Inventory"]) == 68.0
+
+
+def test_history_bottle_dual_census_not_double():
+    from backend.services.daily_inventory_history import coalesce_inventory_history_sku_aliases
+
+    hist = pd.DataFrame(
+        {
+            "OMS_SKU": [
+                "5041YKBOTTLEGREEN-XL",
+                "5041YKBOTTELGREEN-XL",
+                "5041YKBOTTLEGREEN-XL",
+                "5041YKBOTTELGREEN-XL",
+            ],
+            "Date": ["2026-07-01"] * 4,
+            "Qty": [27.0, 27.0, 41.0, 41.0],
+            "Source": ["snapshot"] * 4,
+            "Channel": ["oms", "oms", "amazon", "amazon"],
+        }
+    )
+    out = coalesce_inventory_history_sku_aliases(hist, {})
+    by = out.set_index(["OMS_SKU", "Channel"])["Qty"]
+    assert float(by.loc[("5041YKBOTTELGREEN-XL", "oms")]) == 27.0
+    assert float(by.loc[("5041YKBOTTELGREEN-XL", "amazon")]) == 41.0

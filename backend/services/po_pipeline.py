@@ -584,13 +584,19 @@ def _prepare_inventory_history(
     # Inventory tab applies manual overlay before display; PO must too before any
     # history overlay or engine merge (otherwise Total_Inventory mirrors stale warm).
     try:
-        from .inventory import recompute_inventory_totals
+        from .inventory import (
+            coalesce_inventory_by_sku_mapping,
+            recompute_inventory_totals,
+        )
         from .manual_intransit_sheet import ensure_manual_intransit_overlay_applied
 
         ensure_manual_intransit_overlay_applied(sess)
         fixed = getattr(sess, "inventory_df_variant", None)
         if fixed is not None and hasattr(fixed, "empty") and not fixed.empty:
-            sess.inventory_df_variant = recompute_inventory_totals(fixed)
+            mapping = getattr(sess, "sku_mapping", None) or {}
+            sess.inventory_df_variant = coalesce_inventory_by_sku_mapping(
+                recompute_inventory_totals(fixed), mapping
+            )
             inv_variant = sess.inventory_df_variant
     except Exception:
         logger.exception("manual inventory overlay before PO history prep failed")
