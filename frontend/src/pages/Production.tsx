@@ -685,7 +685,22 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
                           </p>
                           <p className="text-[11px] text-gray-500 mb-1">
                             Allocation is planned at P-Code; FG stays visible for full SKU status traceability.
+                            Allocated Qty here is read-only — use Grey Fabric → Planning &amp; Allocation to act.
                           </p>
+                          <div className="flex flex-wrap gap-2 mb-2">
+                            <a
+                              href="/grey?tab=planning&plan=allocate"
+                              className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-[#002B5B] text-white font-medium hover:bg-blue-900"
+                            >
+                              Open Allocate Grey / Printed →
+                            </a>
+                            <a
+                              href="/grey?tab=planning&plan=tree"
+                              className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50"
+                            >
+                              Planning tree
+                            </a>
+                          </div>
                           <table className="w-full text-xs">
                             <thead>
                               <tr className="text-gray-400">
@@ -1293,22 +1308,25 @@ export default function Production() {
   // ── Add SO lines to new JO ─────────────────────────────────────────────────
   const addSOLineToJO = async (line: any) => {
     if (newLines.find(l => l.sku === line.sku)) return
+    const soQty = Number(line.qty) || 0
+    // Cutting planned qty defaults to SO qty but is independent (may cut fewer pcs).
     setNewLines(ls => [...ls, {
       so_number: newForm.so_number,
       sku: line.sku || '',
       sku_name: line.sku_name || line.item_name || '',
       style: '',
-      planned_qty: line.qty || 0,
+      planned_qty: soQty,
+      so_qty: soQty,
       vendor_rate: newForm.vendor_rate || 0,
       remarks: '',
     }])
     if (line.sku) {
       setNewForm(f => ({ ...f, sku: f.sku || line.sku }))
     }
-    // Cutting: auto-fill fabric from BOM (live — includes fabric QC'd after SO was created)
+    // Cutting: auto-fill fabric from BOM for the cutting (planned) qty
     if (newForm.process === 'Cutting' && line.sku) {
       try {
-        const orderQty = Number(line.qty) || 1
+        const orderQty = soQty || 1
         const res = await api.get(`/production/bom-inputs/${encodeURIComponent(line.sku)}`, { params: { qty: orderQty } })
         const inputs = (res.data?.inputs ?? []) as { material_code?: string; material_name?: string; adj_qty?: number; unit?: string }[]
         const fabric = inputs.find(i => {
@@ -1321,7 +1339,6 @@ export default function Production() {
           setNewForm(f => ({
             ...f,
             fabric_code: f.fabric_code || fabric.material_code || '',
-            // Accumulate fabric across every size line added to the Cutting JO.
             fabric_qty: (Number(f.fabric_qty) || 0) + adj,
             fabric_unit: fabric.unit || f.fabric_unit || 'MTR',
           }))
@@ -1335,6 +1352,47 @@ export default function Production() {
         }
       } catch { /* BOM optional */ }
     }
+  }
+
+  const updateCuttingLineQty = async (index: number, cuttingQty: number) => {
+    const ln = newLines[index]
+    if (!ln) return
+    const prev = Number(ln.planned_qty) || 0
+    setNewLines(ls => ls.map((x, j) => j === index ? { ...x, planned_qty: cuttingQty } : x))
+    if (newForm.process !== 'Cutting' || !ln.sku) return
+    try {
+      const pickFab = (data: any) => {
+        const inputs = (data?.inputs ?? []) as { material_code?: string; material_name?: string; adj_qty?: number; unit?: string }[]
+        return inputs.find(i => {
+          const u = String(i.unit || '').toUpperCase()
+          const code = String(i.material_code || '').toUpperCase()
+          return u.includes('MTR') || u.includes('M') || code.includes('FABRIC')
+        }) || inputs[0]
+      }
+      const [oldBom, newBom] = await Promise.all([
+        prev > 0
+          ? api.get(`/production/bom-inputs/${encodeURIComponent(ln.sku)}`, { params: { qty: prev } })
+          : Promise.resolve({ data: { inputs: [] } }),
+        api.get(`/production/bom-inputs/${encodeURIComponent(ln.sku)}`, { params: { qty: Math.max(0, cuttingQty) } }),
+      ])
+      const oldAdj = Number(pickFab(oldBom.data)?.adj_qty) || 0
+      const fab = pickFab(newBom.data)
+      const newAdj = Number(fab?.adj_qty) || 0
+      const delta = newAdj - oldAdj
+      setNewForm(f => ({
+        ...f,
+        fabric_code: f.fabric_code || fab?.material_code || '',
+        fabric_qty: Math.max(0, Math.round(((Number(f.fabric_qty) || 0) + delta) * 1000) / 1000),
+        fabric_unit: fab?.unit || f.fabric_unit || 'MTR',
+      }))
+      setFabricIssueForm(ff => ({
+        ...ff,
+        fabric_code: fab?.material_code || ff.fabric_code,
+        fabric_name: fab?.material_name || ff.fabric_name,
+        issued_qty: Math.max(0, Math.round(((Number(ff.issued_qty) || 0) + delta) * 1000) / 1000),
+        unit: fab?.unit || ff.unit || 'MTR',
+      }))
+    } catch { /* keep prior fabric_qty */ }
   }
 
   const allProcesses = processes.length > 0 ? processes : ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Finishing', 'Packing']
@@ -2415,12 +2473,20 @@ export default function Production() {
             {/* JO Lines */}
             {newLines.length > 0 && (
               <div className="border rounded-xl overflow-hidden">
-                <div className="px-3 py-2 bg-gray-50 text-xs font-semibold text-gray-600">JO Lines ({newLines.length})</div>
+                <div className="px-3 py-2 bg-gray-50 text-xs font-semibold text-gray-600 flex flex-wrap justify-between gap-2">
+                  <span>JO Lines ({newLines.length})</span>
+                  {newForm.process === 'Cutting' && (
+                    <span className="font-normal text-amber-800">
+                      Edit Cutting Qty freely — it may be lower than SO (demand cut / fabric reject). Fabric MTR re-scales from BOM.
+                    </span>
+                  )}
+                </div>
                 <div className="max-h-52 overflow-y-auto">
                 <table className="w-full text-xs">
                   <thead className="sticky top-0 bg-white"><tr className="text-gray-400 border-b">
                     <th className="text-left px-3 py-1.5">SKU</th><th className="text-left px-3 py-1.5">Style</th>
-                    <th className="text-right px-3 py-1.5">Planned Qty</th>
+                    {newForm.process === 'Cutting' && <th className="text-right px-3 py-1.5">SO Qty</th>}
+                    <th className="text-right px-3 py-1.5">{newForm.process === 'Cutting' ? 'Cutting Qty' : 'Planned Qty'}</th>
                     <th className="text-right px-3 py-1.5">Rate (₹)</th>
                     <th className="text-left px-3 py-1.5">Remarks</th>
                     <th className="text-right px-3 py-1.5">Amount</th>
@@ -2432,8 +2498,21 @@ export default function Production() {
                         <td className="px-3 py-1 font-mono font-semibold text-[#002B5B] break-all">{ln.sku}</td>
                         <td className="px-3 py-1"><input value={ln.style} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, style: e.target.value} : x))}
                           placeholder="Style/desc" className="border rounded px-1.5 py-0.5 text-xs w-full" /></td>
-                        <td className="px-3 py-1"><input type="number" value={ln.planned_qty} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, planned_qty: +e.target.value} : x))}
-                          className="border rounded px-1.5 py-0.5 text-xs w-20 text-right" /></td>
+                        {newForm.process === 'Cutting' && (
+                          <td className="px-3 py-1 text-right text-gray-500">{(ln as { so_qty?: number }).so_qty ?? '—'}</td>
+                        )}
+                        <td className="px-3 py-1">
+                          <input
+                            type="number"
+                            value={ln.planned_qty}
+                            onChange={e => {
+                              const v = +e.target.value
+                              if (newForm.process === 'Cutting') void updateCuttingLineQty(i, v)
+                              else setNewLines(ls => ls.map((x, j) => j === i ? { ...x, planned_qty: v } : x))
+                            }}
+                            className="border border-amber-200 bg-amber-50 rounded px-1.5 py-0.5 text-xs w-20 text-right font-semibold"
+                          />
+                        </td>
                         <td className="px-3 py-1"><input type="number" value={ln.vendor_rate} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, vendor_rate: +e.target.value} : x))}
                           className="border rounded px-1.5 py-0.5 text-xs w-20 text-right" /></td>
                         <td className="px-3 py-1"><input value={ln.remarks} onChange={e => setNewLines(ls => ls.map((x,j) => j===i ? {...x, remarks: e.target.value} : x))}
@@ -2443,7 +2522,7 @@ export default function Production() {
                       </tr>
                     ))}
                     <tr className="border-t bg-gray-50 font-semibold">
-                      <td colSpan={5} className="px-3 py-1.5 text-right text-xs text-gray-600">Total:</td>
+                      <td colSpan={newForm.process === 'Cutting' ? 6 : 5} className="px-3 py-1.5 text-right text-xs text-gray-600">Total:</td>
                       <td className="px-3 py-1.5 text-right text-xs">{fmtR(newLines.reduce((s,l) => s + l.planned_qty * l.vendor_rate, 0))}</td>
                       <td></td>
                     </tr>
@@ -2564,6 +2643,11 @@ export default function Production() {
               Received so far: <b>{activeJO.received_qty}{activeJO.process === 'Embroidery' && (activeJO as any).embroidery_unit ? ` ${(activeJO as any).embroidery_unit}` : ' pcs'}</b>
               {(activeJO as any).garment_qty > 0 && activeJO.process === 'Embroidery' && (
                 <span className="block mt-1 text-green-800">Garment pieces covered: {(activeJO as any).garment_qty}</span>
+              )}
+              {activeJO.process === 'Cutting' && (
+                <span className="block mt-1 text-green-800">
+                  Cutting receive can exceed plan by up to ~10% (efficiency / extra full pieces). Under-receive is always allowed.
+                </span>
               )}
             </div>
             {activeJO.process === 'Cutting' && receiveSetBomInfo?.has_set_bom && (() => {

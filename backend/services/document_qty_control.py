@@ -24,6 +24,21 @@ TOLERANCE_BY_MATERIAL_TYPE: dict[str, float] = {
 DEFAULT_GREY_TOLERANCE = 0.05
 DEFAULT_ACCESSORY_TOLERANCE = 0.0
 DEFAULT_PIECE_TOLERANCE = 0.0
+# Cutting floors routinely cut slightly over/under JO plan (BOM avg variance).
+# Allow +10% by default; override with CUTTING_RECEIVE_TOLERANCE (e.g. 0.15 = 15%).
+DEFAULT_CUTTING_RECEIVE_TOLERANCE = 0.10
+
+
+def cutting_receive_tolerance_pct() -> float:
+    import os
+
+    raw = (os.environ.get("CUTTING_RECEIVE_TOLERANCE") or "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return DEFAULT_CUTTING_RECEIVE_TOLERANCE
 
 
 def tolerance_pct(material_type: str = "", material_code: str = "") -> float:

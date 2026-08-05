@@ -1902,7 +1902,7 @@ def _ensure_downstream_jo_for_issue(
 # ── Receive Pieces ─────────────────────────────────────────────────────────────
 
 def receive_pieces(joid: int, data: dict):
-    from ..services.document_qty_control import max_allowed_receive
+    from ..services.document_qty_control import cutting_receive_tolerance_pct, max_allowed_receive
 
     conn = _connect()
     jo = dict(conn.execute("SELECT * FROM job_orders WHERE id=?", (joid,)).fetchone() or {})
@@ -1921,7 +1921,9 @@ def receive_pieces(joid: int, data: dict):
     process = data.get('process') or jo.get('process', 'Cutting')
     so_number = jo.get('so_number', '')
     sku = data.get('sku') or jo.get('sku', '')
-    jo_tol = 0.0
+    # Under-receive is always allowed (partial production). Over-receive on Cutting
+    # uses fabric efficiency tolerance (extra complete pieces from lower avg consumption).
+    jo_tol = cutting_receive_tolerance_pct() if str(process or "").strip().lower() == "cutting" else 0.0
     if jo_line_id:
         line = conn.execute(
             "SELECT id, sku, planned_qty FROM jo_lines WHERE id=? AND jo_id=?",
@@ -1942,7 +1944,7 @@ def receive_pieces(joid: int, data: dict):
             conn.close()
             raise ValueError(
                 f"Cannot receive {received} pcs — max {cap} allowed on this line "
-                f"(planned {planned}, already {already})"
+                f"(planned {planned} + {jo_tol * 100:.0f}% cutting tolerance, already {already})"
             )
     else:
         already = int(jo.get("received_qty") or 0)
@@ -1952,7 +1954,7 @@ def receive_pieces(joid: int, data: dict):
             conn.close()
             raise ValueError(
                 f"Cannot receive {received} pcs — max {cap} allowed "
-                f"(planned {planned}, already {already})"
+                f"(planned {planned} + {jo_tol * 100:.0f}% cutting tolerance, already {already})"
             )
 
     try:

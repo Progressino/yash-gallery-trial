@@ -123,7 +123,15 @@ const statusColor = (s: string) => {
 
 export default function GreyFabric() {
   const qc = useQueryClient()
-  const [tab, setTab] = useState<Tab>('dashboard')
+  const [tab, setTab] = useState<Tab>(() => {
+    try {
+      const p = new URLSearchParams(window.location.search).get('tab')
+      const allowed: Tab[] = ['dashboard', 'locations', 'tracker', 'mrp', 'planning', 'jobwork', 'qc', 'ledger', 'reservations', 'printed-fabric', 'reports']
+      return (allowed.includes(p as Tab) ? p : 'dashboard') as Tab
+    } catch {
+      return 'dashboard'
+    }
+  })
   const [filterStatus, setFilterStatus] = useState('')
   const [editEntry, setEditEntry] = useState<GreyEntry | null>(null)
   const [editData, setEditData] = useState<Record<string, string | number>>({})
@@ -163,7 +171,15 @@ export default function GreyFabric() {
   const [pfSkuQtyMap, setPFSkuQtyMap] = useState<Record<string, number>>({})
 
   // Planning / Allocation
-  const [planView, setPlanView] = useState<'tree' | 'allocate' | 'reallocate' | 'print-jo' | 'history' | 'report'>('tree')
+  const [planView, setPlanView] = useState<'tree' | 'allocate' | 'reallocate' | 'print-jo' | 'history' | 'report'>(() => {
+    try {
+      const p = new URLSearchParams(window.location.search).get('plan')
+      const allowed = ['tree', 'allocate', 'reallocate', 'print-jo', 'history', 'report'] as const
+      return (allowed.includes(p as typeof allowed[number]) ? p : 'tree') as typeof allowed[number]
+    } catch {
+      return 'tree'
+    }
+  })
   const [expandedGrey, setExpandedGrey] = useState<Record<string, boolean>>({})
   const [expandedPrinted, setExpandedPrinted] = useState<Record<string, boolean>>({})
   const [greyAllocForm, setGreyAllocForm] = useState({
