@@ -194,6 +194,92 @@ def _history_dedupe_keys(work: pd.DataFrame) -> list[str]:
     return ["OMS_SKU", "Date"]
 
 
+def align_history_day_to_variant(
+    hist_df: pd.DataFrame | None,
+    variant_df: pd.DataFrame | None,
+    snap_date: str | pd.Timestamp | None,
+) -> pd.DataFrame:
+    """Replace one history day with channel qty from the live inventory variant.
+
+    Used so Inventory History OMS day totals match Actual / Inventory tab
+    ``OMS_Inventory`` after an Actual workbook or daily RAR is uploaded.
+    """
+    if hist_df is None or getattr(hist_df, "empty", True):
+        return hist_df if hist_df is not None else pd.DataFrame(columns=_STORE_COLS)
+    if variant_df is None or getattr(variant_df, "empty", True) or "OMS_SKU" not in variant_df.columns:
+        return hist_df
+    try:
+        day = pd.Timestamp(snap_date).normalize()
+    except Exception:
+        return hist_df
+    if pd.isna(day):
+        return hist_df
+
+    var = variant_df.copy()
+    var["OMS_SKU"] = var["OMS_SKU"].astype(str).str.strip().str.upper()
+    var = var[var["OMS_SKU"].str.len() > 0]
+    if var.empty:
+        return hist_df
+
+    try:
+        from .inventory import coalesce_inventory_by_sku_mapping
+
+        var = coalesce_inventory_by_sku_mapping(var, {})
+    except Exception:
+        pass
+
+    work = _ensure_source_column(_ensure_channel_column(hist_df.copy()))
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    # Drop every row for that calendar day (any channel/source) so Actual is sole author.
+    keep = work["Date"] != day
+    rest = work.loc[keep].copy()
+
+    parts: list[pd.DataFrame] = []
+    has_split_cols = {"OMS_Inventory", "Amazon_Inventory"}.intersection(var.columns)
+    if has_split_cols:
+        for channel, col in (("oms", "OMS_Inventory"), ("amazon", "Amazon_Inventory")):
+            if col not in var.columns:
+                continue
+            qty = pd.to_numeric(var[col], errors="coerce").fillna(0.0)
+            # Keep zeros so day-SKU coverage matches the Inventory tab (negative OPS
+            # rows already zeroed at load when needed; clip only at coalesce).
+            parts.append(
+                pd.DataFrame(
+                    {
+                        "OMS_SKU": var["OMS_SKU"].values,
+                        "Date": day,
+                        "Qty": qty.values,
+                        "Source": "snapshot",
+                        "Channel": channel,
+                    }
+                )
+            )
+    else:
+        qty = _variant_snapshot_qty_series(var)
+        if qty is None:
+            return hist_df
+        parts.append(
+            pd.DataFrame(
+                {
+                    "OMS_SKU": var["OMS_SKU"].values,
+                    "Date": day,
+                    "Qty": pd.to_numeric(qty, errors="coerce").fillna(0.0).values,
+                    "Source": "snapshot",
+                    "Channel": "oms",
+                }
+            )
+        )
+    if not parts:
+        return hist_df
+    incoming = pd.concat(parts, ignore_index=True)
+    # Drop all-zero channel rows to keep the matrix lean; total OMS is unchanged.
+    incoming["Qty"] = pd.to_numeric(incoming["Qty"], errors="coerce").fillna(0.0)
+    incoming = incoming.loc[incoming["Qty"].abs() > 1e-9].copy()
+    out = pd.concat([rest, incoming], ignore_index=True)
+    clear_inventory_channel_view_cache()
+    return scrub_absurd_inventory_history_rows(_coalesce_history_rows(out))
+
+
 def repair_snapshot_channel_totals(
     hist_df: pd.DataFrame | None,
     variant_df: pd.DataFrame | None,
@@ -204,7 +290,6 @@ def repair_snapshot_channel_totals(
     work = _ensure_channel_column(hist_df.copy())
     work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     src = work["Source"].astype(str).str.strip().str.lower()
-    ch = work["Channel"].astype(str).str.strip().str.lower()
     snap_mask = src == "snapshot"
     if not snap_mask.any():
         return work.reset_index(drop=True)
@@ -216,40 +301,8 @@ def repair_snapshot_channel_totals(
     if snap_dates.empty:
         return _coalesce_history_rows(work)
     latest = pd.Timestamp(snap_dates.max()).normalize()
-
-    var = variant_df.copy()
-    var["OMS_SKU"] = var["OMS_SKU"].astype(str).str.strip().str.upper()
-    var = var[var["OMS_SKU"].str.len() > 0]
-    if var.empty:
-        return _coalesce_history_rows(work)
-
-    split = ch.isin(["oms", "amazon"]).any()
-    work = work[~((work["Date"] == latest) & (work["Source"].astype(str).str.strip().str.lower() == "snapshot"))]
-    parts: list[pd.DataFrame] = []
-    if split and {"OMS_Inventory", "Amazon_Inventory"}.intersection(var.columns):
-        for channel, col in (("oms", "OMS_Inventory"), ("amazon", "Amazon_Inventory")):
-            if col not in var.columns:
-                continue
-            parts.append(pd.DataFrame({
-                "OMS_SKU": var["OMS_SKU"].values,
-                "Date": latest,
-                "Qty": pd.to_numeric(var[col], errors="coerce").fillna(0.0).values,
-                "Source": "snapshot",
-                "Channel": channel,
-            }))
-    else:
-        qty = _variant_snapshot_qty_series(var)
-        if qty is None:
-            return _coalesce_history_rows(work)
-        parts.append(pd.DataFrame({
-            "OMS_SKU": var["OMS_SKU"].values,
-            "Date": latest,
-            "Qty": pd.to_numeric(qty, errors="coerce").fillna(0.0).values,
-            "Source": "snapshot",
-            "Channel": "",
-        }))
-    work = pd.concat([work, *parts], ignore_index=True)
-    return _coalesce_history_rows(work)
+    # Prefer full Actual/variant replacement so OMS day total matches Inventory.
+    return align_history_day_to_variant(work, variant_df, latest)
 
 
 def combine_inventory_channels(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -289,6 +342,46 @@ def combine_inventory_channels(df: pd.DataFrame | None) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+def _oms_channel_prefer_explicit(
+    work: pd.DataFrame,
+) -> pd.DataFrame:
+    """OMS warehouse view: prefer ``oms`` rows; fall back to blank-channel rows per SKU-day.
+
+    Never drop blank-only SKUs on a calendar day that also has *any* explicit OMS
+    row for a *different* SKU — that global-date filter under-counted OMS day
+    totals vs Actual (e.g. 191k vs 199k) when RAR wrote partial ``oms`` rows
+    while legacy blank / Actual census still held the missing SKUs.
+    """
+    if work is None or getattr(work, "empty", True):
+        return pd.DataFrame(columns=_STORE_COLS)
+    ch = work["Channel"].astype(str).str.strip().str.lower()
+    oms = work.loc[ch == "oms", _STORE_COLS].copy()
+    blank = work.loc[ch.isin(("", "nan", "none")), _STORE_COLS].copy()
+    if oms.empty:
+        return blank.reset_index(drop=True) if not blank.empty else pd.DataFrame(columns=_STORE_COLS)
+    if blank.empty:
+        return oms.reset_index(drop=True)
+    oms = oms.copy()
+    blank = blank.copy()
+    oms["OMS_SKU"] = oms["OMS_SKU"].astype(str).str.strip().str.upper()
+    blank["OMS_SKU"] = blank["OMS_SKU"].astype(str).str.strip().str.upper()
+    oms["Date"] = pd.to_datetime(oms["Date"], errors="coerce").dt.normalize()
+    blank["Date"] = pd.to_datetime(blank["Date"], errors="coerce").dt.normalize()
+    covered = set(zip(oms["OMS_SKU"].tolist(), oms["Date"].tolist()))
+    blank_keys = list(zip(blank["OMS_SKU"].tolist(), blank["Date"].tolist()))
+    keep_blank = [
+        i for i, key in enumerate(blank_keys) if key not in covered and key[0] and pd.notna(key[1])
+    ]
+    if not keep_blank:
+        return oms.reset_index(drop=True)
+    extra = blank.iloc[keep_blank]
+    extra = extra.copy()
+    # Mark fallback rows as OMS so downstream exporters treat them as warehouse stock.
+    extra["Channel"] = "oms"
+    out = pd.concat([oms, extra], ignore_index=True)
+    return out.reset_index(drop=True)
+
+
 def filter_inventory_history_channel(df: pd.DataFrame | None, channel: str = "combined") -> pd.DataFrame:
     """``combined`` = max(OMS, Amazon); ``oms`` / ``amazon`` = one channel only.
 
@@ -319,12 +412,8 @@ def filter_inventory_history_channel(df: pd.DataFrame | None, channel: str = "co
     if channel == "amazon":
         out = work.loc[ch == "amazon", _STORE_COLS].reset_index(drop=True)
         return _store_cached_channel_view(df, channel, out)
-    # During migration, old wide-matrix dates are blank-channel OMS while newer
-    # daily snapshots carry explicit channels. Keep blank dates only where no
-    # explicit OMS census exists.
-    explicit_oms_dates = work.loc[ch == "oms", "Date"].unique()
-    keep = (ch == "oms") | ((ch == "") & ~work["Date"].isin(explicit_oms_dates))
-    out = work.loc[keep, _STORE_COLS].reset_index(drop=True)
+    # Per SKU-day: explicit OMS wins; blank is warehouse fallback only when no OMS row.
+    out = _oms_channel_prefer_explicit(work)
     return _store_cached_channel_view(df, channel, out)
 
 
@@ -1603,6 +1692,9 @@ def refresh_inventory_history_rollforward(
                         ~((merged["Date"] == snap_ts) & (merged["Source"].astype(str) == "derived"))
                     ]
                     merged = merge_inventory_history(merged, incoming)
+                    # Authoritative overwrite: day's OMS/Amazon must equal the variant
+                    # (Actual workbook / daily RAR), not a partial merge residual.
+                    merged = align_history_day_to_variant(merged, work, snap_ts)
                     snapshot_appended = True
                     record_inventory_snapshot_date(sess, str(snap_ts.date()))
                     promote_daily_inventory_matrix_max_date(sess, str(snap_ts.date()))
@@ -3097,12 +3189,21 @@ def inventory_history_wide_matrix(
     work["_d"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
     work = work.dropna(subset=["_d"])
     work = work[work["OMS_SKU"].astype(str).str.len() > 0]
-    # After replacement map, sum twins so date totals are not double-counted.
-    work = (
-        work.groupby(["OMS_SKU", "_d"], as_index=False, sort=False)["Qty"]
-        .sum()
-        .reset_index(drop=True)
-    )
+    # After replacement map, smart-merge twins (near-dup max, true splits sum).
+    try:
+        from .inventory import smart_coalesce_qty
+
+        work = (
+            work.groupby(["OMS_SKU", "_d"], as_index=False, sort=False)
+            .agg(Qty=("Qty", smart_coalesce_qty))
+            .reset_index(drop=True)
+        )
+    except Exception:
+        work = (
+            work.groupby(["OMS_SKU", "_d"], as_index=False, sort=False)["Qty"]
+            .sum()
+            .reset_index(drop=True)
+        )
 
     needle = (q or "").strip().upper()
     if needle:
@@ -4112,6 +4213,8 @@ __all__ = [
     "_coalesce_history_rows",
     "detect_inventory_history_integrity_issues",
     "repair_inventory_history_integrity",
+    "align_history_day_to_variant",
+    "repair_snapshot_channel_totals",
     "ensure_latest_daily_inventory_authoritative",
     "disk_inventory_meta_looks_placeholder",
     "session_inventory_matrix_stats",

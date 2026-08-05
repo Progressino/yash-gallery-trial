@@ -85,6 +85,58 @@ def test_oms_channel_uses_legacy_blank_dates_and_new_explicit_dates():
     assert float(totals[pd.Timestamp("2026-07-16")]) == 90.0
 
 
+def test_oms_channel_keeps_blank_skus_on_hybrid_days():
+    """Same-day blank-only SKUs must not be dropped when other SKUs have channel=oms."""
+    oms_a = _hist("SKU-A", ["2026-08-05"], [100.0])
+    oms_a["Channel"] = "oms"
+    blank_b = _hist("SKU-B", ["2026-08-05"], [50.0])
+    blank_b["Channel"] = ""
+    amz = _hist("SKU-A", ["2026-08-05"], [9.0])
+    amz["Channel"] = "amazon"
+    hist = pd.concat([oms_a, blank_b, amz], ignore_index=True)
+
+    oms_only = filter_inventory_history_channel(hist, "oms")
+    by_sku = dict(zip(oms_only["OMS_SKU"].astype(str), oms_only["Qty"].astype(float)))
+    assert by_sku == {"SKU-A": 100.0, "SKU-B": 50.0}
+    assert float(oms_only["Qty"].sum()) == 150.0
+
+
+def test_align_history_day_matches_variant_oms_total():
+    from backend.services.daily_inventory_history import (
+        align_history_day_to_variant,
+        filter_inventory_history_channel,
+        inventory_history_wide_matrix,
+    )
+
+    hist = pd.concat(
+        [
+            _hist("SKU-A", ["2026-08-05"], [80.0]),
+            _hist("SKU-B", ["2026-08-05"], [20.0]),
+            _hist("SKU-A", ["2026-08-04"], [70.0]),
+        ],
+        ignore_index=True,
+    )
+    hist["Channel"] = "oms"
+    hist["Source"] = "snapshot"
+    # Stale history day total 100; Actual / Inventory tab OMS is 198.
+    variant = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A", "SKU-B", "SKU-C"],
+            "OMS_Inventory": [100.0, 50.0, 48.0],
+            "Amazon_Inventory": [10.0, 0.0, 0.0],
+        }
+    )
+    out = align_history_day_to_variant(hist, variant, "2026-08-05")
+    oms = filter_inventory_history_channel(out, "oms")
+    day = oms[pd.to_datetime(oms["Date"]).dt.normalize() == pd.Timestamp("2026-08-05")]
+    assert float(day["Qty"].sum()) == 198.0
+    wide = inventory_history_wide_matrix(out, days=2, end_date="2026-08-05", channel="oms")
+    assert wide["date_totals"][-1] == 198.0
+    # Prior day preserved
+    prev = oms[pd.to_datetime(oms["Date"]).dt.normalize() == pd.Timestamp("2026-08-04")]
+    assert float(prev["Qty"].sum()) == 70.0
+
+
 def test_inventory_history_wide_matrix_csv_includes_total_row():
     from backend.services.daily_inventory_history import inventory_history_wide_matrix_csv
 
