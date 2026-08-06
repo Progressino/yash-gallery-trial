@@ -19,23 +19,19 @@ jobs:
             exit 1
           fi
           echo "Container: ${CID}"
-          # Use deployed script if present; else inject from /root/app (post-deploy tree).
-          if docker exec "${CID}" test -f /srv/backend/scripts/erp_integrity_audit.py 2>/dev/null; then
-            echo "Using /srv/backend/scripts/erp_integrity_audit.py"
+          # Always refresh script from latest origin/main (container path may be stale).
+          if [ -d /root/app/.git ]; then
+            git -C /root/app fetch origin main 2>/dev/null || true
+            git -C /root/app show origin/main:backend/scripts/erp_integrity_audit.py \
+              > /tmp/erp_integrity_audit.py
           elif [ -f /root/app/backend/scripts/erp_integrity_audit.py ]; then
-            docker cp /root/app/backend/scripts/erp_integrity_audit.py "${CID}:/srv/backend/scripts/erp_integrity_audit.py"
+            cp /root/app/backend/scripts/erp_integrity_audit.py /tmp/erp_integrity_audit.py
           else
-            # Fallback: fetch from git if tree missing
-            if [ -d /root/app/.git ]; then
-              git -C /root/app fetch origin main 2>/dev/null || true
-              git -C /root/app show origin/main:backend/scripts/erp_integrity_audit.py \
-                > /tmp/erp_integrity_audit.py
-              docker cp /tmp/erp_integrity_audit.py "${CID}:/srv/backend/scripts/erp_integrity_audit.py"
-            else
-              echo "FATAL: erp_integrity_audit.py not found"
-              exit 1
-            fi
+            echo "FATAL: erp_integrity_audit.py not found on host"
+            exit 1
           fi
+          docker cp /tmp/erp_integrity_audit.py "${CID}:/srv/backend/scripts/erp_integrity_audit.py" \
+            || docker cp /tmp/erp_integrity_audit.py "${CID}:/app/backend/scripts/erp_integrity_audit.py"
           docker exec -e PYTHONPATH=/srv -e WARM_CACHE_DIR=/data/warm_cache -w /srv \
             "${CID}" python -m backend.scripts.erp_integrity_audit \
             > /tmp/erp_integrity_audit.json 2>/tmp/erp_integrity_audit.err || RC=$?
