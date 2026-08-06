@@ -1,0 +1,81 @@
+name: ERP integrity audit
+
+# Runs against production warm-cache on the self-hosted VPS runner.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "backend/scripts/erp_integrity_audit.py"
+
+concurrency:
+  group: erp-integrity-audit
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: audit-prod-warm-cache
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Sync script into running backend container
+        run: |
+          set -euo pipefail
+          COMPOSE_FILE="${INV_RECONCILE_COMPOSE_FILE:-docker-compose.prod.yml}"
+          ROOT_DIR="${GITHUB_WORKSPACE:-/root/app}"
+          if [ -d /root/app ]; then
+            sudo cp -f "${ROOT_DIR}/backend/scripts/erp_integrity_audit.py" \
+              /root/app/backend/scripts/erp_integrity_audit.py 2>/dev/null || true
+            # Prefer live app tree when deploy workspace is /root/app
+            if [ -f /root/app/docker-compose.prod.yml ]; then
+              cd /root/app
+            fi
+          fi
+          # Copy into backend container filesystem if compose project is running
+          CID="$(docker ps --format '{{.Names}}' | grep -E 'progressino-backend|backend-1' | head -1 || true)"
+          if [ -z "${CID}" ]; then
+            echo "No backend container found"
+            docker ps
+            exit 1
+          fi
+          echo "Using container: ${CID}"
+          docker cp backend/scripts/erp_integrity_audit.py "${CID}:/srv/backend/scripts/erp_integrity_audit.py" \
+            || docker cp backend/scripts/erp_integrity_audit.py "${CID}:/app/backend/scripts/erp_integrity_audit.py" \
+            || docker cp "${ROOT_DIR}/backend/scripts/erp_integrity_audit.py" "${CID}:/srv/backend/scripts/erp_integrity_audit.py"
+          docker exec "${CID}" python -m backend.scripts.erp_integrity_audit \
+            > /tmp/erp_integrity_audit.json 2>/tmp/erp_integrity_audit.err || true
+          echo "=== STDERR ==="
+          cat /tmp/erp_integrity_audit.err || true
+          echo "=== RESULT (tail) ==="
+          tail -c 20000 /tmp/erp_integrity_audit.json || true
+          # Fail job if summary has fail_count > 0, but still upload artifact
+          python3 - <<'PY'
+import json, sys
+from pathlib import Path
+p = Path("/tmp/erp_integrity_audit.json")
+if not p.is_file() or p.stat().st_size < 20:
+    print("No audit JSON produced")
+    sys.exit(1)
+d = json.loads(p.read_text())
+s = d.get("summary") or {}
+print(json.dumps({"ok": d.get("ok"), "summary": s, "fatal": d.get("fatal"), "root_causes": len(d.get("root_causes") or [])}, indent=2))
+fails = [c for c in d.get("checks") or [] if not c.get("ok") and c.get("severity") == "fail"]
+print("FAILS:")
+for c in fails[:40]:
+    print("-", c.get("id"), c.get("title"), "—", (c.get("detail") or "")[:200])
+sys.exit(0 if d.get("ok") else 2)
+PY
+
+      - name: Upload audit JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: erp-integrity-audit
+          path: |
+            /tmp/erp_integrity_audit.json
+            /tmp/erp_integrity_audit.err
+          if-no-files-found: warn
