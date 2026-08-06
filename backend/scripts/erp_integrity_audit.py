@@ -568,11 +568,7 @@ def phase_po_cross_check(
     try:
         from backend.session import AppSession
         from backend.services.inventory import coalesce_inventory_by_sku_mapping
-        from backend.services.po_engine import calculate_po_base, effective_days_from_history
-        from backend.services.daily_inventory_history import (
-            filter_inventory_history_channel,
-            effective_days_from_history as eff_hist,
-        )
+        from backend.services.po_engine import calculate_po_base
         from backend.services.sku_mapping import load_sku_mapping_from_disk, load_bundled_sku_mapping
     except Exception as exc:
         return [_check("po:import", "po", "Import PO engine", False, str(exc))]
