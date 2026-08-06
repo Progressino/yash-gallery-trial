@@ -1,0 +1,94 @@
+name: Probe lineage (prod)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - name: Inventory + sales lineage probe
+        run: |
+          set -eu
+          cat > /tmp/probe_lineage.py <<'PY'
+          import json
+          from pathlib import Path
+          import pandas as pd
+          from backend.services.daily_inventory_history import (
+              filter_inventory_history_channel,
+              combine_inventory_channels,
+          )
+          from backend.services.inventory import (
+              coalesce_inventory_by_sku_mapping,
+              inventory_column_totals,
+          )
+
+          h = pd.read_parquet("/data/warm_cache/daily_inventory_history_df.parquet")
+          inv = pd.read_parquet("/data/warm_cache/inventory_df_variant.parquet")
+          meta = json.loads(Path("/data/warm_cache/inventory_session_meta.json").read_text())
+          sales = pd.read_parquet("/data/warm_cache/sales_df.parquet")
+          print("meta", {k: meta.get(k) for k in (
+              "inventory_snapshot_date", "inventory_snapshot_uploaded_at", "inventory_snapshot_date_label"
+          )})
+          ch = h["Channel"].astype(str).str.lower() if "Channel" in h.columns else pd.Series(dtype=str)
+          print("hist_rows", len(h), "channel_counts", ch.value_counts().to_dict())
+          inv_c = coalesce_inventory_by_sku_mapping(inv, {})
+          print("inv_totals", inventory_column_totals(inv_c))
+          h["Date"] = pd.to_datetime(h["Date"], errors="coerce").dt.normalize()
+          for d in ["2026-08-04", "2026-08-05", "2026-08-06"]:
+              day = pd.Timestamp(d)
+              for chn, view in (
+                  ("oms", filter_inventory_history_channel(h, "oms")),
+                  ("amazon", filter_inventory_history_channel(h, "amazon")),
+                  ("combined", combine_inventory_channels(h)),
+              ):
+                  sub = view[pd.to_datetime(view["Date"]).dt.normalize() == day]
+                  if sub.empty:
+                      print(d, chn, "EMPTY")
+                      continue
+                  g = sub.groupby(sub["OMS_SKU"].astype(str).str.upper())["Qty"].max()
+                  print(d, chn, "qty", float(g.sum()), "skus", int(g.shape[0]))
+          sku_col = next((c for c in ("OMS_SKU", "Sku", "SKU") if c in sales.columns), None)
+          qty_col = next((c for c in ("Units_Effective", "Quantity", "Qty") if c in sales.columns), None)
+          dt_col = next((c for c in ("TxnDate", "Date") if c in sales.columns), None)
+          print("sales", "rows", len(sales), "sku", sku_col, "qty", qty_col, "date", dt_col)
+          if sku_col and qty_col and dt_col:
+              s = sales.copy()
+              s["_d"] = pd.to_datetime(s[dt_col], errors="coerce")
+              s["_q"] = pd.to_numeric(s[qty_col], errors="coerce").fillna(0)
+              mx = s["_d"].max()
+              print("sales_max", mx)
+              win = s[s["_d"] >= pd.Timestamp(mx).normalize() - pd.Timedelta(days=29)]
+              print("sales_30d_units", float(win["_q"].clip(lower=0).sum()), "skus", int(win[sku_col].nunique()))
+              if "Platform" in s.columns:
+                  print("sales_platforms", s.groupby(s["Platform"].astype(str))["_q"].sum().sort_values(ascending=False).head(10).to_dict())
+          top = inv_c.nlargest(8, "Total_Inventory")[
+              ["OMS_SKU", "OMS_Inventory", "Amazon_Inventory", "Total_Inventory"]
+          ]
+          print("top_inv")
+          print(top.to_string(index=False))
+          mxd = h["Date"].max()
+          oms = filter_inventory_history_channel(h, "oms")
+          oms = oms[pd.to_datetime(oms["Date"]).dt.normalize() == pd.Timestamp(mxd)]
+          oms_i = oms.groupby(oms["OMS_SKU"].astype(str).str.upper())["Qty"].max()
+          amz = filter_inventory_history_channel(h, "amazon")
+          amz = amz[pd.to_datetime(amz["Date"]).dt.normalize() == pd.Timestamp(mxd)]
+          amz_i = amz.groupby(amz["OMS_SKU"].astype(str).str.upper())["Qty"].max() if not amz.empty else pd.Series(dtype=float)
+          mismatches = 0
+          for _, r in inv_c.iterrows():
+              sku = str(r["OMS_SKU"]).upper()
+              o = float(r.get("OMS_Inventory") or 0)
+              ho = float(oms_i.get(sku, 0) or 0)
+              if abs(o - ho) > 0.5:
+                  mismatches += 1
+          print("sku_oms_mismatches_vs_hist_maxday", mismatches, "of", len(inv_c), "maxday", str(pd.Timestamp(mxd).date()))
+          print("hist_oms_maxday_total", float(oms_i.sum()), "inv_oms", float(pd.to_numeric(inv_c["OMS_Inventory"], errors="coerce").fillna(0).sum()))
+          if len(amz_i):
+              print("hist_amz_maxday_total", float(amz_i.sum()))
+          else:
+              print("hist_amz_maxday_total", 0)
+          print("LINEAGE_OK")
+          PY
+          docker cp /tmp/probe_lineage.py progressino-backend-1:/tmp/probe_lineage.py
+          docker exec -e PYTHONPATH=/srv -w /srv progressino-backend-1 python /tmp/probe_lineage.py
