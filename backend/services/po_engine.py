@@ -132,6 +132,8 @@ def _strip_pl(
     """
     from .sku_mapping import follow_sku_replacement
 
+    from .sku_mapping import normalize_builtin_oms_spellings
+
     raw = str(sku).strip().upper()
     stripped = _PL_RE.sub(r"\1\2", raw)
     stripped = _powder_typo_canonical(_yeal_typo_canonical(_balck_typo_canonical(stripped)))
@@ -139,17 +141,23 @@ def _strip_pl(
     if apply_sku_mapping and mapping:
         for candidate in (stripped, raw_fixed, raw):
             if candidate in mapping:
-                return follow_sku_replacement(candidate, mapping)
+                # Normalize *after* map so POWDERBLUE terminals (5038 family in
+                # the master map) re-fold onto POWERBLUE with inventory stock.
+                return normalize_builtin_oms_spellings(
+                    follow_sku_replacement(candidate, mapping)
+                )
         fixed = _ykn_typo_canonical(stripped)
         if fixed != stripped:
             if fixed in mapping:
-                return follow_sku_replacement(fixed, mapping)
-            return fixed
-        return stripped
+                return normalize_builtin_oms_spellings(
+                    follow_sku_replacement(fixed, mapping)
+                )
+            return normalize_builtin_oms_spellings(fixed)
+        return normalize_builtin_oms_spellings(stripped)
     fixed = _ykn_typo_canonical(stripped)
     if fixed != stripped:
-        return fixed
-    return stripped
+        return normalize_builtin_oms_spellings(fixed)
+    return normalize_builtin_oms_spellings(stripped)
 
 
 def inventory_oms_key(raw) -> str:
@@ -1702,7 +1710,7 @@ def calculate_po_base(
 
     inv_work = inv_df.copy()
     from .existing_po import existing_po_merge_key, is_bundled_size_range_sku
-    from .inventory import coalesce_inventory_by_sku_mapping
+    from .inventory import coalesce_inventory_by_sku_mapping, _inventory_alias_oms_key
 
     # Re-apply Replace-SKU + spelling aliases on every PO run. Warm/session inventory
     # can still hold twin rows (BOTTLE vs BOTTEL, POWDER vs POWER) when the map was
@@ -1723,7 +1731,10 @@ def calculate_po_base(
                 _bundled_from_per_size_inv.add(mapped)
     _ep_prepared = pd.DataFrame()
     _unique_inv_skus = inv_work["OMS_SKU"].unique() if "OMS_SKU" in inv_work.columns else []
-    _inv_canon_cache = {s: inventory_oms_key(s) for s in _unique_inv_skus}
+    # Keep coalesced + map terminals (alias), not bare inventory_oms_key — that path
+    # folds POWDER→POWER without re-applying the map and used to re-split sales
+    # that land on master-map terminals still spelled POWDERBLUE.
+    _inv_canon_cache = {s: _inventory_alias_oms_key(s, _map) for s in _unique_inv_skus}
     inv_work["OMS_SKU"] = inv_work["OMS_SKU"].map(_inv_canon_cache).fillna("")
     inv_work = inv_work[inv_work["OMS_SKU"].str.len() > 0]
     if inv_work["OMS_SKU"].duplicated().any():

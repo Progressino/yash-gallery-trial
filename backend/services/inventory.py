@@ -2146,30 +2146,25 @@ def _inventory_alias_oms_key(sku: object, mapping: Optional[Dict[str, str]] = No
     Order matters:
       1. Inventory token normalize (PL strip / YEAL / BALCK in inventory_oms_key path)
       2. Built-in twin spellings (BOTTLE→BOTTEL, POWDER→POWER, 1180 yellow, …)
-      3. Replace-SKU / seller→OMS map (source of truth; can override 2)
+      3. Replace-SKU / seller→OMS map
+      4. Built-in spellings again — map terminals must not re-split twins
+         (5038 master map still lists POWDERBLUE while inventory holds POWERBLUE)
 
     Replace sheets map old listing codes onto the operational OMS code used on the
     status sheet. Twins must land on that terminal before summing inventory.
     """
     from .po_engine import inventory_oms_key
-    from .sku_mapping import follow_sku_replacement
+    from .sku_mapping import follow_sku_replacement, normalize_builtin_oms_spellings
 
     key = inventory_oms_key(sku)
     if not key:
         return ""
-    # Prefer BOTTEL (ops / Replace SKU terminal) over warehouse BOTTLE typo.
-    key = _BOTTLEGREEN_RE.sub("BOTTELGREEN", key)
-    # Prefer POWERBLUE (ops status / New SKU) over warehouse POWDERBLUE typo.
-    key = _POWDERBLUE_RE.sub("POWERBLUE", key)
-    key = _BALCK_RE.sub("BLACK", key)
-    key = _YEAL_RE.sub("TEAL", key)
-    m1180 = _1180_YELLOW_RE.match(key)
-    if m1180:
-        key = "289YK345YELLOW-" + key.split("-", 1)[-1]
+    key = normalize_builtin_oms_spellings(key)
     mp = mapping or {}
     if mp:
         key = follow_sku_replacement(key, mp)
-    return str(key).strip().upper()
+    # Re-fold after map: bundled master still targets POWDERBLUE / BOTTLEGREEN etc.
+    return normalize_builtin_oms_spellings(key)
 
 
 def _collapse_case_duplicate_inventory_rows(df: pd.DataFrame) -> pd.DataFrame:

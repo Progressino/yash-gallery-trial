@@ -172,6 +172,65 @@ def test_coalesce_powder_to_power_inventory():
     assert float(by.loc["7114YKPOWERBLUE-F", "Total_Inventory"]) == 175.0
 
 
+def test_po_joins_power_stock_with_powder_sales_under_master_map():
+    """5038 master map targets POWDERBLUE; inventory holds POWERBLUE — one PO row."""
+    from backend.services.po_engine import calculate_po_base
+    from backend.services.sku_mapping import (
+        clear_bundled_sku_mapping_cache,
+        load_bundled_sku_mapping,
+        resolve_sku_replacement_map,
+    )
+
+    clear_bundled_sku_mapping_cache()
+    m = load_bundled_sku_mapping()
+    # Destinations in the shipped map are rewritten to POWERBLUE via resolve.
+    assert m.get("5038YKPOWDERBLUE-3XL") == "5038YKPOWERBLUE-3XL"
+    assert m.get("5038PLYKPOWDERBLUE-3XL") == "5038YKPOWERBLUE-3XL"
+
+    # Also prove raw (unresolved) POWDER terminals no longer split after resolve.
+    raw = {
+        "5038YKPOWDERBLUE-3XL": "5038YKPOWDERBLUE-3XL",
+        "5038PLYKPOWDERBLUE-3XL": "5038YKPOWDERBLUE-3XL",
+        "5038YKPOWDERBLUE-L": "5038YKPOWDERBLUE-L",
+        "5038PLYKPOWDERBLUE-L": "5038YKPOWDERBLUE-L",
+    }
+    assert resolve_sku_replacement_map(raw)["5038PLYKPOWDERBLUE-3XL"] == "5038YKPOWERBLUE-3XL"
+
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["5038YKPOWERBLUE-3XL", "5038YKPOWERBLUE-L"],
+            "OMS_Inventory": [47.0, 60.0],
+            "Amazon_Inventory": [0.0, 0.0],
+            "Total_Inventory": [47.0, 60.0],
+            "Marketplace_Total": [0.0, 0.0],
+            "Buffer_Stock": [0.0, 0.0],
+            "Manual_InTransit": [0.0, 0.0],
+            "Not_In_Inventory_Qty": [0.0, 0.0],
+        }
+    )
+    sales = pd.DataFrame(
+        {
+            "Sku": (["5038YKPOWDERBLUE-3XL"] * 6) + (["5038YKPOWDERBLUE-L"] * 11),
+            "TxnDate": pd.date_range("2026-07-01", periods=17, freq="D"),
+            "Transaction Type": ["Shipment"] * 17,
+            "Quantity": [1] * 17,
+            "Units_Effective": [1] * 17,
+        }
+    )
+    po = calculate_po_base(
+        sales, inv, period_days=30, lead_time=45, target_days=45, sku_mapping=m
+    )
+    sub = po[po["OMS_SKU"].astype(str).str.contains("5038YK.*BLUE", regex=True)]
+    skus = set(sub["OMS_SKU"].astype(str))
+    assert "5038YKPOWDERBLUE-3XL" not in skus
+    assert "5038YKPOWDERBLUE-L" not in skus
+    by = sub.set_index("OMS_SKU")
+    assert float(by.loc["5038YKPOWERBLUE-3XL", "Total_Inventory"]) == 47.0
+    assert float(by.loc["5038YKPOWERBLUE-3XL", "Sold_Units"]) == 6.0
+    assert float(by.loc["5038YKPOWERBLUE-L", "Total_Inventory"]) == 60.0
+    assert float(by.loc["5038YKPOWERBLUE-L", "Sold_Units"]) == 11.0
+
+
 def test_coalesce_case_twins_max_not_double():
     """6xl vs 6XL re-upload must not sum to 2× stock."""
     inv = pd.DataFrame(

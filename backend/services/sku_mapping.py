@@ -36,11 +36,14 @@ def load_bundled_sku_mapping() -> Dict[str, str]:
     px = bundled_sku_mapping_xlsx_path()
     try:
         if pj.is_file():
-            _BUNDLED_SKU_MAP_CACHE = json.loads(pj.read_text(encoding="utf-8"))
+            raw = json.loads(pj.read_text(encoding="utf-8"))
         elif px.is_file():
-            _BUNDLED_SKU_MAP_CACHE = parse_sku_mapping(px.read_bytes())
+            raw = parse_sku_mapping(px.read_bytes())
         else:
-            _BUNDLED_SKU_MAP_CACHE = {}
+            raw = {}
+        _BUNDLED_SKU_MAP_CACHE = resolve_sku_replacement_map(
+            raw if isinstance(raw, dict) else {}
+        )
     except Exception:
         _BUNDLED_SKU_MAP_CACHE = {}
     return _BUNDLED_SKU_MAP_CACHE
@@ -94,6 +97,33 @@ def merge_sku_mapping_layers(
     return resolve_sku_replacement_map(out)
 
 
+# Built-in twin spellings shared by map terminals, sales, and inventory coalesce.
+# Replace-SKU / New SKU sheets often still list the older warehouse form
+# (POWDERBLUE, BOTTLEGREEN, …); ops status and inventory uploads use the
+# corrected form (POWERBLUE, BOTTELGREEN, …). Terminals must not reintroduce
+# the typo after a successful map lookup, or PO splits stock vs sales.
+_MAP_POWDERBLUE_RE = re.compile(r"POWDERBLUE", re.I)
+_MAP_BALCK_RE = re.compile(r"BALCK", re.I)
+_MAP_YEAL_RE = re.compile(r"YEAL", re.I)
+_MAP_BOTTLEGREEN_RE = re.compile(r"BOTTLEGREEN", re.I)
+_MAP_1180_YELLOW_RE = re.compile(r"^1180YK?YELLOW-", re.I)
+
+
+def normalize_builtin_oms_spellings(sku: str) -> str:
+    """Force known warehouse typos onto the ops/status OMS spelling."""
+    key = str(sku or "").strip().upper()
+    if not key:
+        return ""
+    # BOTTEL (ops) over warehouse BOTTLE; must run before other color tokens.
+    key = _MAP_BOTTLEGREEN_RE.sub("BOTTELGREEN", key)
+    key = _MAP_POWDERBLUE_RE.sub("POWERBLUE", key)
+    key = _MAP_BALCK_RE.sub("BLACK", key)
+    key = _MAP_YEAL_RE.sub("TEAL", key)
+    if _MAP_1180_YELLOW_RE.match(key):
+        key = "289YK345YELLOW-" + key.split("-", 1)[-1]
+    return key
+
+
 def resolve_sku_replacement_map(mapping: Optional[Dict[str, str]]) -> Dict[str, str]:
     """Normalize seller→OMS map: UPPERCASE, collapse chains, break A↔B cycles.
 
@@ -101,6 +131,10 @@ def resolve_sku_replacement_map(mapping: Optional[Dict[str, str]]) -> Dict[str, 
     opposite CMB↔MB conventions for different sizes.  Without consolidation,
     Inv History shows both SKUs and totals diverge from the OMS matrix after
     human consolidation.
+
+    Destinations are also canonicalized through
+    :func:`normalize_builtin_oms_spellings` so map terminals cannot re-split
+    inventory that already folded POWDER→POWER / BOTTLE→BOTTEL.
     """
     if not mapping:
         return {}
@@ -113,24 +147,35 @@ def resolve_sku_replacement_map(mapping: Optional[Dict[str, str]]) -> Dict[str, 
             continue
         if dst in ("NAN", "NONE", "NAT"):
             continue
-        if src == dst:
-            identities[src] = src
+        dst_n = normalize_builtin_oms_spellings(dst)
+        if not dst_n:
             continue
-        raw[src] = dst
+        if src == dst:
+            # Identity rows still register as lookups; terminal is ops spelling
+            # (e.g. 5038YKPOWDERBLUE-* → 5038YKPOWERBLUE-*).
+            identities[src] = dst_n
+            identities.setdefault(dst_n, dst_n)
+            continue
+        raw[src] = dst_n
     if not raw:
-        return dict(identities)
+        return {k: normalize_builtin_oms_spellings(v) for k, v in identities.items()}
 
     def _cycle_canonical(nodes: set[str]) -> str:
         """Pick one stable OMS code for a strongly-connected replacement set."""
 
         def score(n: str) -> tuple:
-            u = n.upper()
+            u = normalize_builtin_oms_spellings(n)
             s = 0
             # Prefer ops / Replace-SKU BOTTEL form over warehouse BOTTLE typo
             if "BOTTELGREEN" in u:
                 s += 20
             if "BOTTLEGREEN" in u and "BOTTELGREEN" not in u:
                 s -= 10
+            # Prefer ops POWERBLUE over warehouse POWDERBLUE terminal
+            if "POWERBLUE" in u:
+                s += 20
+            if "POWDERBLUE" in u:
+                s -= 20
             if "YEAL" in u:
                 s -= 20
             if "BALCK" in u:
@@ -141,7 +186,7 @@ def resolve_sku_replacement_map(mapping: Optional[Dict[str, str]]) -> Dict[str, 
             # Prefer longer (more specific) codes when tied
             return (s, len(u), u)
 
-        return max(nodes, key=score)
+        return normalize_builtin_oms_spellings(max(nodes, key=score))
 
     resolved: Dict[str, str] = {}
     for start in raw:
@@ -164,8 +209,11 @@ def resolve_sku_replacement_map(mapping: Optional[Dict[str, str]]) -> Dict[str, 
         if cycle_nodes:
             terminal = _cycle_canonical(cycle_nodes)
             for n in cycle_nodes:
-                if n != terminal:
+                nt = normalize_builtin_oms_spellings(n)
+                if nt != terminal:
                     resolved[n] = terminal
+                if n != nt and nt != terminal:
+                    resolved.setdefault(nt, terminal)
             # Predecessors on path before cycle also map to terminal
             for n in path:
                 if n in cycle_nodes:
@@ -173,14 +221,15 @@ def resolve_sku_replacement_map(mapping: Optional[Dict[str, str]]) -> Dict[str, 
                 if n != terminal:
                     resolved[n] = terminal
         else:
-            terminal = path[-1]
+            terminal = normalize_builtin_oms_spellings(path[-1])
             for n in path[:-1]:
                 if n != terminal:
                     resolved[n] = terminal
     # Preserve identity registrations (marketplace listed keys) not overwritten by rewrites.
     for k, v in identities.items():
-        resolved.setdefault(k, v)
-    return resolved
+        resolved.setdefault(k, normalize_builtin_oms_spellings(v))
+    # Every terminal stays on the built-in spelling (defense for raw map bytes).
+    return {k: normalize_builtin_oms_spellings(v) for k, v in resolved.items() if k and v}
 
 
 def follow_sku_replacement(
@@ -191,22 +240,24 @@ def follow_sku_replacement(
 ) -> str:
     """Follow replacement map to a terminal OMS code (safe on cycles)."""
     cur = str(sku or "").strip().upper()
-    if not cur or not mapping:
+    if not cur:
         return cur
+    if not mapping:
+        return normalize_builtin_oms_spellings(cur)
     seen: set[str] = set()
     for _ in range(max_hops):
         if cur in seen:
             # Should be rare after resolve_sku_replacement_map; break deterministically
-            return min(seen | {cur})
+            return normalize_builtin_oms_spellings(min(seen | {cur}))
         seen.add(cur)
         nxt = mapping.get(cur)
         if not nxt:
-            return cur
+            return normalize_builtin_oms_spellings(cur)
         nxt = str(nxt).strip().upper()
         if not nxt or nxt == cur:
-            return cur
+            return normalize_builtin_oms_spellings(cur)
         cur = nxt
-    return cur
+    return normalize_builtin_oms_spellings(cur)
 
 
 def resolve_sku_mapping_base(sess) -> Dict[str, str]:

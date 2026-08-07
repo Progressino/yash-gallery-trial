@@ -24,7 +24,8 @@ _log = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # Bump when PO engine merge/ADS semantics change (invalidates shared cache).
-PO_MERGE_LOGIC_VERSION = 56
+# 57: POWDERBLUE→POWERBLUE map-terminal fold (sales + inventory join no longer split).
+PO_MERGE_LOGIC_VERSION = 57
 
 
 def po_merge_result_is_stale(meta: dict[str, Any] | None) -> bool:
