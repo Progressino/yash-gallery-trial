@@ -335,6 +335,49 @@ jobs:
           echo "ok=false" >> "$GITHUB_OUTPUT"
           exit 1
 
+      # After force-recreate, process-local warm cache is empty until disk hydrate.
+      # Without this, health can report warm_cache:false for several minutes and
+      # operators see empty Inventory/PO until the first login triggers bootstrap.
+      - name: Hydrate warm cache after deploy
+        continue-on-error: true
+        timeout-minutes: 12
+        run: |
+          set -eu
+          cd /root/app
+          set -a
+          # shellcheck disable=SC1091
+          . ./.env
+          set +a
+          python3 <<'PY'
+          import os, time, requests
+          base = "http://127.0.0.1:8000"
+          s = requests.Session()
+          # Wait for auth/API readiness after container recreate
+          for i in range(1, 31):
+              try:
+                  r = s.get(f"{base}/api/health", timeout=10)
+                  if r.ok:
+                      break
+              except Exception:
+                  pass
+              time.sleep(2)
+          r = s.post(
+              f"{base}/api/auth/login",
+              json={"username": os.environ["AUTH_USERNAME"], "password": os.environ["AUTH_PASSWORD"]},
+              headers={"X-Device-Id": "gha-deploy-hydrate"},
+              timeout=60,
+          )
+          r.raise_for_status()
+          h = s.post(f"{base}/api/cache/hydrate-warm", timeout=600)
+          print("hydrate", h.status_code, (h.text or "")[:300])
+          h.raise_for_status()
+          health = s.get(f"{base}/api/health", timeout=30).json()
+          print("health_after_hydrate", health)
+          if not health.get("warm_cache"):
+              raise SystemExit("warm_cache still false after hydrate-warm")
+          PY
+          curl -sf --connect-timeout 5 "http://127.0.0.1:8000/api/health" || true
+
       - name: Publish success summary
         if: success()
         run: |
