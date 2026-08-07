@@ -380,8 +380,10 @@ jobs:
               target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             });
 
+      # Post-health steps must never block deploy indefinitely (Actions UI looks "stuck").
       - name: Reconcile latest Existing PO on disk
         continue-on-error: true
+        timeout-minutes: 5
         run: |
           set -eu
           cd /root/app
@@ -389,6 +391,7 @@ jobs:
 
       - name: Reconcile latest inventory history on disk
         continue-on-error: true
+        timeout-minutes: 10
         run: |
           set -eu
           cd /root/app
@@ -396,6 +399,7 @@ jobs:
 
       - name: Warm shared PO cache (PO Fresh defaults)
         continue-on-error: true
+        timeout-minutes: 45
         run: |
           set -eu
           cd /root/app
@@ -403,6 +407,7 @@ jobs:
 
       - name: Warm Intelligence bundle (default 30D window)
         continue-on-error: true
+        timeout-minutes: 15
         run: |
           set -eu
           cd /root/app
