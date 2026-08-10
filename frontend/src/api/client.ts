@@ -1379,6 +1379,27 @@ function _isRetryablePoPollError(e: unknown): boolean {
   return !e.response
 }
 
+function _isPoJobNotFoundError(e: unknown): boolean {
+  if (!axios.isAxiosError(e) || e.response?.status !== 404) return false
+  const detail = e.response?.data
+  if (typeof detail === 'string' && /po job not found/i.test(detail)) return true
+  if (detail && typeof detail === 'object') {
+    const d = (detail as { detail?: unknown }).detail
+    if (typeof d === 'string' && /po job not found/i.test(d)) return true
+  }
+  // Older gateways still 404 the /status/{job_id} path when the in-memory job is gone.
+  return true
+}
+
+function _clearRememberedPoJobId(): void {
+  if (typeof sessionStorage === 'undefined') return
+  try {
+    sessionStorage.removeItem('po_calculate_job_id')
+  } catch {
+    /* ignore */
+  }
+}
+
 function _poProgressWhileUnreachable(
   pollStart: number,
   lastProgress: number | undefined,
@@ -1616,20 +1637,41 @@ export async function waitForPoCalculate(
   jobId?: string,
 ): Promise<POCalculateResult> {
   const start = Date.now()
-  const statusPath = _poStatusPath(jobId)
+  let activeJobId = jobId || undefined
   let statusGatewayRetries = 0
   let idlePolls = 0
   let lastServerMessage = 'Calculating PO recommendations…'
   let lastServerProgress: number | undefined
   let sawRunning = false
   while (Date.now() - start < maxMs) {
-    let data: POCalculateResult & { row_count?: number; progress?: number; columns?: string[] }
+    let data: POCalculateResult & {
+      row_count?: number
+      progress?: number
+      columns?: string[]
+      job_missing?: boolean
+      job_id?: string
+    }
+    const statusPath = _poStatusPath(activeJobId)
     try {
       ;({ data } = await api.get<
-        POCalculateResult & { row_count?: number; progress?: number; columns?: string[] }
+        POCalculateResult & {
+          row_count?: number
+          progress?: number
+          columns?: string[]
+          job_missing?: boolean
+          job_id?: string
+        }
       >(statusPath, { timeout: PO_STATUS_POLL_TIMEOUT_MS }))
       statusGatewayRetries = 0
     } catch (e: unknown) {
+      if (_isPoJobNotFoundError(e) && activeJobId) {
+        // In-memory job gone after restart, or stale sessionStorage id.
+        _clearRememberedPoJobId()
+        activeJobId = undefined
+        onTick?.('PO job lost after server restart — checking session progress…', lastServerProgress ?? 8)
+        await _sleep(500)
+        continue
+      }
       if (_isRetryablePoPollError(e) && statusGatewayRetries < 180) {
         statusGatewayRetries += 1
         const pct = _poProgressWhileUnreachable(start, lastServerProgress, statusGatewayRetries)
@@ -1638,6 +1680,15 @@ export async function waitForPoCalculate(
         continue
       }
       throw e
+    }
+    if (data.job_missing && activeJobId) {
+      // Server soft-fallback: continue with session status / new job_id if present.
+      if (data.job_id && data.job_id !== activeJobId) {
+        activeJobId = String(data.job_id)
+      } else {
+        _clearRememberedPoJobId()
+        activeJobId = undefined
+      }
     }
     let st = data.status ?? 'idle'
     // Queued / preparing still means the server accepted the job — never treat as idle.
@@ -1669,7 +1720,7 @@ export async function waitForPoCalculate(
       try {
         const { data: probe } = await api.get<
           POCalculateResult & { status?: string; total?: number }
-        >(_poResultPath(jobId), {
+        >(_poResultPath(activeJobId), {
           params: { offset: 0, limit: 1, compact: 1 },
           timeout: PO_STATUS_POLL_TIMEOUT_MS,
         })
@@ -1690,19 +1741,34 @@ export async function waitForPoCalculate(
           await _sleep(2500)
           continue
         }
-      } catch {
+      } catch (e: unknown) {
+        if (_isPoJobNotFoundError(e) && activeJobId) {
+          _clearRememberedPoJobId()
+          activeJobId = undefined
+        }
         await _sleep(2500)
         continue
       }
     }
     if (st === 'idle') {
       idlePolls += 1
+      const lostJobMsg =
+        data.job_missing || data.message?.toLowerCase().includes('job was lost')
+          ? (data.message || 'PO job was lost. Click Calculate PO again.')
+          : undefined
       onTick?.(
-        sawRunning
-          ? 'Waiting for server to finish…'
-          : lastServerMessage || 'Waiting for PO calculation to start…',
+        lostJobMsg ||
+          (sawRunning
+            ? 'Waiting for server to finish…'
+            : lastServerMessage || 'Waiting for PO calculation to start…'),
         lastServerProgress ?? Math.min(12 + idlePolls, 40),
       )
+      if (data.job_missing && !sawRunning && idlePolls >= 2) {
+        throw new Error(
+          data.message ||
+            'PO job was lost (server may have restarted). Click Calculate PO again.',
+        )
+      }
       if (!sawRunning && idlePolls >= 24) {
         throw new Error(
           'PO calculation did not start on the server. Hard-refresh the page and click Calculate PO again. If it persists, restart the local PO stack.',
@@ -1717,19 +1783,42 @@ export async function waitForPoCalculate(
       continue
     }
     if (st === 'done') {
-      const loaded = await fetchAllPoResultPages(
-        onTick,
-        {
-          columns: data.columns,
-          row_count: data.row_count,
-        },
-        jobId,
-      )
-      return {
-        ...loaded,
-        from_shared_cache: data.from_shared_cache ?? loaded.from_shared_cache,
-        shared_cache_at: data.shared_cache_at ?? loaded.shared_cache_at,
-        message: data.message ?? loaded.message,
+      try {
+        const loaded = await fetchAllPoResultPages(
+          onTick,
+          {
+            columns: data.columns,
+            row_count: data.row_count,
+          },
+          activeJobId,
+        )
+        return {
+          ...loaded,
+          from_shared_cache: data.from_shared_cache ?? loaded.from_shared_cache,
+          shared_cache_at: data.shared_cache_at ?? loaded.shared_cache_at,
+          message: data.message ?? loaded.message,
+        }
+      } catch (e: unknown) {
+        // Result by job_id 404 after restart — retry without job id (session path).
+        if (_isPoJobNotFoundError(e) && activeJobId) {
+          _clearRememberedPoJobId()
+          activeJobId = undefined
+          const loaded = await fetchAllPoResultPages(
+            onTick,
+            {
+              columns: data.columns,
+              row_count: data.row_count,
+            },
+            undefined,
+          )
+          return {
+            ...loaded,
+            from_shared_cache: data.from_shared_cache ?? loaded.from_shared_cache,
+            shared_cache_at: data.shared_cache_at ?? loaded.shared_cache_at,
+            message: data.message ?? loaded.message,
+          }
+        }
+        throw e
       }
     }
   }
@@ -1769,14 +1858,6 @@ export async function startPoCalculate(
       /* ignore quota / private mode */
     }
   }
-  const rememberedJobId = (): string | undefined => {
-    if (typeof sessionStorage === 'undefined') return undefined
-    try {
-      return sessionStorage.getItem('po_calculate_job_id') || undefined
-    } catch {
-      return undefined
-    }
-  }
   try {
     const { data } = await api.post<
       POCalculateResult & { status?: string; from_shared_cache?: boolean; job_id?: string }
@@ -1814,18 +1895,20 @@ export async function startPoCalculate(
       }
     }
     if (data.status === 'running' || data.status === 'queued' || (!data.rows && data.status !== 'done')) {
-      return waitForPoCalculate(onTick, 900_000, rememberedJobId())
+      // Do not reuse a stale sessionStorage job id — poll session-bound status only.
+      return waitForPoCalculate(onTick, 900_000, undefined)
     }
     return data
   } catch (e: unknown) {
     if (_isAxiosTimeout(e)) {
       onTick?.('Still calculating on server…')
-      return waitForPoCalculate(onTick, 900_000, rememberedJobId())
+      // POST may have been accepted; session status tracks the latest job without a stale id.
+      return waitForPoCalculate(onTick, 900_000, undefined)
     }
     if (axios.isAxiosError(e) && e.response?.status === 502) {
       onTick?.('Still calculating on server — checking progress…', 8)
       await _sleep(2000)
-      return waitForPoCalculate(onTick, 900_000, rememberedJobId())
+      return waitForPoCalculate(onTick, 900_000, undefined)
     }
     throw e
   }

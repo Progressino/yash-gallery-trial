@@ -1,0 +1,98 @@
+name: PO calculate API probe
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'use_shared_cache=0 force recalculate'
+        default: '0'
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 45
+    steps:
+      - name: Login and Calculate PO like UI
+        run: |
+          set -euo pipefail
+          set -a
+          . /root/app/.env
+          set +a
+          python3 <<'PY'
+          import os, time, json, requests
+          base = "http://127.0.0.1:8000"
+          s = requests.Session()
+          r = s.post(
+              f"{base}/api/auth/login",
+              json={"username": os.environ["AUTH_USERNAME"], "password": os.environ["AUTH_PASSWORD"]},
+              headers={"X-Device-Id": "gha-po-calc-probe"},
+              timeout=60,
+          )
+          print("login", r.status_code, (r.text or "")[:200])
+          r.raise_for_status()
+          h = s.get(f"{base}/api/health", timeout=30)
+          print("health", h.status_code, h.text[:300])
+          body = {
+              "period_days": 30,
+              "lead_time": 60,
+              "target_days": 180,
+              "grace_days": 0,
+              "demand_basis": "Sold",
+              "group_by_parent": False,
+              "safety_pct": 0.0,
+              "use_seasonality": True,
+              "use_ly_fallback": True,
+              "use_oms_inventory_only": False,
+              "inventory_history_channel": "oms",
+              "seasonal_weight": 0.5,
+              "enforce_two_size_minimum": True,
+              "enforce_lead_time_release_gate": True,
+              "urgent_all_sizes_days": 45,
+              "planning_date": "2026-08-10",
+              "raise_ledger_lookback_days": 14,
+              "raise_view_date": "2026-08-10",
+              "auto_import_yesterday_ledger": True,
+              "use_shared_cache": os.environ.get("FORCE", "0") not in ("1", "true"),
+          }
+          force = "${{ github.event.inputs.force }}"
+          if force in ("1", "true", "True"):
+              body["use_shared_cache"] = False
+          print("POST body", json.dumps(body))
+          t0 = time.time()
+          post = s.post(f"{base}/api/po/calculate", json=body, timeout=120)
+          print("POST", post.status_code, post.headers.get("content-type"), (post.text or "")[:500])
+          post.raise_for_status()
+          data = post.json()
+          job_id = data.get("job_id")
+          print("job_id", job_id, "from_shared", data.get("from_shared_cache"))
+          # Poll status by job and without
+          for i in range(120):
+              for path in ([f"/api/po/calculate/status/{job_id}"] if job_id else []) + ["/api/po/calculate/status"]:
+                  st = s.get(f"{base}{path}", timeout=30)
+                  print(f"poll{i} {path} -> {st.status_code} {(st.text or '')[:220]}")
+                  if st.status_code == 404:
+                      print("FATAL_404", path, st.text)
+                      # also try result
+                      break
+              if st.status_code == 404:
+                  raise SystemExit(2)
+              payload = st.json() if st.ok else {}
+              status = payload.get("status")
+              if status == "done":
+                  # page 1 result
+                  res = s.get(
+                      f"{base}/api/po/calculate/result" + (f"/{job_id}" if job_id else ""),
+                      params={"offset": 0, "limit": 5, "compact": 1},
+                      timeout=60,
+                  )
+                  print("result", res.status_code, (res.text or "")[:400])
+                  if res.status_code == 404:
+                      raise SystemExit(3)
+                  rj = res.json()
+                  print("RESULT_OK total", rj.get("total"), "rows", len(rj.get("rows") or rj.get("rows_matrix") or []), "elapsed", round(time.time()-t0,1))
+                  raise SystemExit(0)
+              if status == "error":
+                  print("CALC_ERROR", payload)
+                  raise SystemExit(4)
+              time.sleep(3)
+          print("TIMEOUT")
+          raise SystemExit(5)
+          PY

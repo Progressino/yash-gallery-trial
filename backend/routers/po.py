@@ -1597,7 +1597,13 @@ def _po_calculate_status_payload(job: dict, *, sid: str = "") -> dict:
     return out
 
 
-def _require_po_job(request: Request, job_id: str) -> dict:
+def _require_po_job(request: Request, job_id: str) -> dict | None:
+    """Load a PO job for this browser session.
+
+    Returns ``None`` when the job id is unknown (process restart / stale client cache)
+    so callers can fall back to session status instead of hard 404s — the UI previously
+    showed only axios "Request failed with status code 404" for that case.
+    """
     from fastapi import HTTPException
 
     from ..services.po_calculate_jobs import get_po_job_by_id
@@ -1605,10 +1611,62 @@ def _require_po_job(request: Request, job_id: str) -> dict:
     sid = getattr(request.state, "session_id", None) or ""
     job = get_po_job_by_id(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail="PO job not found.")
+        return None
     if str(job.get("session_id") or "") != sid:
         raise HTTPException(status_code=403, detail="PO job not accessible.")
     return job
+
+
+def _po_job_missing_status_payload(job_id: str, request: Request) -> dict:
+    """Soft fallback when a poll references a job lost after restart."""
+    # Prefer the session's latest progress (same path as GET /calculate/status).
+    from ..services.po_calculate_jobs import get_po_job
+
+    sid = getattr(request.state, "session_id", None) or ""
+    sess = getattr(request.state, "session", None)
+    stale = _fail_stale_po_job_if_needed(sess, sid)
+    if stale:
+        stale = dict(stale)
+        stale["job_missing"] = True
+        stale["requested_job_id"] = job_id
+        return stale
+    job = get_po_job(sid) if sid else {}
+    if job:
+        out = _po_calculate_status_payload(job, sid=sid)
+        out["job_missing"] = True
+        out["requested_job_id"] = job_id
+        return out
+    if sess is not None:
+        st = getattr(sess, "po_calculate_status", "idle") or "idle"
+        if st and st != "idle":
+            meta = getattr(sess, "po_calculate_result", None) or {}
+            fallback = {
+                "status": st,
+                "message": getattr(sess, "po_calculate_message", "") or "",
+                "progress": int(getattr(sess, "po_calculate_progress", 0) or 0),
+                "ok": st != "error",
+                "job_missing": True,
+                "requested_job_id": job_id,
+            }
+            if st == "done":
+                if meta.get("total_rows") is not None:
+                    fallback["total_rows"] = int(meta["total_rows"])
+                if meta.get("columns"):
+                    fallback["columns"] = list(meta["columns"])
+            elif st == "error":
+                fallback["ok"] = False
+            return _po_calculate_status_payload(fallback, sid=sid)
+    return {
+        "status": "idle",
+        "message": (
+            "PO job was lost (server may have restarted). "
+            "Click Calculate PO again."
+        ),
+        "progress": 0,
+        "ok": True,
+        "job_missing": True,
+        "requested_job_id": job_id,
+    }
 
 
 def _fail_stale_po_job_if_needed(sess, sid: str) -> dict | None:
@@ -1640,7 +1698,9 @@ def po_calculate_status_by_job(request: Request, job_id: str):
 
     sess = getattr(request.state, "session", None)
     sid = getattr(request.state, "session_id", None) or ""
-    _require_po_job(request, job_id)
+    job = _require_po_job(request, job_id)
+    if job is None:
+        return _po_job_missing_status_payload(job_id, request)
     stale = _fail_stale_po_job_if_needed(sess, sid)
     if stale and stale.get("job_id") == job_id:
         return stale
@@ -1753,6 +1813,22 @@ def po_calculate_result_by_job(
 ):
     """PO table page for a finished job (paginated)."""
     job = _require_po_job(request, job_id)
+    if job is None:
+        # Job store wiped (restart) but session may still hold a finished PO table.
+        sess = getattr(request.state, "session", None)
+        st_sess = (getattr(sess, "po_calculate_status", None) or "idle") if sess is not None else "idle"
+        if st_sess == "done":
+            return _po_calculate_result_response(request, offset=offset, limit=limit, compact=compact)
+        return {
+            "ok": False,
+            "status": "idle",
+            "job_missing": True,
+            "message": (
+                "PO job was lost (server may have restarted). "
+                "Click Calculate PO again."
+            ),
+            "job_id": job_id,
+        }
     st = str(job.get("status") or "idle")
     if st == "running":
         return {"ok": False, "status": "running", "message": "PO calculation still running.", "job_id": job_id}
