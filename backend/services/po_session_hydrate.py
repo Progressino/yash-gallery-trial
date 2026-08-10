@@ -745,7 +745,20 @@ _MIN_PLATFORM_ROWS_FOR_PO = 1000
 
 
 def ensure_platform_bulk_frames_in_warm_cache() -> None:
-    """Top up Tier-1 platform parquets for PO quarterly / LY when PO-session-only skipped them."""
+    """Top up Tier-1 platform parquets for PO quarterly / LY when PO-session-only skipped them.
+
+    Intentionally **not** called during Calculate PO hydrate on production — reading
+    multi-GB platform parquets OOMs the 7 GB VPS (exit 137). Call only from
+    quarterly warmup / large-host tooling when ``PO_HYDRATE_PLATFORM_BULK=1``.
+    """
+    raw = (os.environ.get("PO_HYDRATE_PLATFORM_BULK") or "").strip().lower()
+    if raw not in ("1", "true", "yes", "on"):
+        _log.info(
+            "PO hydrate: skip platform bulk parquet load "
+            "(set PO_HYDRATE_PLATFORM_BULK=1 to enable on large hosts)"
+        )
+        return
+
     import backend.main as _main
 
     from .shared_frames import warm_frame
@@ -773,16 +786,14 @@ def ensure_platform_bulk_frames_in_warm_cache() -> None:
 
 
 def _hydrate_platform_frames_from_disk_for_po(sess) -> None:
-    """Attach platform history for quarterly / slow ADS when session is PO-session-only.
+    """Attach platform history **already in warm cache** for quarterly / LY.
 
-    Unified ``sales_df`` covers recent ADS via PG materialization, but LY floors and
-    quarterly columns still need per-platform Tier-1 frames. Load into warm cache once,
-    then attach to the session (shared refs when enabled).
+    Unified ``sales_df`` covers ADS for Calculate PO. Do not bulk-load platform
+    parquets here — that OOM-kills small production hosts during hydrate.
     """
-    import backend.main as _main
-
     from .shared_frames import warm_frame
 
+    # Optional bulk load only when explicitly enabled (large hosts).
     ensure_platform_bulk_frames_in_warm_cache()
 
     if any(_df_row_count(getattr(sess, attr, None)) > 0 for attr in _PO_PLATFORM_ATTRS):
@@ -795,7 +806,11 @@ def _hydrate_platform_frames_from_disk_for_po(sess) -> None:
         if _share_warm_frame_in_po_session_only(attr):
             setattr(sess, attr, wf)
         else:
-            setattr(sess, attr, wf.copy())
+            # Still prefer shared ref for multi-million-row platform frames.
+            try:
+                setattr(sess, attr, wf)
+            except Exception:
+                setattr(sess, attr, wf.copy())
         _log.info("PO hydrate: attached %s to session (%s rows)", attr, len(wf))
 
 
