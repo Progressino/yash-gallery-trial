@@ -1,0 +1,100 @@
+name: Chain audit Sales-Inv-Eff-PO (prod)
+
+# Full calculation chain audit against production warm-cache.
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: self-hosted
+    timeout-minutes: 60
+    steps:
+      - name: Run chain audit in backend container
+        run: |
+          set -euo pipefail
+          CID="$(docker ps --format '{{.Names}}' | grep -E 'progressino-backend' | head -1 || true)"
+          if [ -z "${CID}" ]; then
+            echo "FATAL: no backend container"
+            docker ps || true
+            exit 1
+          fi
+          echo "Container: ${CID}"
+          if [ -d /root/app/.git ]; then
+            git -C /root/app fetch origin main 2>/dev/null || true
+            git -C /root/app show origin/main:backend/scripts/chain_audit_prod.py \
+              > /tmp/chain_audit_prod.py 2>/dev/null \
+              || cp /root/app/backend/scripts/chain_audit_prod.py /tmp/chain_audit_prod.py
+          else
+            cp /root/app/backend/scripts/chain_audit_prod.py /tmp/chain_audit_prod.py
+          fi
+          # Prefer workspace if present (this job may not checkout)
+          if [ -f backend/scripts/chain_audit_prod.py ]; then
+            cp backend/scripts/chain_audit_prod.py /tmp/chain_audit_prod.py
+          fi
+          docker cp /tmp/chain_audit_prod.py "${CID}:/srv/backend/scripts/chain_audit_prod.py" \
+            || docker cp /tmp/chain_audit_prod.py "${CID}:/app/backend/scripts/chain_audit_prod.py"
+          docker exec -e PYTHONPATH=/srv -e WARM_CACHE_DIR=/data/warm_cache -w /srv \
+            "${CID}" python -m backend.scripts.chain_audit_prod \
+            > /tmp/chain_audit.json 2>/tmp/chain_audit.err || RC=$?
+          echo "exit_code=${RC:-0}"
+          echo "=== STDERR (tail) ==="
+          tail -80 /tmp/chain_audit.err || true
+          echo "=== JSON size ==="
+          wc -c /tmp/chain_audit.json || true
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("/tmp/chain_audit.json")
+          d = json.loads(p.read_text()) if p.is_file() and p.stat().st_size > 20 else {}
+          # Compact printable summary
+          sales = d.get("sales") or {}
+          inv = d.get("inventory") or {}
+          po = d.get("eff_days_po") or {}
+          print("ROOT_CAUSES", json.dumps(d.get("root_causes"), indent=2, default=str)[:4000])
+          print("Q1_HYPOTHESIS", json.dumps(sales.get("q1_root_cause_hypothesis"), indent=2))
+          print("PERIODS", json.dumps(sales.get("periods"), indent=2, default=str)[:3000])
+          print("Q1_2025", json.dumps(sales.get("q1_2025"), indent=2, default=str)[:2500])
+          print("PLATFORM_VS", json.dumps(sales.get("q1_2025_platform_vs_sales"), indent=2, default=str))
+          print("MONTHLY_PRESENCE", json.dumps(sales.get("monthly_presence"), indent=2))
+          print("INV_TOTALS", json.dumps(inv.get("totals"), indent=2, default=str))
+          print("HIST_VS_INV", json.dumps(inv.get("history_vs_inv"), indent=2, default=str)[:3000])
+          print("PO_SUMMARY", {k: po.get(k) for k in (
+              "po_rows","inv_mismatch_count","inv_mismatch_zero_po_with_stock",
+              "sales_with_zero_inventory_count","summary_po_qty_sum","po_error"
+          )})
+          print("TOP_INV_MISMATCH", json.dumps((po.get("top_inv_mismatches") or [])[:12], indent=2, default=str))
+          print("ZERO_PO_WITH_STOCK", json.dumps((po.get("top_zero_po_with_stock") or [])[:12], indent=2, default=str))
+          print("REQ_STATUS", json.dumps(d.get("requirement_status"), indent=2, default=str)[:2500])
+          Path("/tmp/chain_audit_summary.json").write_text(json.dumps({
+              "root_causes": d.get("root_causes"),
+              "sales_span": sales.get("sales_span"),
+              "periods": sales.get("periods"),
+              "q1": sales.get("q1_2025"),
+              "q1_hypothesis": sales.get("q1_root_cause_hypothesis"),
+              "platform_vs": sales.get("q1_2025_platform_vs_sales"),
+              "monthly_presence": sales.get("monthly_presence"),
+              "inventory": {
+                  "sku_count": inv.get("sku_count"),
+                  "totals": inv.get("totals"),
+                  "history_vs_inv": inv.get("history_vs_inv"),
+                  "powder_twins": inv.get("powder_power_twin_count"),
+              },
+              "po": {k: po.get(k) for k in (
+                  "po_rows","inv_mismatch_count","inv_mismatch_zero_po_with_stock",
+                  "sales_with_zero_inventory_count","summary_po_qty_sum","formula",
+                  "top_inv_mismatches","top_zero_po_with_stock","top_sales_zero_inv"
+              )},
+              "requirement_status": d.get("requirement_status"),
+          }, indent=2, default=str))
+          PY
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chain-audit-prod
+          path: |
+            /tmp/chain_audit.json
+            /tmp/chain_audit_summary.json
+            /tmp/chain_audit.err
+          if-no-files-found: warn
