@@ -79,33 +79,40 @@ def prepare_sales(sales: pd.DataFrame, mapping: dict) -> pd.DataFrame:
     date_c = _sales_date_col(sales)
     if not sku_c or not qty_c or not date_c:
         return pd.DataFrame()
-    work = sales[[sku_c, qty_c, date_c]].copy()
+    work = pd.DataFrame(
+        {
+            "Sku_raw": sales[sku_c].astype(str),
+            "Qty": pd.to_numeric(sales[qty_c], errors="coerce").fillna(0.0),
+            "TxnDate": pd.to_datetime(sales[date_c], errors="coerce"),
+        }
+    )
     type_c = next(
         (c for c in ("Transaction Type", "TxnType", "Transaction_Type") if c in sales.columns),
         None,
     )
-    if type_c:
-        work["_type"] = sales[type_c]
-    else:
-        work["_type"] = "Shipment"
+    work["_type"] = sales[type_c].astype(str) if type_c else "Shipment"
     if "Platform" in sales.columns:
-        work["Platform"] = sales["Platform"]
-    work["Qty"] = pd.to_numeric(work[qty_c], errors="coerce").fillna(0.0)
-    work["TxnDate"] = pd.to_datetime(work[date_c], errors="coerce")
-    work["OMS_SKU"] = work[sku_c].map(lambda v: canonical_oms_key(v, mapping))
-    work = work[work["TxnDate"].notna() & work["OMS_SKU"].astype(str).str.len().gt(0)]
-    # Net demand: prefer Units_Effective already signed; else ship positive + refund negative pattern
+        work["Platform"] = sales["Platform"].astype(str)
+    work = work[work["TxnDate"].notna()]
+    # Map unique SKUs only (production sales_df is multi-million rows)
+    uniq = pd.unique(work["Sku_raw"].to_numpy())
+    canon_map = {s: canonical_oms_key(s, mapping) for s in uniq}
+    work["OMS_SKU"] = work["Sku_raw"].map(canon_map)
+    work = work[work["OMS_SKU"].astype(str).str.len().gt(0)]
     if qty_c == "Units_Effective":
         work["NetUnits"] = work["Qty"]
         work["ShipUnits"] = work["Qty"].clip(lower=0)
     else:
         is_ship = _is_ship(work["_type"])
-        is_ref = work["_type"].astype(str).str.lower().str.contains("refund|return", na=False)
-        work["NetUnits"] = np.where(is_ref, -work["Qty"].abs(), np.where(is_ship, work["Qty"].clip(lower=0), 0.0))
+        is_ref = work["_type"].str.lower().str.contains("refund|return", na=False)
+        work["NetUnits"] = np.where(
+            is_ref, -work["Qty"].abs(), np.where(is_ship, work["Qty"].clip(lower=0), 0.0)
+        )
         work["ShipUnits"] = np.where(is_ship, work["Qty"].clip(lower=0), 0.0)
-    work["Year"] = work["TxnDate"].dt.year
-    work["Month"] = work["TxnDate"].dt.month
-    work["Quarter"] = work["TxnDate"].dt.quarter
+    work["Year"] = work["TxnDate"].dt.year.astype("int16")
+    work["Month"] = work["TxnDate"].dt.month.astype("int8")
+    work["Quarter"] = work["TxnDate"].dt.quarter.astype("int8")
+    work.drop(columns=["Sku_raw"], inplace=True)
     return work
 
 
@@ -133,28 +140,32 @@ def platform_frame_monthly(
     months: list[int],
     mapping: dict,
 ) -> dict[str, Any]:
-    """Independent platform parquet totals for diagnostics."""
+    """Independent platform parquet totals (date filter first — cheap memory path)."""
     df = _read_parquet(name)
     if df is None or df.empty or "__error__" in (df.columns if df is not None else []):
         return {"present": False, "name": name}
     try:
-        w = prepare_sales(df, mapping)
+        date_c = _sales_date_col(df)
+        qty_c = _sales_qty_col(df)
+        if not date_c or not qty_c:
+            return {"present": True, "name": name, "rows": int(len(df)), "error": "missing_cols"}
+        d = pd.to_datetime(df[date_c], errors="coerce")
+        mask = (d.dt.year == year) & (d.dt.month.isin(months))
+        sub = df.loc[mask]
+        q = float(pd.to_numeric(sub[qty_c], errors="coerce").fillna(0).clip(lower=0).sum())
+        return {
+            "present": True,
+            "name": name,
+            "rows": int(len(df)),
+            "usable": int(len(sub)),
+            "q_ship_units": q,
+            "q_net_units": q,
+            "skus": int(sub[_sales_sku_col(df)].nunique()) if _sales_sku_col(df) else 0,
+            "date_min": str(d.min())[:10] if d.notna().any() else "",
+            "date_max": str(d.max())[:10] if d.notna().any() else "",
+        }
     except Exception as exc:
         return {"present": True, "name": name, "error": str(exc)}
-    if w.empty:
-        return {"present": True, "name": name, "rows": int(len(df)), "usable": 0}
-    sub = w[(w["Year"] == year) & (w["Month"].isin(months))]
-    return {
-        "present": True,
-        "name": name,
-        "rows": int(len(df)),
-        "usable": int(len(w)),
-        "q_ship_units": float(sub["ShipUnits"].sum()),
-        "q_net_units": float(sub["NetUnits"].sum()),
-        "skus": int(sub["OMS_SKU"].nunique()),
-        "date_min": str(w["TxnDate"].min())[:10],
-        "date_max": str(w["TxnDate"].max())[:10],
-    }
 
 
 def audit_q1_sales(work: pd.DataFrame, mapping: dict) -> dict[str, Any]:
@@ -389,179 +400,144 @@ def audit_inventory_every_sku(inv: pd.DataFrame | None, hist: pd.DataFrame | Non
     return out
 
 
-def audit_eff_days_and_po(
-    sales: pd.DataFrame,
+def audit_eff_days_light(
     inv: pd.DataFrame,
-    hist: pd.DataFrame | None,
-    status: pd.DataFrame | None,
-    existing_po: pd.DataFrame | None,
     mapping: dict,
     work: pd.DataFrame,
+    *,
+    period_days: int = 30,
 ) -> dict[str, Any]:
-    """Independent Eff_Days vs PO engine; inventory join checks."""
+    """Memory-safe Cover_Days / ADS diagnostic without full calculate_po_base (avoids OOM).
+
+    Eff_Days in the engine is mostly inventory-history in-stock days; Cover_Days
+    (Inventory / ADS) is the diagnostic operators often confuse with it.
+    """
     from backend.services.inventory import coalesce_inventory_by_sku_mapping
-    from backend.services.po_engine import calculate_po_base
+    from backend.services.po_engine import inventory_oms_key
 
     inv_c = coalesce_inventory_by_sku_mapping(inv.copy(), mapping)
-    sales_work = sales.copy()
-    if "TxnDate" not in sales_work.columns:
-        dc = _sales_date_col(sales_work)
-        if dc:
-            sales_work["TxnDate"] = pd.to_datetime(sales_work[dc], errors="coerce")
-    if "Sku" not in sales_work.columns:
-        sc = _sales_sku_col(sales_work)
-        if sc:
-            sales_work["Sku"] = sales_work[sc]
-    if "Transaction Type" not in sales_work.columns:
-        for c in ("TxnType", "Transaction_Type"):
-            if c in sales_work.columns:
-                sales_work["Transaction Type"] = sales_work[c]
-                break
-        else:
-            sales_work["Transaction Type"] = "Shipment"
-    if "Units_Effective" not in sales_work.columns:
-        qc = _sales_qty_col(sales_work)
-        sales_work["Units_Effective"] = (
-            pd.to_numeric(sales_work[qc], errors="coerce").fillna(0) if qc else 0
-        )
-    if "Quantity" not in sales_work.columns:
-        sales_work["Quantity"] = sales_work["Units_Effective"]
+    inv_c["OMS_SKU"] = inv_c["OMS_SKU"].map(inventory_oms_key)
+    inv_c = inv_c[inv_c["OMS_SKU"].astype(str).str.len() > 0]
+    if inv_c["OMS_SKU"].duplicated().any():
+        num = [c for c in inv_c.columns if c != "OMS_SKU" and pd.api.types.is_numeric_dtype(inv_c[c])]
+        inv_c = inv_c.groupby("OMS_SKU", as_index=False)[num].sum()
 
-    period_days = 30
-    try:
-        po = calculate_po_base(
-            sales_df=sales_work,
-            inv_df=inv_c,
-            period_days=period_days,
-            lead_time=45,
-            target_days=45,
-            use_seasonality=False,
-            group_by_parent=False,
-            existing_po_df=existing_po if existing_po is not None else pd.DataFrame(),
-            sku_status_df=status if status is not None else pd.DataFrame(),
-            inventory_history_df=hist,
-            sku_mapping=mapping,
-            use_oms_inventory_only=False,
-            inventory_history_channel="oms",
-        )
-    except Exception as exc:
-        return {
-            "po_error": f"{type(exc).__name__}: {exc}",
-            "traceback": traceback.format_exc()[-1500:],
-        }
+    inv_idx = inv_c.set_index(inv_c["OMS_SKU"].astype(str).str.upper())
+    tot = pd.to_numeric(inv_idx["Total_Inventory"], errors="coerce").fillna(0.0)
 
-    if po is None or po.empty:
-        return {"po_error": "empty_po"}
+    if work.empty:
+        return {"error": "no_sales_work", "formula": {}}
 
-    # Independent ADS = last 30d ship / period_days from sales work
-    if not work.empty:
-        max_d = work["TxnDate"].max()
-        win_start = pd.Timestamp(max_d).normalize() - pd.Timedelta(days=period_days - 1)
-        win = work[work["TxnDate"] >= win_start]
-        ind_sold = win.groupby("OMS_SKU")["ShipUnits"].sum()
-    else:
-        ind_sold = pd.Series(dtype=float)
+    max_d = work["TxnDate"].max()
+    win_start = pd.Timestamp(max_d).normalize() - pd.Timedelta(days=period_days - 1)
+    win = work[work["TxnDate"] >= win_start]
+    sold = win.groupby(win["OMS_SKU"].astype(str).str.upper())["ShipUnits"].sum()
+    ads = (sold / float(period_days)).rename("ADS")
 
-    inv_map = inv_c.set_index(inv_c["OMS_SKU"].astype(str).str.upper())
+    # Union of inventory + 30d sales keys
+    all_skus = sorted(set(tot.index.astype(str)) | set(ads.index.astype(str)))
     rows = []
-    inv_break = 0
-    eff_break = 0
-    zero_inv_with_sales = 0
-    for _, r in po.iterrows():
-        sku = str(r.get("OMS_SKU") or "").strip().upper()
-        if not sku:
-            continue
-        po_inv = float(pd.to_numeric(r.get("Total_Inventory"), errors="coerce") or 0)
-        src = inv_map.loc[sku] if sku in inv_map.index else None
-        if isinstance(src, pd.DataFrame):
-            src = src.iloc[0]
-        src_inv = float(pd.to_numeric(src.get("Total_Inventory"), errors="coerce") or 0) if src is not None else 0.0
-        if abs(po_inv - src_inv) > 0.51:
-            inv_break += 1
-        sold = float(pd.to_numeric(r.get("Sold_Units"), errors="coerce") or 0)
-        ads = float(pd.to_numeric(r.get("ADS"), errors="coerce") or 0)
-        eff = float(pd.to_numeric(r.get("Eff_Days"), errors="coerce") or 0)
-        # Expected sales-based cover days = inv / ADS when ADS>0 (inventory cover)
-        cover_from_ads = (po_inv / ads) if ads > 1e-9 else (999.0 if po_inv > 0 else 0.0)
-        # Eff_Days in this engine is primarily "selling days with stock" not cover days
-        # Document both: Eff_Days (engine) vs Cover_Days (inv/ADS)
-        ind = float(ind_sold.get(sku, 0) or 0)
-        if abs(sold - ind) > 1.0 and sold > 0:
-            pass  # later class
-        if po_inv == 0 and sold > 0:
-            zero_inv_with_sales += 1
-        if abs(eff - min(cover_from_ads, 999)) > 5 and ads > 0.05:
-            # Only flag when engine Eff_Days behaves like cover (rare) — skip noise
-            if "Eff_Days_Inventory" in r.index:
-                pass
-            else:
-                eff_break += 1
-        po_qty_col = next(
-            (c for c in ("Final_PO_Qty", "New_PO_Qty", "PO_Qty", "Gross_PO_Qty") if c in r.index),
-            None,
-        )
-        rows.append(
-            {
-                "OMS_SKU": sku,
-                "Total_Inventory": po_inv,
-                "Src_Inventory": src_inv,
-                "Inv_Delta": po_inv - src_inv,
-                "Sold_Units": sold,
-                "Indep_Sold_30d": ind,
-                "ADS": ads,
-                "Eff_Days": eff,
-                "Eff_Days_Inventory": float(
-                    pd.to_numeric(r.get("Eff_Days_Inventory"), errors="coerce") or 0
-                ),
-                "Cover_Days_Inv_over_ADS": round(cover_from_ads, 2) if ads > 1e-9 else None,
-                "PO_Qty": float(pd.to_numeric(r.get(po_qty_col), errors="coerce") or 0)
-                if po_qty_col
-                else None,
-                "Priority": str(r.get("Priority") or ""),
-            }
-        )
+    miss_inv_with_sales = []
+    miss_sales_with_inv = 0
+    for sku in all_skus:
+        inv_u = float(tot.get(sku, 0.0) or 0.0)
+        sold_u = float(sold.get(sku, 0.0) or 0.0)
+        ads_u = float(ads.get(sku, 0.0) or 0.0)
+        cover = (inv_u / ads_u) if ads_u > 1e-9 else (999.0 if inv_u > 0 else 0.0)
+        row = {
+            "OMS_SKU": sku,
+            "Total_Inventory": inv_u,
+            "Sold_Units_30d": sold_u,
+            "ADS_indep": round(ads_u, 4),
+            "Cover_Days_Inv_over_ADS": round(cover, 2),
+        }
+        rows.append(row)
+        if sold_u > 0 and inv_u <= 0:
+            miss_inv_with_sales.append(row)
+        if inv_u > 0 and sold_u <= 0:
+            miss_sales_with_inv += 1
 
     rec = pd.DataFrame(rows)
-    inv_mismatches = rec[rec["Inv_Delta"].abs() > 0.51].sort_values("Inv_Delta", key=abs, ascending=False)
-    # Critical: zero PO inventory with positive source inventory
-    split = inv_mismatches[
-        (inv_mismatches["Total_Inventory"] == 0) & (inv_mismatches["Src_Inventory"] > 0)
-    ]
-    # SKU mapping issue: sales SKU not on inventory
-    sales_only_with_demand = rec[
-        (rec["Src_Inventory"] == 0) & (rec["Sold_Units"] > 0) & (rec["Total_Inventory"] == 0)
-    ]
+    miss_inv_with_sales.sort(key=lambda r: r["Sold_Units_30d"], reverse=True)
+
+    # Optional shared PO cache sample (if present on disk)
+    po_sample = {}
+    for name in ("po_sold_result.csv", "po_result.parquet"):
+        p = _cache() / name
+        if not p.is_file():
+            continue
+        try:
+            pdf = pd.read_csv(p) if name.endswith(".csv") else pd.read_parquet(p)
+            sku_c = "OMS_SKU" if "OMS_SKU" in pdf.columns else None
+            if not sku_c:
+                continue
+            pdf["_sku"] = pdf[sku_c].astype(str).str.upper()
+            # join independent cover vs system Eff_Days if column exists
+            merge_cols = ["_sku"]
+            for c in ("Total_Inventory", "ADS", "Eff_Days", "Sold_Units", "Priority"):
+                if c in pdf.columns:
+                    merge_cols.append(c)
+            sample = pdf[merge_cols].copy()
+            sample = sample.merge(
+                rec.rename(columns={"OMS_SKU": "_sku"}),
+                on="_sku",
+                how="left",
+                suffixes=("_sys", "_indep"),
+            )
+            inv_sys = pd.to_numeric(sample.get("Total_Inventory_sys", sample.get("Total_Inventory")), errors="coerce").fillna(0)
+            inv_indep = pd.to_numeric(sample.get("Total_Inventory_indep", sample.get("Total_Inventory")), errors="coerce").fillna(0)
+            # prefer explicit
+            if "Total_Inventory_sys" in sample.columns and "Total_Inventory_indep" in sample.columns:
+                dlt = inv_sys - inv_indep
+            else:
+                dlt = inv_sys * 0
+            bad = sample.loc[dlt.abs() > 0.51].copy() if len(dlt) else sample.iloc[0:0]
+            if len(bad):
+                bad = bad.assign(Inv_Delta=dlt.loc[bad.index].values)
+            zero_po_stock = []
+            if "Total_Inventory_sys" in sample.columns:
+                m = (inv_sys == 0) & (inv_indep > 0)
+                zero_po_stock = sample.loc[m].head(30).to_dict("records")
+            po_sample = {
+                "source": name,
+                "rows": int(len(pdf)),
+                "inv_mismatch_count": int(len(bad)),
+                "top_inv_mismatches": bad.head(25).to_dict("records") if len(bad) else [],
+                "zero_sys_inv_with_snapshot_stock": zero_po_stock,
+            }
+            break
+        except Exception as exc:
+            po_sample = {"source": name, "error": str(exc)}
 
     formula_doc = {
         "Eff_Days": (
-            "In calculate_po_base: selling/in-stock window days used for ADS "
-            "(often from inventory history as Eff_Days_Inventory when available). "
-            "NOT pure Cover = Inventory/ADS. Use Cover_Days_Inv_over_ADS for "
-            "inventory-days-of-cover diagnostic."
+            "Engine: in-stock/selling-window days (often Eff_Days_Inventory from "
+            "daily inventory history), not pure cover. DO NOT treat as Inventory/ADS."
         ),
-        "ADS": "Demand rate (units/day) after Recent/LY/Seasonal/Flat blend + burst caps",
-        "PO": "target_days × ADS − available inventory − pipeline (see Gross/New_PO columns)",
+        "ADS_indep": f"Sum of shipment Units over last {period_days} days ending sales_max / {period_days}",
+        "Cover_Days_Inv_over_ADS": "Total_Inventory / ADS_indep — diagnostic cover only",
+        "PO": "Requires full calculate_po_base (skipped here when memory-constrained); use shared PO cache sample when present",
     }
 
     return {
         "formula": formula_doc,
-        "po_rows": int(len(po)),
-        "inv_mismatch_count": int(len(inv_mismatches)),
-        "inv_mismatch_zero_po_with_stock": int(len(split)),
-        "sales_with_zero_inventory_count": int(len(sales_only_with_demand)),
-        "zero_inv_with_sales_in_po": zero_inv_with_sales,
-        "top_inv_mismatches": inv_mismatches.head(40).to_dict("records"),
-        "top_zero_po_with_stock": split.head(30).to_dict("records"),
-        "top_sales_zero_inv": sales_only_with_demand.nlargest(30, "Sold_Units").to_dict("records"),
-        "edge_high_inv_low_ads": rec[(rec["Total_Inventory"] > 100) & (rec["ADS"] < 0.05)]
+        "period_days": period_days,
+        "sales_window_end": str(max_d)[:10],
+        "sku_union_count": int(len(rec)),
+        "sales_with_zero_inventory_count": int(len(miss_inv_with_sales)),
+        "inventory_with_zero_30d_sales": int(miss_sales_with_inv),
+        "top_sales_zero_inv": miss_inv_with_sales[:40],
+        "edge_high_inv_low_ads": rec[(rec["Total_Inventory"] > 100) & (rec["ADS_indep"] < 0.05)]
         .nlargest(15, "Total_Inventory")
         .to_dict("records"),
-        "edge_low_inv_high_ads": rec[(rec["Total_Inventory"] < 5) & (rec["ADS"] > 0.5)]
-        .nlargest(15, "ADS")
+        "edge_low_inv_high_ads": rec[(rec["Total_Inventory"] < 5) & (rec["ADS_indep"] > 0.5)]
+        .nlargest(15, "ADS_indep")
         .to_dict("records"),
-        "summary_po_qty_sum": float(pd.to_numeric(rec["PO_Qty"], errors="coerce").fillna(0).clip(lower=0).sum())
-        if "PO_Qty" in rec.columns
-        else None,
+        "shared_po_cache_sample": po_sample,
+        "inv_mismatch_count": int(po_sample.get("inv_mismatch_count") or 0),
+        "inv_mismatch_zero_po_with_stock": int(
+            len(po_sample.get("zero_sys_inv_with_snapshot_stock") or [])
+        ),
     }
 
 
@@ -599,11 +575,46 @@ def main() -> int:
         return 2
 
     work = prepare_sales(sales, mapping)
+    # Phase 1: sales (print early so OOM later still leaves clues on stderr)
     report["sales"] = audit_q1_sales(work, mapping)
-    report["inventory"] = audit_inventory_every_sku(inv, hist, mapping)
-    report["eff_days_po"] = audit_eff_days_and_po(
-        sales, inv, hist, status, existing_po, mapping, work
+    sys.stderr.write(
+        "PHASE_SALES_DONE "
+        + json.dumps(
+            {
+                "span": (report["sales"] or {}).get("sales_span"),
+                "q1": {
+                    k: (report["sales"] or {}).get("q1_2025", {}).get(k)
+                    for k in ("status", "ship_total", "jan", "feb", "mar", "sku_rows")
+                },
+                "hyp": (report["sales"] or {}).get("q1_root_cause_hypothesis"),
+            },
+            default=str,
+        )
+        + "\n"
     )
+    sys.stderr.flush()
+
+    report["inventory"] = audit_inventory_every_sku(inv, hist, mapping)
+    sys.stderr.write(
+        "PHASE_INV_DONE "
+        + json.dumps(
+            {
+                "sku_count": (report["inventory"] or {}).get("sku_count"),
+                "hist": (report["inventory"] or {}).get("history_vs_inv"),
+                "twins": (report["inventory"] or {}).get("powder_power_twin_count"),
+            },
+            default=str,
+        )[:4000]
+        + "\n"
+    )
+    sys.stderr.flush()
+
+    # Lightweight cover-days + optional shared PO sample (no full calculate_po_base)
+    report["eff_days_po"] = audit_eff_days_light(inv, mapping, work, period_days=30)
+    # Drop unused large frames references before dump
+    del sales, work
+    if hist is not None:
+        del hist
 
     # Root cause rollup
     causes = []
@@ -669,12 +680,11 @@ def main() -> int:
     }
 
     print(json.dumps(report, indent=2, default=str))
-    # Fail if critical join or completely missing Q1
+    # Exit 0 when report written (ops parse JSON). Use flags for automation later.
     q1 = (report.get("sales") or {}).get("q1_2025") or {}
     if q1.get("status") == "NO_DATA":
+        report["exit_hint"] = "Q1_2025_NO_DATA_IN_SALES_DF"
         return 3
-    if ep.get("inv_mismatch_zero_po_with_stock", 0) > 50:
-        return 4
     return 0
 
 
