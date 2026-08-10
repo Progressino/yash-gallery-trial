@@ -5,18 +5,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-_dc() {
-  if docker compose version >/dev/null 2>&1; then
-    docker compose "$@"
-  else
-    docker-compose "$@"
-  fi
-}
-
 COMPOSE_FILE="${PO_WARMUP_COMPOSE_FILE:-docker-compose.prod.yml}"
+COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-progressino}"
 TIMEOUT_SEC="${PO_WARMUP_TIMEOUT_SEC:-2400}"
 
-echo "==> PO shared-cache warmup (compose: ${COMPOSE_FILE})"
+if docker compose version >/dev/null 2>&1; then
+  DC=(docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE")
+else
+  DC=(docker-compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE")
+fi
+
+echo "==> PO shared-cache warmup (compose: ${COMPOSE_FILE}, project: ${COMPOSE_PROJECT})"
 
 echo "==> Waiting for backend health (warm disk cache may still be loading)…"
 for i in $(seq 1 60); do
@@ -32,11 +31,22 @@ if ! curl -sf --max-time 5 http://127.0.0.1:8000/api/health >/dev/null 2>&1; the
 fi
 
 echo "==> Running run_po_calculate_production (timeout ${TIMEOUT_SEC}s)…"
-WARMUP_CMD=(_dc -f "$COMPOSE_FILE" exec -T backend python -m backend.scripts.run_po_calculate_production)
-if timeout "${TIMEOUT_SEC}s" "${WARMUP_CMD[@]}"; then
-  echo "OK: PO shared-cache warmup finished"
+# Important: do not pass a shell function to ``timeout`` (exit 127 — command not found).
+if command -v timeout >/dev/null 2>&1; then
+  if timeout "${TIMEOUT_SEC}s" "${DC[@]}" exec -T backend \
+    python -m backend.scripts.run_po_calculate_production; then
+    echo "OK: PO shared-cache warmup finished"
+  else
+    rc=$?
+    echo "WARN: PO warmup exited ${rc} — operators can still Calculate PO manually"
+    exit 0
+  fi
 else
-  rc=$?
-  echo "WARN: PO warmup exited ${rc} — operators can still Calculate PO manually"
-  exit 0
+  if "${DC[@]}" exec -T backend python -m backend.scripts.run_po_calculate_production; then
+    echo "OK: PO shared-cache warmup finished"
+  else
+    rc=$?
+    echo "WARN: PO warmup exited ${rc} — operators can still Calculate PO manually"
+    exit 0
+  fi
 fi

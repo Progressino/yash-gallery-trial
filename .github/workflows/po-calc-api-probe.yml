@@ -52,6 +52,8 @@ jobs:
           print("hydrate", hy.status_code, (hy.text or "")[:300])
           hy.raise_for_status()
 
+          # Match backend.scripts.run_po_calculate_production po_fresh_default so
+          # post-deploy shared PO cache is a hit (seconds, not a full engine run).
           body = {
               "period_days": 30,
               "lead_time": 60,
@@ -69,7 +71,7 @@ jobs:
               "enforce_lead_time_release_gate": True,
               "urgent_all_sizes_days": 45,
               "planning_date": time.strftime("%Y-%m-%d"),
-              "raise_ledger_lookback_days": 14,
+              "raise_ledger_lookback_days": 45,
               "raise_view_date": time.strftime("%Y-%m-%d"),
               "auto_import_yesterday_ledger": True,
               "use_shared_cache": True,
@@ -89,11 +91,27 @@ jobs:
           last = {}
           for i in range(400):  # ~20–40 min with backoff
               path = f"/api/po/calculate/status/{job_id}" if job_id else "/api/po/calculate/status"
-              st = s.get(f"{base}{path}", timeout=45)
+              try:
+                  st = s.get(f"{base}{path}", timeout=45)
+              except (requests.ConnectionError, requests.Timeout) as e:
+                  print(f"poll{i} transient {type(e).__name__}: {e}")
+                  # Wait for possible OOM/restart recovery
+                  for _ in range(30):
+                      try:
+                          if s.get(f"{base}/api/health", timeout=10).ok:
+                              break
+                      except Exception:
+                          pass
+                      time.sleep(2)
+                  continue
               print(f"poll{i} {path} -> {st.status_code} {(st.text or '')[:240]}")
               if st.status_code == 404:
                   print("FATAL_404", path, st.text)
                   raise SystemExit(2)
+              if st.status_code >= 500:
+                  print(f"poll{i} server {st.status_code}")
+                  time.sleep(5)
+                  continue
               st.raise_for_status()
               last = st.json()
               status = last.get("status")
@@ -116,6 +134,8 @@ jobs:
                       rj.get("total"),
                       "cols",
                       len(rj.get("columns") or []),
+                      "from_shared",
+                      data.get("from_shared_cache") or last.get("from_shared_cache"),
                       "elapsed",
                       round(time.time() - t0, 1),
                   )
