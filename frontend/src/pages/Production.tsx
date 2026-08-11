@@ -6,6 +6,147 @@ import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import SetBomPanel from '../components/SetBomPanel'
 import { downloadCsv } from '../lib/exportCsv'
 
+type MasterSkuOption = {
+  sku: string
+  sku_name: string
+  source?: string
+}
+
+/** Searchable SKU dropdown for Manual SO Cutting JO (item master + sales/ready SKUs). */
+function ManualJoSkuDropdown({
+  value,
+  catalog,
+  onPick,
+}: {
+  value: string
+  catalog: MasterSkuOption[]
+  onPick: (sku: string, skuName: string) => void
+}) {
+  const [filter, setFilter] = useState('')
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  const { data: itemHits = [] } = useQuery<
+    { id?: number; item_code?: string; item_name?: string; size_label?: string }[]
+  >({
+    queryKey: ['manual-jo-sku-search', filter],
+    queryFn: () =>
+      api
+        .get(`/items/search?q=${encodeURIComponent(filter.trim())}`)
+        .then(r => r.data || []),
+    enabled: open && filter.trim().length >= 2,
+    staleTime: 30_000,
+  })
+
+  const options = useMemo(() => {
+    const map = new Map<string, MasterSkuOption>()
+    for (const row of catalog) {
+      const sku = String(row.sku || '').trim()
+      if (!sku) continue
+      if (!map.has(sku.toUpperCase())) {
+        map.set(sku.toUpperCase(), {
+          sku,
+          sku_name: String(row.sku_name || '').trim(),
+          source: row.source,
+        })
+      }
+    }
+    for (const it of itemHits) {
+      const sku = String(it.item_code || '').trim()
+      if (!sku) continue
+      const key = sku.toUpperCase()
+      if (!map.has(key)) {
+        map.set(key, {
+          sku,
+          sku_name: [it.item_name, it.size_label].filter(Boolean).join(' · '),
+          source: 'item_master',
+        })
+      }
+    }
+    let list = [...map.values()]
+    const q = filter.trim().toLowerCase()
+    if (q) {
+      list = list.filter(
+        r =>
+          r.sku.toLowerCase().includes(q)
+          || r.sku_name.toLowerCase().includes(q),
+      )
+    }
+    list.sort((a, b) => a.sku.localeCompare(b.sku))
+    return list.slice(0, 400)
+  }, [catalog, itemHits, filter])
+
+  useEffect(() => {
+    function onDoc(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
+
+  const selectedLabel = useMemo(() => {
+    const hit = catalog.find(c => c.sku.toUpperCase() === value.toUpperCase())
+      || options.find(o => o.sku.toUpperCase() === value.toUpperCase())
+    if (!value) return ''
+    return hit?.sku_name ? `${value} — ${hit.sku_name}` : value
+  }, [value, catalog, options])
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className={`w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 text-left font-mono bg-white
+          ${value ? 'text-gray-900' : 'text-gray-400'}`}
+      >
+        {value ? selectedLabel : 'Select SKU…'}
+      </button>
+      {open && (
+        <div className="absolute z-50 mt-1 w-full min-w-[16rem] max-w-md bg-white border border-gray-200 rounded-lg shadow-lg">
+          <div className="p-2 border-b">
+            <input
+              autoFocus
+              type="search"
+              value={filter}
+              onChange={e => setFilter(e.target.value)}
+              placeholder="Search item master / SO SKUs…"
+              className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm font-mono"
+            />
+          </div>
+          <div className="max-h-52 overflow-y-auto">
+            {options.length === 0 ? (
+              <p className="px-3 py-2 text-xs text-gray-500">
+                {filter.trim().length < 2
+                  ? 'Type 2+ characters to search Item Master, or pick from SO/JO list.'
+                  : 'No matching SKUs.'}
+              </p>
+            ) : (
+              options.map(opt => (
+                <button
+                  key={opt.sku}
+                  type="button"
+                  className={`w-full text-left px-3 py-2 text-sm border-b border-gray-50 last:border-0 hover:bg-blue-50
+                    ${value === opt.sku ? 'bg-blue-50' : ''}`}
+                  onClick={() => {
+                    onPick(opt.sku, opt.sku_name)
+                    setOpen(false)
+                    setFilter('')
+                  }}
+                >
+                  <span className="font-mono font-semibold text-[#002B5B]">{opt.sku}</span>
+                  {opt.sku_name && (
+                    <span className="ml-2 text-xs text-gray-500 truncate">{opt.sku_name}</span>
+                  )}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function apiErrorMessage(err: unknown, fallback: string): string {
   if (!axios.isAxiosError(err)) return fallback
   const detail = err.response?.data?.detail
@@ -989,6 +1130,30 @@ export default function Production() {
     return [...new Set([...fromJO, ...fromReady].map(s => s.trim()).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b))
   }, [processJOs, allJOs, readyLines])
+
+  /** SKU catalog for Manual SO JO dropdown (SOs + JOs + ready lines). */
+  const manualJoSkuCatalog = useMemo(() => {
+    const map = new Map<string, MasterSkuOption>()
+    const add = (sku: string, name: string, source: string) => {
+      const s = String(sku || '').trim()
+      if (!s) return
+      const k = s.toUpperCase()
+      if (map.has(k)) return
+      map.set(k, { sku: s, sku_name: String(name || '').trim(), source })
+    }
+    for (const so of soList as { lines?: { sku?: string; sku_name?: string; item_name?: string }[] }[]) {
+      for (const ln of so.lines || []) {
+        add(String(ln.sku || ''), String(ln.sku_name || ln.item_name || ''), 'sales')
+      }
+    }
+    for (const j of [...processJOs, ...allJOs] as JO[]) {
+      add(j.sku, j.sku_name || '', 'jo')
+    }
+    for (const r of readyLines as { sku?: string; sku_name?: string }[]) {
+      add(String(r.sku || ''), String(r.sku_name || ''), 'ready')
+    }
+    return [...map.values()].sort((a, b) => a.sku.localeCompare(b.sku))
+  }, [soList, processJOs, allJOs, readyLines])
 
   const vendorOptions = useMemo(() => {
     const fromJO = processJOs.map(j => j.vendor_name).concat(allJOs.map(j => j.vendor_name))
@@ -2577,17 +2742,25 @@ export default function Production() {
               </div>
             )}
 
-            {/* Manual SO — free SKU / qty (no SO master lines) */}
+            {/* Manual SO — SKU dropdown / qty (no SO master lines required) */}
             {newForm.so_source === 'manual' && (
               <div className="border border-amber-200 bg-amber-50/50 rounded-xl p-3 grid grid-cols-2 md:grid-cols-4 gap-2">
-                <div>
+                <div className="md:col-span-2">
                   <label className="text-xs text-gray-500">SKU *</label>
-                  <input
+                  <ManualJoSkuDropdown
                     value={newForm.sku}
-                    onChange={e => setNewForm(f => ({ ...f, sku: e.target.value.trim().toUpperCase() }))}
-                    className="w-full border rounded px-2 py-1.5 text-sm mt-1 font-mono"
-                    placeholder="STYLE-M"
+                    catalog={manualJoSkuCatalog}
+                    onPick={(sku, skuName) =>
+                      setNewForm(f => ({
+                        ...f,
+                        sku,
+                        sku_name: skuName || f.sku_name,
+                      }))
+                    }
                   />
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    Pick from open SO lines / ready-to-cut / prior JOs, or search Item Master.
+                  </p>
                 </div>
                 <div>
                   <label className="text-xs text-gray-500">SKU name</label>
@@ -2606,10 +2779,10 @@ export default function Production() {
                     className="w-full border rounded px-2 py-1.5 text-sm mt-1"
                   />
                 </div>
-                <div className="flex items-end">
+                <div className="flex items-end md:col-span-4">
                   <button
                     type="button"
-                    className="w-full py-1.5 text-xs bg-[#002B5B] text-white rounded-lg"
+                    className="px-4 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg"
                     onClick={() => {
                       if (!newForm.sku || !newForm.planned_qty) return
                       setNewLines([{
