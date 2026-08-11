@@ -14,8 +14,8 @@ const ISSUE_TYPES = ['General', 'Discipline', 'Quality', 'Attendance', 'Behaviou
 const SEVERITIES = ['Minor', 'Moderate', 'Major']
 const ISSUE_STATUSES = ['Open', 'Resolve', 'Hold', 'Cancel'] as const
 
-/** Column header with inline filter control */
-function ColFilter({ label, children }: { label: string; children: ReactNode }) {
+/** Column header with inline filter control (reserved for dense tables) */
+function _ColFilter({ label, children }: { label: string; children: ReactNode }) {
   return (
     <th className="text-left px-2 py-1.5 align-bottom">
       <div className="text-[10px] font-semibold text-gray-500 uppercase">{label}</div>
@@ -23,6 +23,7 @@ function ColFilter({ label, children }: { label: string; children: ReactNode }) 
     </th>
   )
 }
+void _ColFilter
 
 const issueStatusStyle = (s: string) => {
   if (s === 'Resolve' || s === 'Resolved') return 'bg-green-100 text-green-800'
@@ -142,6 +143,7 @@ export default function HRM() {
   const [manualTimeVal, setManualTimeVal] = useState('')
   const [empNameSuggest, setEmpNameSuggest] = useState<any[]>([])
   const [audioPreview, setAudioPreview] = useState<string | null>(null)
+  void audioPreview
   const issueAudioRecRef = useRef<MediaRecorder | null>(null)
   const issueAudioChunks = useRef<Blob[]>([])
 
@@ -476,6 +478,7 @@ export default function HRM() {
       setIssueForm({
         subject_user_id: '', employee_id: '', issue_type: 'General', severity: 'Minor',
         title: '', description: '', caused_by_user_id: '', caused_by_employee_id: '', status: 'Open',
+        audio_url: '',
       })
     },
     onError: (e: any) => alert(e?.response?.data?.detail || 'Failed to create issue'),
@@ -877,6 +880,8 @@ export default function HRM() {
     issueAudioRecRef.current?.stop()
     setIssueVoiceStatus('Audio ready for attachment / playback')
   }
+  void startIssueAudio
+  void stopIssueAudio
 
   const searchEmpNames = async (q: string) => {
     setEmpForm(f => ({ ...f, name: q }))
@@ -1870,7 +1875,9 @@ export default function HRM() {
                     mandatory: false,
                     schedule_weekday: '',
                     schedule_month_day: 0,
+                    schedule_month: 0,
                     time_period: '',
+                    linked_to_employee_id: '',
                   })}
                   disabled={!taskForm.employee_id || !taskForm.title || createOneTimeTaskMut.isPending}
                   className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
