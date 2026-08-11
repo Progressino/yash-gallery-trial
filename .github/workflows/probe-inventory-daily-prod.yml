@@ -10,7 +10,12 @@ on:
 
 jobs:
   probe:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && contains(github.event.workflow_run.head_commit.message, 'inventory')) || github.event_name == 'workflow_dispatch' }}
+    # Always probe after a successful Deploy to VPS, or on manual dispatch.
+    # (Previously only runs with "inventory" in the commit message were probed,
+    # so most deploys showed a 1s "skipped" run — looks broken but never tested.)
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: self-hosted
     timeout-minutes: 30
     steps:
@@ -49,9 +54,7 @@ jobs:
               "status", "git_sha", "label", "warm_cache", "built_at"
           )}))
           sha = str(health.get("git_sha") or "")
-          if not sha.startswith("95dd95") and sha not in ("95dd95b",):
-              # Accept any SHA that includes inventory export route (post-deploy)
-              print("WARN: expected git_sha 95dd95b+, got", sha)
+          print("DEPLOY_SHA", sha)
 
           for attempt in range(1, 6):
               try:
