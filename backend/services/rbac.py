@@ -104,8 +104,13 @@ class HrmScope:
 
     @property
     def can_edit_assignments(self) -> bool:
-        """HOD or Admin (incl. Super Admin / Sir) may edit/delete assignments — not employees."""
+        """HOD or Admin may create assignments and mark status overrides (not employee)."""
         return self.can_manage_org or self.is_hod
+
+    @property
+    def can_mutate_assignment_records(self) -> bool:
+        """Edit/delete responsibility & task master data — Admin / Super Admin / Sir only."""
+        return self.can_manage_org
 
     @property
     def can_view_employee_list(self) -> bool:
@@ -114,8 +119,24 @@ class HrmScope:
 
     @property
     def can_delete_hrm_records(self) -> bool:
-        """Delete/cancel responsibilities, tasks, etc. — HOD or Admin, never Employee."""
-        return self.can_edit_assignments
+        """Delete/cancel responsibilities, tasks — Admin only (not HOD / Employee)."""
+        return self.can_mutate_assignment_records
+
+    @property
+    def can_use_employee_check(self) -> bool:
+        """Employee Check tab for operational users/HOD; hidden for pure Admin roster roles."""
+        if self.is_hod or self.is_employee:
+            return True
+        if self.role in (ROLE_SUPER_ADMIN, ROLE_ADMIN) and self.level == "all":
+            return False
+        return True
+
+    @property
+    def can_view_dashboard(self) -> bool:
+        """Dashboard tab: Admin/Super Admin/Sir and HOD only — not normal employees."""
+        if self.is_hod:
+            return True
+        return self.can_manage_org
 
     @property
     def can_create_issues(self) -> bool:
@@ -295,7 +316,15 @@ def assert_hrm_hod_or_admin(scope: HrmScope) -> None:
     from fastapi import HTTPException
 
     if not scope.can_edit_assignments:
-        raise HTTPException(403, "Only HOD or Admin can edit tasks and responsibilities")
+        raise HTTPException(403, "Only HOD or Admin can manage assignments")
+
+
+def assert_hrm_admin_mutate_records(scope: HrmScope) -> None:
+    """Edit/delete of task/responsibility master records — Admin only."""
+    from fastapi import HTTPException
+
+    if not scope.can_mutate_assignment_records:
+        raise HTTPException(403, "Only Admin can edit or delete tasks and responsibilities")
 
 
 def assert_can_view_employee_list(scope: HrmScope) -> None:
@@ -311,7 +340,7 @@ def assert_hrm_delete_allowed(scope: HrmScope) -> None:
     if scope.is_employee:
         raise HTTPException(403, "Employees cannot delete HRM records")
     if not scope.can_delete_hrm_records:
-        raise HTTPException(403, "Only HOD or Admin can delete HRM records")
+        raise HTTPException(403, "Only Admin can delete tasks and responsibilities")
 
 
 def assert_responsibility_in_scope(scope: HrmScope, responsibility_id: int) -> int:

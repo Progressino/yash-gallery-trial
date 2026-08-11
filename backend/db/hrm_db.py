@@ -5,6 +5,12 @@ import os
 import sqlite3
 from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
+
+# Performance rules cutover (IST calendar date). Rows before this stay on legacy formula.
+PERFORMANCE_CUTOVER_DATE = os.environ.get("HRM_PERFORMANCE_CUTOVER", "2026-08-11").strip()[:10]
 
 
 def _default_db_path() -> str:
@@ -17,10 +23,88 @@ _DB = os.environ.get("HRM_DB_PATH", _default_db_path())
 
 TASK_LOG_STATUSES = frozenset({"Done", "Partial", "Missed", "Blocked", "Leave", "N/A"})
 NEUTRAL_TASK_STATUSES = frozenset({"Leave", "N/A"})
+# Performance only after Approved / Self-complete (Done without Linked To) / Auto-Approved
+PERF_CREDIT_STATUSES = frozenset({"Done", "Partial"})  # Done only if approval satisfied
 
 # HR issue lifecycle (Resolved legacy maps to Resolve)
 ISSUE_STATUSES = frozenset({"Open", "Resolve", "Hold", "Cancel"})
 ISSUE_STATUS_ALIASES = {"Resolved": "Resolve", "Closed": "Resolve", "Cancelled": "Cancel"}
+
+FREQUENCIES = (
+    "Daily",
+    "Weekly",
+    "Fortnightly",
+    "Monthly",
+    "Quarterly",
+    "Yearly",
+    "Whenever Required",
+)
+PRIORITIES = ("High", "Medium", "Low", "Critical")
+TIME_PERIODS = ("Morning", "Afternoon", "Evening", "Full Day", "Shift-A", "Shift-B", "Custom")
+WEEKDAYS = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
+MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+# HOD may change a locked status until end of the calendar day after first mark.
+HOD_STATUS_EDIT_GRACE_DAYS = 1
+# Employee may mark / Linked person may approve within task day + next 2 IST days.
+TASK_WINDOW_EXTRA_DAYS = 2
+
+
+def today_ist() -> date:
+    return datetime.now(IST).date()
+
+
+def now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def _now_iso() -> str:
+    return now_ist().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def in_task_action_window(task_date: str, *, as_of: date | None = None) -> bool:
+    """True if as_of is within task_date .. task_date+2 (IST calendar days inclusive)."""
+    as_of = as_of or today_ist()
+    try:
+        d0 = date.fromisoformat(str(task_date)[:10])
+    except ValueError:
+        return True
+    return d0 <= as_of <= d0 + timedelta(days=TASK_WINDOW_EXTRA_DAYS)
+
+
+def weekday_occurrence_in_month(d: date) -> int:
+    """1-based count of this weekday in the month (1st Monday, 2nd Monday, …)."""
+    n = 0
+    for day in range(1, d.day + 1):
+        if date(d.year, d.month, day).weekday() == d.weekday():
+            n += 1
+    return n
+
+
+def quarterly_months(anchor_month: int) -> set[int]:
+    """Months in the quarterly cycle starting at anchor (1-12). e.g. Jan → 1,4,7,10."""
+    a = max(1, min(12, int(anchor_month or 1)))
+    return {((a - 1 + i * 3) % 12) + 1 for i in range(4)}
 
 
 def _connect():
@@ -193,11 +277,66 @@ def init_db():
         "ALTER TABLE issue_logs ADD COLUMN caused_by_user_name TEXT DEFAULT ''",
         "ALTER TABLE issue_logs ADD COLUMN updated_at TEXT DEFAULT ''",
         "ALTER TABLE issue_logs ADD COLUMN designation TEXT DEFAULT ''",
+        # Responsibilities enhancements
+        "ALTER TABLE responsibilities ADD COLUMN priority TEXT DEFAULT 'Medium'",
+        "ALTER TABLE responsibilities ADD COLUMN mandatory INTEGER DEFAULT 0",
+        "ALTER TABLE responsibilities ADD COLUMN schedule_weekday TEXT DEFAULT ''",
+        "ALTER TABLE responsibilities ADD COLUMN schedule_month_day INTEGER DEFAULT 0",
+        "ALTER TABLE responsibilities ADD COLUMN time_period TEXT DEFAULT ''",
+        # One-time tasks enhancements
+        "ALTER TABLE one_time_tasks ADD COLUMN priority TEXT DEFAULT 'Medium'",
+        "ALTER TABLE one_time_tasks ADD COLUMN manual_duration_minutes INTEGER DEFAULT 0",
+        # Org hierarchy
+        "ALTER TABLE employees ADD COLUMN reports_to_employee_id INTEGER REFERENCES employees(id)",
+        "ALTER TABLE departments ADD COLUMN parent_department_id INTEGER REFERENCES departments(id)",
+        # Issue audio attachments (data URL / base64 payload stored in file_url when small)
+        "ALTER TABLE issue_attachments ADD COLUMN attachment_kind TEXT DEFAULT 'file'",
+        # Final confirmation: schedules, linked approval, reassignment
+        "ALTER TABLE responsibilities ADD COLUMN schedule_month INTEGER DEFAULT 0",
+        "ALTER TABLE responsibilities ADD COLUMN linked_to_employee_id INTEGER",
+        "ALTER TABLE one_time_tasks ADD COLUMN linked_to_employee_id INTEGER",
+        "ALTER TABLE task_logs ADD COLUMN approval_status TEXT DEFAULT ''",
+        "ALTER TABLE task_logs ADD COLUMN approved_by TEXT DEFAULT ''",
+        "ALTER TABLE task_logs ADD COLUMN approved_at TEXT DEFAULT ''",
+        "ALTER TABLE task_logs ADD COLUMN is_reassignment INTEGER DEFAULT 0",
+        "ALTER TABLE task_logs ADD COLUMN reassigned_from_employee_id INTEGER DEFAULT 0",
+        "ALTER TABLE task_logs ADD COLUMN reassignment_clone_id INTEGER DEFAULT 0",
     ):
         try:
             conn.execute(sql)
         except sqlite3.OperationalError:
             pass
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS hrm_task_audit (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type     TEXT NOT NULL,
+            entity_id       INTEGER,
+            action          TEXT NOT NULL,
+            old_value       TEXT DEFAULT '',
+            new_value       TEXT DEFAULT '',
+            actor           TEXT DEFAULT '',
+            notes           TEXT DEFAULT '',
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS day_reassignment_clones (
+            id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_responsibility_id  INTEGER NOT NULL REFERENCES responsibilities(id),
+            original_employee_id        INTEGER NOT NULL REFERENCES employees(id),
+            assignee_employee_id        INTEGER NOT NULL REFERENCES employees(id),
+            reassignment_date           TEXT NOT NULL,
+            title                       TEXT DEFAULT '',
+            status                      TEXT DEFAULT 'Pending',
+            remarks                     TEXT DEFAULT '',
+            marked_by                   TEXT DEFAULT '',
+            marked_at                   TEXT DEFAULT '',
+            assigned_by                 TEXT DEFAULT '',
+            created_at                  TEXT DEFAULT (datetime('now')),
+            UNIQUE(original_responsibility_id, reassignment_date)
+        );
+        """
+    )
 
     # Lifecycle rename: Resolved → Resolve (keep legacy display mapping)
     try:
@@ -214,6 +353,12 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_issue_logs_date ON issue_logs(issue_date)",
         "CREATE INDEX IF NOT EXISTS idx_issue_history_issue ON issue_history(issue_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id)",
+        "CREATE INDEX IF NOT EXISTS idx_resp_freq ON responsibilities(frequency)",
+        "CREATE INDEX IF NOT EXISTS idx_resp_priority ON responsibilities(priority)",
+        "CREATE INDEX IF NOT EXISTS idx_ott_priority ON one_time_tasks(priority)",
+        "CREATE INDEX IF NOT EXISTS idx_emp_reports ON employees(reports_to_employee_id)",
+        "CREATE INDEX IF NOT EXISTS idx_task_logs_approval ON task_logs(approval_status)",
+        "CREATE INDEX IF NOT EXISTS idx_reassign_day ON day_reassignment_clones(assignee_employee_id, reassignment_date)",
     ):
         try:
             conn.execute(idx_sql)
@@ -221,6 +366,458 @@ def init_db():
             pass
     conn.commit()
     conn.close()
+
+
+def write_task_audit(
+    entity_type: str,
+    entity_id: int | None,
+    action: str,
+    *,
+    old_value: str = "",
+    new_value: str = "",
+    actor: str = "",
+    notes: str = "",
+    conn=None,
+) -> None:
+    owns = conn is None
+    if owns:
+        conn = _connect()
+    conn.execute(
+        """INSERT INTO hrm_task_audit(entity_type, entity_id, action, old_value, new_value, actor, notes, created_at)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            entity_type,
+            entity_id,
+            action,
+            old_value or "",
+            new_value or "",
+            actor or "",
+            notes or "",
+            _now_iso(),
+        ),
+    )
+    if owns:
+        conn.commit()
+        conn.close()
+
+
+def parse_duration_to_minutes(value) -> int:
+    """Parse minutes (int) or HH:MM / H:MM time strings into minutes. Raises ValueError."""
+    if value is None or value == "":
+        raise ValueError("Duration is required")
+    if isinstance(value, (int, float)):
+        mins = int(value)
+        if mins < 0:
+            raise ValueError("Duration cannot be negative")
+        return mins
+    s = str(value).strip()
+    if not s:
+        raise ValueError("Duration is required")
+    if s.isdigit():
+        return max(0, int(s))
+    # HH:MM or H:MM
+    if ":" in s:
+        parts = s.split(":")
+        if len(parts) != 2:
+            raise ValueError("Time must be HH:MM")
+        h_s, m_s = parts[0].strip(), parts[1].strip()
+        if not h_s.isdigit() or not m_s.isdigit():
+            raise ValueError("Time must be HH:MM")
+        h, m = int(h_s), int(m_s)
+        if h < 0 or m < 0 or m > 59:
+            raise ValueError("Invalid time (minutes 0-59)")
+        return h * 60 + m
+    raise ValueError("Invalid duration format (use minutes or HH:MM)")
+
+
+def is_schedule_due(
+    frequency: str,
+    check_date: str,
+    weekday: str = "",
+    month_day: int = 0,
+    schedule_month: int = 0,
+) -> bool:
+    """True if a responsibility should appear on check_date for its frequency/schedule.
+
+    Fortnightly: 2nd and 4th occurrence of the selected weekday each month.
+    Quarterly: anchor month (1–12) then every 3 months; no day selection (due all days in cycle months).
+    Whenever Required: always available (UI lists at bottom of Employee Check).
+    """
+    freq = (frequency or "Daily").strip()
+    if not freq or freq == "Whenever Required":
+        return True
+    try:
+        d = date.fromisoformat(check_date[:10])
+    except ValueError:
+        return True
+    wd_name = WEEKDAYS[d.weekday()] if d.weekday() < len(WEEKDAYS) else ""
+    if freq == "Daily":
+        return True
+    if freq == "Weekly":
+        wanted = (weekday or "").strip()
+        if not wanted:
+            return True  # unscheduled weekly still shows (backward compatible)
+        return wanted.lower() == wd_name.lower()
+    if freq == "Fortnightly":
+        wanted = (weekday or "").strip()
+        if not wanted:
+            return False
+        if wanted.lower() != wd_name.lower():
+            return False
+        return weekday_occurrence_in_month(d) in (2, 4)
+    if freq == "Monthly":
+        md = int(month_day or 0)
+        if md <= 0:
+            return True
+        return d.day == min(md, 28) or d.day == md
+    if freq == "Quarterly":
+        anchor = int(schedule_month or 0) or int(month_day or 0) or 1
+        # Month-based cycle only — show every day of the anchor quarter months
+        return d.month in quarterly_months(anchor)
+    if freq == "Yearly":
+        md = int(month_day or 1)
+        sm = int(schedule_month or 1)
+        return d.month == sm and d.day == min(max(md, 1), 28)
+    return True
+
+
+def task_log_counts_for_performance(
+    status: str,
+    *,
+    approval_status: str = "",
+    log_date: str = "",
+    linked_to_employee_id: int | None = None,
+) -> str | None:
+    """Return performance bucket or None if neutral / not counted.
+
+    Pre-cutover: Done/Partial credit without linked approval (legacy freeze).
+    Post-cutover: N/A has no impact; Done only after Self/Approved/Auto-Approved.
+    """
+    st = (status or "").strip()
+    if st in NEUTRAL_TASK_STATUSES:
+        return None
+    ld = (log_date or "")[:10]
+    legacy = bool(ld and ld < PERFORMANCE_CUTOVER_DATE)
+    appr = (approval_status or "").strip()
+    linked = bool(linked_to_employee_id)
+
+    if st == "Done":
+        if legacy:
+            return "done"
+        if not linked or appr in ("Approved", "Auto-Approved", "Self"):
+            return "done"
+        return None  # awaiting linked approval
+    if st == "Partial":
+        if legacy:
+            return "partial"
+        if not linked or appr in ("Approved", "Auto-Approved", "Self"):
+            return "partial"
+        return None
+    if st == "Missed":
+        return "missed"
+    if st == "Blocked":
+        return "blocked"
+    return None
+
+
+def hod_status_editable(marked_at: str | None, *, now: datetime | None = None) -> bool:
+    """Status remains editable until end of next calendar day after first mark."""
+    if not marked_at:
+        return True
+    now = now or datetime.now()
+    try:
+        raw = str(marked_at).replace("T", " ").strip()
+        marked_dt = datetime.fromisoformat(raw[:19] if len(raw) >= 19 else raw[:10])
+    except ValueError:
+        try:
+            marked_dt = datetime.strptime(str(marked_at)[:10], "%Y-%m-%d")
+        except ValueError:
+            return True
+    deadline = (marked_dt.date() + timedelta(days=HOD_STATUS_EDIT_GRACE_DAYS + 1))
+    # end of next day after assignment/mark day ⇒ deadline is exclusive date after next day
+    # marked Mon → editable through end of Tue → now.date() <= Tue
+    last_editable = marked_dt.date() + timedelta(days=HOD_STATUS_EDIT_GRACE_DAYS)
+    return now.date() <= last_editable
+
+
+def find_employees_by_name_prefix(query: str, *, limit: int = 15) -> list[dict]:
+    """Autocomplete: matching active employees by name."""
+    q = (query or "").strip()
+    if len(q) < 1:
+        return []
+    conn = _connect()
+    rows = conn.execute(
+        """
+        SELECT e.id, e.emp_code, e.name, e.department_id, e.designation, d.name as department_name
+        FROM employees e
+        LEFT JOIN departments d ON d.id=e.department_id
+        WHERE e.status='Active' AND LOWER(e.name) LIKE LOWER(?)
+        ORDER BY e.name
+        LIMIT ?
+        """,
+        (f"%{q}%", int(limit)),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def employee_name_exists(name: str, *, exclude_id: int | None = None) -> bool:
+    conn = _connect()
+    if exclude_id:
+        row = conn.execute(
+            "SELECT id FROM employees WHERE LOWER(TRIM(name))=LOWER(TRIM(?)) AND status='Active' AND id!=? LIMIT 1",
+            (name, exclude_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id FROM employees WHERE LOWER(TRIM(name))=LOWER(TRIM(?)) AND status='Active' LIMIT 1",
+            (name,),
+        ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def emp_code_exists(emp_code: str, *, exclude_id: int | None = None) -> bool:
+    conn = _connect()
+    if exclude_id:
+        row = conn.execute(
+            "SELECT id FROM employees WHERE UPPER(TRIM(emp_code))=UPPER(TRIM(?)) AND id!=? LIMIT 1",
+            (emp_code, exclude_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id FROM employees WHERE UPPER(TRIM(emp_code))=UPPER(TRIM(?)) LIMIT 1",
+            (emp_code,),
+        ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def get_dashboard_stats(department_id: int | None = None, employee_id: int | None = None) -> dict:
+    conn = _connect()
+    emp_conds = ["e.status='Active'"]
+    emp_params: list = []
+    if department_id:
+        emp_conds.append("e.department_id=?")
+        emp_params.append(department_id)
+    if employee_id:
+        emp_conds.append("e.id=?")
+        emp_params.append(employee_id)
+    emp_where = " AND ".join(emp_conds)
+    total_employees = conn.execute(
+        f"SELECT COUNT(*) FROM employees e WHERE {emp_where}", emp_params
+    ).fetchone()[0]
+    if department_id:
+        dept_count = 1
+        hod_rows = conn.execute(
+            "SELECT id, name, hod_name FROM departments WHERE id=?",
+            (department_id,),
+        ).fetchall()
+    else:
+        dept_count = conn.execute("SELECT COUNT(*) FROM departments").fetchone()[0]
+        hod_rows = conn.execute(
+            "SELECT id, name, hod_name FROM departments ORDER BY name"
+        ).fetchall()
+    open_issues = conn.execute(
+        "SELECT COUNT(*) FROM issue_logs WHERE status='Open'"
+    ).fetchone()[0]
+    pending_tasks = conn.execute(
+        "SELECT COUNT(*) FROM one_time_tasks WHERE active=1 AND status IN ('Pending','In Progress','Done')"
+    ).fetchone()[0]
+    conn.close()
+    return {
+        "department_count": int(dept_count or 0),
+        "total_employees": int(total_employees or 0),
+        "open_issues": int(open_issues or 0),
+        "pending_tasks": int(pending_tasks or 0),
+        "hods": [
+            {"department_id": r["id"], "department": r["name"], "hod_name": r["hod_name"] or ""}
+            for r in hod_rows
+        ],
+    }
+
+
+def get_org_hierarchy() -> dict:
+    """Departments tree + employee reporting tree."""
+    conn = _connect()
+    depts = [dict(r) for r in conn.execute("SELECT * FROM departments ORDER BY name").fetchall()]
+    emps = [
+        dict(r)
+        for r in conn.execute(
+            """
+            SELECT e.id, e.emp_code, e.name, e.department_id, e.designation,
+                   e.reports_to_employee_id, d.name as department_name, d.hod_name
+            FROM employees e
+            LEFT JOIN departments d ON d.id=e.department_id
+            WHERE e.status='Active'
+            ORDER BY e.name
+            """
+        ).fetchall()
+    ]
+    conn.close()
+
+    dept_by_id = {d["id"]: {**d, "children": []} for d in depts}
+    dept_roots = []
+    for d in depts:
+        node = dept_by_id[d["id"]]
+        pid = d.get("parent_department_id")
+        if pid and pid in dept_by_id:
+            dept_by_id[pid]["children"].append(node)
+        else:
+            dept_roots.append(node)
+
+    emp_by_id = {e["id"]: {**e, "reports": []} for e in emps}
+    emp_roots = []
+    for e in emps:
+        node = emp_by_id[e["id"]]
+        mid = e.get("reports_to_employee_id")
+        if mid and mid in emp_by_id:
+            emp_by_id[mid]["reports"].append(node)
+        else:
+            emp_roots.append(node)
+
+    return {
+        "departments": dept_roots,
+        "reporting": emp_roots,
+        "employees_flat": emps,
+        "departments_flat": depts,
+    }
+
+
+def get_task_based_report(
+    *,
+    department_id: int | None = None,
+    employee_id: int | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    priority: str | None = None,
+    status: str | None = None,
+) -> list[dict]:
+    """Task-oriented report combining responsibilities (period activity) + one-time tasks."""
+    today = date.today().isoformat()
+    fd = from_date or today
+    td = to_date or today
+    conn = _connect()
+    rows: list[dict] = []
+
+    # One-time tasks as primary rows
+    ot_conds = ["t.active=1"]
+    ot_params: list = []
+    if department_id:
+        ot_conds.append("t.department_id=?")
+        ot_params.append(department_id)
+    if employee_id:
+        ot_conds.append("t.employee_id=?")
+        ot_params.append(employee_id)
+    if priority:
+        ot_conds.append("COALESCE(t.priority,'Medium')=?")
+        ot_params.append(priority)
+    if status:
+        ot_conds.append("t.status=?")
+        ot_params.append(status)
+    ot_where = " AND ".join(ot_conds)
+    for r in conn.execute(
+        f"""
+        SELECT t.*, e.name as employee_name, d.name as department_name
+        FROM one_time_tasks t
+        LEFT JOIN employees e ON e.id=t.employee_id
+        LEFT JOIN departments d ON d.id=t.department_id
+        WHERE {ot_where}
+        ORDER BY t.due_date, t.title
+        """,
+        ot_params,
+    ).fetchall():
+        d = dict(r)
+        st = d.get("status") or "Pending"
+        pct_map = {
+            "Pending": 0,
+            "In Progress": 40,
+            "Done": 80,
+            "Completed": 80,
+            "Approved": 100,
+            "Rejected": 20,
+        }
+        rows.append(
+            {
+                "kind": "task",
+                "task": d.get("title"),
+                "assigned_to": d.get("employee_name") or "",
+                "assigned_by": d.get("assigned_by") or "",
+                "department": d.get("department_name") or "",
+                "due_date": d.get("due_date") or "",
+                "status": st,
+                "completion_pct": pct_map.get(st, 0),
+                "priority": d.get("priority") or "Medium",
+                "frequency": "One-time",
+                "mandatory": False,
+                "task_id": d.get("id"),
+                "employee_id": d.get("employee_id"),
+            }
+        )
+
+    # Responsibility summary in period
+    resp_conds = ["r.active=1"]
+    resp_params: list = []
+    if department_id:
+        resp_conds.append("r.department_id=?")
+        resp_params.append(department_id)
+    if employee_id:
+        resp_conds.append("r.employee_id=?")
+        resp_params.append(employee_id)
+    if priority:
+        resp_conds.append("COALESCE(r.priority,'Medium')=?")
+        resp_params.append(priority)
+    resp_where = " AND ".join(resp_conds)
+    for r in conn.execute(
+        f"""
+        SELECT r.*, e.name as employee_name, d.name as department_name,
+          (SELECT COUNT(*) FROM task_logs tl
+             WHERE tl.responsibility_id=r.id AND tl.log_date BETWEEN ? AND ?
+               AND tl.status NOT IN ('Leave','N/A')) AS log_total,
+          (SELECT COUNT(*) FROM task_logs tl
+             WHERE tl.responsibility_id=r.id AND tl.log_date BETWEEN ? AND ?
+               AND tl.status='Done') AS log_done,
+          (SELECT COUNT(*) FROM task_logs tl
+             WHERE tl.responsibility_id=r.id AND tl.log_date BETWEEN ? AND ?
+               AND tl.status='Partial') AS log_partial
+        FROM responsibilities r
+        LEFT JOIN employees e ON e.id=r.employee_id
+        LEFT JOIN departments d ON d.id=r.department_id
+        WHERE {resp_where}
+        ORDER BY r.title
+        """,
+        [fd, td, fd, td, fd, td, *resp_params],
+    ).fetchall():
+        d = dict(r)
+        total = int(d.get("log_total") or 0)
+        done = int(d.get("log_done") or 0)
+        partial = int(d.get("log_partial") or 0)
+        pct = round((done + partial * 0.5) / total * 100, 1) if total else 0
+        st = "Done" if pct >= 100 else ("In Progress" if total else "Pending")
+        if status and st != status and (status not in (st, "Pending") or total):
+            if status == "Pending" and total:
+                continue
+            if status not in (st,):
+                continue
+        rows.append(
+            {
+                "kind": "responsibility",
+                "task": d.get("title"),
+                "assigned_to": d.get("employee_name") or "",
+                "assigned_by": d.get("added_by") or "",
+                "department": d.get("department_name") or "",
+                "due_date": "",
+                "status": st,
+                "completion_pct": pct,
+                "priority": d.get("priority") or "Medium",
+                "frequency": d.get("frequency") or "Daily",
+                "mandatory": bool(int(d.get("mandatory") or 0)),
+                "responsibility_id": d.get("id"),
+                "employee_id": d.get("employee_id"),
+            }
+        )
+    conn.close()
+    return rows
 
 
 def _next_emp_code(conn):
@@ -281,7 +878,7 @@ def create_department(data: dict):
 
 def update_department(did: int, data: dict):
     conn = _connect()
-    allowed = ["name", "description", "hod_name"]
+    allowed = ["name", "description", "hod_name", "parent_department_id"]
     sets = ", ".join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed] + [did]
     if sets:
@@ -333,19 +930,38 @@ def list_employees(department_id=None, status="Active", employee_id: int | None 
 
 def create_employee(data: dict):
     conn = _connect()
-    code = _next_emp_code(conn)
+    name = (data.get("name") or "").strip()
+    if not name:
+        conn.close()
+        raise ValueError("Employee name is required")
+    # Prevent duplicate active employee by name
+    existing = conn.execute(
+        "SELECT id, emp_code FROM employees WHERE LOWER(TRIM(name))=LOWER(?) AND status='Active' LIMIT 1",
+        (name,),
+    ).fetchone()
+    if existing:
+        conn.close()
+        raise ValueError(f"Employee already exists: {name} ({existing['emp_code']})")
+    code = (data.get("emp_code") or "").strip() or _next_emp_code(conn)
+    if conn.execute(
+        "SELECT id FROM employees WHERE UPPER(TRIM(emp_code))=UPPER(?) LIMIT 1",
+        (code,),
+    ).fetchone():
+        conn.close()
+        raise ValueError(f"Employee ID already exists: {code}")
     conn.execute(
-        """INSERT INTO employees(emp_code,name,department_id,designation,phone,email,join_date,status)
-        VALUES(?,?,?,?,?,?,?,?)""",
+        """INSERT INTO employees(emp_code,name,department_id,designation,phone,email,join_date,status,reports_to_employee_id)
+        VALUES(?,?,?,?,?,?,?,?,?)""",
         (
             code,
-            data["name"],
+            name,
             data.get("department_id"),
             data.get("designation", ""),
             data.get("phone", ""),
             data.get("email", ""),
             data.get("join_date", ""),
             "Active",
+            data.get("reports_to_employee_id"),
         ),
     )
     conn.commit()
@@ -355,9 +971,41 @@ def create_employee(data: dict):
 
 def update_employee(eid: int, data: dict):
     conn = _connect()
-    allowed = ["name", "department_id", "designation", "phone", "email", "join_date", "status"]
-    sets = ", ".join(f"{k}=?" for k in data if k in allowed)
-    vals = [data[k] for k in data if k in allowed] + [eid]
+    allowed = [
+        "name",
+        "department_id",
+        "designation",
+        "phone",
+        "email",
+        "join_date",
+        "status",
+        "emp_code",
+        "reports_to_employee_id",
+    ]
+    payload = {k: data[k] for k in data if k in allowed}
+    if "name" in payload and payload["name"]:
+        dup = conn.execute(
+            "SELECT id FROM employees WHERE LOWER(TRIM(name))=LOWER(TRIM(?)) AND status='Active' AND id!=? LIMIT 1",
+            (payload["name"], eid),
+        ).fetchone()
+        if dup:
+            conn.close()
+            raise ValueError(f"Employee name already exists: {payload['name']}")
+    if "emp_code" in payload and payload["emp_code"]:
+        code = str(payload["emp_code"]).strip()
+        if not code:
+            conn.close()
+            raise ValueError("Employee ID cannot be empty")
+        dup = conn.execute(
+            "SELECT id FROM employees WHERE UPPER(TRIM(emp_code))=UPPER(?) AND id!=? LIMIT 1",
+            (code, eid),
+        ).fetchone()
+        if dup:
+            conn.close()
+            raise ValueError(f"Employee ID already exists: {code}")
+        payload["emp_code"] = code
+    sets = ", ".join(f"{k}=?" for k in payload)
+    vals = list(payload.values()) + [eid]
     if sets:
         conn.execute(f"UPDATE employees SET {sets} WHERE id=?", vals)
         conn.commit()
@@ -481,10 +1129,12 @@ def list_responsibilities(employee_id=None, department_id=None, active_only=True
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     rows = conn.execute(
         f"""
-        SELECT r.*, e.name as employee_name, d.name as department_name
+        SELECT r.*, e.name as employee_name, d.name as department_name,
+               le.name as linked_to_employee_name
         FROM responsibilities r
         LEFT JOIN employees e ON e.id=r.employee_id
         LEFT JOIN departments d ON d.id=r.department_id
+        LEFT JOIN employees le ON le.id=r.linked_to_employee_id
         {where}
         ORDER BY d.name, e.name, r.frequency, r.title
     """,
@@ -492,6 +1142,17 @@ def list_responsibilities(employee_id=None, department_id=None, active_only=True
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def _validate_responsibility_schedule(freq: str, weekday: str, month_day: int, schedule_month: int):
+    if freq == "Weekly" and not (weekday or "").strip():
+        raise ValueError("Weekly responsibilities require a weekday")
+    if freq == "Fortnightly" and not (weekday or "").strip():
+        raise ValueError("Fortnightly responsibilities require a weekday (Mon–Sun)")
+    if freq == "Monthly" and month_day <= 0:
+        raise ValueError("Monthly responsibilities require a calendar day (1-31)")
+    if freq == "Quarterly" and not (1 <= int(schedule_month or 0) <= 12):
+        raise ValueError("Quarterly responsibilities require an anchor month (1–12)")
 
 
 def create_responsibility(data: dict):
@@ -503,30 +1164,125 @@ def create_responsibility(data: dict):
         ).fetchone()
         if row:
             dept_id = row["department_id"]
+    freq = data.get("frequency", "Daily") or "Daily"
+    if freq not in FREQUENCIES:
+        # accept legacy free-text frequencies
+        pass
+    weekday = (data.get("schedule_weekday") or "").strip()
+    month_day = int(data.get("schedule_month_day") or 0)
+    schedule_month = int(data.get("schedule_month") or 0)
+    if freq == "Quarterly" and schedule_month <= 0 and month_day > 0 and month_day <= 12:
+        schedule_month = month_day  # tolerate older clients
+    try:
+        _validate_responsibility_schedule(freq, weekday, month_day, schedule_month)
+    except ValueError:
+        conn.close()
+        raise
+    priority = data.get("priority") or "Medium"
+    if priority not in PRIORITIES:
+        priority = "Medium"
+    linked = data.get("linked_to_employee_id")
+    try:
+        linked_id = int(linked) if linked not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        linked_id = None
     conn.execute(
-        """INSERT INTO responsibilities(employee_id,department_id,title,description,frequency,category,added_by,active)
-        VALUES(?,?,?,?,?,?,?,1)""",
+        """INSERT INTO responsibilities(
+            employee_id,department_id,title,description,frequency,category,added_by,active,
+            priority,mandatory,schedule_weekday,schedule_month_day,time_period,
+            schedule_month,linked_to_employee_id
+        )
+        VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,?)""",
         (
             data["employee_id"],
             dept_id,
             data["title"],
             data.get("description", ""),
-            data.get("frequency", "Daily"),
+            freq,
             data.get("category", "General"),
             data.get("added_by", ""),
+            priority,
+            1 if data.get("mandatory") else 0,
+            weekday,
+            month_day,
+            data.get("time_period", "") or "",
+            schedule_month or 0,
+            linked_id,
         ),
     )
     conn.commit()
+    rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.close()
+    return rid
 
 
 def update_responsibility(rid: int, data: dict):
     conn = _connect()
-    allowed = ["title", "description", "frequency", "category", "employee_id", "active"]
-    sets = ", ".join(f"{k}=?" for k in data if k in allowed)
-    vals = [data[k] for k in data if k in allowed]
+    allowed = [
+        "title",
+        "description",
+        "frequency",
+        "category",
+        "employee_id",
+        "active",
+        "added_by",
+        "priority",
+        "mandatory",
+        "schedule_weekday",
+        "schedule_month_day",
+        "time_period",
+        "department_id",
+        "schedule_month",
+        "linked_to_employee_id",
+    ]
+    payload = {k: data[k] for k in data if k in allowed}
+    if "mandatory" in payload:
+        payload["mandatory"] = 1 if payload["mandatory"] else 0
+    if "linked_to_employee_id" in payload:
+        v = payload["linked_to_employee_id"]
+        try:
+            payload["linked_to_employee_id"] = int(v) if v not in (None, "", 0, "0") else None
+        except (TypeError, ValueError):
+            payload["linked_to_employee_id"] = None
+    if any(
+        k in payload
+        for k in (
+            "frequency",
+            "schedule_weekday",
+            "schedule_month_day",
+            "schedule_month",
+        )
+    ):
+        row = conn.execute("SELECT * FROM responsibilities WHERE id=?", (rid,)).fetchone()
+        if row:
+            freq = payload.get("frequency", row["frequency"])
+            weekday = payload.get(
+                "schedule_weekday",
+                row["schedule_weekday"] if "schedule_weekday" in row.keys() else "",
+            )
+            month_day = int(
+                payload.get(
+                    "schedule_month_day",
+                    row["schedule_month_day"] if "schedule_month_day" in row.keys() else 0,
+                )
+                or 0
+            )
+            schedule_month = int(
+                payload.get(
+                    "schedule_month",
+                    row["schedule_month"] if "schedule_month" in row.keys() else 0,
+                )
+                or 0
+            )
+            try:
+                _validate_responsibility_schedule(freq, weekday, month_day, schedule_month)
+            except ValueError:
+                conn.close()
+                raise
+    sets = ", ".join(f"{k}=?" for k in payload)
+    vals = list(payload.values())
     if sets:
-        vals.append(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        vals.append(now_ist().strftime("%Y-%m-%d %H:%M:%S"))
         vals.append(rid)
         conn.execute(f"UPDATE responsibilities SET {sets}, updated_at=? WHERE id=?", vals)
         conn.commit()
@@ -554,34 +1310,74 @@ def mark_task(
     if status not in TASK_LOG_STATUSES:
         return "invalid_status"
 
+    # Employees may only mark within task date + next 2 IST calendar days
+    if not allow_override and not in_task_action_window(log_date):
+        return "window_closed"
+
     conn = _connect()
     resp = conn.execute(
-        "SELECT employee_id, department_id FROM responsibilities WHERE id=?",
+        """SELECT employee_id, department_id, linked_to_employee_id
+           FROM responsibilities WHERE id=?""",
         (responsibility_id,),
     ).fetchone()
     if not resp:
         conn.close()
         return False
 
+    linked_id = None
+    if "linked_to_employee_id" in resp.keys() and resp["linked_to_employee_id"]:
+        try:
+            linked_id = int(resp["linked_to_employee_id"])
+        except (TypeError, ValueError):
+            linked_id = None
+
+    # Self-complete when no Linked To; else Done/Partial need linked approval
+    if status in ("Done", "Partial"):
+        if linked_id:
+            approval_status = "Pending"
+            approved_by = ""
+            approved_at = ""
+        else:
+            approval_status = "Self"
+            approved_by = marked_by or "self"
+            approved_at = _now_iso()
+    elif status in NEUTRAL_TASK_STATUSES:
+        approval_status = "N/A" if status == "N/A" else ""
+        approved_by = ""
+        approved_at = ""
+    else:
+        approval_status = ""
+        approved_by = ""
+        approved_at = ""
+
     existing = conn.execute(
-        "SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        "SELECT id, marked_at, approval_status FROM task_logs WHERE responsibility_id=? AND log_date=?",
         (responsibility_id, log_date),
     ).fetchone()
     if existing:
         if not allow_override:
             conn.close()
             return "locked"
+        # HOD status editing only until end of next day after first assignment/mark
+        if not hod_status_editable(existing["marked_at"] if "marked_at" in existing.keys() else None):
+            conn.close()
+            return "window_closed"
         conn.execute(
             """UPDATE task_logs
-               SET status=?, remarks=?, marked_by=?, marked_at=datetime('now'),
-                   blocker_employee_id=?, blocker_reason=?
+               SET status=?, remarks=?, marked_by=?, marked_at=?,
+                   blocker_employee_id=?, blocker_reason=?,
+                   approval_status=?, approved_by=?, approved_at=?
                WHERE responsibility_id=? AND log_date=?""",
             (
                 status,
                 remarks,
                 marked_by,
+                _now_iso(),
                 blocker_employee_id,
                 blocker_reason,
+                approval_status,
+                approved_by,
+                approved_at,
                 responsibility_id,
                 log_date,
             ),
@@ -589,8 +1385,10 @@ def mark_task(
         task_log_id = existing
     else:
         conn.execute(
-            """INSERT INTO task_logs(responsibility_id,employee_id,log_date,status,remarks,marked_by,marked_at,blocker_employee_id,blocker_reason)
-            VALUES(?,?,?,?,?,?,datetime('now'),?,?)
+            """INSERT INTO task_logs(
+                responsibility_id,employee_id,log_date,status,remarks,marked_by,marked_at,
+                blocker_employee_id,blocker_reason,approval_status,approved_by,approved_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(responsibility_id,log_date) DO NOTHING
         """,
             (
@@ -600,8 +1398,12 @@ def mark_task(
                 status,
                 remarks,
                 marked_by,
+                _now_iso(),
                 blocker_employee_id,
                 blocker_reason,
+                approval_status,
+                approved_by,
+                approved_at,
             ),
         )
 
@@ -655,6 +1457,329 @@ def mark_task(
     conn.close()
     return True
 
+
+def approve_task_log(
+    task_log_id: int,
+    *,
+    actor: str = "",
+    linked_employee_id: int | None = None,
+    action: str = "Approved",
+    notes: str = "",
+    allow_override: bool = False,
+) -> str | bool:
+    """Linked-person Approve/Cancel a Done/Partial task. action: Approved | Cancelled."""
+    if action not in ("Approved", "Cancelled"):
+        return "invalid_action"
+    conn = _connect()
+    row = conn.execute(
+        """
+        SELECT tl.*, r.linked_to_employee_id, r.title
+        FROM task_logs tl
+        JOIN responsibilities r ON r.id=tl.responsibility_id
+        WHERE tl.id=?
+        """,
+        (task_log_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    linked = row["linked_to_employee_id"] if "linked_to_employee_id" in row.keys() else None
+    if linked and linked_employee_id is not None and int(linked) != int(linked_employee_id) and not allow_override:
+        conn.close()
+        return "forbidden"
+    if (row["status"] or "") not in ("Done", "Partial"):
+        conn.close()
+        return "not_pending"
+    appr = (row["approval_status"] if "approval_status" in row.keys() else "") or ""
+    if appr not in ("Pending",):
+        conn.close()
+        return "not_pending"
+    if not allow_override and not in_task_action_window(row["log_date"]):
+        # Outside window — auto-process will handle; still allow HOD override
+        conn.close()
+        return "window_closed"
+
+    new_status = row["status"]
+    if action == "Cancelled":
+        new_status = "Missed"
+        approval = "Cancelled"
+    else:
+        approval = "Approved"
+
+    conn.execute(
+        """UPDATE task_logs SET status=?, approval_status=?, approved_by=?, approved_at=?, remarks=?
+           WHERE id=?""",
+        (
+            new_status,
+            approval,
+            actor,
+            _now_iso(),
+            (notes or row["remarks"] or "") if notes else (row["remarks"] or ""),
+            task_log_id,
+        ),
+    )
+    write_task_audit(
+        "task_log",
+        task_log_id,
+        f"linked_{action.lower()}",
+        old_value=appr,
+        new_value=approval,
+        actor=actor,
+        notes=notes,
+        conn=conn,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def reassign_mandatory_for_day(
+    *,
+    original_responsibility_id: int,
+    to_employee_id: int,
+    reassignment_date: str,
+    assigned_by: str = "",
+) -> int:
+    """One-day clone only — original responsibility is NOT permanently transferred."""
+    conn = _connect()
+    orig = conn.execute(
+        """SELECT id, employee_id, title, mandatory FROM responsibilities WHERE id=? AND active=1""",
+        (original_responsibility_id,),
+    ).fetchone()
+    if not orig:
+        conn.close()
+        raise ValueError("Responsibility not found")
+    if int(orig["employee_id"]) == int(to_employee_id):
+        conn.close()
+        raise ValueError("Cannot reassign to the same employee")
+    day = reassignment_date[:10]
+    title = f"{orig['title']} (HOD reassignment)"
+    existing = conn.execute(
+        """SELECT id FROM day_reassignment_clones
+           WHERE original_responsibility_id=? AND reassignment_date=?""",
+        (original_responsibility_id, day),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """UPDATE day_reassignment_clones
+               SET assignee_employee_id=?, assigned_by=?, title=?, status='Pending'
+               WHERE id=?""",
+            (to_employee_id, assigned_by, title, existing["id"]),
+        )
+        cid = int(existing["id"])
+    else:
+        conn.execute(
+            """INSERT INTO day_reassignment_clones(
+                original_responsibility_id, original_employee_id, assignee_employee_id,
+                reassignment_date, title, status, assigned_by
+            ) VALUES(?,?,?,?,?,'Pending',?)""",
+            (
+                original_responsibility_id,
+                orig["employee_id"],
+                to_employee_id,
+                day,
+                title,
+                assigned_by,
+            ),
+        )
+        cid = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    write_task_audit(
+        "reassignment",
+        cid,
+        "created",
+        old_value=str(orig["employee_id"]),
+        new_value=str(to_employee_id),
+        actor=assigned_by,
+        notes=f"day={day} resp={original_responsibility_id}",
+        conn=conn,
+    )
+    conn.commit()
+    conn.close()
+    return cid
+
+
+def mark_reassignment_clone(
+    clone_id: int,
+    status: str,
+    marked_by: str = "",
+    remarks: str = "",
+) -> str | bool:
+    if status not in TASK_LOG_STATUSES:
+        return "invalid_status"
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM day_reassignment_clones WHERE id=?", (clone_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    if not in_task_action_window(row["reassignment_date"]):
+        conn.close()
+        return "window_closed"
+    conn.execute(
+        """UPDATE day_reassignment_clones
+           SET status=?, remarks=?, marked_by=?, marked_at=?
+           WHERE id=?""",
+        (status, remarks, marked_by, _now_iso(), clone_id),
+    )
+    # Also mirror onto original responsibility log for the day if empty
+    log_exists = conn.execute(
+        """SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?""",
+        (row["original_responsibility_id"], row["reassignment_date"]),
+    ).fetchone()
+    if not log_exists and status in ("Done", "Partial", "Missed", "Leave", "N/A"):
+        conn.execute(
+            """INSERT INTO task_logs(
+                responsibility_id, employee_id, log_date, status, remarks, marked_by, marked_at,
+                approval_status, approved_by, approved_at, is_reassignment,
+                reassigned_from_employee_id, reassignment_clone_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+            (
+                row["original_responsibility_id"],
+                row["original_employee_id"],
+                row["reassignment_date"],
+                status,
+                remarks or f"Covered by reassignment assignee (clone {clone_id})",
+                marked_by,
+                _now_iso(),
+                "Self" if status in ("Done", "Partial") else "",
+                marked_by if status in ("Done", "Partial") else "",
+                _now_iso() if status in ("Done", "Partial") else "",
+                row["original_employee_id"],
+                clone_id,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def process_auto_closures_ist(*, as_of: date | None = None, actor: str = "system-auto") -> dict:
+    """Miss unmarked after task day + 2 IST days; auto-approve Pending linked after window."""
+    as_of = as_of or today_ist()
+    cutoff_task_date = (as_of - timedelta(days=TASK_WINDOW_EXTRA_DAYS + 0)).isoformat()
+    # Window is task_date .. task_date+2 inclusive → after as_of > task_date+2
+    # i.e. task_date < as_of - 2 days → task_date <= as_of - 3 days? Let's check:
+    # Window closed when NOT (d0 <= as_of <= d0+2) for as_of > d0+2, i.e. d0 <= as_of-3
+    # Actually: last day of window is d0+2. On as_of = d0+3, window closed.
+    # So process when as_of > d0 + 2 → d0 <= as_of - 3... wait
+    # d0 <= as_of, closed when as_of > d0+2 i.e. d0 < as_of - 2 → d0 <= as_of - 3 for integer dates
+    # Example: task 01-Aug. Window: 1,2,3. On 4-Aug closed. as_of=4, d0 <= 4-3=1 → d0<=1. Yes.
+    limit_date = (as_of - timedelta(days=TASK_WINDOW_EXTRA_DAYS + 1)).isoformat()
+
+    conn = _connect()
+    missed_n = 0
+    approved_n = 0
+
+    # Auto-approve Pending Done/Partial
+    pending = conn.execute(
+        """
+        SELECT tl.id, tl.log_date, tl.status, tl.approval_status
+        FROM task_logs tl
+        WHERE tl.approval_status='Pending'
+          AND tl.status IN ('Done', 'Partial')
+          AND tl.log_date <= ?
+        """,
+        (limit_date,),
+    ).fetchall()
+    for p in pending:
+        if in_task_action_window(p["log_date"], as_of=as_of):
+            continue
+        conn.execute(
+            """UPDATE task_logs SET approval_status=?, approved_by=?, approved_at=? WHERE id=?""",
+            ("Auto-Approved", actor, _now_iso(), p["id"]),
+        )
+        write_task_audit(
+            "task_log",
+            p["id"],
+            "auto_approved",
+            old_value="Pending",
+            new_value="Auto-Approved",
+            actor=actor,
+            notes=f"linked approval timeout (window ended, log_date={p['log_date']})",
+            conn=conn,
+        )
+        approved_n += 1
+
+    # Auto-Missed: due scheduled responsibilities with no log after window
+    # Only scan last 14 days of candidate due dates that already expired
+    scan_from = (as_of - timedelta(days=14)).isoformat()
+    resps = conn.execute(
+        """
+        SELECT r.id, r.employee_id, r.frequency, r.schedule_weekday, r.schedule_month_day,
+               COALESCE(r.schedule_month, 0) as schedule_month
+        FROM responsibilities r
+        WHERE r.active=1
+        """
+    ).fetchall()
+    cur = date.fromisoformat(scan_from)
+    end = date.fromisoformat(limit_date)
+    while cur <= end:
+        dstr = cur.isoformat()
+        if in_task_action_window(dstr, as_of=as_of):
+            cur += timedelta(days=1)
+            continue
+        for r in resps:
+            if not is_schedule_due(
+                r["frequency"] or "Daily",
+                dstr,
+                r["schedule_weekday"] or "",
+                int(r["schedule_month_day"] or 0),
+                int(r["schedule_month"] or 0),
+            ):
+                continue
+            # Skip Whenever Required for auto-missed
+            if (r["frequency"] or "") == "Whenever Required":
+                continue
+            exists = conn.execute(
+                "SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?",
+                (r["id"], dstr),
+            ).fetchone()
+            if exists:
+                continue
+            conn.execute(
+                """INSERT INTO task_logs(
+                    responsibility_id, employee_id, log_date, status, remarks, marked_by, marked_at, approval_status)
+                   VALUES(?,?,?,'Missed',?,?,?,'')""",
+                (
+                    r["id"],
+                    r["employee_id"],
+                    dstr,
+                    "Auto-marked: not updated within 2 days after task date (IST)",
+                    actor,
+                    _now_iso(),
+                ),
+            )
+            write_task_audit(
+                "task_log",
+                None,
+                "auto_missed",
+                old_value="Pending",
+                new_value="Missed",
+                actor=actor,
+                notes=f"resp={r['id']} date={dstr}",
+                conn=conn,
+            )
+            missed_n += 1
+        cur += timedelta(days=1)
+
+    # Reassignment clones
+    clones = conn.execute(
+        """SELECT id, reassignment_date FROM day_reassignment_clones
+           WHERE status='Pending' AND reassignment_date <= ?""",
+        (limit_date,),
+    ).fetchall()
+    for c in clones:
+        if not in_task_action_window(c["reassignment_date"], as_of=as_of):
+            conn.execute(
+                "UPDATE day_reassignment_clones SET status='Missed', marked_by=?, marked_at=? WHERE id=?",
+                (actor, _now_iso(), c["id"]),
+            )
+            missed_n += 1
+
+    conn.commit()
+    conn.close()
+    return {"missed": missed_n, "auto_approved": approved_n, "as_of": as_of.isoformat()}
 
 def get_task_logs(department_id=None, employee_id=None, from_date=None, to_date=None):
     conn = _connect()
@@ -1318,7 +2443,7 @@ def get_hod_dashboard(
     logs = conn.execute(
         """
         SELECT tl.responsibility_id, tl.log_date, tl.status, tl.remarks,
-               tl.marked_by, tl.blocker_employee_id, tl.blocker_reason,
+               tl.marked_by, tl.marked_at, tl.blocker_employee_id, tl.blocker_reason,
                be.name as blocker_name
         FROM task_logs tl
         JOIN responsibilities r ON r.id=tl.responsibility_id
@@ -1332,13 +2457,16 @@ def get_hod_dashboard(
     log_map = {}
     for l in logs:
         key = (l["responsibility_id"], l["log_date"])
+        mat = l["marked_at"] if "marked_at" in l.keys() else ""
         log_map[key] = {
             "status": l["status"],
             "remarks": l["remarks"],
             "marked_by": l["marked_by"],
+            "marked_at": mat or "",
             "blocker_name": l["blocker_name"] or "",
             "blocker_reason": l["blocker_reason"] or "",
             "marked": True,
+            "editable": hod_status_editable(mat),
         }
 
     result = []
@@ -1346,6 +2474,15 @@ def get_hod_dashboard(
         rd = dict(r)
         rd["dates"] = {}
         for d in dates:
+            # Hide weekly/monthly etc. when not scheduled for that calendar day
+            if not is_schedule_due(
+                rd.get("frequency") or "Daily",
+                d,
+                rd.get("schedule_weekday") or "",
+                int(rd.get("schedule_month_day") or 0),
+                int(rd.get("schedule_month") or 0),
+            ):
+                continue
             key = (r["id"], d)
             rd["dates"][d] = log_map.get(
                 key,
@@ -1353,11 +2490,16 @@ def get_hod_dashboard(
                     "status": "Pending",
                     "remarks": "",
                     "marked_by": "",
+                    "marked_at": "",
                     "blocker_name": "",
                     "blocker_reason": "",
                     "marked": False,
+                    "editable": True,
                 },
             )
+        if not rd["dates"] and dates:
+            # Keep row but empty dates if none due in range — skip empty optional
+            pass
         result.append(rd)
 
     return {"responsibilities": result, "dates": dates}
@@ -1383,7 +2525,7 @@ def get_appraisal(employee_id: int, from_date: str = None, to_date: str = None):
 
     task_logs = conn.execute(
         """
-        SELECT tl.*, r.title, r.frequency
+        SELECT tl.*, r.title, r.frequency, r.linked_to_employee_id
         FROM task_logs tl
         JOIN responsibilities r ON r.id=tl.responsibility_id
         WHERE tl.employee_id=? AND tl.log_date BETWEEN ? AND ?
@@ -1428,15 +2570,46 @@ def get_appraisal(employee_id: int, from_date: str = None, to_date: str = None):
 
     conn.close()
 
-    counted_logs = [t for t in task_logs if t["status"] not in NEUTRAL_TASK_STATUSES]
-    total = len(counted_logs)
-    done = sum(1 for t in counted_logs if t["status"] == "Done")
-    partial = sum(1 for t in counted_logs if t["status"] == "Partial")
-    missed = sum(1 for t in counted_logs if t["status"] == "Missed")
-    blocked = sum(1 for t in counted_logs if t["status"] == "Blocked")
-    leave = sum(1 for t in task_logs if t["status"] == "Leave")
-    na = sum(1 for t in task_logs if t["status"] == "N/A")
-    resp_pct = round((done + partial * 0.5) / total * 100, 1) if total > 0 else 0
+    done = partial = missed = blocked = leave = na = 0
+    credit_done = credit_partial = 0
+    total_counted = 0
+    for t in task_logs:
+        st = t["status"]
+        if st == "Leave":
+            leave += 1
+        if st == "N/A":
+            na += 1
+        bucket = task_log_counts_for_performance(
+            st,
+            approval_status=(t["approval_status"] if "approval_status" in t.keys() else "") or "",
+            log_date=t["log_date"] or "",
+            linked_to_employee_id=t["linked_to_employee_id"]
+            if "linked_to_employee_id" in t.keys()
+            else None,
+        )
+        if bucket is None:
+            continue
+        total_counted += 1
+        if bucket == "done":
+            done += 1
+            credit_done += 1
+        elif bucket == "partial":
+            partial += 1
+            credit_partial += 1
+        elif bucket == "missed":
+            missed += 1
+        elif bucket == "blocked":
+            blocked += 1
+    # Also count legacy raw statuses for display (exclude N/A from denominator)
+    for t in task_logs:
+        st = t["status"]
+        if st == "Done" and credit_done == 0 and total_counted == 0:
+            pass  # already handled
+    resp_pct = (
+        round((credit_done + credit_partial * 0.5) / total_counted * 100, 1)
+        if total_counted > 0
+        else 0
+    )
 
     ot_summary, ot_period = _summarize_one_time_tasks(
         [_one_time_task_row(r) for r in ot_rows], fd, td, today
@@ -1447,7 +2620,7 @@ def get_appraisal(employee_id: int, from_date: str = None, to_date: str = None):
         "employee": emp,
         "period": {"from": fd, "to": td},
         "task_summary": {
-            "total": total,
+            "total": total_counted,
             "done": done,
             "partial": partial,
             "missed": missed,
@@ -1457,6 +2630,7 @@ def get_appraisal(employee_id: int, from_date: str = None, to_date: str = None):
             "responsibility_performance_pct": resp_pct,
             "one_time_performance_pct": ot_summary["performance_pct"],
             "performance_pct": combined_pct,
+            "cutover_date": PERFORMANCE_CUTOVER_DATE,
         },
         "one_time_summary": ot_summary,
         "one_time_tasks": ot_period,
@@ -1470,8 +2644,10 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     """
     Snapshot of what an employee worked on vs did not for a given day.
     Unmarked daily responsibilities appear under not_worked as Pending.
+    Whenever Required items are listed last under whenever_required.
+    Additional Work holds one-day HOD reassignment clones.
     """
-    day = check_date or date.today().isoformat()
+    day = check_date or today_ist().isoformat()
     conn = _connect()
     emp = conn.execute(
         """
@@ -1487,11 +2663,24 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
 
     resps = conn.execute(
         """
-        SELECT r.id, r.title, r.description, r.frequency, r.category
+        SELECT r.id, r.title, r.description, r.frequency, r.category,
+               r.priority, r.mandatory, r.schedule_weekday, r.schedule_month_day, r.time_period,
+               COALESCE(r.schedule_month, 0) as schedule_month,
+               r.linked_to_employee_id, le.name as linked_to_employee_name
         FROM responsibilities r
+        LEFT JOIN employees le ON le.id=r.linked_to_employee_id
         WHERE r.employee_id=? AND r.active=1
         ORDER BY
-          CASE r.frequency WHEN 'Daily' THEN 0 WHEN 'Weekly' THEN 1 ELSE 2 END,
+          CASE r.frequency
+            WHEN 'Daily' THEN 0
+            WHEN 'Weekly' THEN 1
+            WHEN 'Fortnightly' THEN 2
+            WHEN 'Monthly' THEN 3
+            WHEN 'Quarterly' THEN 4
+            WHEN 'Yearly' THEN 5
+            WHEN 'Whenever Required' THEN 9
+            ELSE 6
+          END,
           r.title
         """,
         (employee_id,),
@@ -1499,8 +2688,10 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
 
     logs = conn.execute(
         """
-        SELECT responsibility_id, status, remarks, marked_by, marked_at,
-               blocker_employee_id, blocker_reason
+        SELECT id, responsibility_id, status, remarks, marked_by, marked_at,
+               blocker_employee_id, blocker_reason,
+               COALESCE(approval_status,'') as approval_status,
+               COALESCE(approved_by,'') as approved_by
         FROM task_logs
         WHERE employee_id=? AND log_date=?
         """,
@@ -1508,9 +2699,35 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     ).fetchall()
     log_map = {int(l["responsibility_id"]): dict(l) for l in logs}
 
+    # Who took over original's mandatory tasks today
+    reassigned_out = conn.execute(
+        """
+        SELECT original_responsibility_id, assignee_employee_id, e.name as assignee_name
+        FROM day_reassignment_clones c
+        JOIN employees e ON e.id=c.assignee_employee_id
+        WHERE c.original_employee_id=? AND c.reassignment_date=?
+        """,
+        (employee_id, day),
+    ).fetchall()
+    reassign_out_map = {
+        int(r["original_responsibility_id"]): dict(r) for r in reassigned_out
+    }
+
+    # Additional work assigned to this employee for the day
+    additional = conn.execute(
+        """
+        SELECT c.*, e.name as original_employee_name, r.frequency, r.priority
+        FROM day_reassignment_clones c
+        JOIN employees e ON e.id=c.original_employee_id
+        JOIN responsibilities r ON r.id=c.original_responsibility_id
+        WHERE c.assignee_employee_id=? AND c.reassignment_date=?
+        """,
+        (employee_id, day),
+    ).fetchall()
+
     ot_rows = conn.execute(
         """
-        SELECT id, title, description, due_date, status, started_at, completed_at
+        SELECT id, title, description, due_date, status, started_at, completed_at, priority
         FROM one_time_tasks
         WHERE employee_id=? AND active=1
           AND status IN ('Pending', 'In Progress', 'Done', 'Rejected')
@@ -1530,37 +2747,103 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     worked_on: list[dict] = []
     not_worked: list[dict] = []
     other: list[dict] = []
+    whenever_required: list[dict] = []
+    skipped_schedule: list[dict] = []
 
-    for r in resps:
-        rid = int(r["id"])
-        log = log_map.get(rid)
-        status = (log or {}).get("status") or "Pending"
-        item = {
-            "responsibility_id": rid,
-            "title": r["title"],
-            "description": r["description"] or "",
-            "frequency": r["frequency"],
-            "category": r["category"],
-            "status": status,
-            "marked": bool(log),
-            "remarks": (log or {}).get("remarks") or "",
-            "marked_by": (log or {}).get("marked_by") or "",
-            "blocker_reason": (log or {}).get("blocker_reason") or "",
-        }
+    def _bucket(item: dict, status: str):
+        if item.get("frequency") == "Whenever Required":
+            whenever_required.append(item)
+            return
         if status in ("Done", "Partial"):
             worked_on.append(item)
         elif status in ("Leave", "N/A"):
             other.append(item)
         else:
-            # Pending, Missed, Blocked — not completed work for the day
             not_worked.append(item)
+
+    for r in resps:
+        rid = int(r["id"])
+        rdict = dict(r)
+        if not is_schedule_due(
+            rdict.get("frequency") or "Daily",
+            day,
+            rdict.get("schedule_weekday") or "",
+            int(rdict.get("schedule_month_day") or 0),
+            int(rdict.get("schedule_month") or 0),
+        ):
+            skipped_schedule.append(
+                {
+                    "responsibility_id": rid,
+                    "title": r["title"],
+                    "frequency": r["frequency"],
+                    "schedule_weekday": rdict.get("schedule_weekday") or "",
+                    "schedule_month_day": rdict.get("schedule_month_day") or 0,
+                    "schedule_month": rdict.get("schedule_month") or 0,
+                }
+            )
+            continue
+        log = log_map.get(rid)
+        status = (log or {}).get("status") or "Pending"
+        re_out = reassign_out_map.get(rid)
+        item = {
+            "responsibility_id": rid,
+            "task_log_id": (log or {}).get("id"),
+            "title": r["title"],
+            "description": r["description"] or "",
+            "frequency": r["frequency"],
+            "category": r["category"],
+            "priority": rdict.get("priority") or "Medium",
+            "mandatory": bool(int(rdict.get("mandatory") or 0)),
+            "time_period": rdict.get("time_period") or "",
+            "linked_to_employee_id": rdict.get("linked_to_employee_id"),
+            "linked_to_employee_name": rdict.get("linked_to_employee_name") or "",
+            "approval_status": (log or {}).get("approval_status") or "",
+            "status": status,
+            "marked": bool(log),
+            "remarks": (log or {}).get("remarks") or "",
+            "marked_by": (log or {}).get("marked_by") or "",
+            "blocker_reason": (log or {}).get("blocker_reason") or "",
+            "editable": hod_status_editable((log or {}).get("marked_at")),
+            "in_action_window": in_task_action_window(day),
+            "reassigned_out": bool(re_out),
+            "reassigned_to_name": (re_out or {}).get("assignee_name") or "",
+        }
+        # Original still holds master — if reassigned for the day, don't force pending scoreboard
+        if re_out and not log:
+            item["status"] = "Reassigned"
+            other.append(item)
+            continue
+        _bucket(item, status)
+
+    additional_work = []
+    for c in additional:
+        cd = dict(c)
+        additional_work.append(
+            {
+                "clone_id": cd["id"],
+                "responsibility_id": cd["original_responsibility_id"],
+                "title": cd.get("title") or "",
+                "original_employee_name": cd.get("original_employee_name") or "",
+                "assigned_by": cd.get("assigned_by") or "",
+                "status": cd.get("status") or "Pending",
+                "remarks": cd.get("remarks") or "",
+                "frequency": cd.get("frequency") or "Daily",
+                "priority": cd.get("priority") or "Medium",
+                "section": "Additional Work (Assigned by HOD)",
+                "in_action_window": in_task_action_window(day),
+            }
+        )
 
     one_time = [_one_time_task_row(r) for r in ot_rows]
     working_tasks = [t for t in one_time if t.get("status") == "In Progress"]
     pending_tasks = [t for t in one_time if t.get("status") in ("Pending", "Rejected")]
     awaiting_approval = [t for t in one_time if t.get("status") == "Done"]
 
-    expected_daily = [i for i in worked_on + not_worked + other if i["frequency"] == "Daily"]
+    expected_daily = [
+        i
+        for i in worked_on + not_worked + other
+        if i["frequency"] == "Daily" or i.get("mandatory")
+    ]
     done_daily = sum(1 for i in expected_daily if i["status"] == "Done")
     partial_daily = sum(1 for i in expected_daily if i["status"] == "Partial")
     pending_daily = sum(1 for i in expected_daily if i["status"] == "Pending")
@@ -1572,14 +2855,22 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         "worked_on": worked_on,
         "not_worked": not_worked,
         "other": other,
+        "whenever_required": whenever_required,
+        "additional_work": additional_work,
+        "not_scheduled_today": skipped_schedule,
         "one_time_working": working_tasks,
         "one_time_pending": pending_tasks,
         "one_time_awaiting_approval": awaiting_approval,
         "summary": {
-            "responsibilities_total": len(resps),
+            "responsibilities_total": len(worked_on)
+            + len(not_worked)
+            + len(other)
+            + len(whenever_required),
             "worked_on": len(worked_on),
             "not_worked": len(not_worked),
             "other": len(other),
+            "whenever_required": len(whenever_required),
+            "additional_work": len(additional_work),
             "daily_expected": len(expected_daily),
             "daily_done": done_daily,
             "daily_partial": partial_daily,
@@ -1592,6 +2883,8 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             else 0,
             "unmarked_daily": pending_daily,
         },
+        "time_period_filter": TIME_PERIODS,
+        "performance_cutover": PERFORMANCE_CUTOVER_DATE,
     }
 
 
@@ -1658,7 +2951,9 @@ def get_performance(department_id=None, from_date=None, to_date=None):
 
     logs = conn.execute(
         f"""
-        SELECT tl.responsibility_id, tl.log_date, tl.status, tl.blocker_employee_id
+        SELECT tl.responsibility_id, tl.log_date, tl.status, tl.blocker_employee_id,
+               COALESCE(tl.approval_status,'') as approval_status,
+               r.linked_to_employee_id
         FROM task_logs tl
         JOIN responsibilities r ON r.id=tl.responsibility_id
         {cond} AND tl.log_date BETWEEN ? AND ?
@@ -1710,7 +3005,15 @@ def get_performance(department_id=None, from_date=None, to_date=None):
 
     conn.close()
 
-    log_map = {(l["responsibility_id"], l["log_date"]): l["status"] for l in logs}
+    log_map = {}
+    for l in logs:
+        log_map[(l["responsibility_id"], l["log_date"])] = {
+            "status": l["status"],
+            "approval_status": l["approval_status"] if "approval_status" in l.keys() else "",
+            "linked_to_employee_id": l["linked_to_employee_id"]
+            if "linked_to_employee_id" in l.keys()
+            else None,
+        }
     issue_map: dict = {}
     for i in issue_counts:
         eid = i["employee_id"]
@@ -1743,11 +3046,29 @@ def get_performance(department_id=None, from_date=None, to_date=None):
             if r["frequency"] == "Daily"
             else (total_days // 7 if r["frequency"] == "Weekly" else 1)
         )
-        done = sum(1 for d in dates if log_map.get((r["id"], d), "") == "Done")
-        missed = sum(1 for d in dates if log_map.get((r["id"], d), "") == "Missed")
-        blocked = sum(1 for d in dates if log_map.get((r["id"], d), "") == "Blocked")
+        done_weight = 0.0
+        missed = 0
+        blocked = 0
+        for d in dates:
+            entry = log_map.get((r["id"], d))
+            if not entry:
+                continue
+            bucket = task_log_counts_for_performance(
+                entry["status"],
+                approval_status=entry.get("approval_status") or "",
+                log_date=d,
+                linked_to_employee_id=entry.get("linked_to_employee_id"),
+            )
+            if bucket == "done":
+                done_weight += 1
+            elif bucket == "partial":
+                done_weight += 0.5
+            elif bucket == "missed":
+                missed += 1
+            elif bucket == "blocked":
+                blocked += 1
         emp_stats[eid]["total_tasks"] += expected
-        emp_stats[eid]["done_tasks"] += done
+        emp_stats[eid]["done_tasks"] += done_weight
         emp_stats[eid]["missed_tasks"] += missed
         emp_stats[eid]["blocked_tasks"] += blocked
 
@@ -1836,39 +3157,56 @@ def _task_completed_on_time(task: dict) -> bool:
 
 def _summarize_one_time_tasks(tasks: list, fd: str, td: str, today: str):
     period_tasks = [t for t in tasks if _task_in_appraisal_period(t, fd, td, today)]
-    approved_on_time = 0
-    approved_late = 0
-    awaiting_approval = 0
-    pending = 0
-    overdue = 0
-    in_progress = 0
-    rejected = 0
-
-    for task in period_tasks:
-        status = _normalize_one_time_status(task.get("status") or "")
-        due = task.get("due_date") or ""
-        is_overdue = bool(due and due < today and status in ("Pending", "In Progress"))
-        if status == "Approved":
-            if _task_completed_on_time(task):
-                approved_on_time += 1
-            else:
-                approved_late += 1
-        elif status == "Done":
-            awaiting_approval += 1
-        elif status == "Rejected":
-            rejected += 1
-        elif status == "In Progress":
-            in_progress += 1
-            if is_overdue:
-                overdue += 1
-        elif status == "Pending":
-            pending += 1
-            if is_overdue:
-                overdue += 1
-
     total = len(period_tasks)
-    positive = approved_on_time + approved_late * 0.6 + awaiting_approval * 0.25
-    negative = rejected + overdue + pending * 0.35 + in_progress * 0.15
+    # Post-cutover: awaiting approval does not inflate performance (counts only after Approved)
+    # Pre-cutover tasks (created before cutover) keep partial credit for Done awaiting HOD.
+    period_pre = []
+    period_post = []
+    for t in period_tasks:
+        created = (t.get("created_at") or "")[:10]
+        if created and created < PERFORMANCE_CUTOVER_DATE:
+            period_pre.append(t)
+        else:
+            period_post.append(t)
+
+    def _score(tasks_subset, credit_awaiting: bool):
+        aot = alate = aw = pend = ove = ip = rej = 0
+        for task in tasks_subset:
+            status = _normalize_one_time_status(task.get("status") or "")
+            due = task.get("due_date") or ""
+            is_overdue = bool(due and due < today and status in ("Pending", "In Progress"))
+            if status == "Approved":
+                if _task_completed_on_time(task):
+                    aot += 1
+                else:
+                    alate += 1
+            elif status == "Done":
+                aw += 1
+            elif status == "Rejected":
+                rej += 1
+            elif status == "In Progress":
+                ip += 1
+                if is_overdue:
+                    ove += 1
+            elif status == "Pending":
+                pend += 1
+                if is_overdue:
+                    ove += 1
+        pos = aot + alate * 0.6 + (aw * 0.25 if credit_awaiting else 0)
+        neg = rej + ove + pend * 0.35 + ip * 0.15 + (0 if credit_awaiting else aw * 0.4)
+        return pos, neg, aot, alate, aw, pend, ove, ip, rej
+
+    pos1, neg1, aot1, alate1, aw1, pend1, ove1, ip1, rej1 = _score(period_pre, True)
+    pos2, neg2, aot2, alate2, aw2, pend2, ove2, ip2, rej2 = _score(period_post, False)
+    approved_on_time = aot1 + aot2
+    approved_late = alate1 + alate2
+    awaiting_approval = aw1 + aw2
+    pending = pend1 + pend2
+    overdue = ove1 + ove2
+    in_progress = ip1 + ip2
+    rejected = rej1 + rej2
+    positive = pos1 + pos2
+    negative = neg1 + neg2
     if total == 0:
         ot_pct = None
     else:
@@ -1898,7 +3236,7 @@ def _combined_performance_pct(resp_pct: float, ot_summary: dict) -> float:
 
 
 def _now_iso() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return now_ist().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _duration_minutes(started_at: str, completed_at: str) -> int:
@@ -1988,10 +3326,13 @@ def create_one_time_task(data: dict) -> int:
         ).fetchone()
         if row:
             dept_id = row["department_id"]
+    priority = data.get("priority") or "Medium"
+    if priority not in PRIORITIES:
+        priority = "Medium"
     cur = conn.execute(
         """INSERT INTO one_time_tasks(
-            employee_id, department_id, title, description, due_date, assigned_by, status, active
-        ) VALUES(?,?,?,?,?,?,?,1)""",
+            employee_id, department_id, title, description, due_date, assigned_by, status, active, priority
+        ) VALUES(?,?,?,?,?,?,?,1,?)""",
         (
             data["employee_id"],
             dept_id,
@@ -2000,6 +3341,7 @@ def create_one_time_task(data: dict) -> int:
             data.get("due_date", ""),
             data.get("assigned_by", ""),
             "Pending",
+            priority,
         ),
     )
     tid = int(cur.lastrowid)
@@ -2010,15 +3352,54 @@ def create_one_time_task(data: dict) -> int:
 
 def update_one_time_task(task_id: int, data: dict):
     conn = _connect()
-    allowed = ["title", "description", "due_date", "employee_id", "department_id", "active"]
-    sets = ", ".join(f"{k}=?" for k in data if k in allowed)
-    vals = [data[k] for k in data if k in allowed]
+    allowed = [
+        "title",
+        "description",
+        "due_date",
+        "employee_id",
+        "department_id",
+        "active",
+        "assigned_by",
+        "priority",
+        "duration_minutes",
+        "manual_duration_minutes",
+    ]
+    payload = {k: data[k] for k in data if k in allowed}
+    if "manual_duration_minutes" in payload and "duration_minutes" not in payload:
+        try:
+            payload["duration_minutes"] = parse_duration_to_minutes(payload["manual_duration_minutes"])
+        except ValueError:
+            pass
+    sets = ", ".join(f"{k}=?" for k in payload)
+    vals = list(payload.values())
     if sets:
         vals.append(_now_iso())
         vals.append(task_id)
         conn.execute(f"UPDATE one_time_tasks SET {sets}, updated_at=? WHERE id=?", vals)
         conn.commit()
     conn.close()
+
+
+def set_manual_task_duration(task_id: int, duration_value) -> int:
+    """Set manual duration on a one-time task; returns minutes stored."""
+    mins = parse_duration_to_minutes(duration_value)
+    conn = _connect()
+    row = conn.execute(
+        "SELECT id FROM one_time_tasks WHERE id=? AND active=1", (task_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("Task not found")
+    now = _now_iso()
+    conn.execute(
+        """UPDATE one_time_tasks
+           SET duration_minutes=?, manual_duration_minutes=?, updated_at=?
+           WHERE id=?""",
+        (mins, mins, now, task_id),
+    )
+    conn.commit()
+    conn.close()
+    return mins
 
 
 def cancel_one_time_task(task_id: int):

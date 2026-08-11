@@ -21,6 +21,10 @@ from ..db.hrm_db import (
     update_responsibility,
     delete_responsibility,
     mark_task,
+    approve_task_log,
+    reassign_mandatory_for_day,
+    mark_reassignment_clone,
+    process_auto_closures_ist,
     get_task_logs,
     list_issues,
     create_issue,
@@ -51,6 +55,17 @@ from ..db.hrm_db import (
     complete_one_time_task,
     approve_one_time_task,
     reject_one_time_task,
+    get_dashboard_stats,
+    get_org_hierarchy,
+    get_task_based_report,
+    find_employees_by_name_prefix,
+    set_manual_task_duration,
+    FREQUENCIES,
+    PRIORITIES,
+    TIME_PERIODS,
+    WEEKDAYS,
+    MONTH_NAMES,
+    PERFORMANCE_CUTOVER_DATE,
 )
 from ..db.users_db import get_user_auth_profile, search_active_users, get_user_by_id
 from ..services.rbac import (
@@ -60,6 +75,7 @@ from ..services.rbac import (
     assert_employee_in_scope,
     assert_hrm_write_org,
     assert_hrm_hod_or_admin,
+    assert_hrm_admin_mutate_records,
     assert_hrm_delete_allowed,
     assert_can_view_employee_list,
     assert_responsibility_in_scope,
@@ -154,6 +170,8 @@ class EmployeeIn(BaseModel):
     phone: Optional[str] = ""
     email: Optional[str] = ""
     join_date: Optional[str] = ""
+    emp_code: Optional[str] = ""
+    reports_to_employee_id: Optional[int] = None
 
 
 class EmployeeUpdate(BaseModel):
@@ -164,6 +182,8 @@ class EmployeeUpdate(BaseModel):
     email: Optional[str] = None
     join_date: Optional[str] = None
     status: Optional[str] = None
+    emp_code: Optional[str] = None
+    reports_to_employee_id: Optional[int] = None
 
 
 class ResponsibilityIn(BaseModel):
@@ -174,6 +194,13 @@ class ResponsibilityIn(BaseModel):
     frequency: Optional[str] = "Daily"
     category: Optional[str] = "General"
     added_by: Optional[str] = ""
+    priority: Optional[str] = "Medium"
+    mandatory: Optional[bool] = False
+    schedule_weekday: Optional[str] = ""
+    schedule_month_day: Optional[int] = 0
+    schedule_month: Optional[int] = 0
+    time_period: Optional[str] = ""
+    linked_to_employee_id: Optional[int] = None
 
 
 class ResponsibilityUpdate(BaseModel):
@@ -183,6 +210,48 @@ class ResponsibilityUpdate(BaseModel):
     category: Optional[str] = None
     employee_id: Optional[int] = None
     active: Optional[int] = None
+    added_by: Optional[str] = None
+    priority: Optional[str] = None
+    mandatory: Optional[bool] = None
+    schedule_weekday: Optional[str] = None
+    schedule_month_day: Optional[int] = None
+    schedule_month: Optional[int] = None
+    time_period: Optional[str] = None
+    linked_to_employee_id: Optional[int] = None
+
+
+class TaskApproveIn(BaseModel):
+    action: str = "Approved"  # Approved | Cancelled
+    notes: Optional[str] = ""
+    approved_by: Optional[str] = ""
+
+
+class ReassignDayIn(BaseModel):
+    original_responsibility_id: int
+    to_employee_id: int
+    reassignment_date: str
+    assigned_by: Optional[str] = ""
+
+
+class ReassignMarkIn(BaseModel):
+    status: str = "Done"
+    remarks: Optional[str] = ""
+    marked_by: Optional[str] = ""
+
+
+class ManualDurationIn(BaseModel):
+    duration: str  # minutes or HH:MM
+
+
+class HierarchyDeptIn(BaseModel):
+    department_id: int
+    parent_department_id: Optional[int] = None
+    hod_name: Optional[str] = None
+
+
+class HierarchyReportIn(BaseModel):
+    employee_id: int
+    reports_to_employee_id: Optional[int] = None
 
 
 class TaskMarkIn(BaseModel):
@@ -267,6 +336,7 @@ class OneTimeTaskIn(BaseModel):
     description: Optional[str] = ""
     due_date: Optional[str] = ""
     assigned_by: Optional[str] = ""
+    priority: Optional[str] = "Medium"
 
 
 class OneTimeTaskUpdate(BaseModel):
@@ -274,6 +344,10 @@ class OneTimeTaskUpdate(BaseModel):
     description: Optional[str] = None
     due_date: Optional[str] = None
     employee_id: Optional[int] = None
+    assigned_by: Optional[str] = None
+    priority: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    manual_duration_minutes: Optional[int] = None
 
 
 class OneTimeTaskNotesIn(BaseModel):
@@ -296,12 +370,28 @@ def get_hrm_scope(request: Request):
         "department_id": scope.department_id,
         "can_manage_org": scope.can_manage_org,
         "can_edit_assignments": scope.can_edit_assignments,
+        "can_mutate_assignment_records": scope.can_mutate_assignment_records,
         "can_view_employee_list": scope.can_view_employee_list,
         "can_delete_hrm_records": scope.can_delete_hrm_records,
+        "can_use_employee_check": scope.can_use_employee_check,
+        "can_view_dashboard": scope.can_view_dashboard,
         "can_create_issues": scope.can_create_issues,
         "can_edit_issues": scope.can_edit_issues,
         "can_change_issue_status": scope.can_change_issue_status,
         "can_delete_issues": scope.can_delete_issues,
+    }
+
+
+@router.get("/meta")
+def get_hrm_meta():
+    """Dropdown options for forms (frequencies, priorities, etc.)."""
+    return {
+        "frequencies": list(FREQUENCIES),
+        "priorities": list(PRIORITIES),
+        "time_periods": list(TIME_PERIODS),
+        "weekdays": list(WEEKDAYS),
+        "months": [{"value": i + 1, "label": n} for i, n in enumerate(MONTH_NAMES)],
+        "performance_cutover": PERFORMANCE_CUTOVER_DATE,
     }
 
 
@@ -361,7 +451,10 @@ def post_employee(body: EmployeeIn, request: Request):
             raise HTTPException(403, "HOD can only add employees to their department")
     else:
         raise HTTPException(403, "Not allowed to create employees")
-    code = create_employee(body.model_dump())
+    try:
+        code = create_employee(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     return {"ok": True, "emp_code": code}
 
 
@@ -375,8 +468,26 @@ def patch_employee(eid: int, body: EmployeeUpdate, request: Request):
     if scope.is_hod and "department_id" in data and scope.department_id is not None:
         if int(data["department_id"]) != int(scope.department_id):
             raise HTTPException(403, "Cannot move employee out of your department")
-    update_employee(eid, data)
+    if "emp_code" in data and not scope.can_manage_org:
+        raise HTTPException(403, "Only Admin can change Employee ID")
+    try:
+        update_employee(eid, data)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     return {"ok": True}
+
+
+@router.get("/employees/autocomplete")
+def employee_autocomplete(request: Request, q: str = ""):
+    scope = _scope_from_request(request)
+    if not q.strip():
+        return []
+    rows = find_employees_by_name_prefix(q, limit=20)
+    if scope.level == "department" and scope.department_id is not None:
+        rows = [r for r in rows if r.get("department_id") == scope.department_id]
+    elif scope.level == "self" and scope.employee_id is not None:
+        rows = [r for r in rows if r.get("id") == scope.employee_id]
+    return rows
 
 
 @router.delete("/employees/{eid}")
@@ -445,14 +556,21 @@ def post_responsibility(body: ResponsibilityIn, request: Request):
     assert_employee_in_scope(scope, body.employee_id)
     if scope.is_employee and scope.employee_id != body.employee_id:
         raise HTTPException(403, "Cannot assign responsibilities for other employees")
-    create_responsibility(body.model_dump())
+    data = body.model_dump()
+    if not (data.get("added_by") or "").strip():
+        _, name = _recorder_from_request(request)
+        data["added_by"] = name
+    try:
+        create_responsibility(data)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     return {"ok": True}
 
 
 @router.patch("/responsibilities/{rid}")
 def patch_responsibility(rid: int, body: ResponsibilityUpdate, request: Request):
     scope = _scope_from_request(request)
-    assert_hrm_hod_or_admin(scope)
+    assert_hrm_admin_mutate_records(scope)
     from ..db.hrm_db import get_responsibility_owner
 
     owner = get_responsibility_owner(rid)
@@ -461,7 +579,10 @@ def patch_responsibility(rid: int, body: ResponsibilityUpdate, request: Request)
     assert_employee_in_scope(scope, owner)
     if body.employee_id is not None:
         assert_employee_in_scope(scope, body.employee_id)
-    update_responsibility(rid, {k: v for k, v in body.model_dump().items() if v is not None})
+    try:
+        update_responsibility(rid, {k: v for k, v in body.model_dump().items() if v is not None})
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     return {"ok": True}
 
 
@@ -499,9 +620,88 @@ def post_mark_task(body: TaskMarkIn, request: Request):
         return {"ok": True}
     if ok == "locked":
         raise HTTPException(409, "Status already set and cannot be changed")
+    if ok == "window_closed":
+        raise HTTPException(
+            409,
+            "Status edit window closed (editable task date through next 2 IST days)",
+        )
     if ok == "invalid_status":
         raise HTTPException(400, "Invalid status")
     raise HTTPException(404, "Responsibility not found")
+
+
+@router.post("/tasks/logs/{log_id}/approve")
+def post_approve_task_log(log_id: int, body: TaskApproveIn, request: Request):
+    """Linked person (or HOD/Admin) approves or cancels a Done/Partial mark."""
+    scope = _scope_from_request(request)
+    _, name = _recorder_from_request(request)
+    ok = approve_task_log(
+        log_id,
+        actor=body.approved_by or name,
+        linked_employee_id=scope.employee_id,
+        action=body.action or "Approved",
+        notes=body.notes or "",
+        allow_override=scope.can_edit_assignments,
+    )
+    if ok is True:
+        return {"ok": True}
+    if ok == "forbidden":
+        raise HTTPException(403, "Only the Linked To person (or HOD/Admin) can approve")
+    if ok == "not_pending":
+        raise HTTPException(409, "Task is not awaiting linked approval")
+    if ok == "window_closed":
+        raise HTTPException(409, "Approval window closed")
+    if ok == "invalid_action":
+        raise HTTPException(400, "action must be Approved or Cancelled")
+    raise HTTPException(404, "Task log not found")
+
+
+@router.post("/tasks/reassign-day")
+def post_reassign_day(body: ReassignDayIn, request: Request):
+    """One-day mandatory reassignment clone (HOD/Admin). Master responsibility stays put."""
+    scope = _scope_from_request(request)
+    assert_hrm_hod_or_admin(scope)
+    assert_responsibility_in_scope(scope, body.original_responsibility_id)
+    assert_employee_in_scope(scope, body.to_employee_id)
+    _, name = _recorder_from_request(request)
+    try:
+        cid = reassign_mandatory_for_day(
+            original_responsibility_id=body.original_responsibility_id,
+            to_employee_id=body.to_employee_id,
+            reassignment_date=body.reassignment_date,
+            assigned_by=body.assigned_by or name,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "clone_id": cid}
+
+
+@router.post("/tasks/reassign-clones/{clone_id}/mark")
+def post_mark_reassignment(clone_id: int, body: ReassignMarkIn, request: Request):
+    scope = _scope_from_request(request)
+    _, name = _recorder_from_request(request)
+    ok = mark_reassignment_clone(
+        clone_id,
+        body.status,
+        marked_by=body.marked_by or name,
+        remarks=body.remarks or "",
+    )
+    if ok is True:
+        return {"ok": True}
+    if ok == "window_closed":
+        raise HTTPException(409, "Reassignment mark window closed")
+    if ok == "invalid_status":
+        raise HTTPException(400, "Invalid status")
+    raise HTTPException(404, "Reassignment not found")
+
+
+@router.post("/tasks/process-auto-closures")
+def post_process_auto_closures(request: Request):
+    """HOD/Admin: auto-Missed + auto-Approve linked after IST task date + 2 days."""
+    scope = _scope_from_request(request)
+    assert_hrm_hod_or_admin(scope)
+    _, name = _recorder_from_request(request)
+    return process_auto_closures_ist(actor=name or "system-auto")
 
 
 @router.get("/tasks/logs")
@@ -933,14 +1133,18 @@ def post_one_time_task(body: OneTimeTaskIn, request: Request):
     assert_employee_in_scope(scope, body.employee_id)
     if scope.is_employee:
         raise HTTPException(403, "Employees cannot assign one-time tasks")
-    tid = create_one_time_task(body.model_dump())
+    data = body.model_dump()
+    if not (data.get("assigned_by") or "").strip():
+        _, name = _recorder_from_request(request)
+        data["assigned_by"] = name
+    tid = create_one_time_task(data)
     return {"ok": True, "id": tid}
 
 
 @router.patch("/one-time-tasks/{task_id}")
 def patch_one_time_task(task_id: int, body: OneTimeTaskUpdate, request: Request):
     scope = _scope_from_request(request)
-    assert_hrm_hod_or_admin(scope)
+    assert_hrm_admin_mutate_records(scope)
     owner = get_one_time_task_owner(task_id)
     if owner is None:
         raise HTTPException(404, "Task not found")
@@ -1018,3 +1222,117 @@ def post_reject_one_time_task(task_id: int, body: OneTimeTaskApprovalIn, request
     if not reject_one_time_task(task_id, body.approved_by or "", body.notes or ""):
         raise HTTPException(400, "Task must be Done to reject")
     return {"ok": True}
+
+
+@router.post("/one-time-tasks/{task_id}/manual-duration")
+def post_manual_duration(task_id: int, body: ManualDurationIn, request: Request):
+    scope = _scope_from_request(request)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    # Assignee or assigners with edit rights can set duration
+    if scope.is_employee and scope.employee_id != owner and not scope.can_edit_assignments:
+        raise HTTPException(403, "Not allowed to set duration")
+    try:
+        mins = set_manual_task_duration(task_id, body.duration)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "duration_minutes": mins}
+
+
+@router.get("/dashboard-stats")
+def dashboard_stats(request: Request):
+    scope = _scope_from_request(request)
+    dept_f, emp_f = hrm_scope_filters(scope)
+    if dept_f == -1 or emp_f == -1:
+        return {"department_count": 0, "total_employees": 0, "hods": []}
+    return get_dashboard_stats(
+        department_id=dept_f if scope.level == "department" else None,
+        employee_id=emp_f if scope.level == "self" else None,
+    )
+
+
+@router.get("/hierarchy")
+def hierarchy_get(request: Request):
+    scope = _scope_from_request(request)
+    if not scope.can_manage_org and not scope.is_hod:
+        raise HTTPException(403, "Hierarchy view requires HOD or Admin")
+    tree = get_org_hierarchy()
+    if scope.level == "department" and scope.department_id is not None:
+        did = scope.department_id
+        tree["employees_flat"] = [e for e in tree["employees_flat"] if e.get("department_id") == did]
+        tree["departments_flat"] = [d for d in tree["departments_flat"] if d.get("id") == did]
+        tree["departments"] = [d for d in tree["departments"] if d.get("id") == did]
+        tree["reporting"] = [
+            e for e in tree["reporting"] if e.get("department_id") == did
+        ]
+    return tree
+
+
+@router.patch("/hierarchy/department")
+def hierarchy_patch_dept(body: HierarchyDeptIn, request: Request):
+    assert_hrm_write_org(_scope_from_request(request))
+    data = {}
+    if body.parent_department_id is not None:
+        data["parent_department_id"] = body.parent_department_id
+    if body.hod_name is not None:
+        data["hod_name"] = body.hod_name
+    if data:
+        update_department(body.department_id, data)
+    return {"ok": True}
+
+
+@router.patch("/hierarchy/reporting")
+def hierarchy_patch_report(body: HierarchyReportIn, request: Request):
+    assert_hrm_write_org(_scope_from_request(request))
+    try:
+        update_employee(
+            body.employee_id,
+            {"reports_to_employee_id": body.reports_to_employee_id},
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True}
+
+
+@router.get("/reports/tasks")
+def task_based_report(
+    request: Request,
+    department_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    priority: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    scope = _scope_from_request(request)
+    dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
+    if dept_f == -1 or emp_f == -1:
+        return []
+    _enforce_list_employee_scope(scope, emp_f)
+    return get_task_based_report(
+        department_id=dept_f,
+        employee_id=emp_f,
+        from_date=from_date,
+        to_date=to_date,
+        priority=priority,
+        status=status,
+    )
+
+
+@router.get("/assignees")
+def list_assignees(request: Request, q: str = ""):
+    """Authorized users for Assigned By dropdown."""
+    _scope_from_request(request)
+    users = search_active_users(q or "", limit=50)
+    return [
+        {
+            "id": u.get("id"),
+            "name": (u.get("full_name") or u.get("username") or "").strip(),
+            "username": u.get("username"),
+            "role": u.get("role_name"),
+        }
+        for u in users
+        if (u.get("full_name") or u.get("username"))
+    ]

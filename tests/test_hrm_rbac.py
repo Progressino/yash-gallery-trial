@@ -73,8 +73,10 @@ def test_hrm_edit_assignment_permission_flags():
     assert build_hrm_scope(_profile("Admin")).can_edit_assignments is True
     assert build_hrm_scope(_profile("Super Admin")).can_edit_assignments is True
     assert build_hrm_scope(_profile("HOD", hrm_department_id=2)).can_edit_assignments is True
+    assert build_hrm_scope(_profile("HOD", hrm_department_id=2)).can_mutate_assignment_records is False
     assert build_hrm_scope(_profile("Employee", employee_id=1)).can_edit_assignments is False
     assert build_hrm_scope(_profile("Employee", employee_id=1)).can_delete_hrm_records is False
+    assert build_hrm_scope(_profile("Admin")).can_delete_hrm_records is True
     assert build_hrm_scope(_profile("Admin")).can_view_employee_list is True
     assert build_hrm_scope(_profile("Super Admin")).can_view_employee_list is True
     assert build_hrm_scope(_profile("Sir")).can_view_employee_list is False
@@ -167,16 +169,20 @@ def _seed_resp_and_task():
 
 
 def test_hod_can_edit_responsibility_and_task(monkeypatch):
+    """HOD may assign/mark; edit/delete of master records is Admin-only."""
     dept_id, emp_id, rid, tid = _seed_resp_and_task()
     client = _make_client(
         monkeypatch,
         "hod_edit",
         _profile("HOD", hrm_department_id=dept_id),
     )
-    assert client.patch(f"/api/hrm/responsibilities/{rid}", json={"title": "Updated daily check"}).status_code == 200
-    assert client.patch(f"/api/hrm/one-time-tasks/{tid}", json={"title": "Updated audit"}).status_code == 200
-    assert hrm_db.list_responsibilities(employee_id=emp_id)[0]["title"] == "Updated daily check"
-    assert hrm_db.list_one_time_tasks(employee_id=emp_id)[0]["title"] == "Updated audit"
+    assert client.patch(f"/api/hrm/responsibilities/{rid}", json={"title": "Updated daily check"}).status_code == 403
+    assert client.patch(f"/api/hrm/one-time-tasks/{tid}", json={"title": "Updated audit"}).status_code == 403
+    # Create still allowed via can_edit_assignments
+    assert client.post(
+        "/api/hrm/responsibilities",
+        json={"employee_id": emp_id, "title": "New daily", "frequency": "Daily"},
+    ).status_code == 200
 
 
 def test_employee_cannot_edit_responsibility_or_task(monkeypatch):

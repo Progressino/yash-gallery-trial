@@ -1,18 +1,28 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useAuth } from '../store/auth'
+import { FREQUENCIES, PRIORITIES, TIME_PERIODS, WEEKDAYS, MONTHS, priorityStyle } from './hrmConstants'
+import { loadHrmLang, saveHrmLang, t, type HrmLang } from './hrmI18n'
 
-type Tab = 'dashboard' | 'check' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance'
+type Tab = 'dashboard' | 'check' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'hierarchy'
 
-const FREQUENCIES = ['Daily', 'Weekly', 'Monthly']
 const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected'] as const
 const TASK_LOG_STATUSES = ['Done', 'Partial', 'Missed', 'Blocked', 'Leave', 'N/A'] as const
-type ItemType = 'responsibility' | 'task'
 const CATEGORIES = ['General', 'Quality', 'Production', 'Accounts', 'Purchase', 'Sales', 'Store', 'HR', 'Other']
 const ISSUE_TYPES = ['General', 'Discipline', 'Quality', 'Attendance', 'Behaviour', 'Task Failure', 'Dependency Missed', 'Policy Violation', 'Workplace Incident', 'Performance', 'Complaint']
 const SEVERITIES = ['Minor', 'Moderate', 'Major']
 const ISSUE_STATUSES = ['Open', 'Resolve', 'Hold', 'Cancel'] as const
+
+/** Column header with inline filter control */
+function ColFilter({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <th className="text-left px-2 py-1.5 align-bottom">
+      <div className="text-[10px] font-semibold text-gray-500 uppercase">{label}</div>
+      <div className="mt-0.5">{children}</div>
+    </th>
+  )
+}
 
 const issueStatusStyle = (s: string) => {
   if (s === 'Resolve' || s === 'Resolved') return 'bg-green-100 text-green-800'
@@ -92,7 +102,13 @@ export default function HRM() {
   const isEmployeeScope = scopeLevel === 'self'
   const canAssignTasks = !isEmployeeScope
   const canEditAssignments = scope?.can_edit_assignments ?? (canManageOrg || userRole === 'HOD')
-  const canDeleteHrm = scope?.can_delete_hrm_records ?? canEditAssignments
+  const canMutateRecords = scope?.can_mutate_assignment_records ?? canManageOrg
+  const canDeleteHrm = scope?.can_delete_hrm_records ?? canMutateRecords
+  const canUseEmployeeCheck = scope?.can_use_employee_check ?? (userRole === 'HOD' || userRole === 'Employee' || !canViewEmployeeList)
+  const canViewDashboard = scope?.can_view_dashboard ?? (canManageOrg || userRole === 'HOD')
+
+  const [lang, setLang] = useState<HrmLang>(() => loadHrmLang())
+  const setLangPersist = (l: HrmLang) => { setLang(l); saveHrmLang(l) }
 
   const [tab, setTab] = useState<Tab>('dashboard')
   const [selDept, setSelDept] = useState<number | ''>('')
@@ -106,6 +122,7 @@ export default function HRM() {
   const [appraisalTo, setAppraisalTo] = useState(today())
   const [checkDate, setCheckDate] = useState(today())
   const [checkEmp, setCheckEmp] = useState<number | ''>('')
+  const [checkPeriod, setCheckPeriod] = useState('')
   const [showDailyGuide, setShowDailyGuide] = useState(false)
 
   const [showDeptForm, setShowDeptForm] = useState(false)
@@ -114,6 +131,20 @@ export default function HRM() {
   const [showTaskForm, setShowTaskForm] = useState(false)
   const [showIssueForm, setShowIssueForm] = useState(false)
   const [taskStatusFilter, setTaskStatusFilter] = useState('')
+  const [taskPriorityFilter, setTaskPriorityFilter] = useState('')
+  const [taskTitleFilter, setTaskTitleFilter] = useState('')
+  const [taskAssignedByFilter, setTaskAssignedByFilter] = useState('')
+  const [respTitleFilter, setRespTitleFilter] = useState('')
+  const [respFreqFilter, setRespFreqFilter] = useState('')
+  const [respPriorityFilter, setRespPriorityFilter] = useState('')
+  const [respAssignedByFilter, setRespAssignedByFilter] = useState('')
+  const [manualTimeOpen, setManualTimeOpen] = useState<number | null>(null)
+  const [manualTimeVal, setManualTimeVal] = useState('')
+  const [empNameSuggest, setEmpNameSuggest] = useState<any[]>([])
+  const [audioPreview, setAudioPreview] = useState<string | null>(null)
+  const issueAudioRecRef = useRef<MediaRecorder | null>(null)
+  const issueAudioChunks = useRef<Blob[]>([])
+
   const [completeModal, setCompleteModal] = useState<{ id: number; title: string } | null>(null)
   const [completeNotes, setCompleteNotes] = useState('')
   const [approvalModal, setApprovalModal] = useState<{ id: number; title: string; action: 'approve' | 'reject' } | null>(null)
@@ -129,9 +160,19 @@ export default function HRM() {
   const [blockedForm, setBlockedForm] = useState({ blocker_employee_id: '' as any, blocker_reason: '', marked_by: '' })
 
   const [deptForm, setDeptForm] = useState({ name: '', description: '', hod_name: '' })
-  const [empForm, setEmpForm] = useState({ name: '', department_id: '' as any, designation: '', phone: '', email: '', join_date: '' })
-  const [respForm, setRespForm] = useState({ item_type: 'responsibility' as ItemType, employee_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General', added_by: '', due_date: '' })
-  const [taskForm, setTaskForm] = useState({ item_type: 'task' as ItemType, employee_id: '' as any, title: '', description: '', due_date: '', assigned_by: '' })
+  const [empForm, setEmpForm] = useState({ name: '', emp_code: '', department_id: '' as any, designation: '', phone: '', email: '', join_date: '', reports_to_employee_id: '' as any })
+  const [respForm, setRespForm] = useState({
+    employee_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General',
+    added_by: '', priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
+    schedule_month: 0, time_period: '', linked_to_employee_id: '' as any,
+  })
+  const [taskForm, setTaskForm] = useState({
+    employee_id: '' as any, title: '', description: '', due_date: '', assigned_by: '', priority: 'Medium',
+  })
+  const [reassignForm, setReassignForm] = useState({
+    original_responsibility_id: '' as any, to_employee_id: '' as any, reassignment_date: today(),
+  })
+  const [showReassign, setShowReassign] = useState(false)
   const [issueForm, setIssueForm] = useState({
     subject_user_id: '' as any,
     employee_id: '' as any,
@@ -142,6 +183,7 @@ export default function HRM() {
     caused_by_user_id: '' as any,
     caused_by_employee_id: '' as any,
     status: 'Open',
+    audio_url: '',
   })
   const [issueEmpSearch, setIssueEmpSearch] = useState('')
   const [issueCauseSearch, setIssueCauseSearch] = useState('')
@@ -157,8 +199,14 @@ export default function HRM() {
   const [issueComment, setIssueComment] = useState('')
   const [issueAttachmentName, setIssueAttachmentName] = useState('')
 
-  // Quick resp + voice
-  const [quickResp, setQuickResp] = useState({ item_type: 'responsibility' as ItemType, employee_id: '' as any, department_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General', added_by: '', due_date: '' })
+  // Quick assign (dashboard) — separate responsibility vs task flows without Item Type label
+  const [quickResp, setQuickResp] = useState({
+    mode: 'responsibility' as 'responsibility' | 'task',
+    employee_id: '' as any, department_id: '' as any, title: '', description: '',
+    frequency: 'Daily', category: 'General', added_by: '', due_date: '',
+    priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
+    schedule_month: 0, time_period: '', linked_to_employee_id: '' as any,
+  })
   const [showQuickResp, setShowQuickResp] = useState(false)
   const [voiceText, setVoiceText] = useState('')
   const [isListening, setIsListening] = useState(false)
@@ -181,11 +229,14 @@ export default function HRM() {
     })
     let frequency = 'Daily'
     if (lowerText.includes('weekly')) frequency = 'Weekly'
+    else if (lowerText.includes('fortnight')) frequency = 'Fortnightly'
     else if (lowerText.includes('monthly')) frequency = 'Monthly'
+    else if (lowerText.includes('quarter')) frequency = 'Quarterly'
+    else if (lowerText.includes('yearly') || lowerText.includes('annual')) frequency = 'Yearly'
     const taskHints = ['by friday', 'by monday', 'by tuesday', 'by wednesday', 'by thursday', 'by saturday', 'by sunday', 'one time', 'one-time', 'audit', 'complete the', 'finish the', 'before ']
-    let itemType: ItemType = taskHints.some(h => lowerText.includes(h)) ? 'task' : 'responsibility'
+    let mode: 'responsibility' | 'task' = taskHints.some(h => lowerText.includes(h)) ? 'task' : 'responsibility'
     let dueDate = ''
-    if (itemType === 'task') {
+    if (mode === 'task') {
       const dayMatch = lowerText.match(/by\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)/i)
       if (dayMatch) {
         const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
@@ -202,11 +253,21 @@ export default function HRM() {
         title = title.replace(new RegExp(part, 'gi'), '').trim()
       })
     }
-    title = title.replace(/\b(from now on|daily|weekly|monthly|will|shall|must|the|and|or)\b/gi, '').replace(/\s+/g, ' ').trim()
+    title = title.replace(/\b(from now on|daily|weekly|monthly|fortnightly|quarterly|yearly|will|shall|must|the|and|or)\b/gi, '').replace(/\s+/g, ' ').trim()
     if (!title) title = text
-    const parsed = { item_type: itemType, employee_id: matchedEmp?.id || null, employee_name: matchedEmp?.name || '', department_id: matchedEmp?.department_id || null, title, frequency, category: 'General', due_date: dueDate }
+    const parsed = { mode, employee_id: matchedEmp?.id || null, employee_name: matchedEmp?.name || '', department_id: matchedEmp?.department_id || null, title, frequency, category: 'General', due_date: dueDate }
     setAiParsed(parsed)
-    setQuickResp({ item_type: itemType, employee_id: parsed.employee_id || '', department_id: parsed.department_id || '', title: parsed.title, description: '', frequency: parsed.frequency, category: 'General', added_by: '', due_date: dueDate })
+    setQuickResp(f => ({
+      ...f,
+      mode,
+      employee_id: parsed.employee_id || '',
+      department_id: parsed.department_id || '',
+      title: parsed.title,
+      description: '',
+      frequency: parsed.frequency,
+      category: 'General',
+      due_date: dueDate,
+    }))
     setShowQuickResp(true)
     setAiParsing(false)
   }
@@ -215,7 +276,7 @@ export default function HRM() {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SR) { alert('Speech recognition requires Chrome or Edge.'); return }
     const recognition = new SR()
-    recognition.lang = 'en-IN'
+    recognition.lang = lang === 'hi' ? 'hi-IN' : 'en-IN'
     recognition.continuous = false
     recognition.interimResults = false
     recognition.onstart = () => setIsListening(true)
@@ -352,6 +413,30 @@ export default function HRM() {
       const msg = err?.response?.data?.detail
       if (msg) alert(msg)
     },
+  })
+  const reassignMut = useMutation({
+    mutationFn: (b: object) => api.post('/hrm/tasks/reassign-day', b),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
+      setShowReassign(false)
+    },
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Reassignment failed'),
+  })
+  const markCloneMut = useMutation({
+    mutationFn: ({ id, ...b }: { id: number; status: string; remarks?: string }) =>
+      api.post(`/hrm/tasks/reassign-clones/${id}/mark`, b),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['hrm-employee-check'] }),
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not mark reassignment'),
+  })
+  const approveLogMut = useMutation({
+    mutationFn: ({ id, action }: { id: number; action: string }) =>
+      api.post(`/hrm/tasks/logs/${id}/approve`, { action }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
+      qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
+      qc.invalidateQueries({ queryKey: ['hrm-perf'] })
+    },
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Approval failed'),
   })
   const importRespMut = useMutation({
     mutationFn: (file: File) => {
@@ -534,7 +619,7 @@ export default function HRM() {
       setShowRespForm(false)
       setAiParsed(null)
       setVoiceText('')
-      setTaskForm({ item_type: 'task', employee_id: '', title: '', description: '', due_date: '', assigned_by: '' })
+      setTaskForm({ employee_id: '', title: '', description: '', due_date: '', assigned_by: '', priority: 'Medium' })
     },
   })
   const startOneTimeTaskMut = useMutation({
@@ -569,17 +654,40 @@ export default function HRM() {
     mutationFn: (id: number) => api.delete(`/hrm/one-time-tasks/${id}`),
     onSuccess: invalidateTaskMetrics,
   })
+  const manualDurationMut = useMutation({
+    mutationFn: ({ id, duration }: { id: number; duration: string }) =>
+      api.post(`/hrm/one-time-tasks/${id}/manual-duration`, { duration }),
+    onSuccess: () => {
+      invalidateTaskMetrics()
+      setManualTimeOpen(null)
+      setManualTimeVal('')
+    },
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Invalid time format'),
+  })
   const submitAssign = (form: typeof quickResp) => {
     if (!form.employee_id || !form.title) return
-    if (form.item_type === 'task') {
+    if (form.mode === 'task') {
       createOneTimeTaskMut.mutate({
         employee_id: +form.employee_id,
         title: form.title,
         description: form.description || '',
         due_date: form.due_date || '',
         assigned_by: form.added_by || '',
+        priority: form.priority || 'Medium',
       })
     } else {
+      if ((form.frequency === 'Weekly' || form.frequency === 'Fortnightly') && !form.schedule_weekday) {
+        alert('Select a weekday for Weekly/Fortnightly responsibilities')
+        return
+      }
+      if (form.frequency === 'Monthly' && !(form.schedule_month_day > 0)) {
+        alert('Select calendar day for Monthly responsibilities')
+        return
+      }
+      if (form.frequency === 'Quarterly' && !(form.schedule_month > 0)) {
+        alert('Select anchor month for Quarterly responsibilities')
+        return
+      }
       createRespMut.mutate({
         employee_id: +form.employee_id,
         department_id: form.department_id ? +form.department_id : null,
@@ -588,6 +696,13 @@ export default function HRM() {
         frequency: form.frequency,
         category: form.category,
         added_by: form.added_by || '',
+        priority: form.priority || 'Medium',
+        mandatory: !!form.mandatory,
+        schedule_weekday: form.schedule_weekday || '',
+        schedule_month_day: form.schedule_month_day || 0,
+        schedule_month: form.schedule_month || 0,
+        time_period: form.time_period || '',
+        linked_to_employee_id: form.linked_to_employee_id ? +form.linked_to_employee_id : null,
       })
     }
   }
@@ -596,6 +711,69 @@ export default function HRM() {
     () => (allEmps as any[]).filter((e: any) => !hodDept || e.department_id === hodDept),
     [allEmps, hodDept],
   )
+
+  const { data: dashStats } = useQuery({
+    queryKey: ['hrm-dash-stats'],
+    queryFn: () => api.get('/hrm/dashboard-stats').then(r => r.data),
+    enabled: tab === 'dashboard',
+  })
+  const { data: assignees = [] } = useQuery({
+    queryKey: ['hrm-assignees'],
+    queryFn: () => api.get('/hrm/assignees').then(r => r.data),
+    staleTime: 60_000,
+  })
+  const { data: orgHierarchy } = useQuery({
+    queryKey: ['hrm-hierarchy'],
+    queryFn: () => api.get('/hrm/hierarchy').then(r => r.data),
+    enabled: tab === 'hierarchy' && (canManageOrg || userRole === 'HOD'),
+  })
+  const { data: taskReport = [] } = useQuery({
+    queryKey: ['hrm-task-report', selDept, selEmp, fromDate, toDate, taskPriorityFilter, taskStatusFilter],
+    queryFn: () => {
+      const p = new URLSearchParams({ from_date: fromDate, to_date: toDate })
+      if (selDept) p.set('department_id', String(selDept))
+      if (selEmp) p.set('employee_id', String(selEmp))
+      if (taskPriorityFilter) p.set('priority', taskPriorityFilter)
+      if (taskStatusFilter) p.set('status', taskStatusFilter)
+      return api.get(`/hrm/reports/tasks?${p}`).then(r => r.data)
+    },
+    enabled: tab === 'performance',
+  })
+
+  const filteredResponsibilities = useMemo(() => {
+    return (responsibilities as any[]).filter(r => {
+      if (respTitleFilter && !String(r.title || '').toLowerCase().includes(respTitleFilter.toLowerCase())) return false
+      if (respFreqFilter && r.frequency !== respFreqFilter) return false
+      if (respPriorityFilter && (r.priority || 'Medium') !== respPriorityFilter) return false
+      if (respAssignedByFilter && !String(r.added_by || '').toLowerCase().includes(respAssignedByFilter.toLowerCase())) return false
+      return true
+    })
+  }, [responsibilities, respTitleFilter, respFreqFilter, respPriorityFilter, respAssignedByFilter])
+
+  const filteredTasks = useMemo(() => {
+    return (oneTimeTasks as any[]).filter(t => {
+      if (taskTitleFilter && !String(t.title || '').toLowerCase().includes(taskTitleFilter.toLowerCase())) return false
+      if (taskPriorityFilter && (t.priority || 'Medium') !== taskPriorityFilter) return false
+      if (taskAssignedByFilter && !String(t.assigned_by || '').toLowerCase().includes(taskAssignedByFilter.toLowerCase())) return false
+      return true
+    }).sort((a, b) => {
+      const order = { Critical: 0, High: 1, Medium: 2, Low: 3 } as Record<string, number>
+      return (order[a.priority || 'Medium'] ?? 2) - (order[b.priority || 'Medium'] ?? 2)
+    })
+  }, [oneTimeTasks, taskTitleFilter, taskPriorityFilter, taskAssignedByFilter])
+
+  const dayCheckFiltered = useMemo(() => {
+    if (!dayCheck || !checkPeriod) return dayCheck
+    const filterItems = (arr: any[]) => (arr || []).filter((i: any) => !i.time_period || i.time_period === checkPeriod || i.time_period === 'Full Day')
+    return {
+      ...dayCheck,
+      worked_on: filterItems(dayCheck.worked_on),
+      not_worked: filterItems(dayCheck.not_worked),
+      other: filterItems(dayCheck.other),
+      whenever_required: filterItems(dayCheck.whenever_required || []),
+      additional_work: dayCheck.additional_work || [],
+    }
+  }, [dayCheck, checkPeriod])
 
   const handleStatusSelect = (respId: number, logDate: string, status: string) => {
     if (!status) return
@@ -610,27 +788,39 @@ export default function HRM() {
   const deptName = (id: any) => (depts as any[]).find(d => d.id === id)?.name || '—'
 
   const ALL_TABS: [Tab, string][] = [
-    ['dashboard', '📊 Dashboard'],
-    ['check', '🔎 Employee Check'],
-    ['employees', '👥 Employees'],
-    ['responsibilities', '📋 Responsibilities'],
-    ['tasks', '✅ Tasks'],
-    ['hod', '🏢 HOD View'],
-    ['issues', '⚠️ Issues'],
-    ['appraisal', '📁 Appraisal'],
-    ['performance', '📈 Performance'],
+    ['dashboard', `📊 ${t(lang, 'dashboard')}`],
+    ['check', `🔎 ${t(lang, 'check')}`],
+    ['employees', `👥 ${t(lang, 'employees')}`],
+    ['responsibilities', `📋 ${t(lang, 'responsibilities')}`],
+    ['tasks', `✅ ${t(lang, 'tasks')}`],
+    ['hierarchy', `🏛 ${t(lang, 'hierarchy')}`],
+    ['hod', `🏢 ${t(lang, 'hod')}`],
+    ['issues', `⚠️ ${t(lang, 'issues')}`],
+    ['appraisal', `📁 ${t(lang, 'appraisal')}`],
+    ['performance', `📈 ${t(lang, 'performance')}`],
   ]
 
   const TABS = useMemo(() => {
     let tabs = ALL_TABS
+    if (!canViewDashboard) {
+      tabs = tabs.filter(([k]) => k !== 'dashboard')
+    }
     if (!canViewEmployeeList) {
       tabs = tabs.filter(([k]) => k !== 'employees')
     }
+    if (!canUseEmployeeCheck) {
+      tabs = tabs.filter(([k]) => k !== 'check')
+    }
+    if (!canManageOrg && userRole !== 'HOD') {
+      tabs = tabs.filter(([k]) => k !== 'hierarchy')
+    }
     if (scopeLevel === 'self') {
-      tabs = tabs.filter(([k]) => ['dashboard', 'check', 'responsibilities', 'issues', 'appraisal'].includes(k))
+      tabs = tabs.filter(([k]) => ['check', 'responsibilities', 'issues', 'appraisal'].includes(k) || (canViewDashboard && k === 'dashboard'))
+      // Employees never see dashboard (canViewDashboard false for Employee)
+      tabs = tabs.filter(([k]) => k !== 'dashboard')
     }
     return tabs
-  }, [scopeLevel, canViewEmployeeList])
+  }, [scopeLevel, canViewEmployeeList, canUseEmployeeCheck, canViewDashboard, canManageOrg, userRole, lang])
 
   useEffect(() => {
     if (!TABS.some(([k]) => k === tab)) setTab(TABS[0]?.[0] || 'dashboard')
@@ -651,14 +841,69 @@ export default function HRM() {
     return rows
   }, [allEmps, isEmployeeScope, scope?.employee_id])
 
+  const assigneeOptions = useMemo(() => {
+    const names = new Set<string>()
+    const opts: string[] = []
+    for (const a of assignees as any[]) {
+      const n = (a.name || a.username || '').trim()
+      if (n && !names.has(n)) { names.add(n); opts.push(n) }
+    }
+    if (authUser?.full_name && !names.has(authUser.full_name)) opts.unshift(authUser.full_name)
+    if (authUser?.username && !names.has(authUser.username)) opts.push(authUser.username)
+    return opts
+  }, [assignees, authUser])
+
+  const startIssueAudio = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const rec = new MediaRecorder(stream)
+      issueAudioChunks.current = []
+      rec.ondataavailable = (e) => { if (e.data.size) issueAudioChunks.current.push(e.data) }
+      rec.onstop = () => {
+        const blob = new Blob(issueAudioChunks.current, { type: 'audio/webm' })
+        const url = URL.createObjectURL(blob)
+        setAudioPreview(url)
+        setIssueForm(f => ({ ...f, audio_url: url }))
+        stream.getTracks().forEach(tr => tr.stop())
+      }
+      issueAudioRecRef.current = rec
+      rec.start()
+      setIssueVoiceStatus('Recording audio…')
+    } catch {
+      setIssueVoiceStatus('Microphone access denied')
+    }
+  }
+  const stopIssueAudio = () => {
+    issueAudioRecRef.current?.stop()
+    setIssueVoiceStatus('Audio ready for attachment / playback')
+  }
+
+  const searchEmpNames = async (q: string) => {
+    setEmpForm(f => ({ ...f, name: q }))
+    if (q.trim().length < 2) { setEmpNameSuggest([]); return }
+    try {
+      const res = await api.get('/hrm/employees/autocomplete', { params: { q } })
+      setEmpNameSuggest(res.data || [])
+    } catch { setEmpNameSuggest([]) }
+  }
+
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-xl font-bold text-gray-800">HRM — Task & Performance Tracker</h1>
-        <p className="text-sm text-gray-500">
-          Employees · Tasks · Issues · Dependency · Appraisal
-          {scopeHint && <span className="block text-amber-700 mt-1">{scopeHint}</span>}
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-gray-800">{t(lang, 'title')}</h1>
+          <p className="text-sm text-gray-500">
+            {t(lang, 'subtitle')}
+            {scopeHint && <span className="block text-amber-700 mt-1">{scopeHint}</span>}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">{t(lang, 'lang')}</span>
+          <button type="button" onClick={() => setLangPersist('en')}
+            className={`text-xs px-2 py-1 rounded border ${lang === 'en' ? 'bg-[#002B5B] text-white' : 'bg-white'}`}>EN</button>
+          <button type="button" onClick={() => setLangPersist('hi')}
+            className={`text-xs px-2 py-1 rounded border ${lang === 'hi' ? 'bg-[#002B5B] text-white' : 'bg-white'}`}>हिं</button>
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-1 bg-gray-100 p-1 rounded-lg">
@@ -673,19 +918,26 @@ export default function HRM() {
       {/* ── DASHBOARD ── */}
       {tab === 'dashboard' && (
         <div className="space-y-4">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {[
-              ['Departments', (depts as any[]).length, 'text-blue-600'],
-              ['Employees', (allEmps as any[]).length, 'text-purple-600'],
-              ['Active', (allEmps as any[]).filter((e: any) => e.status === 'Active').length, 'text-green-600'],
-              ['Departments', (depts as any[]).length, 'text-amber-600'],
-            ].map(([l, v, c], i) => (
-              <div key={i} className="bg-white rounded-xl p-4 border shadow-sm">
-                <p className={`text-2xl font-bold ${c}`}>{v}</p>
-                <p className="text-xs text-gray-500 mt-1 font-semibold">{l}</p>
+          {(dashStats?.department_count ?? 0) > 0 || (dashStats?.total_employees ?? 0) > 0 ? (
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <div className="bg-white rounded-xl p-4 border shadow-sm">
+                <p className="text-2xl font-bold text-blue-600">{dashStats?.department_count ?? (depts as any[]).length}</p>
+                <p className="text-xs text-gray-500 mt-1 font-semibold">{t(lang, 'departments')}</p>
               </div>
-            ))}
-          </div>
+              <div className="bg-white rounded-xl p-4 border shadow-sm">
+                <p className="text-2xl font-bold text-purple-600">{dashStats?.total_employees ?? (allEmps as any[]).length}</p>
+                <p className="text-xs text-gray-500 mt-1 font-semibold">{t(lang, 'totalEmployees')}</p>
+              </div>
+              <div className="bg-white rounded-xl p-4 border shadow-sm md:col-span-1 col-span-2">
+                <p className="text-xs text-gray-500 font-semibold mb-1">{t(lang, 'hodInfo')}</p>
+                <ul className="text-sm space-y-0.5 max-h-24 overflow-auto">
+                  {((dashStats?.hods) || (depts as any[]).map((d: any) => ({ department: d.name, hod_name: d.hod_name }))).slice(0, 8).map((h: any, i: number) => (
+                    <li key={i}><span className="font-medium">{h.department || h.department_name}</span>: {h.hod_name || '—'}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          ) : null}
 
           {isEmployeeScope && dayCheck && (
             <div className="bg-white rounded-xl border overflow-hidden">
@@ -777,10 +1029,10 @@ export default function HRM() {
               <div className="bg-white rounded-lg p-3 text-gray-800 text-sm space-y-2">
                 <p className="font-semibold text-[#002B5B] text-xs uppercase">✅ Parsed — please confirm:</p>
                 <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div><span className="text-gray-500">Item Type:</span> <b>{aiParsed.item_type === 'task' ? 'Task' : 'Responsibility'}</b></div>
+                  <div><span className="text-gray-500">Item Type:</span> <b>{aiParsed.mode === 'task' ? 'Task' : 'Responsibility'}</b></div>
                   <div><span className="text-gray-500">Employee:</span> <b>{aiParsed.employee_name || '—'}</b></div>
                   <div className="col-span-2"><span className="text-gray-500">Title:</span> <b>{aiParsed.title || '—'}</b></div>
-                  {aiParsed.item_type === 'responsibility' ? (
+                  {aiParsed.mode === 'responsibility' ? (
                     <div><span className="text-gray-500">Frequency:</span> <b>{aiParsed.frequency}</b></div>
                   ) : (
                     <div><span className="text-gray-500">Due Date:</span> <b>{aiParsed.due_date || '—'}</b></div>
@@ -807,7 +1059,7 @@ export default function HRM() {
               <h3 className="font-semibold text-gray-700">Assignment Details</h3>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <div><label className="text-xs text-gray-500">Item Type *</label>
-                  <select value={quickResp.item_type} onChange={e => setQuickResp(f => ({ ...f, item_type: e.target.value as ItemType }))}
+                  <select value={quickResp.mode} onChange={e => setQuickResp(f => ({ ...f, mode: e.target.value as 'responsibility' | 'task' }))}
                     className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="responsibility">Responsibility (recurring)</option>
                     <option value="task">Task (one-time)</option>
@@ -826,7 +1078,7 @@ export default function HRM() {
                 <div className="col-span-2"><label className="text-xs text-gray-500">Description</label>
                   <input value={quickResp.description} onChange={e => setQuickResp(f => ({ ...f, description: e.target.value }))}
                     className="w-full border rounded px-2 py-1.5 text-sm mt-1" placeholder="Optional details" /></div>
-                {quickResp.item_type === 'responsibility' ? (
+                {quickResp.mode === 'responsibility' ? (
                   <>
                     <div><label className="text-xs text-gray-500">Frequency</label>
                       <select value={quickResp.frequency} onChange={e => setQuickResp(f => ({ ...f, frequency: e.target.value }))}
@@ -846,9 +1098,19 @@ export default function HRM() {
                     <input type="date" value={quickResp.due_date} onChange={e => setQuickResp(f => ({ ...f, due_date: e.target.value }))}
                       className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
                 )}
-                <div><label className="text-xs text-gray-500">Assigned By</label>
-                  <input value={quickResp.added_by} onChange={e => setQuickResp(f => ({ ...f, added_by: e.target.value }))}
-                    className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                <div><label className="text-xs text-gray-500">{t(lang, 'assignedBy')}</label>
+                  <select value={quickResp.added_by} onChange={e => setQuickResp(f => ({ ...f, added_by: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">Select</option>
+                    {assigneeOptions.map(n => <option key={n}>{n}</option>)}
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">{t(lang, 'priority')}</label>
+                  <select value={quickResp.priority} onChange={e => setQuickResp(f => ({ ...f, priority: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    {PRIORITIES.map(pr => <option key={pr}>{pr}</option>)}
+                  </select>
+                </div>
               </div>
               <div className="flex gap-2">
                 <button onClick={() => submitAssign(quickResp)}
@@ -929,24 +1191,86 @@ export default function HRM() {
               <span className="text-sm font-medium text-gray-700">Your daily check</span>
             )}
             <input type="date" value={checkDate} onChange={e => setCheckDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+            <select value={checkPeriod} onChange={e => setCheckPeriod(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm">
+              <option value="">{t(lang, 'timePeriod')} — All</option>
+              {TIME_PERIODS.map(tp => <option key={tp}>{tp}</option>)}
+            </select>
             <button onClick={() => setCheckDate(today())} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600">Today</button>
             {canEditAssignments && checkEmp && (dayCheck?.summary?.unmarked_daily || 0) > 0 && (
               <button
                 onClick={() => {
-                  if (window.confirm(`Mark ${dayCheck.summary.unmarked_daily} unmarked Daily item(s) as Missed for ${checkDate}?`)) {
+                  if (window.confirm(`Mark ${dayCheck?.summary.unmarked_daily} unmarked Daily item(s) as Missed for ${checkDate}?`)) {
                     markMissedMut.mutate()
                   }
                 }}
                 disabled={markMissedMut.isPending}
                 className="text-xs px-3 py-1.5 bg-red-600 text-white rounded-lg disabled:opacity-50"
               >
-                {markMissedMut.isPending ? 'Closing…' : `Auto-close unmarked as Missed (${dayCheck.summary.unmarked_daily})`}
+                {markMissedMut.isPending ? 'Closing…' : `Auto-close unmarked as Missed (${dayCheck?.summary.unmarked_daily})`}
+              </button>
+            )}
+            {canEditAssignments && checkEmp && (
+              <button
+                onClick={() => setShowReassign(true)}
+                className="text-xs px-3 py-1.5 border border-amber-700 text-amber-900 rounded-lg"
+              >
+                Reassign mandatory (1 day)
               </button>
             )}
             <button onClick={() => setShowDailyGuide(v => !v)} className="text-xs px-3 py-1.5 border border-teal-700 text-teal-800 rounded-lg ml-auto">
               {showDailyGuide ? 'Hide daily guide' : 'Daily guide (Harsh / Sanjay)'}
             </button>
           </div>
+
+          {showReassign && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2 text-sm">
+              <h4 className="font-semibold text-amber-900">One-day mandatory reassignment</h4>
+              <p className="text-xs text-amber-800">Creates a temporary clone for the selected day under Additional Work. Original responsibility is not transferred permanently.</p>
+              <div className="grid md:grid-cols-3 gap-2">
+                <div>
+                  <label className="text-xs text-gray-600">Responsibility ID</label>
+                  <input
+                    value={reassignForm.original_responsibility_id}
+                    onChange={e => setReassignForm(f => ({ ...f, original_responsibility_id: e.target.value }))}
+                    placeholder="From employee check list"
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600">Assign to</label>
+                  <select
+                    value={reassignForm.to_employee_id}
+                    onChange={e => setReassignForm(f => ({ ...f, to_employee_id: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
+                  >
+                    <option value="">Select</option>
+                    {pickerEmps.map((e: any) => (
+                      <option key={e.id} value={e.id}>{e.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600">Date</label>
+                  <input type="date" value={reassignForm.reassignment_date} onChange={e => setReassignForm(f => ({ ...f, reassignment_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-0.5" />
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  disabled={!reassignForm.original_responsibility_id || !reassignForm.to_employee_id || reassignMut.isPending}
+                  onClick={() => reassignMut.mutate({
+                    original_responsibility_id: +reassignForm.original_responsibility_id,
+                    to_employee_id: +reassignForm.to_employee_id,
+                    reassignment_date: reassignForm.reassignment_date,
+                  })}
+                  className="px-3 py-1.5 bg-amber-800 text-white rounded-lg text-xs disabled:opacity-50"
+                >
+                  Create one-day clone
+                </button>
+                <button type="button" onClick={() => setShowReassign(false)} className="px-3 py-1.5 border rounded-lg text-xs">Cancel</button>
+              </div>
+            </div>
+          )}
 
           {showDailyGuide && (
             <div className="bg-slate-50 border rounded-xl p-4 text-sm space-y-4">
@@ -986,22 +1310,22 @@ export default function HRM() {
                   <p className="text-teal-200 text-xs mt-1">Check date: {dayCheck.check_date}</p>
                 </div>
                 <div className="text-right">
-                  <p className="text-3xl font-bold">{dayCheck.summary?.completion_pct ?? 0}%</p>
+                  <p className="text-3xl font-bold">{dayCheck?.summary?.completion_pct ?? 0}%</p>
                   <p className="text-teal-200 text-xs">Daily completion</p>
                   <p className="text-teal-100 text-xs mt-1">
-                    Done {dayCheck.summary?.daily_done ?? 0} · Partial {dayCheck.summary?.daily_partial ?? 0} · Pending {dayCheck.summary?.daily_pending ?? 0} · Missed {dayCheck.summary?.daily_missed ?? 0}
+                    Done {dayCheck?.summary?.daily_done ?? 0} · Partial {dayCheck?.summary?.daily_partial ?? 0} · Pending {dayCheck?.summary?.daily_pending ?? 0} · Missed {dayCheck?.summary?.daily_missed ?? 0}
                   </p>
                 </div>
               </div>
 
               <div className="grid md:grid-cols-2 gap-4">
                 <div className="bg-white rounded-xl border overflow-hidden">
-                  <div className="px-4 py-2.5 bg-green-600 text-white font-semibold text-sm">Worked on ({dayCheck.worked_on?.length || 0})</div>
-                  {(dayCheck.worked_on || []).length === 0 ? (
+                  <div className="px-4 py-2.5 bg-green-600 text-white font-semibold text-sm">Worked on ({dayCheckFiltered?.worked_on?.length || 0})</div>
+                  {(dayCheckFiltered?.worked_on || []).length === 0 ? (
                     <p className="p-4 text-sm text-gray-400">No Done/Partial marks for this date yet.</p>
                   ) : (
                     <ul className="divide-y">
-                      {(dayCheck.worked_on || []).map((i: any) => (
+                      {(dayCheckFiltered?.worked_on || []).map((i: any) => (
                         <li key={i.responsibility_id} className="px-4 py-3">
                           <div className="flex items-start gap-2">
                             <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
@@ -1016,12 +1340,12 @@ export default function HRM() {
                   )}
                 </div>
                 <div className="bg-white rounded-xl border overflow-hidden">
-                  <div className="px-4 py-2.5 bg-red-600 text-white font-semibold text-sm">Not worked / pending ({dayCheck.not_worked?.length || 0})</div>
-                  {(dayCheck.not_worked || []).length === 0 ? (
+                  <div className="px-4 py-2.5 bg-red-600 text-white font-semibold text-sm">Not worked / pending ({dayCheckFiltered?.not_worked?.length || 0})</div>
+                  {(dayCheckFiltered?.not_worked || []).length === 0 ? (
                     <p className="p-4 text-sm text-gray-400">Nothing pending or missed — good.</p>
                   ) : (
                     <ul className="divide-y">
-                      {(dayCheck.not_worked || []).map((i: any) => (
+                      {(dayCheckFiltered?.not_worked || []).map((i: any) => (
                         <li key={i.responsibility_id} className="px-4 py-3">
                           <div className="flex items-start gap-2">
                             <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
@@ -1052,16 +1376,95 @@ export default function HRM() {
                 </div>
               </div>
 
-              {((dayCheck.one_time_working || []).length > 0 || (dayCheck.one_time_pending || []).length > 0 || (dayCheck.one_time_awaiting_approval || []).length > 0) && (
+              {((dayCheckFiltered?.additional_work || []).length > 0) && (
+                <div className="bg-white rounded-xl border overflow-hidden">
+                  <div className="px-4 py-2.5 bg-amber-700 text-white font-semibold text-sm">
+                    Additional Work (Assigned by HOD) ({dayCheckFiltered?.additional_work?.length || 0})
+                  </div>
+                  <ul className="divide-y">
+                    {(dayCheckFiltered?.additional_work || []).map((i: any) => (
+                      <li key={i.clone_id} className="px-4 py-3 flex items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-sm text-gray-800">{i.title}</p>
+                          <p className="text-xs text-gray-400">Cover for {i.original_employee_name} · {i.status}{i.assigned_by ? ` · by ${i.assigned_by}` : ''}</p>
+                          {i.status === 'Pending' && (
+                            <select
+                              defaultValue=""
+                              onChange={e => {
+                                const val = e.target.value
+                                if (!val) return
+                                markCloneMut.mutate({ id: i.clone_id, status: val })
+                                e.target.value = ''
+                              }}
+                              className="mt-1.5 text-xs border rounded px-1.5 py-1 bg-white"
+                            >
+                              <option value="">Mark status…</option>
+                              {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
+                            </select>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {((dayCheckFiltered?.whenever_required || []).length > 0) && (
+                <div className="bg-white rounded-xl border overflow-hidden">
+                  <div className="px-4 py-2.5 bg-slate-700 text-white font-semibold text-sm">
+                    Daily Tasks — Whenever Required ({dayCheckFiltered?.whenever_required?.length || 0})
+                  </div>
+                  <p className="px-4 pt-2 text-[11px] text-gray-500">Use N/A when not required (no performance impact). Mark Done/Partial when actually performed.</p>
+                  <ul className="divide-y">
+                    {(dayCheckFiltered?.whenever_required || []).map((i: any) => (
+                      <li key={i.responsibility_id} className="px-4 py-3">
+                        <div className="flex items-start gap-2">
+                          <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium text-sm text-gray-800">{i.title}</p>
+                            <p className="text-xs text-gray-400">
+                              {i.status}{i.approval_status ? ` · ${i.approval_status}` : ''}
+                              {i.linked_to_employee_name ? ` · Linked: ${i.linked_to_employee_name}` : ' · Self-complete'}
+                            </p>
+                            {(!i.marked || canEditAssignments) && (
+                              <select
+                                defaultValue=""
+                                onChange={e => {
+                                  const val = e.target.value
+                                  if (!val) return
+                                  handleStatusSelect(i.responsibility_id, checkDate, val)
+                                  e.target.value = ''
+                                }}
+                                className="mt-1.5 text-xs border rounded px-1.5 py-1 bg-white"
+                              >
+                                <option value="">Mark status…</option>
+                                {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
+                              </select>
+                            )}
+                            {i.task_log_id && i.approval_status === 'Pending' && (canEditAssignments || Number(scope?.employee_id) === Number(i.linked_to_employee_id)) && (
+                              <div className="flex gap-1 mt-1">
+                                <button type="button" className="text-xs px-2 py-0.5 bg-green-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: i.task_log_id, action: 'Approved' })}>Approve</button>
+                                <button type="button" className="text-xs px-2 py-0.5 bg-red-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: i.task_log_id, action: 'Cancelled' })}>Cancel</button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {((dayCheckFiltered?.one_time_working || []).length > 0 || (dayCheckFiltered?.one_time_pending || []).length > 0 || (dayCheckFiltered?.one_time_awaiting_approval || []).length > 0) && (
                 <div className="bg-white rounded-xl border p-4 space-y-3">
                   <h4 className="font-semibold text-[#002B5B] text-sm">One-time tasks</h4>
-                  {(dayCheck.one_time_working || []).map((t: any) => (
+                  {(dayCheckFiltered?.one_time_working || []).map((t: any) => (
                     <p key={t.id} className="text-sm"><span className="text-blue-700 font-medium">In progress:</span> {t.title}</p>
                   ))}
-                  {(dayCheck.one_time_pending || []).map((t: any) => (
+                  {(dayCheckFiltered?.one_time_pending || []).map((t: any) => (
                     <p key={t.id} className="text-sm"><span className="text-gray-600 font-medium">{t.status}:</span> {t.title}{t.due_date ? ` (due ${t.due_date})` : ''}</p>
                   ))}
-                  {(dayCheck.one_time_awaiting_approval || []).map((t: any) => (
+                  {(dayCheckFiltered?.one_time_awaiting_approval || []).map((t: any) => (
                     <p key={t.id} className="text-sm"><span className="text-amber-700 font-medium">Awaiting HOD:</span> {t.title}</p>
                   ))}
                 </div>
@@ -1099,8 +1502,18 @@ export default function HRM() {
             <div className="bg-white rounded-xl border p-4 space-y-3">
               <h3 className="font-semibold text-gray-700">New Employee</h3>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                <div><label className="text-xs text-gray-500">Name *</label>
-                  <input value={empForm.name} onChange={e => setEmpForm(f => ({ ...f, name: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                <div className="relative"><label className="text-xs text-gray-500">Name *</label>
+                  <input value={empForm.name} onChange={e => searchEmpNames(e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm mt-1" autoComplete="off" />
+                  {empNameSuggest.length > 0 && (
+                    <ul className="absolute z-10 bg-white border rounded shadow-sm mt-0.5 w-full max-h-32 overflow-auto text-xs">
+                      {empNameSuggest.map((s: any) => (
+                        <li key={s.id} className="px-2 py-1 text-amber-800 border-b last:border-0">⚠ Already exists: {s.name} ({s.emp_code})</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div><label className="text-xs text-gray-500">Employee ID</label>
+                  <input value={empForm.emp_code} onChange={e => setEmpForm(f => ({ ...f, emp_code: e.target.value }))} placeholder="Auto if blank" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
                 <div><label className="text-xs text-gray-500">Department</label>
                   <select value={empForm.department_id} onChange={e => setEmpForm(f => ({ ...f, department_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
@@ -1113,7 +1526,7 @@ export default function HRM() {
                 ))}
               </div>
               <div className="flex gap-2">
-                <button onClick={() => createEmpMut.mutate({ ...empForm, department_id: empForm.department_id ? +empForm.department_id : null })} disabled={!empForm.name} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Save</button>
+                <button onClick={() => createEmpMut.mutate({ ...empForm, department_id: empForm.department_id ? +empForm.department_id : null, emp_code: empForm.emp_code || undefined })} disabled={!empForm.name} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Save</button>
                 <button onClick={() => setShowEmpForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               </div>
             </div>
@@ -1129,6 +1542,7 @@ export default function HRM() {
                     {editEmp?.id === e.id ? (
                       <td colSpan={8} className="px-4 py-3">
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                          <input value={editEmp.emp_code || ''} onChange={ev => setEditEmp((x: any) => ({ ...x, emp_code: ev.target.value }))} className="border rounded px-2 py-1 text-sm font-mono" placeholder="Emp ID" />
                           <input value={editEmp.name} onChange={ev => setEditEmp((x: any) => ({ ...x, name: ev.target.value }))} className="border rounded px-2 py-1 text-sm" placeholder="Name" />
                           <select value={editEmp.department_id || ''} onChange={ev => setEditEmp((x: any) => ({ ...x, department_id: +ev.target.value }))} className="border rounded px-2 py-1 text-sm">
                             <option value="">Dept</option>
@@ -1137,7 +1551,7 @@ export default function HRM() {
                           <input value={editEmp.designation} onChange={ev => setEditEmp((x: any) => ({ ...x, designation: ev.target.value }))} className="border rounded px-2 py-1 text-sm" placeholder="Designation" />
                           <input value={editEmp.email || ''} onChange={ev => setEditEmp((x: any) => ({ ...x, email: ev.target.value }))} className="border rounded px-2 py-1 text-sm" placeholder="Email" />
                           <div className="flex gap-1 col-span-2">
-                            <button onClick={() => updateEmpMut.mutate({ id: e.id, data: { name: editEmp.name, department_id: editEmp.department_id, designation: editEmp.designation, email: editEmp.email } })} className="px-2 py-1 bg-green-600 text-white rounded text-xs">Save</button>
+                            <button onClick={() => updateEmpMut.mutate({ id: e.id, data: { name: editEmp.name, emp_code: editEmp.emp_code, department_id: editEmp.department_id, designation: editEmp.designation, email: editEmp.email } })} className="px-2 py-1 bg-green-600 text-white rounded text-xs">Save</button>
                             <button onClick={() => setEditEmp(null)} className="px-2 py-1 border rounded text-xs">Cancel</button>
                           </div>
                         </div>
@@ -1153,7 +1567,7 @@ export default function HRM() {
                         <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full ${e.status === 'Active' ? 'bg-green-100 text-green-700' : 'bg-gray-100'}`}>{e.status}</span></td>
                         <td className="px-4 py-2">
                           <div className="flex gap-2">
-                            <button onClick={() => setEditEmp({ id: e.id, name: e.name, department_id: e.department_id, designation: e.designation || '', email: e.email || '' })} className="text-xs text-blue-600">✏️</button>
+                            <button onClick={() => setEditEmp({ id: e.id, emp_code: e.emp_code, name: e.name, department_id: e.department_id, designation: e.designation || '', email: e.email || '' })} className="text-xs text-blue-600">✏️</button>
                             {canViewEmployeeList && (
                               <button onClick={() => { if (window.confirm(`Delete employee ${e.name} (${e.emp_code})?`)) deleteEmpMut.mutate(e.id) }} className="text-xs text-red-600">🗑️</button>
                             )}
@@ -1210,14 +1624,9 @@ export default function HRM() {
           </div>
           {showRespForm && (
             <div className="bg-white rounded-xl border p-4 space-y-3">
-              <h3 className="font-semibold text-gray-700">Assign Responsibility or Task</h3>
+              <h3 className="font-semibold text-gray-700">Assign Responsibility</h3>
+              <p className="text-[11px] text-gray-500">{t(lang, 'scheduleNote')}</p>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                <div><label className="text-xs text-gray-500">Item Type *</label>
-                  <select value={respForm.item_type} onChange={e => setRespForm(f => ({ ...f, item_type: e.target.value as ItemType }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    <option value="responsibility">Responsibility (recurring)</option>
-                    <option value="task">Task (one-time)</option>
-                  </select>
-                </div>
                 <div><label className="text-xs text-gray-500">Employee *</label>
                   <select value={respForm.employee_id} onChange={e => setRespForm(f => ({ ...f, employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
@@ -1225,39 +1634,96 @@ export default function HRM() {
                   </select>
                 </div>
                 <div className="col-span-2"><label className="text-xs text-gray-500">Title *</label>
-                  <input value={respForm.title} onChange={e => setRespForm(f => ({ ...f, title: e.target.value }))} placeholder="e.g. Enter delivery date on bills" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                  <input value={respForm.title} onChange={e => setRespForm(f => ({ ...f, title: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
                 <div className="col-span-2"><label className="text-xs text-gray-500">Description</label>
-                  <input value={respForm.description} onChange={e => setRespForm(f => ({ ...f, description: e.target.value }))} placeholder="Optional details" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                {respForm.item_type === 'responsibility' ? (
-                  <>
-                    <div><label className="text-xs text-gray-500">Frequency</label>
-                      <select value={respForm.frequency} onChange={e => setRespForm(f => ({ ...f, frequency: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                        {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
-                      </select>
-                    </div>
-                    <div><label className="text-xs text-gray-500">Category</label>
-                      <select value={respForm.category} onChange={e => setRespForm(f => ({ ...f, category: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                        {CATEGORIES.map(c => <option key={c}>{c}</option>)}
-                      </select>
-                    </div>
-                  </>
-                ) : (
-                  <div><label className="text-xs text-gray-500">Due Date</label>
-                    <input type="date" value={respForm.due_date} onChange={e => setRespForm(f => ({ ...f, due_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                  <input value={respForm.description} onChange={e => setRespForm(f => ({ ...f, description: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                <div><label className="text-xs text-gray-500">{t(lang, 'frequency')}</label>
+                  <select value={respForm.frequency} onChange={e => setRespForm(f => ({ ...f, frequency: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
+                  </select>
+                </div>
+                {(respForm.frequency === 'Weekly' || respForm.frequency === 'Fortnightly') && (
+                  <div><label className="text-xs text-gray-500">{t(lang, 'weekday')} *</label>
+                    <select value={respForm.schedule_weekday} onChange={e => setRespForm(f => ({ ...f, schedule_weekday: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                      <option value="">Select</option>
+                      {WEEKDAYS.map(d => <option key={d}>{d}</option>)}
+                    </select>
+                  </div>
                 )}
-                <div><label className="text-xs text-gray-500">Assigned By</label>
-                  <input value={respForm.added_by} onChange={e => setRespForm(f => ({ ...f, added_by: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                {respForm.frequency === 'Monthly' && (
+                  <div><label className="text-xs text-gray-500">{t(lang, 'monthDay')} *</label>
+                    <input type="number" min={1} max={31} value={respForm.schedule_month_day || ''} onChange={e => setRespForm(f => ({ ...f, schedule_month_day: +e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
+                  </div>
+                )}
+                {respForm.frequency === 'Quarterly' && (
+                  <div><label className="text-xs text-gray-500">Anchor month *</label>
+                    <select value={respForm.schedule_month || ''} onChange={e => setRespForm(f => ({ ...f, schedule_month: +e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                      <option value="">Select month</option>
+                      {MONTHS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                    </select>
+                    <p className="text-[10px] text-gray-400 mt-0.5">Repeats every 3 months from the selected month</p>
+                  </div>
+                )}
+                <div><label className="text-xs text-gray-500">Linked To (approval)</label>
+                  <select value={respForm.linked_to_employee_id} onChange={e => setRespForm(f => ({ ...f, linked_to_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">Self-complete (no approval)</option>
+                    {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">Category</label>
+                  <select value={respForm.category} onChange={e => setRespForm(f => ({ ...f, category: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">{t(lang, 'priority')}</label>
+                  <select value={respForm.priority} onChange={e => setRespForm(f => ({ ...f, priority: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    {PRIORITIES.map(pr => <option key={pr}>{pr}</option>)}
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">{t(lang, 'timePeriod')}</label>
+                  <select value={respForm.time_period} onChange={e => setRespForm(f => ({ ...f, time_period: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">—</option>
+                    {TIME_PERIODS.map(tp => <option key={tp}>{tp}</option>)}
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">{t(lang, 'mandatory')}</label>
+                  <select value={respForm.mandatory ? 'yes' : 'no'} onChange={e => setRespForm(f => ({ ...f, mandatory: e.target.value === 'yes' }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="no">{t(lang, 'no')}</option>
+                    <option value="yes">{t(lang, 'yes')}</option>
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">{t(lang, 'assignedBy')}</label>
+                  <select value={respForm.added_by} onChange={e => setRespForm(f => ({ ...f, added_by: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">Select</option>
+                    {assigneeOptions.map(n => <option key={n}>{n}</option>)}
+                  </select>
+                </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => submitAssign({ ...respForm, department_id: '' })} disabled={!respForm.employee_id || !respForm.title || createRespMut.isPending || createOneTimeTaskMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Assign</button>
+                <button onClick={() => submitAssign({ ...respForm, mode: 'responsibility' as const, department_id: '', due_date: '' })} disabled={!respForm.employee_id || !respForm.title || createRespMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Assign</button>
                 <button onClick={() => setShowRespForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               </div>
             </div>
           )}
           {(() => {
             const grouped: Record<string, any[]> = {}
-            ;(responsibilities as any[]).forEach((r: any) => { const key = r.employee_name || 'Unknown'; if (!grouped[key]) grouped[key] = []; grouped[key].push(r) })
-            return Object.entries(grouped).map(([empName, resps]) => (
+            ;filteredResponsibilities.forEach((r: any) => { const key = r.employee_name || 'Unknown'; if (!grouped[key]) grouped[key] = []; grouped[key].push(r) })
+            return (
+              <>
+                <div className="bg-white rounded-xl border p-3 flex flex-wrap gap-2 text-xs">
+                  <span className="font-semibold text-gray-500 self-center">{t(lang, 'filters')}:</span>
+                  <input placeholder="Title" value={respTitleFilter} onChange={e => setRespTitleFilter(e.target.value)} className="border rounded px-2 py-1" />
+                  <select value={respFreqFilter} onChange={e => setRespFreqFilter(e.target.value)} className="border rounded px-2 py-1">
+                    <option value="">Frequency</option>
+                    {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
+                  </select>
+                  <select value={respPriorityFilter} onChange={e => setRespPriorityFilter(e.target.value)} className="border rounded px-2 py-1">
+                    <option value="">Priority</option>
+                    {PRIORITIES.map(p => <option key={p}>{p}</option>)}
+                  </select>
+                  <input placeholder="Assigned By" value={respAssignedByFilter} onChange={e => setRespAssignedByFilter(e.target.value)} className="border rounded px-2 py-1" />
+                </div>
+            {Object.entries(grouped).map(([empName, resps]) => (
               <div key={empName} className="bg-white rounded-xl border overflow-hidden">
                 <div className="px-4 py-2 bg-[#002B5B] text-white text-sm font-semibold flex justify-between">
                   <span>👤 {empName}</span>
@@ -1265,7 +1731,7 @@ export default function HRM() {
                 </div>
                 <table className="w-full text-sm">
                   <thead className="text-gray-400 text-xs uppercase bg-gray-50">
-                    <tr><th className="text-left px-4 py-2">Task</th><th className="text-left px-4 py-2">Description</th><th className="text-left px-4 py-2">Frequency</th><th className="text-left px-4 py-2">Category</th><th className="text-left px-4 py-2">Added By</th><th className="px-4 py-2"></th></tr>
+                    <tr><th className="text-left px-4 py-2">Task</th><th className="text-left px-4 py-2">Description</th><th className="text-left px-4 py-2">Frequency</th><th className="text-left px-4 py-2">Priority</th><th className="text-left px-4 py-2">Added By</th><th className="px-4 py-2"></th></tr>
                   </thead>
                   <tbody>
                     {resps.map((r: any) => (
@@ -1292,13 +1758,13 @@ export default function HRM() {
                           </td>
                         ) : (
                           <>
-                            <td className="px-4 py-2 font-medium">{r.title}</td>
+                            <td className="px-4 py-2 font-medium">{r.title}{r.mandatory ? <span className="ml-1 text-[10px] text-red-600">*</span> : null}</td>
                             <td className="px-4 py-2 text-xs text-gray-500">{r.description || '—'}</td>
-                            <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.frequency === 'Daily' ? 'bg-blue-100 text-blue-700' : r.frequency === 'Weekly' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'}`}>{r.frequency}</span></td>
-                            <td className="px-4 py-2 text-xs text-gray-500">{r.category}</td>
+                            <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.frequency === 'Daily' ? 'bg-blue-100 text-blue-700' : r.frequency === 'Weekly' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'}`}>{r.frequency}{r.schedule_weekday ? ` · ${r.schedule_weekday}` : ''}{r.schedule_month_day ? ` · D${r.schedule_month_day}` : ''}</span></td>
+                            <td className="px-4 py-2 text-xs"><span className={`px-1.5 py-0.5 rounded ${priorityStyle(r.priority || 'Medium')}`}>{r.priority || 'Medium'}</span></td>
                             <td className="px-4 py-2 text-xs text-gray-400">{r.added_by || '—'}</td>
                             <td className="px-4 py-2">
-                              {canEditAssignments && (
+                              {canMutateRecords && (
                                 <div className="flex gap-2">
                                   <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id })} className="text-xs text-blue-600">✏️</button>
                                   {canDeleteHrm && (
@@ -1314,7 +1780,9 @@ export default function HRM() {
                   </tbody>
                 </table>
               </div>
-            ))
+            ))}
+              </>
+            )
           })()}
         </div>
       )}
@@ -1360,14 +1828,8 @@ export default function HRM() {
 
           {showTaskForm && canAssignTasks && (
             <div className="bg-white rounded-xl border p-4 space-y-3">
-              <h3 className="font-semibold text-gray-700">Assign Responsibility or Task</h3>
+              <h3 className="font-semibold text-gray-700">Assign Task</h3>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                <div><label className="text-xs text-gray-500">Item Type *</label>
-                  <select value={taskForm.item_type} onChange={e => setTaskForm(f => ({ ...f, item_type: e.target.value as ItemType }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    <option value="responsibility">Responsibility (recurring)</option>
-                    <option value="task">Task (one-time)</option>
-                  </select>
-                </div>
                 <div><label className="text-xs text-gray-500">Employee *</label>
                   <select value={taskForm.employee_id} onChange={e => setTaskForm(f => ({ ...f, employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
@@ -1375,36 +1837,42 @@ export default function HRM() {
                   </select>
                 </div>
                 <div className="col-span-2"><label className="text-xs text-gray-500">Title *</label>
-                  <input value={taskForm.title} onChange={e => setTaskForm(f => ({ ...f, title: e.target.value }))} placeholder="e.g. Complete warehouse audit by Friday" className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                  <input value={taskForm.title} onChange={e => setTaskForm(f => ({ ...f, title: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
                 <div className="col-span-2"><label className="text-xs text-gray-500">Description</label>
                   <input value={taskForm.description} onChange={e => setTaskForm(f => ({ ...f, description: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                {taskForm.item_type === 'responsibility' ? (
-                  <div><label className="text-xs text-gray-500">Frequency</label>
-                    <select value={respForm.frequency} onChange={e => setRespForm(f => ({ ...f, frequency: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                      {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
-                    </select>
-                  </div>
-                ) : (
-                  <div><label className="text-xs text-gray-500">Due Date</label>
-                    <input type="date" value={taskForm.due_date} onChange={e => setTaskForm(f => ({ ...f, due_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
-                )}
-                <div><label className="text-xs text-gray-500">Assigned By</label>
-                  <input value={taskForm.assigned_by} onChange={e => setTaskForm(f => ({ ...f, assigned_by: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                <div><label className="text-xs text-gray-500">{t(lang, 'dueDate')}</label>
+                  <input type="date" value={taskForm.due_date} onChange={e => setTaskForm(f => ({ ...f, due_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
+                <div><label className="text-xs text-gray-500">{t(lang, 'priority')}</label>
+                  <select value={taskForm.priority} onChange={e => setTaskForm(f => ({ ...f, priority: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    {PRIORITIES.map(pr => <option key={pr}>{pr}</option>)}
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">{t(lang, 'assignedBy')}</label>
+                  <select value={taskForm.assigned_by} onChange={e => setTaskForm(f => ({ ...f, assigned_by: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">Select</option>
+                    {assigneeOptions.map(n => <option key={n}>{n}</option>)}
+                  </select>
+                </div>
               </div>
               <div className="flex gap-2">
                 <button
                   onClick={() => submitAssign({
-                    item_type: taskForm.item_type,
+                    mode: 'task',
                     employee_id: taskForm.employee_id,
                     department_id: '',
                     title: taskForm.title,
                     description: taskForm.description,
-                    frequency: respForm.frequency,
-                    category: respForm.category,
+                    frequency: 'Daily',
+                    category: 'General',
                     added_by: taskForm.assigned_by,
                     due_date: taskForm.due_date,
+                    priority: taskForm.priority,
+                    mandatory: false,
+                    schedule_weekday: '',
+                    schedule_month_day: 0,
+                    time_period: '',
                   })}
-                  disabled={!taskForm.employee_id || !taskForm.title || createOneTimeTaskMut.isPending || createRespMut.isPending}
+                  disabled={!taskForm.employee_id || !taskForm.title || createOneTimeTaskMut.isPending}
                   className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
                   Assign
                 </button>
@@ -1414,12 +1882,21 @@ export default function HRM() {
           )}
 
           <div className="bg-white rounded-xl border overflow-hidden">
+            <div className="px-3 py-2 flex flex-wrap gap-2 text-xs border-b">
+              <input placeholder="Title" value={taskTitleFilter} onChange={e => setTaskTitleFilter(e.target.value)} className="border rounded px-2 py-1" />
+              <select value={taskPriorityFilter} onChange={e => setTaskPriorityFilter(e.target.value)} className="border rounded px-2 py-1">
+                <option value="">Priority</option>
+                {PRIORITIES.map(p => <option key={p}>{p}</option>)}
+              </select>
+              <input placeholder="Assigned By" value={taskAssignedByFilter} onChange={e => setTaskAssignedByFilter(e.target.value)} className="border rounded px-2 py-1" />
+            </div>
             <table className="w-full text-sm">
               <thead className="text-gray-400 text-xs uppercase bg-gray-50">
                 <tr>
                   <th className="text-left px-4 py-2">Task</th>
                   <th className="text-left px-4 py-2">Employee</th>
-                  <th className="text-left px-4 py-2">Assigned</th>
+                  <th className="text-left px-4 py-2">Assigned By</th>
+                  <th className="text-left px-4 py-2">Priority</th>
                   <th className="text-left px-4 py-2">Due</th>
                   <th className="text-left px-4 py-2">Status</th>
                   <th className="text-left px-4 py-2">Time</th>
@@ -1427,10 +1904,10 @@ export default function HRM() {
                 </tr>
               </thead>
               <tbody>
-                {(oneTimeTasks as any[]).map((t: any) => (
+                {filteredTasks.map((t: any) => (
                   <tr key={t.id} className="border-t hover:bg-gray-50 align-top">
                     {editTask?.id === t.id ? (
-                      <td colSpan={7} className="px-4 py-3">
+                      <td colSpan={8} className="px-4 py-3">
                         <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                           <input value={editTask.title} onChange={e => setEditTask((x: any) => ({ ...x, title: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Task title" />
                           <input value={editTask.description || ''} onChange={e => setEditTask((x: any) => ({ ...x, description: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Description" />
@@ -1449,15 +1926,13 @@ export default function HRM() {
                         <td className="px-4 py-3">
                           <p className="font-medium text-gray-800">{t.title}</p>
                           {t.description && <p className="text-xs text-gray-400 mt-0.5">{t.description}</p>}
-                          {t.completion_notes && <p className="text-xs text-amber-700 mt-1">Done: {t.completion_notes}</p>}
-                          {t.approval_notes && <p className="text-xs text-gray-500 mt-1">HOD: {t.approval_notes}</p>}
                         </td>
                         <td className="px-4 py-3">
                           <p className="font-medium">{t.employee_name}</p>
                           <p className="text-xs text-gray-400">{t.department_name || '—'}</p>
-                          {t.assigned_by && <p className="text-xs text-gray-400 mt-0.5">By {t.assigned_by}</p>}
                         </td>
-                        <td className="px-4 py-3 text-gray-600">{fmtDate(t.created_at)}</td>
+                        <td className="px-4 py-3 text-xs text-gray-600">{t.assigned_by || '—'}</td>
+                        <td className="px-4 py-3"><span className={`text-xs px-1.5 py-0.5 rounded ${priorityStyle(t.priority || 'Medium')}`}>{t.priority || 'Medium'}</span></td>
                         <td className="px-4 py-3 text-gray-600">{t.due_date || '—'}</td>
                         <td className="px-4 py-3">
                           <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${oneTimeStatusStyle(t.status)}`}>{t.status}</span>
@@ -1466,10 +1941,19 @@ export default function HRM() {
                           <p>Start: {fmtDateTime(t.started_at)}</p>
                           <p>End: {fmtDateTime(t.completed_at)}</p>
                           <p className="font-semibold text-[#002B5B] mt-0.5">{fmtDuration(t.duration_minutes)}</p>
+                          {manualTimeOpen === t.id ? (
+                            <div className="flex gap-1 mt-1">
+                              <input value={manualTimeVal} onChange={e => setManualTimeVal(e.target.value)} placeholder="HH:MM" className="border rounded px-1 w-16 text-xs" />
+                              <button type="button" className="text-xs text-green-700" onClick={() => manualDurationMut.mutate({ id: t.id, duration: manualTimeVal })}>OK</button>
+                              <button type="button" className="text-xs text-gray-500" onClick={() => setManualTimeOpen(null)}>✕</button>
+                            </div>
+                          ) : (
+                            <button type="button" className="text-[10px] text-blue-600 underline mt-1" onClick={() => { setManualTimeOpen(t.id); setManualTimeVal('') }}>Manual time</button>
+                          )}
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex flex-wrap gap-1 justify-end">
-                            {canEditAssignments && t.status !== 'Approved' && (
+                            {canMutateRecords && t.status !== 'Approved' && (
                               <button onClick={() => setEditTask({ id: t.id, title: t.title, description: t.description || '', due_date: t.due_date || '', employee_id: t.employee_id })} className="text-xs px-2 py-1 border rounded text-blue-600">✏️ Edit</button>
                             )}
                             {(t.status === 'Pending' || t.status === 'Rejected') && (
@@ -1500,7 +1984,7 @@ export default function HRM() {
                 ))}
               </tbody>
             </table>
-            {(oneTimeTasks as any[]).length === 0 && (
+            {filteredTasks.length === 0 && (
               <p className="text-center text-gray-400 py-8 text-sm">No one-time tasks yet.</p>
             )}
           </div>
@@ -1618,7 +2102,7 @@ export default function HRM() {
                           const dayData = r.dates?.[d] || { status: 'Pending', marked: false }
                           const s = dayData.status
                           const locked = !!dayData.marked
-                          const hodCanEdit = canEditAssignments && locked
+                          const hodCanEdit = canEditAssignments && locked && (dayData.editable !== false)
                           return (
                             <td key={d} className="px-1 py-2 text-center">
                               {hodCanEdit ? (
@@ -1661,6 +2145,60 @@ export default function HRM() {
           )}
         </div>
       )}
+
+      
+      {/* ── HIERARCHY ── */}
+      {tab === 'hierarchy' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-xl border p-4">
+            <h3 className="font-semibold text-gray-800 mb-2">{t(lang, 'hierarchy')}</h3>
+            <p className="text-xs text-gray-500 mb-3">Organization departments, HOD assignment, and employee reporting structure</p>
+            <div className="grid md:grid-cols-2 gap-4">
+              <div>
+                <h4 className="text-sm font-semibold text-[#002B5B] mb-2">Departments & HOD</h4>
+                <ul className="space-y-2 text-sm">
+                  {((orgHierarchy?.departments_flat) || depts as any[]).map((d: any) => (
+                    <li key={d.id} className="border rounded-lg p-2">
+                      <div className="font-medium">{d.name}</div>
+                      <div className="text-xs text-gray-500">HOD: {d.hod_name || '—'} · Parent dept: {d.parent_department_id || '—'}</div>
+                      {canManageOrg && (
+                        <div className="flex gap-2 mt-1">
+                          <input defaultValue={d.hod_name || ''} id={`hod-${d.id}`} className="border rounded px-1 py-0.5 text-xs flex-1" placeholder="HOD name" />
+                          <button className="text-xs text-blue-600" onClick={() => {
+                            const el = document.getElementById(`hod-${d.id}`) as HTMLInputElement
+                            api.patch('/hrm/hierarchy/department', { department_id: d.id, hod_name: el?.value }).then(() => qc.invalidateQueries({ queryKey: ['hrm-hierarchy'] }))
+                          }}>Save HOD</button>
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <h4 className="text-sm font-semibold text-[#002B5B] mb-2">Reporting structure</h4>
+                <ul className="space-y-2 text-sm max-h-96 overflow-auto">
+                  {((orgHierarchy?.employees_flat) || allEmps as any[]).map((e: any) => (
+                    <li key={e.id} className="border rounded-lg p-2 flex flex-wrap gap-2 items-center">
+                      <span className="font-medium">{e.name}</span>
+                      <span className="text-xs text-gray-400">{e.emp_code} · {e.department_name}</span>
+                      {canManageOrg && (
+                        <select className="border rounded text-xs ml-auto" defaultValue={e.reports_to_employee_id || ''}
+                          onChange={ev => api.patch('/hrm/hierarchy/reporting', { employee_id: e.id, reports_to_employee_id: ev.target.value ? +ev.target.value : null }).then(() => qc.invalidateQueries({ queryKey: ['hrm-hierarchy'] }))}>
+                          <option value="">Reports to…</option>
+                          {(allEmps as any[]).filter((x: any) => x.id !== e.id).map((m: any) => (
+                            <option key={m.id} value={m.id}>{m.name}</option>
+                          ))}
+                        </select>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {/* ── ISSUES ── */}
       {tab === 'issues' && (
@@ -2106,6 +2644,55 @@ export default function HRM() {
       {/* ── PERFORMANCE ── */}
       {tab === 'performance' && (
         <div className="space-y-4">
+          <div className="bg-white rounded-xl border overflow-hidden">
+            <div className="px-4 py-3 bg-[#002B5B] text-white flex justify-between items-center flex-wrap gap-2">
+              <h3 className="font-semibold">{t(lang, 'taskReport')}</h3>
+              <div className="flex gap-2 text-xs">
+                <input type="date" value={fromDate} onChange={e => setFromDate(e.target.value)} className="rounded text-gray-800 px-1" />
+                <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="rounded text-gray-800 px-1" />
+                <select value={taskPriorityFilter} onChange={e => setTaskPriorityFilter(e.target.value)} className="rounded text-gray-800 px-1">
+                  <option value="">Priority</option>
+                  {PRIORITIES.map(p => <option key={p}>{p}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-50 text-gray-500">
+                  <tr>
+                    <th className="text-left px-3 py-2">Task</th>
+                    <th className="text-left px-3 py-2">{t(lang, 'assignedTo')}</th>
+                    <th className="text-left px-3 py-2">{t(lang, 'assignedBy')}</th>
+                    <th className="text-left px-3 py-2">{t(lang, 'departments')}</th>
+                    <th className="text-left px-3 py-2">{t(lang, 'dueDate')}</th>
+                    <th className="text-left px-3 py-2">{t(lang, 'status')}</th>
+                    <th className="text-right px-3 py-2">{t(lang, 'completion')}</th>
+                    <th className="text-left px-3 py-2">{t(lang, 'priority')}</th>
+                    <th className="text-left px-3 py-2">{t(lang, 'frequency')}</th>
+                    <th className="text-left px-3 py-2">{t(lang, 'mandatory')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(taskReport as any[]).map((row: any, i: number) => (
+                    <tr key={i} className="border-t">
+                      <td className="px-3 py-1.5 font-medium">{row.task}</td>
+                      <td className="px-3 py-1.5">{row.assigned_to}</td>
+                      <td className="px-3 py-1.5">{row.assigned_by || '—'}</td>
+                      <td className="px-3 py-1.5">{row.department || '—'}</td>
+                      <td className="px-3 py-1.5">{row.due_date || '—'}</td>
+                      <td className="px-3 py-1.5">{row.status}</td>
+                      <td className="px-3 py-1.5 text-right">{row.completion_pct}%</td>
+                      <td className="px-3 py-1.5"><span className={`px-1.5 py-0.5 rounded ${priorityStyle(row.priority)}`}>{row.priority}</span></td>
+                      <td className="px-3 py-1.5">{row.frequency}</td>
+                      <td className="px-3 py-1.5">{row.mandatory ? t(lang, 'yes') : t(lang, 'no')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {(taskReport as any[]).length === 0 && <p className="text-center text-gray-400 py-6 text-sm">No task report rows for this period.</p>}
+            </div>
+          </div>
+
           <div className="flex items-center gap-3 flex-wrap">
             <select value={selDept} onChange={e => setSelDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
               <option value="">All Departments</option>
