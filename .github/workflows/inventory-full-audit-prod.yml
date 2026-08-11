@@ -1,5 +1,7 @@
 name: Inventory Full Audit (prod)
 
+# Deep prod recon of Inventory Daily totals, export, example SKUs, history async.
+# Uses localhost backend + /root/app/.env credentials on self-hosted runner.
 on:
   workflow_dispatch:
 
@@ -8,16 +10,18 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 40
     steps:
-      - name: Sync repo and run full inventory audit
+      - name: Checkout audit script (clean workspace)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Full inventory audit against live prod
         run: |
           set -eu
-          cd /root/app
-          git fetch origin main
-          git checkout main
-          git pull --ff-only origin main || true
-          # Prefer script from repo (may be ahead of local if deploy lagging)
           set -a
           # shellcheck disable=SC1091
-          . ./.env
+          . /root/app/.env
           set +a
+          export AUDIT_BASE="${AUDIT_BASE:-http://127.0.0.1:8000}"
           python3 backend/scripts/inventory_prod_full_audit.py
