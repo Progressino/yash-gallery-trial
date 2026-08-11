@@ -1,0 +1,211 @@
+name: Probe Inventory Daily + History export (prod)
+
+# Self-hosted: uses /root/app/.env AUTH against localhost backend.
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Deploy to VPS"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  probe:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && contains(github.event.workflow_run.head_commit.message, 'inventory')) || github.event_name == 'workflow_dispatch' }}
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - name: Inventory Daily totals + SKU + export + history async job
+        run: |
+          set -eu
+          cd /root/app
+          set -a
+          # shellcheck disable=SC1091
+          . ./.env
+          set +a
+          python3 <<'PY'
+          import json
+          import os
+          import sys
+          import time
+          import csv
+          import io
+
+          import requests
+
+          base = "http://127.0.0.1:8000"
+          user = os.environ.get("AUTH_USERNAME") or ""
+          pw = os.environ.get("AUTH_PASSWORD") or ""
+          if not user or not pw:
+              raise SystemExit("AUTH_USERNAME/PASSWORD missing in /root/app/.env")
+
+          s = requests.Session()
+          headers = {"X-Device-Id": "gha-inv-aug11-probe"}
+
+          # Health / SHA
+          h = s.get(f"{base}/api/health", timeout=30)
+          h.raise_for_status()
+          health = h.json()
+          print("HEALTH", json.dumps({k: health.get(k) for k in (
+              "status", "git_sha", "label", "warm_cache", "built_at"
+          )}))
+          sha = str(health.get("git_sha") or "")
+          if not sha.startswith("95dd95") and sha not in ("95dd95b",):
+              # Accept any SHA that includes inventory export route (post-deploy)
+              print("WARN: expected git_sha 95dd95b+, got", sha)
+
+          for attempt in range(1, 6):
+              try:
+                  r = s.post(
+                      f"{base}/api/auth/login",
+                      json={"username": user, "password": pw},
+                      headers=headers,
+                      timeout=60,
+                  )
+                  print("login", r.status_code, r.text[:200])
+                  r.raise_for_status()
+                  body = r.json()
+                  if body.get("requires_otp"):
+                      raise SystemExit("login requires OTP — probe needs password-only user")
+                  if not body.get("ok", True) and body.get("detail"):
+                      raise SystemExit(f"login failed: {body}")
+                  break
+              except Exception as e:
+                  print("login retry", attempt, e)
+                  time.sleep(3)
+          else:
+              raise SystemExit("login failed")
+
+          inv = s.get(
+              f"{base}/api/data/inventory",
+              params={"limit": 3, "offset": 0},
+              timeout=120,
+          )
+          print("inventory_status", inv.status_code)
+          inv.raise_for_status()
+          data = inv.json()
+          if not data.get("loaded"):
+              print("INVENTORY_NOT_LOADED", json.dumps({k: data.get(k) for k in data if k != "rows"})[:500])
+              raise SystemExit("inventory not loaded on prod — re-upload Aug 11 RAR then re-run probe")
+
+          totals = data.get("totals") or {}
+          print(
+              "TOTALS",
+              {
+                  "OMS_Inventory": totals.get("OMS_Inventory"),
+                  "Amazon_Inventory": totals.get("Amazon_Inventory"),
+                  "Total_Inventory": totals.get("Total_Inventory"),
+                  "Marketplace_Total": totals.get("Marketplace_Total"),
+                  "total_rows": data.get("total_rows"),
+                  "snapshot_date": data.get("snapshot_date"),
+                  "snapshot_date_label": data.get("snapshot_date_label"),
+              },
+          )
+
+          # Full row sum of OMS vs UI totals (pagination)
+          oms_sum = 0.0
+          total_sum = 0.0
+          amz_sum = 0.0
+          sku_map = {}
+          offset = 0
+          total_rows = int(data.get("total_rows") or 0)
+          while offset < total_rows:
+              page = s.get(
+                  f"{base}/api/data/inventory",
+                  params={"limit": 5000, "offset": offset},
+                  timeout=180,
+              )
+              page.raise_for_status()
+              batch = page.json().get("rows") or []
+              if not batch:
+                  break
+              for row in batch:
+                  sku = str(row.get("OMS_SKU") or "").upper()
+                  o = float(row.get("OMS_Inventory") or 0)
+                  a = float(row.get("Amazon_Inventory") or 0)
+                  t = float(row.get("Total_Inventory") or 0)
+                  oms_sum += o
+                  amz_sum += a
+                  total_sum += t
+                  if sku in ("AK-228BLACK-3XL", "AK-228BLACK-5XL"):
+                      sku_map[sku] = {
+                          "OMS_Inventory": o,
+                          "Amazon_Inventory": a,
+                          "Total_Inventory": t,
+                      }
+              offset += len(batch)
+              if len(batch) < 5000:
+                  break
+
+          print(
+              "ROW_SUMS",
+              {
+                  "OMS": int(round(oms_sum)),
+                  "Amazon": int(round(amz_sum)),
+                  "Total": int(round(total_sum)),
+              },
+          )
+          print("EXAMPLE_SKUS", sku_map)
+
+          ui_oms = int(totals.get("OMS_Inventory") or 0)
+          row_oms = int(round(oms_sum))
+          if ui_oms != row_oms:
+              raise SystemExit(f"UI OMS totals {ui_oms} != row sum {row_oms}")
+          print("UI_VS_ROWS_OMS_OK", ui_oms)
+
+          # Server export CSV __TOTALS__
+          exp = s.get(f"{base}/api/data/inventory/export.csv", timeout=180)
+          print("export_status", exp.status_code, "bytes", len(exp.content))
+          exp.raise_for_status()
+          rows = list(csv.reader(io.StringIO(exp.text)))
+          hdr = rows[0]
+          tot_row = rows[1]
+          assert tot_row[0] == "__TOTALS__", tot_row[0]
+          oms_idx = hdr.index("OMS_Inventory")
+          export_oms = int(float(tot_row[oms_idx]))
+          print("EXPORT_OMS", export_oms)
+          if export_oms != ui_oms:
+              raise SystemExit(f"export OMS {export_oms} != UI {ui_oms}")
+          print("EXPORT_MATCHES_UI_OK")
+
+          # History async export
+          start = s.post(
+              f"{base}/api/po/daily-inventory-history/matrix-export",
+              params={"days": 7, "channel": "oms"},
+              timeout=60,
+          )
+          print("hist_export_start", start.status_code, start.text[:300])
+          if start.status_code == 404:
+              raise SystemExit("matrix-export endpoint missing — deploy incomplete?")
+          start.raise_for_status()
+          job_id = (start.json() or {}).get("job_id")
+          if not job_id:
+              raise SystemExit(f"no job_id: {start.text}")
+
+          deadline = time.time() + 600
+          while time.time() < deadline:
+              st = s.get(
+                  f"{base}/api/po/daily-inventory-history/matrix-export/{job_id}",
+                  timeout=60,
+              )
+              st.raise_for_status()
+              body = st.json()
+              print("hist_job", body.get("status"), body.get("progress"), body.get("message"))
+              if body.get("status") == "error":
+                  raise SystemExit(body.get("error") or "history export error")
+              if body.get("status") == "ready" or body.get("ready"):
+                  dl = s.get(
+                      f"{base}/api/po/daily-inventory-history/matrix-export/{job_id}/download",
+                      timeout=120,
+                  )
+                  print("hist_download", dl.status_code, "bytes", len(dl.content))
+                  dl.raise_for_status()
+                  if len(dl.content) < 50:
+                      raise SystemExit("history CSV too small")
+                  print("HISTORY_ASYNC_EXPORT_OK")
+                  break
+              time.sleep(3)
+          else:
+              raise SystemExit("history export job timeout")
+
+          print("ALL_PROBES_OK")
+          PY
