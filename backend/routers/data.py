@@ -6061,7 +6061,11 @@ def get_inventory(
     cols = [c for c in df.columns if c != "OMS_SKU"]
 
     totals = getattr(sess, "inventory_api_totals", None) or {}
-    if not totals or set(totals.keys()) != set(c for c in cols):
+    # Refresh when columns change OR quantities diverged (stale cache after coalesce/merge
+    # without a totals key change previously caused UI 201k vs export 202k mismatches).
+    from ..services.inventory import inventory_totals_match_frame
+
+    if not inventory_totals_match_frame(totals, df):
         refresh_inventory_api_cache(sess)
         totals = getattr(sess, "inventory_api_totals", None) or {}
 
@@ -6117,6 +6121,67 @@ def get_inventory(
         "manual_intransit_parse_report": getattr(sess, "manual_intransit_parse_report", None) or None,
         **inventory_snapshot_meta_for_api(sess),
     }
+
+
+@router.get("/inventory/export.csv")
+def export_inventory_csv(
+    request: Request,
+    search: Optional[str] = None,
+):
+    """Server-side Inventory Daily export — same frame + totals math as the UI cards.
+
+    First data row is ``__TOTALS__`` (official column sums). Do not sum every column into
+    one grand total; use OMS_Inventory or Total_Inventory only (see NOTE row).
+    """
+    from fastapi import HTTPException
+    from fastapi.responses import Response
+
+    sess = _sess(request)
+    inv_status = getattr(sess, "inventory_upload_status", "idle") or "idle"
+    if inv_status == "running":
+        raise HTTPException(409, "Inventory upload still running — try again when it finishes.")
+
+    _restore_inventory_from_warm(sess)
+    from ..services.inventory import (
+        inventory_export_csv_bytes,
+        inventory_snapshot_meta_for_api,
+        inventory_totals_match_frame,
+        inventory_variant_for_api,
+        refresh_inventory_api_cache,
+    )
+
+    raw_df = sess.inventory_df_variant
+    df = inventory_variant_for_api(raw_df) if not raw_df.empty else raw_df
+    if df.empty:
+        raise HTTPException(404, "No inventory loaded")
+
+    totals = getattr(sess, "inventory_api_totals", None) or {}
+    if not inventory_totals_match_frame(totals, df):
+        refresh_inventory_api_cache(sess)
+        totals = getattr(sess, "inventory_api_totals", None) or {}
+
+    meta = inventory_snapshot_meta_for_api(sess)
+    try:
+        csv_bytes, filename = inventory_export_csv_bytes(
+            df,
+            totals=totals,
+            search=search or "",
+            snapshot_date=str(meta.get("snapshot_date") or ""),
+            snapshot_label=str(meta.get("snapshot_date_label") or ""),
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Inventory export failed: {e}") from e
+
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            "X-Inventory-OMS-Total": str(int(totals.get("OMS_Inventory") or 0)),
+            "X-Inventory-Total-Units": str(int(totals.get("Total_Inventory") or 0)),
+        },
+    )
 
 
 # ── Snapdeal Analytics ────────────────────────────────────────

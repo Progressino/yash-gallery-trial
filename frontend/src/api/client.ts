@@ -1204,17 +1204,70 @@ export async function getPoDailyInventoryHistoryMatrix(
   return data
 }
 
-/** Server-side full-matrix CSV — avoids loading 10k×30 floats as JSON in the browser. */
+/** Server-side full-matrix CSV. Prefers async job (avoids Cloudflare 522) with sync fallback. */
 export async function downloadPoDailyInventoryHistoryMatrixCsv(
   opts?: { q?: string; days?: number; endDate?: string; channel?: InventoryHistoryChannel },
 ) {
+  const params = {
+    q: opts?.q ?? '',
+    days: opts?.days ?? 30,
+    channel: opts?.channel ?? 'combined',
+    ...(opts?.endDate ? { end_date: opts.endDate } : {}),
+  }
+
+  // Async job: POST returns immediately; poll until ready — avoids edge 522 on long builds.
+  try {
+    const { data: start } = await api.post<{ ok?: boolean; job_id?: string }>(
+      '/po/daily-inventory-history/matrix-export',
+      null,
+      { params, timeout: 60_000 },
+    )
+    const jobId = start?.job_id
+    if (jobId) {
+      const deadline = Date.now() + 12 * 60_000
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 2000))
+        const { data: st } = await api.get<{
+          status?: string
+          error?: string
+          message?: string
+          ready?: boolean
+        }>(`/po/daily-inventory-history/matrix-export/${jobId}`, { timeout: 60_000 })
+        if (st?.status === 'error') {
+          throw new Error(st.error || st.message || 'Inventory history export failed')
+        }
+        if (st?.status === 'ready' || st?.ready) {
+          const res = await api.get(`/po/daily-inventory-history/matrix-export/${jobId}/download`, {
+            responseType: 'blob',
+            timeout: 120_000,
+          })
+          const cd = String(res.headers?.['content-disposition'] || '')
+          const m = /filename="?([^";]+)"?/i.exec(cd)
+          const filename = m?.[1] || 'inventory-matrix.csv'
+          const blob = res.data as Blob
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = filename
+          document.body.appendChild(a)
+          a.click()
+          a.remove()
+          window.setTimeout(() => URL.revokeObjectURL(url), 2_000)
+          return
+        }
+      }
+      throw new Error('Inventory history export timed out — try fewer days or retry')
+    }
+  } catch (asyncErr) {
+    const msg = asyncErr instanceof Error ? asyncErr.message : String(asyncErr)
+    // Only fall back when async endpoints are unavailable on older deploys.
+    if (!/404|Not Found|failed with status code 404/i.test(msg)) {
+      throw asyncErr
+    }
+  }
+
   const res = await api.get('/po/daily-inventory-history/matrix.csv', {
-    params: {
-      q: opts?.q ?? '',
-      days: opts?.days ?? 30,
-      channel: opts?.channel ?? 'combined',
-      ...(opts?.endDate ? { end_date: opts.endDate } : {}),
-    },
+    params,
     responseType: 'blob',
     timeout: 300_000,
   })

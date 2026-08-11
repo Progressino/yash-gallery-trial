@@ -759,6 +759,103 @@ async def po_daily_inventory_history_matrix_csv(
     )
 
 
+@router.post("/daily-inventory-history/matrix-export")
+async def po_daily_inventory_history_matrix_export_start(
+    request: Request,
+    q: str = "",
+    days: int = 30,
+    end_date: Optional[str] = None,
+    channel: str = "combined",
+):
+    """Start async full-matrix CSV export — returns job_id (avoids Cloudflare 522).
+
+    Poll ``GET .../matrix-export/{job_id}`` then download when status=ready.
+    """
+    from fastapi import HTTPException
+
+    from ..services.inventory_history_export_jobs import start_matrix_export_job
+
+    sess = request.state.session
+    if sess is None:
+        raise HTTPException(status_code=401, detail="No session")
+
+    df = _inventory_history_df_for_matrix_read(sess)
+    if df is None or getattr(df, "empty", True):
+        raise HTTPException(status_code=404, detail="No inventory history loaded")
+
+    from ..services.sku_mapping import resolve_sku_mapping_base
+
+    try:
+        mapping = resolve_sku_mapping_base(sess)
+    except Exception:
+        mapping = getattr(sess, "sku_mapping", None) or {}
+
+    # Snapshot the frame for the worker (avoid hold session mutation mid-build).
+    try:
+        hist = df.copy()
+    except Exception:
+        hist = df
+
+    job_id = start_matrix_export_job(
+        history_df=hist,
+        q=q or "",
+        days=min(max(1, int(days)), 120),
+        end_date=end_date,
+        channel=channel or "combined",
+        sku_mapping=mapping,
+    )
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": "queued",
+        "message": "Inventory history export started",
+    }
+
+
+@router.get("/daily-inventory-history/matrix-export/{job_id}")
+def po_daily_inventory_history_matrix_export_status(job_id: str, request: Request):
+    from fastapi import HTTPException
+
+    from ..services.inventory_history_export_jobs import get_matrix_export_job
+
+    if request.state.session is None:
+        raise HTTPException(status_code=401, detail="No session")
+    job = get_matrix_export_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found or expired")
+    return job
+
+
+@router.get("/daily-inventory-history/matrix-export/{job_id}/download")
+def po_daily_inventory_history_matrix_export_download(job_id: str, request: Request):
+    from fastapi import HTTPException
+    from fastapi.responses import Response
+
+    from ..services.inventory_history_export_jobs import get_matrix_export_job, read_matrix_export_file
+
+    if request.state.session is None:
+        raise HTTPException(status_code=401, detail="No session")
+    job = get_matrix_export_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found or expired")
+    if job.get("status") == "error":
+        raise HTTPException(status_code=500, detail=job.get("error") or "Export failed")
+    if job.get("status") != "ready":
+        raise HTTPException(status_code=409, detail=f"Export not ready ({job.get('status')})")
+    packed = read_matrix_export_file(job_id)
+    if not packed:
+        raise HTTPException(status_code=404, detail="Export file missing")
+    csv_bytes, filename = packed
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @router.get("/daily-inventory-history/sku")
 async def po_get_daily_inventory_history_for_sku(
     request: Request,

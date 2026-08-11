@@ -2,7 +2,6 @@ import { useState, useMemo, useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, getCoverage, resetStuckInventoryUpload } from '../api/client'
 import { useSession } from '../store/session'
-import * as XLSX from 'xlsx'
 
 type MarketplaceRow = {
   key: string
@@ -167,38 +166,31 @@ export default function Inventory() {
   }, [invUploadRunning])
 
   const exportExcel = async () => {
-    const pageLimit = 5000
-    const allRows: InventoryData['rows'] = []
-    let offset = 0
-    let total = Infinity
-    let exportCols = invCols
-    while (offset < total) {
-      const { data: page } = await api.get<InventoryData>('/data/inventory', {
-        params: { search: search.trim() || undefined, offset, limit: pageLimit },
+    try {
+      const res = await api.get('/data/inventory/export.csv', {
+        params: { search: search.trim() || undefined },
+        responseType: 'blob',
         timeout: 180_000,
       })
-      const batch = page?.rows ?? []
-      if (page?.columns?.length) {
-        exportCols = page.columns.filter(c => c !== 'OMS_SKU')
-      }
-      total = Number(page?.total_rows ?? batch.length)
-      allRows.push(...batch)
-      if (!batch.length) break
-      offset += batch.length
-      if (batch.length < pageLimit) break
+      const cd = String(res.headers?.['content-disposition'] || '')
+      const m = /filename="?([^";]+)"?/i.exec(cd)
+      const datePart = snapshotLabel
+        ? String(snapshotLabel).replace(/\s+/g, '-')
+        : new Date().toISOString().slice(0, 10)
+      const filename = m?.[1] || `Inventory_${datePart}.csv`
+      const blob = res.data as Blob
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      window.alert(`Inventory export failed: ${msg}`)
     }
-    const exportRows = allRows.map(r => {
-      const out: Record<string, string | number> = { 'OMS SKU': String(r['OMS_SKU'] ?? '') }
-      exportCols.forEach(col => {
-        out[col] = Number(r[col] ?? 0)
-      })
-      return out
-    })
-    const ws = XLSX.utils.json_to_sheet(exportRows)
-    const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, ws, 'Inventory')
-    const datePart = snapshotLabel ? String(snapshotLabel).replace(/\s+/g, '-') : new Date().toISOString().slice(0, 10)
-    XLSX.writeFile(wb, `Inventory_${datePart}.xlsx`)
   }
 
   const pageCount = Math.max(1, Math.ceil(totalRows / PAGE_SIZE))
@@ -412,13 +404,22 @@ export default function Inventory() {
 
       <div className="grid grid-cols-3 gap-4">
         <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
-          <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide">Total Units</p>
+          <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide">
+            Total Units (OMS + marketplaces)
+          </p>
           <p className="text-2xl font-bold text-[#002B5B] mt-1">
             {(data?.totals?.Total_Inventory != null
               ? Number(data.totals.Total_Inventory)
               : totalInventory
             ).toLocaleString()}
           </p>
+          {data?.totals?.OMS_Inventory != null && (
+            <p className="text-[11px] text-gray-500 mt-1">
+              OMS warehouse only:{' '}
+              <b className="tabular-nums">{Number(data.totals.OMS_Inventory).toLocaleString()}</b>
+              {' · '}Amazon FBA is separate (see Source Breakdown). Total ≠ OMS alone.
+            </p>
+          )}
         </div>
         <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
           <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide">Active SKUs</p>
@@ -433,6 +434,11 @@ export default function Inventory() {
       {data?.totals && (
         <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
           <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide mb-3">Source Breakdown (all SKUs)</p>
+          <p className="text-[11px] text-gray-500 mb-3">
+            <b>OMS Inventory</b> = Unicommerce warehouse + combo packs (matches OMS CSV Inventory + combo stock).
+            <b> Amazon Inventory</b> = FBA sellable ledger (not OMS). Export CSV first row is <code>__TOTALS__</code> —
+            use that row for reconciliation; do not sum every column.
+          </p>
           <div className="flex flex-wrap gap-4">
             {Object.entries(data.totals)
               .filter(([col]) => col !== 'Total_Inventory')
@@ -481,7 +487,7 @@ export default function Inventory() {
           onClick={() => exportExcel()}
           className="ml-auto flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-green-600 hover:bg-green-700 shadow-sm"
         >
-          ⬇ Export Excel
+          ⬇ Export CSV
         </button>
       </div>
 

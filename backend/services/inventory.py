@@ -302,7 +302,7 @@ def upload_bundle_expects_oms(file_parts: list[tuple[str, bytes]] | None) -> boo
 
 def inventory_column_totals(df: pd.DataFrame) -> dict[str, int]:
     """Sum numeric inventory columns once per snapshot (API cache)."""
-    if df.empty:
+    if df is None or getattr(df, "empty", True):
         return {}
     totals: dict[str, int] = {}
     for col in df.columns:
@@ -313,6 +313,119 @@ def inventory_column_totals(df: pd.DataFrame) -> dict[str, int]:
         except Exception:
             totals[col] = 0
     return totals
+
+
+def inventory_totals_match_frame(totals: dict | None, df: pd.DataFrame) -> bool:
+    """True when cached totals still match live row sums for key columns."""
+    if not totals or df is None or getattr(df, "empty", True):
+        return False
+    live = inventory_column_totals(df)
+    # Require same keys and matching OMS + Total (primary UI figures).
+    keys = set(live.keys())
+    if set(totals.keys()) != keys:
+        return False
+    for k in ("OMS_Inventory", "Total_Inventory", "Amazon_Inventory", "Marketplace_Total"):
+        if k not in live and k not in totals:
+            continue
+        if int(totals.get(k) or 0) != int(live.get(k) or 0):
+            return False
+    return True
+
+
+def inventory_export_csv_bytes(
+    df: pd.DataFrame,
+    *,
+    totals: dict[str, int] | None = None,
+    search: str = "",
+    snapshot_date: str = "",
+    snapshot_label: str = "",
+) -> tuple[bytes, str]:
+    """UTF-8 CSV for Inventory Daily with an official TOTALS row matching UI cards.
+
+    Column order: OMS_SKU, source columns, then computed Marketplace_Total and Total_Inventory.
+    Total_Inventory = OMS_Inventory + Marketplace_Total (do not sum every column).
+    """
+    import csv
+    import io
+    from datetime import date as date_cls
+
+    work = df.copy() if df is not None and not getattr(df, "empty", True) else pd.DataFrame()
+    if work.empty:
+        buf = io.StringIO(newline="")
+        csv.writer(buf).writerow(["OMS_SKU", "note"])
+        csv.writer(buf).writerow(["", "No inventory loaded"])
+        return buf.getvalue().encode("utf-8"), "inventory-empty.csv"
+
+    q = (search or "").strip().lower()
+    if q and "OMS_SKU" in work.columns:
+        skus = work["OMS_SKU"].astype(str)
+        work = work[skus.str.lower().str.contains(q, na=False, regex=False)]
+
+    # Preferred column order for reconcilation.
+    preferred = [
+        "OMS_SKU",
+        "OMS_Inventory",
+        "Amazon_Inventory",
+        "Flipkart_Inventory",
+        "Myntra_Other_Inventory",
+        "Meesho_Inventory",
+        "Manual_InTransit",
+        "Not_In_Inventory_Qty",
+        "FBA_InTransit",
+        "Buffer_Stock",
+        "Marketplace_Total",
+        "Total_Inventory",
+    ]
+    cols = [c for c in preferred if c in work.columns]
+    cols += [c for c in work.columns if c not in cols]
+    # Drop nonsense empty
+    cols = [c for c in cols if c]
+
+    totals = dict(totals or inventory_column_totals(work))
+    # When search filters rows, recompute totals from the visible set only so export total matches rows.
+    if q:
+        totals = inventory_column_totals(work)
+
+    buf = io.StringIO(newline="")
+    w = csv.writer(buf)
+    w.writerow(cols)
+    # Official totals row (matches UI Source Breakdown / Total Units for this export set).
+    total_row = []
+    for c in cols:
+        if c == "OMS_SKU":
+            total_row.append("__TOTALS__")
+        else:
+            try:
+                total_row.append(int(totals.get(c) or 0))
+            except Exception:
+                total_row.append(0)
+    w.writerow(total_row)
+    # Notes row
+    note = (
+        "NOTE: Total_Inventory = OMS_Inventory + marketplace columns "
+        "(Amazon/Flipkart/Myntra/…). Buffer_Stock is informational only — do not add it. "
+        "Summing every column double-counts. OMS_Inventory is Unicommerce warehouse + combo packs."
+    )
+    note_row = [note if c == "OMS_SKU" else "" for c in cols]
+    w.writerow(note_row)
+
+    for _, row in work.iterrows():
+        out = []
+        for c in cols:
+            if c == "OMS_SKU":
+                out.append(str(row.get(c) or ""))
+            else:
+                try:
+                    v = float(pd.to_numeric(row.get(c), errors="coerce") or 0)
+                    out.append(int(round(v)) if abs(v - round(v)) < 1e-9 else v)
+                except Exception:
+                    out.append(0)
+        w.writerow(out)
+
+    label = (snapshot_label or snapshot_date or date_cls.today().isoformat()).replace(" ", "-")
+    suffix = f"-{q[:24]}" if q else ""
+    filename = f"Inventory_{label}{suffix}.csv"
+    return buf.getvalue().encode("utf-8"), filename
 
 
 def refresh_inventory_api_cache(sess: Any) -> None:
@@ -327,6 +440,7 @@ def refresh_inventory_api_cache(sess: Any) -> None:
     sess.inventory_api_totals = inventory_column_totals(df)
     sess.inventory_api_marketplaces = inventory_marketplace_breakdown(df, dbg)
     sess.inventory_auto_checks = inventory_snapshot_auto_checks(dbg, sess.inventory_api_totals)
+
 
 
 def inventory_snapshot_auto_checks(debug: dict | None, totals: dict | None) -> list[dict]:
