@@ -1,0 +1,23 @@
+name: Inventory Full Audit (prod)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: self-hosted
+    timeout-minutes: 40
+    steps:
+      - name: Sync repo and run full inventory audit
+        run: |
+          set -eu
+          cd /root/app
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main || true
+          # Prefer script from repo (may be ahead of local if deploy lagging)
+          set -a
+          # shellcheck disable=SC1091
+          . ./.env
+          set +a
+          python3 backend/scripts/inventory_prod_full_audit.py
