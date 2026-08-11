@@ -321,6 +321,8 @@ class JOLineIn(BaseModel):
 class JOIn(BaseModel):
     jo_date: Optional[str] = None
     so_number: Optional[str] = ''
+    # system = open sales order; manual = free-text SO reference (no SO master row created)
+    so_source: Optional[str] = 'system'
     sku: Optional[str] = ''
     sku_name: Optional[str] = ''
     process: Optional[str] = 'Cutting'
@@ -345,6 +347,10 @@ class JOUpdate(BaseModel):
     received_qty: Optional[int] = None
     rejected_qty: Optional[int] = None
     balance_qty: Optional[int] = None
+    planned_qty: Optional[int] = None
+    so_qty: Optional[int] = None
+    so_number: Optional[str] = None
+    so_source: Optional[str] = None
     completed_date: Optional[str] = None
     remarks: Optional[str] = None
     issued_to: Optional[str] = None
@@ -356,6 +362,8 @@ class JOUpdate(BaseModel):
     fabric_consumption: Optional[float] = None
     process_cost: Optional[float] = None
     total_cost: Optional[float] = None
+    changed_by: Optional[str] = None
+    qty_change_remarks: Optional[str] = None
 
 class FabricIssueIn(BaseModel):
     fabric_code: str
@@ -771,7 +779,17 @@ def post_jo(body: JOIn):
     data["exec_type"] = exec_type
     data["vendor_name"] = vendor_name
     process = data.get('process','Cutting')
-    so_number = data.get('so_number','')
+    so_number = (data.get('so_number') or '').strip()
+    so_source = str(data.get("so_source") or "system").strip().lower()
+    if so_source not in ("system", "manual"):
+        so_source = "system"
+    data["so_source"] = so_source
+    data["so_number"] = so_number
+    if process == "Cutting" and not so_number:
+        raise HTTPException(
+            400,
+            "SO number is required for Cutting JO (select an open SO or enter a manual SO reference).",
+        )
     sku = data.get('sku','')
     planned_qty = int(data.get('planned_qty') or 0)
     if process != 'Cutting' and so_number and sku and planned_qty:
@@ -780,7 +798,8 @@ def post_jo(body: JOIn):
             raise HTTPException(400, v['message'])
     fabric_code = (data.get("fabric_code") or "").strip()
     fabric_qty = float(data.get("fabric_qty") or 0)
-    if so_number and fabric_code and fabric_qty > 0:
+    # Manual SO references skip MRP commitment hard-gate (no system SO for commitment key).
+    if so_source != "manual" and so_number and fabric_code and fabric_qty > 0:
         try:
             check_mrp_commitment(so_number, fabric_code, fabric_qty)
         except ValueError as e:
@@ -835,7 +854,10 @@ def patch_jo(joid: int, body: JOUpdate):
             raise HTTPException(400, "Vendor name is required when execution type is Outsource.")
         if eff_exec.lower() == "inhouse":
             data["vendor_name"] = ""
-    update_jo(joid, data)
+    try:
+        update_jo(joid, data)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     return {"ok": True}
 
 @router.post("/orders/{joid}/issue-fabric")

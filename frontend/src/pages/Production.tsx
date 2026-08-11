@@ -4,6 +4,7 @@ import axios from 'axios'
 import api from '../api/client'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import SetBomPanel from '../components/SetBomPanel'
+import { downloadCsv } from '../lib/exportCsv'
 
 function apiErrorMessage(err: unknown, fallback: string): string {
   if (!axios.isAxiosError(err)) return fallback
@@ -53,6 +54,8 @@ interface JO {
   jo_number: string
   jo_date: string
   so_number: string
+  /** system = from sales SO; manual = free-text SO reference only */
+  so_source?: string
   sku: string
   sku_name: string
   process: string
@@ -833,13 +836,14 @@ export default function Production() {
   const [activeJO, setActiveJO] = useState<JO | null>(null)
   const [activeLineId, setActiveLineId] = useState<number | null>(null)
 
-  // New JO form
+  // New JO form — so_source: system (open SO) | manual (free-text SO, no master SO created)
   const [newForm, setNewForm] = useState({
-    so_number: '', sku: '', sku_name: '', process: 'Cutting',
+    so_number: '', so_source: 'system' as 'system' | 'manual', sku: '', sku_name: '', process: 'Cutting',
     exec_type: 'Inhouse', vendor_name: '', vendor_rate: 0,
     planned_qty: 0, so_qty: 0, fabric_code: '', fabric_qty: 0,
     fabric_unit: 'MTR', expected_completion: '', remarks: '',
   })
+  const [editPlannedQty, setEditPlannedQty] = useState<Record<number, string>>({})
   const [newLines, setNewLines] = useState<{ so_number: string; sku: string; sku_name: string; style: string; planned_qty: number; vendor_rate: number; remarks: string }[]>([])
   const [soLineSearch, setSOLineSearch] = useState('')
   const joImportRef = useRef<HTMLInputElement>(null)
@@ -1147,7 +1151,11 @@ export default function Production() {
   })
   const updateJOMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/production/orders/${id}`, data),
-    onSuccess: () => invalidateAll(),
+    onSuccess: () => {
+      invalidateAll()
+      setActiveJO(null)
+    },
+    onError: (e: unknown) => alert(apiErrorMessage(e, 'Could not update job order')),
   })
   const issueFabricMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/issue-fabric`, data),
@@ -1428,7 +1436,13 @@ export default function Production() {
                   : '🏠 In-house'}
               </span>
             </div>
-            <p className="text-sm text-gray-600">SO: <b>{jo.so_number || '—'}</b> · SKU: <b>{jo.sku}</b> {jo.sku_name ? `— ${jo.sku_name}` : ''}</p>
+            <p className="text-sm text-gray-600">
+              SO: <b>{jo.so_number || '—'}</b>
+              {String(jo.so_source || '').toLowerCase() === 'manual' && (
+                <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-medium">manual SO</span>
+              )}
+              {' · '}SKU: <b>{jo.sku}</b> {jo.sku_name ? `— ${jo.sku_name}` : ''}
+            </p>
             {/* Routing bar */}
             {jo.routing && jo.routing.length > 0 && (
               <div className="flex items-center gap-1 mt-1 flex-wrap">
@@ -1475,6 +1489,46 @@ export default function Production() {
                 </div>
               ))}
             </div>
+
+            {/* Edit planned qty for uploaded / existing JOs (floor = issued/received/output) */}
+            {(jo.status === 'Created' || jo.status === 'In Progress') && (
+              <div className="bg-white border rounded-lg p-3 flex flex-wrap items-end gap-2">
+                <div>
+                  <label className="text-xs text-gray-500">Edit planned qty</label>
+                  <input
+                    type="number"
+                    min={Math.max(jo.issued_qty || 0, jo.received_qty || 0, jo.output_qty || 0)}
+                    value={editPlannedQty[jo.id] ?? String(jo.planned_qty)}
+                    onChange={e => setEditPlannedQty(m => ({ ...m, [jo.id]: e.target.value }))}
+                    className="block w-28 border border-amber-200 bg-amber-50 rounded px-2 py-1 text-sm font-semibold mt-0.5"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={updateJOMut.isPending}
+                  onClick={() => {
+                    const v = parseInt(editPlannedQty[jo.id] ?? String(jo.planned_qty), 10)
+                    if (!Number.isFinite(v)) {
+                      alert('Enter a valid planned quantity')
+                      return
+                    }
+                    updateJOMut.mutate({
+                      id: jo.id,
+                      data: {
+                        planned_qty: v,
+                        qty_change_remarks: 'UI planned_qty edit',
+                      },
+                    })
+                  }}
+                  className="px-3 py-1.5 text-xs bg-amber-600 text-white rounded-lg font-medium disabled:opacity-50"
+                >
+                  Save qty
+                </button>
+                <p className="text-[10px] text-gray-500 max-w-xs">
+                  Cannot go below issued/received/output. Changes are written to jo_qty_history.
+                </p>
+              </div>
+            )}
 
             <VendorExecutionEditor
               jo={jo}
@@ -1948,7 +2002,57 @@ export default function Production() {
               >
                 📥 Import
               </button>
-              <button onClick={() => { setNewForm(f => ({ ...f, process: activeProcess })); setNewLines([]); setSOLineSearch(''); setModal('new-jo') }}
+              <button
+                type="button"
+                onClick={() => {
+                  const headers = [
+                    'jo_number', 'jo_date', 'so_number', 'so_source', 'sku', 'sku_name', 'process',
+                    'status', 'planned_qty', 'received_qty', 'issued_qty', 'balance_qty',
+                    'vendor_name', 'fabric_code', 'fabric_qty', 'exec_type', 'remarks',
+                  ]
+                  const rows = filteredProcessJOs.map(j => [
+                    j.jo_number,
+                    j.jo_date,
+                    j.so_number,
+                    (j as JO & { so_source?: string }).so_source || 'system',
+                    j.sku,
+                    j.sku_name,
+                    j.process,
+                    j.status,
+                    j.planned_qty,
+                    j.received_qty,
+                    j.issued_qty,
+                    j.balance_qty,
+                    j.vendor_name,
+                    j.fabric_code,
+                    j.fabric_qty,
+                    j.exec_type,
+                    j.remarks,
+                  ])
+                  downloadCsv(
+                    `${activeProcess.toLowerCase()}_job_orders_${new Date().toISOString().slice(0, 10)}.csv`,
+                    headers,
+                    rows,
+                  )
+                }}
+                className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
+                title="Export currently listed job orders (respects filters/search)"
+              >
+                ↓ Export Excel
+              </button>
+              <button onClick={() => {
+                setNewForm(f => ({
+                  ...f,
+                  process: activeProcess,
+                  so_source: 'system',
+                  so_number: '',
+                  sku: '',
+                  sku_name: '',
+                }))
+                setNewLines([])
+                setSOLineSearch('')
+                setModal('new-jo')
+              }}
                 className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium hover:bg-blue-800">
                 + New {activeProcess} JO
               </button>
@@ -2027,6 +2131,12 @@ export default function Production() {
                       <span className="font-semibold text-[#002B5B]">SO: {r.so_number}</span>
                       <span className="mx-2 text-gray-400">·</span>
                       <span className="font-mono break-all">{r.sku}</span>
+                      {r.component_code && (
+                        <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 font-medium">
+                          {r.component_code}
+                          {r.readiness_scope === 'component' ? ' ready' : ''}
+                        </span>
+                      )}
                       {r.vendor_name && (
                         <>
                           <span className="mx-2 text-gray-400">·</span>
@@ -2044,8 +2154,13 @@ export default function Production() {
                     </div>
                     <button onClick={() => {
                       setNewForm(f => ({
-                        ...f, so_number: r.so_number, sku: r.sku || '', fabric_code: r.fabric_code || '',
-                        fabric_qty: r.reserved_qty || 0, process: activeProcess,
+                        ...f,
+                        so_number: r.so_number,
+                        so_source: 'system',
+                        sku: r.sku || '',
+                        fabric_code: r.fabric_code || '',
+                        fabric_qty: r.reserved_qty || 0,
+                        process: activeProcess,
                         planned_qty: r.available_qty || r.reserved_qty || 0,
                       }))
                       setNewLines([])
@@ -2303,17 +2418,57 @@ export default function Production() {
             )}
 
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-              {/* SO */}
-              <div><label className="text-xs text-gray-500">SO Number *</label>
-                <select value={newForm.so_number} onChange={e => {
-                  setNewForm(f => ({ ...f, so_number: e.target.value, sku: '', sku_name: '' }))
-                  setNewLines([])
-                  setSOLineSearch('')
-                }}
-                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
-                  <option value="">Select SO</option>
-                  {(soList as any[]).map((s: any) => <option key={s.so_number} value={s.so_number}>{s.so_number} — {s.buyer || ''}</option>)}
-                </select>
+              {/* SO source + number — manual does not create a Sales SO record */}
+              <div className="md:col-span-3 flex flex-wrap gap-3 items-end">
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">SO reference *</label>
+                  <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewForm(f => ({ ...f, so_source: 'system', so_number: '', sku: '', sku_name: '' }))
+                        setNewLines([])
+                      }}
+                      className={`px-3 py-1.5 ${newForm.so_source === 'system' ? 'bg-[#002B5B] text-white' : 'bg-white text-gray-600'}`}
+                    >
+                      Existing SO
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewForm(f => ({ ...f, so_source: 'manual', sku: '', sku_name: '' }))
+                        setNewLines([])
+                      }}
+                      className={`px-3 py-1.5 border-l ${newForm.so_source === 'manual' ? 'bg-[#002B5B] text-white' : 'bg-white text-gray-600'}`}
+                    >
+                      Manual SO #
+                    </button>
+                  </div>
+                </div>
+                <div className="flex-1 min-w-[12rem]">
+                  <label className="text-xs text-gray-500">SO Number *</label>
+                  {newForm.so_source === 'manual' ? (
+                    <input
+                      value={newForm.so_number}
+                      onChange={e => setNewForm(f => ({ ...f, so_number: e.target.value.trim() }))}
+                      placeholder="e.g. SO-OTS-001 (not created in Sales)"
+                      className="w-full border border-amber-200 bg-amber-50 rounded px-2 py-1.5 text-sm mt-1"
+                    />
+                  ) : (
+                    <select value={newForm.so_number} onChange={e => {
+                      setNewForm(f => ({ ...f, so_number: e.target.value, sku: '', sku_name: '' }))
+                      setNewLines([])
+                      setSOLineSearch('')
+                    }}
+                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                      <option value="">Select SO</option>
+                      {(soList as any[]).map((s: any) => <option key={s.so_number} value={s.so_number}>{s.so_number} — {s.buyer || ''}</option>)}
+                    </select>
+                  )}
+                  {newForm.so_source === 'manual' && (
+                    <p className="text-[10px] text-amber-800 mt-1">Stored on the JO only — no Sales Order is created.</p>
+                  )}
+                </div>
               </div>
               {/* Process */}
               <div><label className="text-xs text-gray-500">Process *</label>
@@ -2422,8 +2577,60 @@ export default function Production() {
               </div>
             )}
 
+            {/* Manual SO — free SKU / qty (no SO master lines) */}
+            {newForm.so_source === 'manual' && (
+              <div className="border border-amber-200 bg-amber-50/50 rounded-xl p-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+                <div>
+                  <label className="text-xs text-gray-500">SKU *</label>
+                  <input
+                    value={newForm.sku}
+                    onChange={e => setNewForm(f => ({ ...f, sku: e.target.value.trim().toUpperCase() }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1 font-mono"
+                    placeholder="STYLE-M"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">SKU name</label>
+                  <input
+                    value={newForm.sku_name}
+                    onChange={e => setNewForm(f => ({ ...f, sku_name: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500">Planned qty *</label>
+                  <input
+                    type="number"
+                    value={newForm.planned_qty || ''}
+                    onChange={e => setNewForm(f => ({ ...f, planned_qty: +e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    className="w-full py-1.5 text-xs bg-[#002B5B] text-white rounded-lg"
+                    onClick={() => {
+                      if (!newForm.sku || !newForm.planned_qty) return
+                      setNewLines([{
+                        so_number: newForm.so_number,
+                        sku: newForm.sku,
+                        sku_name: newForm.sku_name,
+                        style: '',
+                        planned_qty: newForm.planned_qty,
+                        vendor_rate: newForm.vendor_rate || 0,
+                        remarks: '',
+                      }])
+                    }}
+                  >
+                    Add as JO line
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* SO Lines — add to JO */}
-            {newForm.so_number && soLines.length > 0 && (
+            {newForm.so_source === 'system' && newForm.so_number && soLines.length > 0 && (
               <div className="border rounded-xl overflow-hidden">
                 <div className="px-3 py-2 bg-blue-50 text-xs font-semibold text-blue-700 flex flex-wrap justify-between gap-2 items-center">
                   <span>SO Lines — all styles (live list). Search & scroll to find SKUs.</span>
@@ -2535,12 +2742,26 @@ export default function Production() {
             <div className="flex gap-2 pt-2">
               <button onClick={() => createJOMut.mutate({
                 ...newForm,
+                so_source: newForm.so_source || 'system',
                 planned_qty: newLines.reduce((s,l) => s+l.planned_qty, 0) || newForm.planned_qty,
-                lines: newLines,
+                lines: newLines.length
+                  ? newLines
+                  : (newForm.so_source === 'manual' && newForm.sku
+                    ? [{
+                        so_number: newForm.so_number,
+                        sku: newForm.sku,
+                        sku_name: newForm.sku_name,
+                        style: '',
+                        planned_qty: newForm.planned_qty || 1,
+                        vendor_rate: newForm.vendor_rate || 0,
+                        remarks: newForm.remarks || '',
+                      }]
+                    : newLines),
               })}
                 disabled={
                   createJOMut.isPending
-                  || !newForm.so_number
+                  || !newForm.so_number.trim()
+                  || (newForm.so_source === 'manual' && newForm.process === 'Cutting' && !newForm.sku.trim() && newLines.length === 0)
                   || (isOutsourceExec(newForm.exec_type) && !newForm.vendor_name.trim())
                   || (newForm.process !== 'Cutting' && joValidation && !joValidation?.ok)
                 }

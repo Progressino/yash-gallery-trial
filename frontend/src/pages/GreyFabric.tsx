@@ -271,8 +271,15 @@ export default function GreyFabric() {
     refetchOnWindowFocus: false,
   })
   const { data: pfReserveOptions } = useQuery({
-    queryKey: ['printed-fabric-reserve-options'],
-    queryFn: () => api.get('/grey/printed-fabric/reserve-options').then(r => r.data),
+    queryKey: ['printed-fabric-reserve-options', pfReserveForm.fabric_code || ''],
+    queryFn: () =>
+      api
+        .get('/grey/printed-fabric/reserve-options', {
+          params: pfReserveForm.fabric_code
+            ? { fabric_code: pfReserveForm.fabric_code }
+            : undefined,
+        })
+        .then(r => r.data),
     enabled: tab === 'printed-fabric' && (pfSubTab === 'ready-to-cut' || showPFReserveForm),
   })
   const { data: printedReadyToCut = [] } = useQuery({
@@ -1140,6 +1147,10 @@ export default function GreyFabric() {
               </div>
               <div className="bg-white rounded-xl border p-4 space-y-3">
                 <h3 className="text-sm font-semibold">Stage 4 — Allocate Printed → FG + SO</h3>
+                <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-100 rounded px-2 py-1.5">
+                  Same source of truth as <b>Printed Fabric → Reserve for SO</b> (`printed_fabric_reservations`).
+                  Use this form for planning / reallocation audit history; day-to-day QC reserve stays on the Printed Fabric tab.
+                </p>
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <label className="block">Printed code
                     <input className="mt-1 w-full border rounded px-2 py-1.5" value={pfAllocForm.printed_code}
@@ -1670,7 +1681,10 @@ export default function GreyFabric() {
               {showPFReserveForm && (
                 <div className="bg-white rounded-xl border p-4 space-y-3">
                   <h3 className="font-semibold text-gray-700">Reserve Printed Fabric against SO</h3>
-                  <p className="text-xs text-gray-500">Select from QC-checked fabric and an existing sales order — no manual codes.</p>
+                  <p className="text-xs text-gray-500">
+                    Primary operational path (same reservations as Planning → Allocate Printed).
+                    After you pick a fabric, only SKUs/SOs that use that fabric (BOM / Set BOM) are listed.
+                  </p>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div>
                       <label className="text-xs text-gray-500">Checked fabric *</label>
@@ -1682,8 +1696,12 @@ export default function GreyFabric() {
                             ...prev,
                             fabric_code: e.target.value,
                             fabric_name: f?.fabric_name || '',
+                            so_number: '',
                             qty: 0,
                           }))
+                          setPFSelectedSkus([])
+                          setPFSkuQtyMap({})
+                          setPFSkuSearch('')
                         }}
                         className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
                       >
@@ -1723,7 +1741,14 @@ export default function GreyFabric() {
                         ))}
                       </select>
                       {pfSalesOrders.length === 0 && (
-                        <p className="text-[10px] text-amber-600 mt-1">No open sales orders. Create one under Sales Orders first.</p>
+                        <p className="text-[10px] text-amber-600 mt-1">
+                          {pfReserveForm.fabric_code
+                            ? 'No open SO lines for this fabric (BOM filter). Check Item/Set BOM mapping or pick another fabric.'
+                            : 'No open sales orders. Create one under Sales Orders first.'}
+                        </p>
+                      )}
+                      {pfReserveOptions?.fabric_filter_active && (
+                        <p className="text-[10px] text-green-700 mt-1">BOM filter on — only SKUs that use this fabric are shown.</p>
                       )}
                     </div>
                     <div className="md:col-span-2">

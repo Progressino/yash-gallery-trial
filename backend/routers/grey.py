@@ -260,9 +260,12 @@ def get_printed_fabric_checked():
 
 
 @router.get("/printed-fabric/reserve-options")
-def get_printed_fabric_reserve_options():
-    """Checked fabrics (available only) + open sales orders with SKUs for reserve form."""
-    return gdb.printed_fabric_reserve_options()
+def get_printed_fabric_reserve_options(fabric_code: Optional[str] = None):
+    """Checked fabrics (available only) + open sales orders with SKUs for reserve form.
+
+    Optional ``fabric_code`` filters SO lines to SKUs that use that fabric (BOM/Set BOM).
+    """
+    return gdb.printed_fabric_reserve_options(fabric_code=fabric_code)
 
 
 @router.post("/printed-fabric/reserve")

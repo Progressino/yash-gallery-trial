@@ -1265,11 +1265,28 @@ def close_printed_reservations_when_fully_planned(
         conn.close()
 
 
-def printed_fabric_reserve_options() -> dict:
-    """Dropdown data: checked fabrics + open sales orders with line SKUs."""
+def printed_fabric_reserve_options(fabric_code: str | None = None) -> dict:
+    """Dropdown data: checked fabrics + open sales orders with line SKUs.
+
+    When ``fabric_code`` is set, SO lines are filtered to SKUs that use that fabric
+    (Item Master BOM / Set BOM). When the fabric has no BOM mapping, all open SO
+    lines remain available (backward compatible for shops without BOM).
+    """
     fabrics = list_printed_fabric_checked_available()
     jo_planned = _cutting_jo_planned_by_so_sku()
     active_reserved = _active_printed_reserve_so_sku()
+    fabric_filter = (fabric_code or "").strip()
+    allowed_skus: set[str] | None = None
+    fabric_mapping_active = False
+    if fabric_filter:
+        try:
+            from ..services.fabric_sku_matching import skus_using_fabric
+
+            allowed_skus = skus_using_fabric(fabric_filter)
+            fabric_mapping_active = bool(allowed_skus)
+        except Exception:
+            allowed_skus = None
+            fabric_mapping_active = False
     try:
         from .sales_db import list_orders
 
@@ -1292,6 +1309,14 @@ def printed_fabric_reserve_options() -> dict:
                 continue
             if jo_planned.get(key, 0) > 0:
                 continue
+            if fabric_mapping_active and allowed_skus is not None:
+                try:
+                    from ..services.fabric_sku_matching import sku_uses_fabric
+
+                    if not sku_uses_fabric(sku, fabric_filter):
+                        continue
+                except Exception:
+                    pass
             lines.append(
                 {
                     "id": ln.get("id"),
@@ -1312,7 +1337,12 @@ def printed_fabric_reserve_options() -> dict:
                 "lines": lines,
             }
         )
-    return {"fabrics": fabrics, "sales_orders": sales_orders}
+    return {
+        "fabrics": fabrics,
+        "sales_orders": sales_orders,
+        "fabric_code": fabric_filter or None,
+        "fabric_filter_active": fabric_mapping_active,
+    }
 
 
 def reserve_printed_fabric(data: dict):
@@ -1329,6 +1359,19 @@ def reserve_printed_fabric(data: dict):
         raise ValueError("sku is required")
     if qty <= 0:
         raise ValueError("qty must be greater than 0")
+
+    try:
+        from ..services.fabric_sku_matching import sku_uses_fabric, skus_using_fabric
+
+        if skus_using_fabric(fabric_code) and not sku_uses_fabric(sku, fabric_code):
+            raise ValueError(
+                f"SKU {sku} does not use fabric {fabric_code} per BOM / Set BOM. "
+                "Choose a SKU that consumes this fabric."
+            )
+    except ValueError:
+        raise
+    except Exception:
+        pass
 
     key = (so_number, sku)
     if key in _active_printed_reserve_so_sku():
@@ -1372,7 +1415,7 @@ def reserve_printed_fabric(data: dict):
 
 
 def list_printed_fabric_ready_to_cut():
-    """Printed fabric jo reserve ho gaya SO ke against — Ready to Cut."""
+    """Printed fabric reserved vs SO — Ready to Cut (component-aware)."""
     conn = _connect()
     try:
         rows = _fetchall_retry(conn, """
@@ -1385,16 +1428,21 @@ def list_printed_fabric_ready_to_cut():
             ORDER BY r.so_number
         """)
         conn.close()
+        raw = [dict(r) for r in rows]
         jo_planned = _cutting_jo_planned_by_so_sku()
-        result: List[Dict[str, Any]] = []
-        for r in rows:
-            d = dict(r)
-            so = (d.get("so_number") or "").strip()
-            sku = (d.get("sku") or "").strip()
-            if jo_planned.get((so, sku), 0) > 0:
-                continue
-            result.append(d)
-        return result
+        try:
+            from ..services.ready_to_cut_eligibility import expand_ready_to_cut_rows
+
+            return expand_ready_to_cut_rows(raw, jo_planned=jo_planned, hide_if_jo=True)
+        except Exception:
+            result: List[Dict[str, Any]] = []
+            for d in raw:
+                so = (d.get("so_number") or "").strip()
+                sku = (d.get("sku") or "").strip()
+                if jo_planned.get((so, sku), 0) > 0:
+                    continue
+                result.append(d)
+            return result
     except sqlite3.Error:
         conn.close()
         return []

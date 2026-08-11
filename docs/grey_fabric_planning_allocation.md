@@ -103,6 +103,15 @@ Implementation: `backend/services/fabric_allocation_engine.py`
 
 ## 10. UI
 
+### Two entry points for **printed fabric → SO/SKU** (same table)
+
+| UI path | API | Writes | When to use |
+|---------|-----|--------|-------------|
+| **Printed Fabric → Reserve for SO** (and Ready to Cut) | `POST /grey/printed-fabric/reserve` | `printed_fabric_reservations` | Day-to-day ops: pick checked fabric, reserve to open SO lines (BOM-filtered), see Ready to Cut, create Cutting JO |
+| **Planning & Allocation → Stage 4 / Allocate printed** | `POST /grey/planning/allocate-printed` | **same** `printed_fabric_reservations` + `fabric_allocation_history` | Planner workflow: grey→P-code tree, reallocate, lock at cutting issue, audit trail |
+
+**Do not use both for the same fabric meters** without knowing the free/available balance — double reserve is blocked by stock checks, not by separate ledgers. There is one operational source of truth: `printed_fabric_reservations`. Planning adds stages, reallocation, and history; the Printed Fabric tab is the operational reserve + Ready-to-Cut surface.
+
 Grey Fabric page → tab **Planning & Allocation**:
 - MRP Tree, Allocate, Reallocate, Printing JO, FG Status, Audit Trail  
 Colors: green allocated, blue printed/locked, orange partial, grey pending, red shortage.

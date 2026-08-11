@@ -336,12 +336,29 @@ def init_db():
         ("process_stock", "batch", "TEXT DEFAULT ''"),
         ("process_stock", "vendor_name", "TEXT DEFAULT ''"),
         ("process_stock", "jo_number", "TEXT DEFAULT ''"),
+        # system = matched/from SO master list; manual = free-text SO no (no SO record required)
+        ("job_orders", "so_source", "TEXT DEFAULT 'system'"),
     ]
     for table, col, decl in migrations:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         except Exception:
             pass
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS jo_qty_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                jo_id INTEGER NOT NULL REFERENCES job_orders(id) ON DELETE CASCADE,
+                field TEXT NOT NULL DEFAULT 'planned_qty',
+                old_qty REAL NOT NULL DEFAULT 0,
+                new_qty REAL NOT NULL DEFAULT 0,
+                changed_by TEXT DEFAULT '',
+                remarks TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now'))
+            )"""
+        )
+    except Exception:
+        pass
     try:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS ready_to_wip_imports (
@@ -832,8 +849,28 @@ def _enrich_ready_row(d: dict, to_process: str) -> dict:
     return d
 
 
+def _cutting_jo_planned_map() -> dict[tuple[str, str], float]:
+    """(so_number, sku) → sum planned_qty on non-cancelled Cutting JOs."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT so_number, sku, COALESCE(SUM(planned_qty), 0) AS pq
+               FROM job_orders
+               WHERE process='Cutting' AND status NOT IN ('Cancelled')
+               GROUP BY so_number, sku"""
+        ).fetchall()
+        return {
+            (str(r["so_number"] or "").strip(), str(r["sku"] or "").strip()): float(r["pq"] or 0)
+            for r in rows
+        }
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
 def _get_ready_to_cut() -> list:
-    """Get printed fabric reservations ready for cutting — deduct already planned JO qty."""
+    """Get printed fabric reservations ready for cutting — component-level when Set BOM exists."""
     grey_db_path = os.environ.get("GREY_DB_PATH",
         os.path.join(os.path.dirname(__file__), "..", "grey.db"))
     result = []
@@ -849,32 +886,22 @@ def _get_ready_to_cut() -> list:
             WHERE r.status = 'Active'
             ORDER BY r.so_number, r.sku
         """).fetchall()
-        # Convert to plain dicts BEFORE closing grey connection
         raw = [dict(r) for r in rows]
         gconn.close()
 
-        # Now open production.db separately
-        conn = _connect()
-        try:
-            for d in raw:
-                existing = conn.execute("""
-                    SELECT COALESCE(SUM(planned_qty), 0) as already_planned
-                    FROM job_orders
-                    WHERE so_number=? AND sku=? AND process='Cutting'
-                    AND status NOT IN ('Cancelled')
-                """, (d['so_number'], d.get('sku',''))).fetchone()
-                already_planned = int(existing[0]) if existing else 0
-                reserved = float(d.get('reserved_qty') or 0)
-                remaining = max(0, reserved - already_planned)
-                if remaining > 0:
-                    d['already_planned'] = already_planned
-                    d['available_qty'] = remaining
-                    d['routing'] = get_item_routing(d.get('sku', ''))
-                    d['from_process'] = 'Printed'
-                    d['to_process'] = 'Cutting'
-                    result.append(_enrich_ready_row(d, 'Cutting'))
-        finally:
-            conn.close()
+        from ..services.ready_to_cut_eligibility import expand_ready_to_cut_rows
+
+        jo_planned = _cutting_jo_planned_map()
+        for d in expand_ready_to_cut_rows(raw, jo_planned=jo_planned, hide_if_jo=False):
+            reserved = float(d.get("reserved_qty") or 0)
+            remaining = float(d.get("available_qty") or 0)
+            if remaining <= 0:
+                continue
+            d["already_planned"] = max(0, reserved - remaining)
+            d["routing"] = get_item_routing(d.get("sku", ""))
+            d["from_process"] = "Printed"
+            d["to_process"] = "Cutting"
+            result.append(_enrich_ready_row(d, "Cutting"))
     except Exception:
         pass
 
@@ -1184,20 +1211,24 @@ def _create_single_jo(data: dict) -> str:
     so_number = (data.get("so_number") or "").strip()
     fabric_code = (data.get("fabric_code") or "").strip()
     fabric_qty = float(data.get("fabric_qty") or 0)
-    if so_number and fabric_code and fabric_qty > 0:
+    so_source = str(data.get("so_source") or "system").strip().lower()
+    if so_source not in ("system", "manual"):
+        so_source = "system"
+    # Manual SO is free-text only — no sales order / MRP commitment key.
+    if so_source != "manual" and so_number and fabric_code and fabric_qty > 0:
         check_mrp_commitment(so_number, fabric_code, fabric_qty)
     conn = _connect()
     num = _next_jo(conn)
     process = data.get('process') or data.get('stage') or 'Cutting'
     planned = int(data.get('planned_qty') or 0)
     conn.execute("""INSERT INTO job_orders(
-        jo_number, jo_date, so_number, sku, sku_name, process, stage,
+        jo_number, jo_date, so_number, so_source, sku, sku_name, process, stage,
         exec_type, vendor_name, vendor_rate, so_qty, planned_qty, balance_qty,
         status, expected_completion, issued_to, remarks,
         fabric_code, fabric_qty, fabric_unit, main_sku, component_code, sku_role, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
         (num, data.get('jo_date') or datetime.now().strftime('%Y-%m-%d'),
-         data.get('so_number',''), data.get('sku',''), data.get('sku_name',''),
+         data.get('so_number',''), so_source, data.get('sku',''), data.get('sku_name',''),
          process, process,
          data.get('exec_type','Inhouse'), data.get('vendor_name',''),
          float(data.get('vendor_rate') or 0),
@@ -1246,7 +1277,7 @@ def _create_single_jo(data: dict) -> str:
         create_issue_note_for_jo(joid, num, jo_snapshot, line_snapshots)
     except Exception:
         pass
-    if so_number and fabric_code and fabric_qty > 0:
+    if so_source != "manual" and so_number and fabric_code and fabric_qty > 0:
         record_mrp_jo_commitment(so_number, fabric_code, fabric_qty)
     if process == "Cutting" and so_number and data.get("sku"):
         try:
@@ -1262,28 +1293,110 @@ def _create_single_jo(data: dict) -> str:
 
 def update_jo(joid: int, data: dict):
     conn = _connect()
-    prev = conn.execute("SELECT so_number, fabric_code, fabric_qty, status FROM job_orders WHERE id=?", (joid,)).fetchone()
-    conn.close()
-    allowed = ['status','output_qty','received_qty','rejected_qty','balance_qty',
-               'completed_date','remarks','issued_to','exec_type','vendor_name',
-               'vendor_rate','fabric_issued_qty','fabric_received_qty',
-               'fabric_consumption','process_cost','total_cost','next_stage_jo_id']
-    sets = ', '.join(f"{k}=?" for k in data if k in allowed)
+    prev = conn.execute(
+        """SELECT so_number, fabric_code, fabric_qty, status, planned_qty,
+                  issued_qty, received_qty, output_qty, so_qty, sku
+           FROM job_orders WHERE id=?""",
+        (joid,),
+    ).fetchone()
+    if not prev:
+        conn.close()
+        raise ValueError("Job order not found")
+    prev = dict(prev)
+    data = dict(data)
+
+    # Planned quantity: editable for uploaded + UI JOs with process safety floor.
+    if "planned_qty" in data and data["planned_qty"] is not None:
+        new_plan = int(data["planned_qty"])
+        if new_plan < 0:
+            conn.close()
+            raise ValueError("planned_qty cannot be negative")
+        floor = max(
+            int(prev.get("issued_qty") or 0),
+            int(prev.get("received_qty") or 0),
+            int(prev.get("output_qty") or 0),
+        )
+        if new_plan < floor:
+            conn.close()
+            raise ValueError(
+                f"planned_qty cannot be below already processed quantity ({floor}). "
+                "Issued, received, or output pieces already exceed that plan."
+            )
+        old_plan = int(prev.get("planned_qty") or 0)
+        if new_plan != old_plan:
+            conn.execute(
+                """INSERT INTO jo_qty_history(jo_id, field, old_qty, new_qty, changed_by, remarks)
+                   VALUES(?,?,?,?,?,?)""",
+                (
+                    joid,
+                    "planned_qty",
+                    old_plan,
+                    new_plan,
+                    str(data.pop("changed_by", "") or ""),
+                    str(data.pop("qty_change_remarks", "") or ""),
+                ),
+            )
+            # Keep open balance consistent when status is still Created / no receives.
+            bal = max(0, new_plan - int(prev.get("received_qty") or 0))
+            data["balance_qty"] = bal
+
+    if "so_source" in data and data["so_source"] is not None:
+        ss = str(data["so_source"]).strip().lower()
+        data["so_source"] = ss if ss in ("system", "manual") else (prev.get("so_source") or "system")
+
+    allowed = [
+        "status",
+        "output_qty",
+        "received_qty",
+        "rejected_qty",
+        "balance_qty",
+        "planned_qty",
+        "so_qty",
+        "so_number",
+        "so_source",
+        "completed_date",
+        "remarks",
+        "issued_to",
+        "exec_type",
+        "vendor_name",
+        "vendor_rate",
+        "fabric_issued_qty",
+        "fabric_received_qty",
+        "fabric_consumption",
+        "process_cost",
+        "total_cost",
+        "next_stage_jo_id",
+    ]
+    sets = ", ".join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]
     if not sets:
+        conn.close()
         return
     new_status = data.get("status")
-    if prev and new_status == "Cancelled" and (prev["status"] or "") != "Cancelled":
+    if new_status == "Cancelled" and (prev.get("status") or "") != "Cancelled":
         release_mrp_jo_commitment(
-            prev["so_number"] or "",
-            prev["fabric_code"] or "",
-            float(prev["fabric_qty"] or 0),
+            prev.get("so_number") or "",
+            prev.get("fabric_code") or "",
+            float(prev.get("fabric_qty") or 0),
         )
-    vals += [datetime.now().strftime('%Y-%m-%d %H:%M:%S'), joid]
-    conn = _connect()
+    vals += [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), joid]
     conn.execute(f"UPDATE job_orders SET {sets}, updated_at=? WHERE id=?", vals)
     conn.commit()
     conn.close()
+
+
+def list_jo_qty_history(joid: int) -> list:
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM jo_qty_history WHERE jo_id=? ORDER BY id DESC",
+            (joid,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
 
 
 # ── Fabric Issue ───────────────────────────────────────────────────────────────
@@ -1820,18 +1933,22 @@ def _ensure_downstream_jo_for_issue(
     remarks = f"Auto-created from {parent_jo.get('jo_number') or parent_joid} issue → {process}"
     if plan.get("use_measurement"):
         remarks += f" | {qty_label}"
+    parent_so_source = str(parent_jo.get("so_source") or "system").strip().lower()
+    if parent_so_source not in ("system", "manual"):
+        parent_so_source = "system"
     conn.execute(
         """INSERT INTO job_orders(
-            jo_number, jo_date, so_number, sku, sku_name, process, stage,
+            jo_number, jo_date, so_number, so_source, sku, sku_name, process, stage,
             exec_type, vendor_name, vendor_rate, so_qty, planned_qty, balance_qty, status,
             expected_completion, fabric_code, parent_jo_id, main_sku, component_code, sku_role,
             embroidery_type, embroidery_unit, garment_qty, measurement_qty,
             remarks, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
         (
             num,
             datetime.now().strftime("%Y-%m-%d"),
             so_number,
+            parent_so_source,
             sku,
             sku_name or sku,
             process,
@@ -2092,13 +2209,16 @@ def create_next_process_jo(parent_joid: int) -> dict:
         return {'ok': False, 'available': 0,
                 'message': f'No pieces at {current_process}. Receive pieces first.'}
     num = _next_jo(conn)
+    parent_so_source = str(parent.get("so_source") or "system").strip().lower()
+    if parent_so_source not in ("system", "manual"):
+        parent_so_source = "system"
     conn.execute("""INSERT INTO job_orders(
-        jo_number, jo_date, so_number, sku, sku_name, process, stage,
+        jo_number, jo_date, so_number, so_source, sku, sku_name, process, stage,
         exec_type, vendor_name, vendor_rate, so_qty, planned_qty, balance_qty, status,
         expected_completion, fabric_code, parent_jo_id, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
         (num, datetime.now().strftime('%Y-%m-%d'),
-         so_number, sku, parent.get('sku_name',''),
+         so_number, parent_so_source, sku, parent.get('sku_name',''),
          next_process, next_process,
          parent.get('exec_type','Inhouse'),
          parent.get('vendor_name',''),
