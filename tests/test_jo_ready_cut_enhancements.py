@@ -69,20 +69,40 @@ def test_update_planned_qty_rejects_below_received(iso):
         production_db.update_jo(jo["id"], {"planned_qty": 5})
 
 
-def test_manual_so_source_persisted(iso):
+def test_manual_so_multi_size_lines_on_single_jo(iso):
+    """One JO can hold multiple size SKUs as separate lines."""
     num = production_db.create_jo(
         {
-            "so_number": "WALKIN-99",
+            "so_number": "WALKIN-MULTI",
             "so_source": "manual",
-            "sku": "AB-S",
+            "sku": "1294YKGREEN-S",
+            "sku_name": "Green S",
             "process": "Cutting",
-            "planned_qty": 3,
+            "planned_qty": 25,
             "create_component_jos": False,
+            "lines": [
+                {
+                    "so_number": "WALKIN-MULTI",
+                    "sku": "1294YKGREEN-S",
+                    "sku_name": "Green S",
+                    "planned_qty": 10,
+                },
+                {
+                    "so_number": "WALKIN-MULTI",
+                    "sku": "1294YKGREEN-M",
+                    "sku_name": "Green M",
+                    "planned_qty": 15,
+                },
+            ],
         }
     )
     jo = next(j for j in production_db.list_jos() if j["jo_number"] == num)
-    assert jo.get("so_source") == "manual"
-    assert jo.get("so_number") == "WALKIN-99"
+    full = production_db.get_jo(jo["id"])
+    skus = { (ln.get("sku") or "").upper() for ln in (full.get("lines") or []) }
+    assert "1294YKGREEN-S" in skus
+    assert "1294YKGREEN-M" in skus
+    assert len(full.get("lines") or []) == 2
+    assert sum(int(ln.get("planned_qty") or 0) for ln in full["lines"]) == 25
 
 
 def test_ready_component_not_blocked_by_sibling(iso, monkeypatch):

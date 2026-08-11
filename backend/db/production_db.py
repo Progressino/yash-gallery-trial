@@ -1133,8 +1133,30 @@ def create_jo(data: dict) -> str | list[str]:
             for ln in active_lines:
                 nums.extend(create_component_cutting_jos(_payload_for_line(ln)))
             return nums
+        # Multiple size / SKU lines → one JO with all lines (e.g. S+M+L on Manual SO)
         if len(active_lines) > 1:
-            return [_create_single_jo(_payload_for_line(ln)) for ln in active_lines]
+            payload = dict(data)
+            normalized = []
+            for ln in active_lines:
+                s = str(ln.get("sku") or "").strip().upper()
+                main_sku, comp = parse_component_sku(s)
+                if comp:
+                    raise ValueError(
+                        f"Cannot create a Cutting JO on component SKU {s}; use the main size SKU (e.g. {main_sku})."
+                    )
+                normalized.append({
+                    **ln,
+                    "sku": main_sku or s,
+                    "planned_qty": int(ln.get("planned_qty") or 0),
+                })
+            payload["lines"] = normalized
+            payload["planned_qty"] = sum(int(ln["planned_qty"]) for ln in normalized)
+            first = normalized[0]
+            payload["sku"] = str(first.get("sku") or payload.get("sku") or "").strip()
+            payload["sku_name"] = str(
+                first.get("sku_name") or payload.get("sku_name") or ""
+            ).strip()
+            return _create_single_jo(payload)
 
     if should_auto_create_component_jos(data):
         return create_component_cutting_jos(data)

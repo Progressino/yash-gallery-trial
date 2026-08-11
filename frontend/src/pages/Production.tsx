@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
+import { appendManualJoLine } from './joLineHelpers'
 import SetBomPanel from '../components/SetBomPanel'
 import { downloadCsv } from '../lib/exportCsv'
 
@@ -2779,25 +2780,42 @@ export default function Production() {
                     className="w-full border rounded px-2 py-1.5 text-sm mt-1"
                   />
                 </div>
-                <div className="flex items-end md:col-span-4">
+                <div className="flex items-end md:col-span-4 gap-2">
                   <button
                     type="button"
-                    className="px-4 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg"
+                    className="px-4 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg disabled:opacity-50"
+                    disabled={!newForm.sku.trim() || !(Number(newForm.planned_qty) > 0)}
                     onClick={() => {
-                      if (!newForm.sku || !newForm.planned_qty) return
-                      setNewLines([{
+                      const sku = (newForm.sku || '').trim()
+                      const qty = Number(newForm.planned_qty) || 0
+                      if (!sku || qty <= 0) return
+                      const nextLine = {
                         so_number: newForm.so_number,
-                        sku: newForm.sku,
-                        sku_name: newForm.sku_name,
+                        sku,
+                        sku_name: newForm.sku_name || '',
                         style: '',
-                        planned_qty: newForm.planned_qty,
+                        planned_qty: qty,
+                        so_qty: qty,
                         vendor_rate: newForm.vendor_rate || 0,
                         remarks: '',
-                      }])
+                      }
+                      setNewLines(ls => appendManualJoLine(ls, nextLine))
+                      // Clear pickers so the next size can be entered for the same JO
+                      setNewForm(f => ({
+                        ...f,
+                        sku: '',
+                        sku_name: '',
+                        planned_qty: 0,
+                      }))
                     }}
                   >
                     Add as JO line
                   </button>
+                  {newLines.length > 0 && (
+                    <span className="text-[11px] text-gray-600 self-center">
+                      {newLines.length} line{newLines.length === 1 ? '' : 's'} on this JO — add another size/SKU if needed
+                    </span>
+                  )}
                 </div>
               </div>
             )}
@@ -2913,28 +2931,39 @@ export default function Production() {
             )}
 
             <div className="flex gap-2 pt-2">
-              <button onClick={() => createJOMut.mutate({
-                ...newForm,
-                so_source: newForm.so_source || 'system',
-                planned_qty: newLines.reduce((s,l) => s+l.planned_qty, 0) || newForm.planned_qty,
-                lines: newLines.length
+              <button onClick={() => {
+                const lines = newLines.length
                   ? newLines
-                  : (newForm.so_source === 'manual' && newForm.sku
+                  : (newForm.so_source === 'manual' && newForm.sku.trim()
                     ? [{
                         so_number: newForm.so_number,
-                        sku: newForm.sku,
+                        sku: newForm.sku.trim(),
                         sku_name: newForm.sku_name,
                         style: '',
                         planned_qty: newForm.planned_qty || 1,
                         vendor_rate: newForm.vendor_rate || 0,
                         remarks: newForm.remarks || '',
                       }]
-                    : newLines),
-              })}
+                    : [])
+                const totalPlanned = lines.reduce((s, l) => s + (Number(l.planned_qty) || 0), 0)
+                  || newForm.planned_qty
+                  || 0
+                const headerSku = (newForm.sku || '').trim() || (lines[0]?.sku || '')
+                const headerName = (newForm.sku_name || '').trim() || (lines[0]?.sku_name || '')
+                createJOMut.mutate({
+                  ...newForm,
+                  so_source: newForm.so_source || 'system',
+                  sku: headerSku,
+                  sku_name: headerName,
+                  planned_qty: totalPlanned,
+                  lines,
+                })
+              }}
                 disabled={
                   createJOMut.isPending
                   || !newForm.so_number.trim()
-                  || (newForm.so_source === 'manual' && newForm.process === 'Cutting' && !newForm.sku.trim() && newLines.length === 0)
+                  || (newForm.so_source === 'manual' && newForm.process === 'Cutting'
+                    && !newForm.sku.trim() && newLines.length === 0)
                   || (isOutsourceExec(newForm.exec_type) && !newForm.vendor_name.trim())
                   || (newForm.process !== 'Cutting' && joValidation && !joValidation?.ok)
                 }
