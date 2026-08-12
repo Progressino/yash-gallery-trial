@@ -8,7 +8,7 @@ from typing import Optional, List
 import io
 import pandas as pd
 from ..db.production_db import (
-    list_jos, get_jo, create_jo, update_jo,
+    list_jos, get_jo, get_jo_by_number, create_jo, update_jo,
     issue_fabric, return_fabric, issue_pieces, receive_pieces, add_cost,
     create_next_process_jo, validate_jo_creation,
     get_process_stock, get_all_process_stocks, get_ready_to_process,
@@ -811,7 +811,8 @@ def post_jo(body: JOIn):
     if isinstance(result, list):
         orders = []
         for num in result:
-            jo_row = next((j for j in list_jos() if j.get("jo_number") == num), None)
+            _ref = get_jo_by_number(num)
+            jo_row = get_jo(_ref["id"]) if _ref else None
             issue_note = jo_issue_notes.get_issue_note_by_jo_id(jo_row["id"]) if jo_row else None
             orders.append(
                 {
@@ -830,7 +831,8 @@ def post_jo(body: JOIn):
             "message": f"Created {len(result)} component Cutting JO(s)",
         }
     num = result
-    jo_row = next((j for j in list_jos() if j.get("jo_number") == num), None)
+    _ref = get_jo_by_number(num)
+    jo_row = get_jo(_ref["id"]) if _ref else None
     issue_note = jo_issue_notes.get_issue_note_by_jo_id(jo_row["id"]) if jo_row else None
     return {"jo_number": num, "ok": True, "issue_note": issue_note}
 
