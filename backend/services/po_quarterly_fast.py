@@ -134,7 +134,7 @@ def _qty_signs_for_demand_basis(
 
 
 def _quarter_seq(n_quarters: int) -> list[tuple[int, int]]:
-    today = pd.Timestamp.today()
+    today = pd.Timestamp(pd.Timestamp.now(tz="Asia/Kolkata").date())
     cur_fy, cur_q = get_indian_fy_quarter(today)
     seq: list[tuple[int, int]] = []
     fy_i, q_i = cur_fy, cur_q
@@ -805,7 +805,7 @@ def calculate_quarterly_from_tier3_streaming(
 
     start_ts = pd.Timestamp(s0).normalize()
     end_ts = pd.Timestamp(s1).normalize() + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-    today = pd.Timestamp.today()
+    today = pd.Timestamp(pd.Timestamp.now(tz="Asia/Kolkata").date())
     cutoff_90 = today - timedelta(days=90)
     cutoff_30 = today - timedelta(days=30)
 

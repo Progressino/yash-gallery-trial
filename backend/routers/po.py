@@ -1015,6 +1015,71 @@ def po_get_daily_sales_history_for_sku(
     return {"ok": True, **out}
 
 
+@router.get("/daily-sales-history/export")
+async def po_daily_sales_history_export(
+    request: Request,
+    days: int = 30,
+    end_date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    platform: Optional[str] = None,
+):
+    """Transaction-level CSV export for Sales History reconciliation.
+
+    Returns one row per transaction: Date, SKU, Platform, TxnType, Units.
+    Useful for verifying daily sales data against platform reports.
+    """
+    from fastapi import HTTPException
+    from fastapi.responses import Response
+
+    from ..concurrency import run_read_api
+    from ..services.daily_sales_history import filter_sales_history_window
+
+    sess = request.state.session
+    if sess is None:
+        raise HTTPException(status_code=401, detail="No session")
+
+    def _build() -> bytes:
+        sales = _sales_df_for_history_read(
+            sess,
+            days=min(max(1, int(days)), 120),
+            end_date=end_date,
+            start_date=start_date,
+        )
+        plat = (platform or "").strip()
+        tall = filter_sales_history_window(
+            sales,
+            days=min(max(1, int(days)), 120),
+            end_date=end_date,
+            start_date=start_date,
+            platform=plat if plat and plat.lower() != "all" else None,
+        )
+        lines: list[str] = ["Date,SKU,Platform,TxnType,Units"]
+        if not tall.empty:
+            for row in tall.sort_values(["Date", "OMS_SKU"]).itertuples(index=False):
+                date_str = str(row.Date)[:10]
+                sku = str(row.OMS_SKU).replace('"', '""')
+                plat_str = str(row.Source).replace('"', '""')
+                ttype = str(row.TxnType).replace('"', '""')
+                units = int(row.Units) if float(row.Units) == int(row.Units) else float(row.Units)
+                lines.append(f'"{date_str}","{sku}","{plat_str}","{ttype}",{units}')
+        return ("\n".join(lines) + "\n").encode("utf-8")
+
+    try:
+        csv_bytes = await run_read_api(_build)
+    except Exception as e:
+        logging.getLogger(__name__).exception("sales history export failed")
+        raise HTTPException(status_code=500, detail=f"Sales export failed: {e}") from e
+
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="sales-history-export.csv"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @router.delete("/daily-inventory-history")
 def po_clear_daily_inventory_history(request: Request):
     from ..services.upload_policy import _DELETE_DENIED_MSG, may_delete_upload_data

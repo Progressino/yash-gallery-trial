@@ -2762,6 +2762,9 @@ def inventory_history_summary(
     days: int | None = None,
     end_date: str | None = None,
 ) -> dict:
+    # channel_split_available must reflect the FULL history, not just the windowed
+    # view — Amazon data may exist for older dates outside the current 30-day window.
+    channel_split = inventory_channel_split_available(df)
     view = filter_inventory_history_view(df, days=days, end_date=end_date)
     if view is None or view.empty:
         return {
@@ -2773,6 +2776,7 @@ def inventory_history_summary(
             "max_date": "",
             "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
             "window_end": str(end_date or today_ist_timestamp().date()),
+            "channel_split_available": channel_split,
         }
     dates = pd.to_datetime(view["Date"], errors="coerce").dt.normalize()
     min_d = dates.min()
@@ -2786,6 +2790,7 @@ def inventory_history_summary(
         "max_date": str(pd.Timestamp(max_d).date()) if pd.notna(max_d) else "",
         "window_days": int(days if days is not None else _DEFAULT_VIEW_DAYS),
         "window_end": str(pd.Timestamp(max_d).date()) if pd.notna(max_d) else str(end_date or today_ist_timestamp().date()),
+        "channel_split_available": channel_split,
     }
 
 

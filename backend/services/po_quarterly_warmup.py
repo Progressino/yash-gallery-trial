@@ -58,7 +58,7 @@ def expected_quarter_columns(n_quarters: int = 8) -> list[str]:
     """Oldest → newest quarter labels (matches calculate_quarterly_history pivot)."""
     from .po_engine import get_indian_fy_quarter, quarter_col_name
 
-    today = pd.Timestamp.today()
+    today = pd.Timestamp(pd.Timestamp.now(tz="Asia/Kolkata").date())
     cur_fy, cur_q = get_indian_fy_quarter(today)
     quarter_seq: list[str] = []
     fy_i, q_i = cur_fy, cur_q
@@ -666,9 +666,9 @@ def quarterly_ly_floor_dict(
     from .po_engine import _calendar_quarter_span, get_indian_fy_quarter, quarter_col_name
 
     try:
-        plan = pd.Timestamp(pd.to_datetime(str(planning_date or pd.Timestamp.today()).strip()[:10]))
+        plan = pd.Timestamp(pd.to_datetime(str(planning_date or pd.Timestamp.now(tz="Asia/Kolkata").date()).strip()[:10]))
     except Exception:
-        plan = pd.Timestamp.today().normalize()
+        plan = pd.Timestamp(pd.Timestamp.now(tz="Asia/Kolkata").date())
 
     q_start, q_end = _calendar_quarter_span(plan, 1)
     fy, qn = get_indian_fy_quarter(q_start)

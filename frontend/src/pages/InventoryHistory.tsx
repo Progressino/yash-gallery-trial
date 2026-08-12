@@ -179,7 +179,12 @@ export default function InventoryHistory() {
     )
   }
 
-  const channelSplitAvailable = matrixQ.data?.channel_split_available ?? false
+  // Prefer summary (checks full history) over matrix (checks windowed view only).
+  // Amazon data outside the current 30-day window would otherwise hide the split toggle.
+  const channelSplitAvailable =
+    (summaryQ.data as Record<string, unknown>)?.channel_split_available as boolean ??
+    matrixQ.data?.channel_split_available ??
+    false
 
   const rangeLabel = useMemo(() => {
     if (!dates.length) return ''

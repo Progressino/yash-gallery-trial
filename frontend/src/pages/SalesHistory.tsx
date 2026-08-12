@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
+  downloadPoDailySalesHistoryExport,
   getPoDailySalesHistoryMatrix,
   getPoDailySalesHistorySku,
   getPoDailySalesHistorySummary,
@@ -133,6 +134,22 @@ export default function SalesHistory() {
       ['date', 'sku', 'net_units', 'txns'],
       skuRows.map(r => [r.date, skuQuery.trim(), String(r.units), String(r.txns)]),
     )
+  }
+
+  const handleExportDetail = async () => {
+    setExporting(true)
+    try {
+      const blob = await downloadPoDailySalesHistoryExport(historyOpts)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const label = [platform !== 'all' ? platform : null, startDate, endDate].filter(Boolean).join('_')
+      a.download = `sales-detail-${label}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+    } finally {
+      setExporting(false)
+    }
   }
 
   const coverageGaps = matrixQ.data?.coverage_gaps ?? summaryQ.data?.coverage_gaps ?? []
@@ -342,6 +359,15 @@ export default function SalesHistory() {
           }`}
         >
           Single SKU timeline
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleExportDetail()}
+          disabled={exporting || !salesLoaded}
+          className="ml-auto px-3 py-1.5 text-sm font-medium rounded-lg border border-emerald-400 text-emerald-800 hover:bg-emerald-50 disabled:opacity-40"
+          title="Download transaction-level CSV (Date, SKU, Platform, TxnType, Units) for reconciliation"
+        >
+          {exporting ? 'Exporting…' : 'Export detail CSV'}
         </button>
       </div>
 

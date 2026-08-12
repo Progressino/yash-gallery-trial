@@ -1415,6 +1415,25 @@ export async function getPoDailySalesHistorySku(
   return data
 }
 
+export async function downloadPoDailySalesHistoryExport(opts?: {
+  days?: number
+  endDate?: string
+  startDate?: string
+  platform?: string
+}): Promise<Blob> {
+  const { data } = await api.get<Blob>('/po/daily-sales-history/export', {
+    params: {
+      days: opts?.days ?? 30,
+      ...(opts?.endDate ? { end_date: opts.endDate } : {}),
+      ...(opts?.startDate ? { start_date: opts.startDate } : {}),
+      ...(opts?.platform && opts.platform !== 'all' ? { platform: opts.platform } : {}),
+    },
+    responseType: 'blob',
+    timeout: 120_000,
+  })
+  return data
+}
+
 function _isAxiosTimeout(e: unknown): boolean {
   return axios.isAxiosError(e) && e.code === 'ECONNABORTED'
 }
