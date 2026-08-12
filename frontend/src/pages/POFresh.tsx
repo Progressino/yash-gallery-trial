@@ -1142,6 +1142,7 @@ function POFreshInner() {
                   ['po', 'PO Results'],
                   ['dashboard', 'PO Dashboard'],
                   ['quarterly', 'Quarterly History'],
+                  ['sku-replacement', 'SKU Replacement'],
                 ] as const
               ).map(([t, label]) => (
                 <button
@@ -1334,6 +1335,10 @@ function POFreshInner() {
                 </>
               )}
             </div>
+          )}
+
+          {tab === 'sku-replacement' && (
+            <SkuReplacementPanel />
           )}
         </div>
       </div>
@@ -2112,3 +2117,136 @@ function MetricCard({
     </div>
   )
 }
+
+function SkuReplacementPanel() {
+  type Replacement = { old_sku: string; new_sku: string }
+  const [replacements, setReplacements] = useState<Replacement[]>([])
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [oldSku, setOldSku] = useState('')
+  const [newSku, setNewSku] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveErr, setSaveErr] = useState<string | null>(null)
+  const [deletingKey, setDeletingKey] = useState<string | null>(null)
+
+  const load = () => {
+    setLoading(true)
+    setErr(null)
+    api.get<{ ok: boolean; replacements: Replacement[] }>('/po/sku-replacement')
+      .then(r => setReplacements(r.data.replacements ?? []))
+      .catch(e => setErr(e?.message ?? 'Failed to load'))
+      .finally(() => setLoading(false))
+  }
+
+  useEffect(() => { load() }, [])
+
+  const handleAdd = () => {
+    if (!oldSku.trim() || !newSku.trim()) { setSaveErr('Both fields are required'); return }
+    setSaving(true)
+    setSaveErr(null)
+    api.post<{ ok: boolean; message?: string }>('/po/sku-replacement', { old_sku: oldSku.trim(), new_sku: newSku.trim() })
+      .then(r => {
+        if (!r.data.ok) { setSaveErr(r.data.message ?? 'Save failed'); return }
+        setOldSku('')
+        setNewSku('')
+        load()
+      })
+      .catch(e => setSaveErr(e?.message ?? 'Save failed'))
+      .finally(() => setSaving(false))
+  }
+
+  const handleDelete = (key: string) => {
+    setDeletingKey(key)
+    const encoded = encodeURIComponent(key)
+    api.delete<{ ok: boolean }>(`/po/sku-replacement/${encoded}`)
+      .then(() => load())
+      .catch(e => setErr(e?.message ?? 'Delete failed'))
+      .finally(() => setDeletingKey(null))
+  }
+
+  return (
+    <div className="p-6 space-y-6 max-w-3xl">
+      <div>
+        <h3 className="text-sm font-semibold text-[var(--po-secondary)] mb-1">PO SKU Replacement</h3>
+        <p className="text-xs text-[var(--po-outline)] leading-relaxed">
+          Map incorrect or old SKU codes on uploaded PO sheets to the correct ERP SKU.
+          The replacement is applied before all PO normalization — the wrong code is
+          transparently replaced everywhere PO data is used (pipeline, coverage, quarterly).
+        </p>
+      </div>
+
+      <div className="flex flex-wrap gap-2 items-end">
+        <div className="flex flex-col gap-1">
+          <label className="text-[11px] font-semibold text-[var(--po-outline)] uppercase tracking-wide">Wrong PO SKU</label>
+          <input
+            value={oldSku}
+            onChange={e => setOldSku(e.target.value.toUpperCase())}
+            placeholder="e.g. 1003DPT21-XL"
+            className="po-fresh-search text-xs"
+            style={{minWidth: 200}}
+            onKeyDown={e => { if (e.key === 'Enter') handleAdd() }}
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label className="text-[11px] font-semibold text-[var(--po-outline)] uppercase tracking-wide">Correct ERP SKU</label>
+          <input
+            value={newSku}
+            onChange={e => setNewSku(e.target.value.toUpperCase())}
+            placeholder="e.g. 1003YKBLUE-XL"
+            className="po-fresh-search text-xs"
+            style={{minWidth: 200}}
+            onKeyDown={e => { if (e.key === 'Enter') handleAdd() }}
+          />
+        </div>
+        <button
+          type="button"
+          disabled={saving || !oldSku.trim() || !newSku.trim()}
+          onClick={handleAdd}
+          className="text-xs px-3 py-1.5 rounded border border-[var(--po-primary)]/40 text-[var(--po-primary)] hover:bg-[var(--po-surface-2)] disabled:opacity-50"
+        >
+          {saving ? 'Saving…' : '+ Add / Update'}
+        </button>
+        {saveErr && <span className="text-xs text-red-600">{saveErr}</span>}
+      </div>
+
+      {loading ? (
+        <p className="text-sm text-[var(--po-outline)]">Loading…</p>
+      ) : err ? (
+        <p className="text-sm text-red-600">{err}</p>
+      ) : replacements.length === 0 ? (
+        <p className="text-sm text-[var(--po-outline)]">No replacements defined yet.</p>
+      ) : (
+        <div className="overflow-x-auto rounded border border-[var(--po-outline-ghost)]">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-[var(--po-surface-2)] border-b border-[var(--po-outline-ghost)]">
+                <th className="text-left px-3 py-2 font-semibold text-[var(--po-outline)]">Wrong PO SKU</th>
+                <th className="text-left px-3 py-2 font-semibold text-[var(--po-outline)]">Correct ERP SKU</th>
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {replacements.map(r => (
+                <tr key={r.old_sku} className="border-b border-[var(--po-outline-ghost)] last:border-0 hover:bg-[var(--po-surface-2)]/50">
+                  <td className="px-3 py-2 font-mono text-[var(--po-on-surface)]">{r.old_sku}</td>
+                  <td className="px-3 py-2 font-mono text-[var(--po-primary)]">{r.new_sku}</td>
+                  <td className="px-3 py-2 text-right">
+                    <button
+                      type="button"
+                      disabled={deletingKey === r.old_sku}
+                      onClick={() => handleDelete(r.old_sku)}
+                      className="text-[11px] px-2 py-0.5 rounded border border-red-300 text-red-500 hover:bg-red-50 disabled:opacity-50"
+                    >
+                      {deletingKey === r.old_sku ? '…' : 'Remove'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+

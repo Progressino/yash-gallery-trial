@@ -89,6 +89,11 @@ def existing_po_merge_key(raw: object) -> str:
     merges with inventory/sales that already use those corrected warehouse keys.
     """
     try:
+        from .po_sku_replacement import apply_po_sku_replacement
+        raw = apply_po_sku_replacement(str(raw or "").strip()) or raw
+    except Exception:
+        pass
+    try:
         from ..services.po_engine import inventory_oms_key
 
         k = inventory_oms_key(raw)

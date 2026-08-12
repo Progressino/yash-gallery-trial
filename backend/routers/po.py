@@ -908,6 +908,37 @@ def po_sku_audit(request: Request, sku: str):
     return build_po_sku_audit(sess, sku, qp)
 
 
+@router.get("/sku-replacement")
+def po_list_sku_replacements():
+    """List all PO SKU replacements (old_sku -> new_sku mappings)."""
+    from ..services.po_sku_replacement import list_po_sku_replacements
+    return {"ok": True, "replacements": list_po_sku_replacements()}
+
+
+class _SkuReplaceBody(BaseModel):
+    old_sku: str
+    new_sku: str
+
+
+@router.post("/sku-replacement")
+def po_add_sku_replacement(body: _SkuReplaceBody):
+    """Add or update a PO SKU replacement: body={old_sku, new_sku}."""
+    from ..services.po_sku_replacement import add_or_update_replacement
+    try:
+        entry = add_or_update_replacement(body.old_sku, body.new_sku)
+        return {"ok": True, "entry": entry}
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}
+
+
+@router.delete("/sku-replacement/{old_sku:path}")
+def po_delete_sku_replacement(old_sku: str):
+    """Remove a PO SKU replacement by its old_sku."""
+    from ..services.po_sku_replacement import remove_replacement
+    found = remove_replacement(old_sku)
+    return {"ok": True, "removed": found}
+
+
 @router.get("/daily-sales-history")
 async def po_get_daily_sales_history(
     request: Request,

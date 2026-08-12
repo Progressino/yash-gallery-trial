@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { POCalculateResult } from '../api/client'
 
-export type POFreshTab = 'po' | 'dashboard' | 'quarterly'
+export type POFreshTab = 'po' | 'dashboard' | 'quarterly' | 'sku-replacement'
 
 export type POFreshParams = {
   period_days: number
