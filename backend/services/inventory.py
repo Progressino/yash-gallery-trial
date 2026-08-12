@@ -2407,11 +2407,14 @@ def oms_return_columns(df: pd.DataFrame) -> list[str]:
 
 
 def marketplace_total_columns(df: pd.DataFrame) -> list[str]:
-    """Columns summed into Marketplace_Total (OMS warehouse + buffer are excluded)."""
+    """Columns summed into Marketplace_Total (OMS warehouse, buffer, and non-channel
+    tracking columns like Manual_InTransit and Not_In_Inventory_Qty are excluded).
+    MIT and NIIQ are informational — they track stock in transit and unlisted stock
+    but are not sellable inventory at a known channel."""
     return [
         c
         for c in inventory_source_columns(df)
-        if c != "Buffer_Stock" and "oms" not in c.lower()
+        if c != "Buffer_Stock" and "oms" not in c.lower() and c not in _EXTRA_MKT_COLS
     ]
 
 
@@ -2498,8 +2501,8 @@ def recompute_inventory_totals(df: pd.DataFrame) -> pd.DataFrame:
     """
     Derive Marketplace_Total and Total_Inventory from source columns.
 
-    Buffer_Stock is informational only. Manual in-transit and not-in-inventory qty
-    count toward marketplace total. Never sum the existing Total_Inventory column
+    Buffer_Stock, Manual_InTransit, and Not_In_Inventory_Qty are informational only
+    and excluded from Marketplace_Total. Never sum the existing Total_Inventory column
     into Marketplace_Total (that would double-count).
     """
     if df is None or df.empty:
