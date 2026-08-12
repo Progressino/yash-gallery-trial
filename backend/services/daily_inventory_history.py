@@ -272,9 +272,12 @@ def align_history_day_to_variant(
     if not parts:
         return hist_df
     incoming = pd.concat(parts, ignore_index=True)
-    # Drop all-zero channel rows to keep the matrix lean; total OMS is unchanged.
     incoming["Qty"] = pd.to_numeric(incoming["Qty"], errors="coerce").fillna(0.0)
-    incoming = incoming.loc[incoming["Qty"].abs() > 1e-9].copy()
+    # Keep OMS zeros: explicit 0 on snapshot date prevents ffill from carrying
+    # a stale pre-snapshot value forward in the wide matrix display.
+    # Amazon zeros are still dropped (absence of Amazon FBA stock is ambiguous).
+    _is_oms = incoming["Channel"].astype(str).str.lower() == "oms"
+    incoming = incoming.loc[_is_oms | (incoming["Qty"].abs() > 1e-9)].copy()
     out = pd.concat([rest, incoming], ignore_index=True)
     clear_inventory_channel_view_cache()
     return scrub_absurd_inventory_history_rows(_coalesce_history_rows(out))
@@ -3147,6 +3150,14 @@ def inventory_history_wide_matrix(
         page = daily[daily["OMS_SKU"].isin(page_skus)]
         pivot = page.pivot(index="OMS_SKU", columns="_d", values="Qty")
         pivot = pivot.reindex(index=page_skus, columns=dates_sorted)
+        # Zero out NaN on snapshot/uploaded dates before ffill so stale pre-snapshot
+        # values from blank-channel legacy rows cannot carry forward into an
+        # authoritative upload day (fixes SKU-level ffill inflation vs header total).
+        if uploaded_dates:
+            _upl_ts = {pd.Timestamp(d) for d in uploaded_dates}
+            _snap_cols = [c for c in pivot.columns if c in _upl_ts]
+            if _snap_cols:
+                pivot[_snap_cols] = pivot[_snap_cols].fillna(0.0)
         pivot = pivot.ffill(axis=1).fillna(0.0)
         # Avoid DataFrame.iterrows (10k+ SKU exports were multi-minute / OOM).
         vals = pivot.to_numpy(dtype=float, copy=False)
@@ -3287,6 +3298,12 @@ def inventory_history_wide_matrix(
         )
         pivot = page.pivot(index="OMS_SKU", columns="Date", values="Qty")
         pivot = pivot.reindex(index=page_skus, columns=dates_sorted)
+        # Zero out NaN on snapshot/uploaded dates before ffill — same fix as fast path.
+        if uploaded_dates:
+            _upl_ts2 = {pd.Timestamp(d) for d in uploaded_dates}
+            _snap_cols2 = [c for c in pivot.columns if c in _upl_ts2]
+            if _snap_cols2:
+                pivot[_snap_cols2] = pivot[_snap_cols2].fillna(0.0)
         pivot = pivot.ffill(axis=1).fillna(0.0)
         vals = pivot.to_numpy(dtype=float, copy=False)
         rows = [
