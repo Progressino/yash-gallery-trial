@@ -2518,7 +2518,14 @@ def recompute_inventory_totals(df: pd.DataFrame) -> pd.DataFrame:
         oms_inv = pd.to_numeric(out["OMS_Inventory"], errors="coerce").fillna(0)
     else:
         oms_inv = 0
-    out["Total_Inventory"] = oms_inv + out["Marketplace_Total"]
+    # Marketplace_Total excludes MIT and NIIQ (they are not at a specific sales channel).
+    # Total_Inventory must include them — they represent real physical inventory.
+    extra_inv = sum(
+        pd.to_numeric(out[c], errors="coerce").fillna(0)
+        for c in _EXTRA_MKT_COLS
+        if c in out.columns
+    )
+    out["Total_Inventory"] = oms_inv + out["Marketplace_Total"] + extra_inv
     return out
 
 
