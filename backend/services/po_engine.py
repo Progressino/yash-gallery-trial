@@ -393,14 +393,25 @@ def _sales_shipment_history_part(sales_df: pd.DataFrame, *, include_fan: bool = 
     # copies created by OMS for combo listings — they represent actual physical units
     # dispatched per component SKU and must be counted in quarterly totals.
     # include_fan=False: legacy listing-level view (Sales History tab, which must match File).
-    if not include_fan and "_Combo_Fan" in sales_df.columns:
+    if "_Combo_Fan" in sales_df.columns:
         from .combo_sku_map import combo_fan_mask
 
         fan = combo_fan_mask(sales_df["_Combo_Fan"])
         if fan.any():
-            src = sales_df.loc[~fan]
-            if src.empty:
-                return pd.DataFrame()
+            if not include_fan:
+                src = sales_df.loc[~fan]
+                if src.empty:
+                    return pd.DataFrame()
+            else:
+                # Even with include_fan=True, exclude fan rows for DPT-prefix accessory
+                # SKUs. DPT dupattas are bundled with garments in combo listings — their
+                # combo-dispatch fan rows represent an accessory dispatch, not a standalone
+                # sale. Only direct (non-fan) DPT sales count toward their quarterly demand.
+                dpt_fan = fan & src["Sku"].astype(str).str.upper().str.startswith("DPT")
+                if dpt_fan.any():
+                    src = src.loc[~dpt_fan]
+                    if src.empty:
+                        return pd.DataFrame()
     cols = ["Sku", "TxnDate", "Quantity", "Transaction Type"]
     src_col = next((c for c in ("Source", "Platform", "Channel") if c in src.columns), None)
     if src_col:

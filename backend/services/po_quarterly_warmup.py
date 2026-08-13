@@ -11,7 +11,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Bump when quarterly payload shape / history rules change (invalidates caches).
-QUARTERLY_CACHE_SCHEMA = 41  # v41: include combo-fan rows so component SKUs count actual dispatch
+QUARTERLY_CACHE_SCHEMA = 42  # v42: exclude fan rows for DPT-prefix accessory SKUs only
 
 
 def po_quarterly_demand_bases() -> tuple[str, ...]:
