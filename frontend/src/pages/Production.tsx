@@ -581,7 +581,7 @@ function isPrintedMaterial(mat: { type?: string }, code: string): boolean {
   return Boolean(c) && c.startsWith('P') && /\d/.test(c.slice(0, 6))
 }
 
-function isGreyOrFabricMaterial(mat: { type?: string; unit?: string }, code: string): boolean {
+function isGreyOrFabricMaterial(mat: { type?: string; unit?: string }): boolean {
   const t = String(mat?.type || '').toUpperCase()
   const u = String(mat?.unit || '').toUpperCase()
   if (['GF', 'GREY', 'GREY FABRIC', 'RM', 'FABRIC'].includes(t)) return true
@@ -591,7 +591,7 @@ function isGreyOrFabricMaterial(mat: { type?: string; unit?: string }, code: str
 
 function canInlineGreyAlloc(mat: any, code: string): boolean {
   if (isPrintedMaterial(mat, code)) return false
-  if (isGreyOrFabricMaterial(mat, code)) return true
+  if (isGreyOrFabricMaterial(mat)) return true
   const bd = Array.isArray(mat?.breakdown) ? mat.breakdown : []
   return bd.some((b: any) => b?.p_code || b?.printed_code || b?.allocated_grey != null)
 }
