@@ -461,7 +461,7 @@ export const PO_PARAM_FORMULAS: Record<string, POFormulaDef> = {
       'Which daily inventory history series counts toward Eff_Days (in-stock days for ADS).',
     formula: 'Eff_Days = count of days with Qty ≥ 1 on the selected channel',
     steps: [
-      'Combined (default): max(OMS, Amazon FBA) per SKU-day',
+      'Combined (default): sum(OMS + Amazon FBA) per SKU-day',
       'OMS only: warehouse on-hand days — use when planning OMS/warehouse demand',
       'Amazon FBA only: FBA on-hand days — use when planning Amazon marketplace PO',
       'Days with Qty = 0 never count (28 in-stock + 2 zero → Eff_Days = 28)',

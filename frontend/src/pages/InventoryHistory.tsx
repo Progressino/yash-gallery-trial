@@ -345,7 +345,7 @@ export default function InventoryHistory() {
         <span className="text-xs font-medium text-gray-500 mr-1">Channel:</span>
         {(
           [
-            ['combined', 'Combined (max)'],
+            ['combined', 'Combined (OMS+FBA)'],
             ['oms', 'OMS warehouse'],
             ['amazon', 'Amazon FBA'],
           ] as const

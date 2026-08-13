@@ -976,7 +976,7 @@ function POFreshInner() {
                       }
                       className="border border-[var(--po-outline)] rounded-lg px-2 py-1 text-sm bg-white max-w-xs"
                     >
-                      <option value="combined">Combined (max OMS/Amazon)</option>
+                      <option value="combined">Combined (OMS+FBA)</option>
                       <option value="oms">OMS warehouse only</option>
                       <option value="amazon">Amazon FBA only</option>
                     </select>

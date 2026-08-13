@@ -309,14 +309,14 @@ def repair_snapshot_channel_totals(
 
 
 def combine_inventory_channels(df: pd.DataFrame | None) -> pd.DataFrame:
-    """Max on-hand per SKU-day across OMS + Amazon (PO combined view).
+    """Sum of OMS + Amazon FBA per SKU-day (PO combined view).
 
-    Blank-channel (Channel='') rows are used only as a fallback for dates
-    that have no explicit 'oms' or 'amazon' rows.  On dates where per-channel
-    data is available, blank rows are dropped to prevent snapshot-sourced
-    combined values from inflating the per-SKU maximum (snapshot rows contain
-    OMS + Amazon FBA combined, so keeping them alongside separate channel rows
-    causes double-counting and large artificial spikes in the history).
+    OMS warehouse and Amazon FBA are separate physical locations — their
+    quantities are summed per SKU-day.  Blank-channel (Channel='') rows are
+    used only as a fallback for dates that have no explicit 'oms' or 'amazon'
+    rows.  On dates where per-channel data is available, blank rows are
+    dropped because snapshot rows already contain OMS+Amazon combined and
+    would double-count if left alongside the explicit per-channel rows.
     """
     work = _ensure_channel_column(df)
     if work is None or getattr(work, "empty", True):
@@ -339,7 +339,7 @@ def combine_inventory_channels(df: pd.DataFrame | None) -> pd.DataFrame:
         ascending=[True, True, False, False],
     )
     out = work.groupby(["OMS_SKU", "Date"], as_index=False).agg(
-        Qty=("Qty", "max"),
+        Qty=("Qty", "sum"),
         Source=("Source", "first"),
     )
     return out.reset_index(drop=True)
@@ -386,7 +386,7 @@ def _oms_channel_prefer_explicit(
 
 
 def filter_inventory_history_channel(df: pd.DataFrame | None, channel: str = "combined") -> pd.DataFrame:
-    """``combined`` = max(OMS, Amazon); ``oms`` / ``amazon`` = one channel only.
+    """``combined`` = sum(OMS + Amazon) per SKU; ``oms`` / ``amazon`` = one channel only.
 
     Legacy / snapshot history often stores OMS warehouse qty with blank Channel.
     Treat blank-channel-only matrices as OMS so the OMS tab is not empty zeros.
