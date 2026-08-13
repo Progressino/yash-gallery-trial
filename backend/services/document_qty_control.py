@@ -25,14 +25,24 @@ DEFAULT_GREY_TOLERANCE = 0.05
 DEFAULT_ACCESSORY_TOLERANCE = 0.0
 DEFAULT_PIECE_TOLERANCE = 0.0
 # Cutting floors routinely cut slightly over/under JO plan (BOM avg variance).
-# Allow +10% by default; override with CUTTING_RECEIVE_TOLERANCE (e.g. 0.15 = 15%).
-DEFAULT_CUTTING_RECEIVE_TOLERANCE = 0.10
+# Temporary: no over-receive cap. Restore +10% by setting this to 0.10, or
+# CUTTING_RECEIVE_TOLERANCE=0.10 in the environment. Use "off" / "none" to keep unlimited.
+DEFAULT_CUTTING_RECEIVE_TOLERANCE: float | None = None
 
 
-def cutting_receive_tolerance_pct() -> float:
+def cutting_receive_tolerance_pct() -> float | None:
+    """Return Cutting over-receive fraction (0.10 = +10%) or None = no cap.
+
+    Env ``CUTTING_RECEIVE_TOLERANCE``:
+      unset → ``DEFAULT_CUTTING_RECEIVE_TOLERANCE`` (currently unlimited)
+      ``0.10`` → +10%
+      ``off`` / ``none`` / ``unlimited`` → no cap
+    """
     import os
 
     raw = (os.environ.get("CUTTING_RECEIVE_TOLERANCE") or "").strip()
+    if raw.lower() in ("off", "none", "unlimited", "*"):
+        return None
     if raw:
         try:
             return max(0.0, float(raw))
@@ -92,10 +102,14 @@ def po_should_auto_close(ordered_qty: float, received_qty: float, tolerance_pct:
     return received >= ordered and received <= max_allowed_receive(ordered, tolerance_pct)
 
 
-def jo_should_auto_close(planned_qty: int, received_qty: int, tolerance_pct: float = 0.0) -> bool:
+def jo_should_auto_close(planned_qty: int, received_qty: int, tolerance_pct: float | None = 0.0) -> bool:
     planned = int(planned_qty or 0)
     if planned <= 0:
         return False
     received = int(received_qty or 0)
+    if received < planned:
+        return False
+    if tolerance_pct is None:
+        return True
     cap = int(max_allowed_receive(planned, tolerance_pct) + 0.999999)
-    return received >= planned and received <= cap
+    return received <= cap

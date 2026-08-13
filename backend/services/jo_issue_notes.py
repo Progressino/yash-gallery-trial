@@ -397,10 +397,13 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
             finished_items[0]["name"] if finished_items else jo.get("sku_name", ""),
         )
     elif finished_items:
-        header_code = finished_items[0]["code"]
-        header_name = finished_items[0]["name"]
-        if len(finished_items) > 1:
-            header_name = (header_name or header_code) + f" (+{len(finished_items) - 1} sizes)"
+        header_code = ", ".join(str(f.get("code") or "") for f in finished_items if f.get("code"))
+        header_name = ", ".join(
+            str(f.get("name") or f.get("code") or "") for f in finished_items
+        )
+        if not header_code:
+            header_code = finished_items[0]["code"]
+            header_name = finished_items[0]["name"]
     else:
         header_code = jo.get("sku", "")
         header_name = jo.get("sku_name", "")

@@ -435,6 +435,8 @@ def test_multi_size_jo_issue_note_sums_all_lines(isolated_module_dbs, client):
         "/api/production/orders",
         json={
             "jo_date": "2026-07-11",
+            "so_number": "SO-MULTI-SIZE",
+            "so_source": "manual",
             "sku": "1189YKMAROON",
             "sku_name": "1189YKMAROON",
             "process": "Cutting",
@@ -469,6 +471,9 @@ def test_multi_size_jo_issue_note_sums_all_lines(isolated_module_dbs, client):
     note2 = regen.json()["issue_note"]
     fab2 = next(l for l in note2["lines"] if l["material_code"] == "FAB-CTN")
     assert fab2["required_qty"] == pytest.approx(442.5)
+    code = str(note.get("finished_item_code") or "")
+    assert "1189YKMAROON" in code
+    assert code != "1189YKMAROON-3XL"
 
 
 def test_cutting_issue_note_filters_process_and_skips_foreign_fabric(isolated_module_dbs, client):
@@ -627,8 +632,8 @@ def test_receive_pieces_per_line_cutting_jo(isolated_module_dbs, client):
     assert refreshed["received_qty"] == 10
 
 
-def test_cutting_receive_allows_over_planned_within_tolerance(isolated_module_dbs, client):
-    """Floor: JO plan 40, receive 42 (avg efficiency) — within +10% cutting tolerance."""
+def test_cutting_receive_allows_over_planned_without_tolerance_cap(isolated_module_dbs, client):
+    """Temporary: Cutting over-receive is uncapped (e.g. 1150 vs plan 1000)."""
     r = client.post(
         "/api/production/orders",
         json={
@@ -636,10 +641,10 @@ def test_cutting_receive_allows_over_planned_within_tolerance(isolated_module_db
             "so_number": "SO-CUT-OV",
             "sku": "7100YKTEAL-S",
             "process": "Cutting",
-            "planned_qty": 40,
+            "planned_qty": 1000,
             "fabric_code": "P308",
             "fabric_qty": 100,
-            "lines": [{"sku": "7100YKTEAL-S", "style": "S", "planned_qty": 40}],
+            "lines": [{"sku": "7100YKTEAL-S", "style": "S", "planned_qty": 1000}],
         },
     )
     assert r.status_code == 200, r.text
@@ -648,7 +653,7 @@ def test_cutting_receive_allows_over_planned_within_tolerance(isolated_module_db
     rec = client.post(
         f"/api/production/orders/{jo['id']}/receive-pieces",
         json={
-            "received_qty": 42,
+            "received_qty": 1150,
             "process": "Cutting",
             "sku": line["sku"],
             "jo_line_id": line["id"],
@@ -656,18 +661,38 @@ def test_cutting_receive_allows_over_planned_within_tolerance(isolated_module_db
     )
     assert rec.status_code == 200, rec.text
     refreshed = client.get(f"/api/production/orders/{jo['id']}").json()
-    assert refreshed["received_qty"] == 42
-    # Far over: 50 > 40 * 1.10 = 44 → blocked
-    bad = client.post(
-        f"/api/production/orders/{jo['id']}/receive-pieces",
+    assert refreshed["received_qty"] == 1150
+
+
+def test_cutting_receive_tolerance_can_be_restored_via_env(isolated_module_dbs, client, monkeypatch):
+    """CUTTING_RECEIVE_TOLERANCE=0.10 restores the previous +10% cap."""
+    monkeypatch.setenv("CUTTING_RECEIVE_TOLERANCE", "0.10")
+    r = client.post(
+        "/api/production/orders",
         json={
-            "received_qty": 10,
+            "jo_date": "2026-05-22",
+            "so_number": "SO-CUT-TOL",
+            "sku": "7100YKTEAL-M",
             "process": "Cutting",
-            "sku": line["sku"],
-            "jo_line_id": line["id"],
+            "planned_qty": 40,
+            "fabric_code": "P308",
+            "fabric_qty": 100,
+            "lines": [{"sku": "7100YKTEAL-M", "style": "M", "planned_qty": 40}],
         },
     )
-    assert bad.status_code in (400, 422, 500) or "Cannot receive" in bad.text or bad.status_code >= 400
+    assert r.status_code == 200, r.text
+    jo = next(o for o in client.get("/api/production/orders").json() if o["jo_number"] == r.json()["jo_number"])
+    line = jo["lines"][0]
+    ok = client.post(
+        f"/api/production/orders/{jo['id']}/receive-pieces",
+        json={"received_qty": 42, "process": "Cutting", "sku": line["sku"], "jo_line_id": line["id"]},
+    )
+    assert ok.status_code == 200, ok.text
+    bad = client.post(
+        f"/api/production/orders/{jo['id']}/receive-pieces",
+        json={"received_qty": 10, "process": "Cutting", "sku": line["sku"], "jo_line_id": line["id"]},
+    )
+    assert bad.status_code >= 400 or "Cannot receive" in bad.text
 
 
 def test_init_db_adds_jo_lines_received_qty_column(tmp_path):

@@ -3,7 +3,14 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
-import { appendManualJoLine } from './joLineHelpers'
+import {
+  appendManualJoLine,
+  expandJoExportRows,
+  formatJoHeaderSku,
+  joLineSkus,
+  joMatchesSkuFilter,
+  JO_EXPORT_HEADERS,
+} from './joLineHelpers'
 import SetBomPanel from '../components/SetBomPanel'
 import { downloadCsv } from '../lib/exportCsv'
 
@@ -567,6 +574,191 @@ const printJO = async (jo: JO) => {
   win.document.close()
 }
 
+function isPrintedMaterial(mat: { type?: string }, code: string): boolean {
+  const t = String(mat?.type || '').toUpperCase()
+  const c = String(code || '').trim().toUpperCase()
+  if (['SFG', 'PRINTED', 'PRINTED FABRIC', 'PF'].includes(t)) return true
+  return Boolean(c) && c.startsWith('P') && /\d/.test(c.slice(0, 6))
+}
+
+function isGreyOrFabricMaterial(mat: { type?: string; unit?: string }, code: string): boolean {
+  const t = String(mat?.type || '').toUpperCase()
+  const u = String(mat?.unit || '').toUpperCase()
+  if (['GF', 'GREY', 'GREY FABRIC', 'RM', 'FABRIC'].includes(t)) return true
+  if (['MTR', 'M', 'METER', 'METRE'].includes(u)) return true
+  return false
+}
+
+function canInlineGreyAlloc(mat: any, code: string): boolean {
+  if (isPrintedMaterial(mat, code)) return false
+  if (isGreyOrFabricMaterial(mat, code)) return true
+  const bd = Array.isArray(mat?.breakdown) ? mat.breakdown : []
+  return bd.some((b: any) => b?.p_code || b?.printed_code || b?.allocated_grey != null)
+}
+
+function GreyInlineAllocPanel({
+  materialCode,
+  mat,
+  greyFreeQty,
+  onSaved,
+}: {
+  materialCode: string
+  mat: any
+  greyFreeQty: number
+  onSaved: () => void
+}) {
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState('')
+  const unit = String(mat.unit || 'MTR')
+  const breakdown = Array.isArray(mat.breakdown) ? mat.breakdown : []
+  const alreadyTotal = breakdown.reduce((s: number, b: any) => s + (Number(b.allocated_qty ?? b.allocated_grey) || 0), 0)
+  const draftTotal = breakdown.reduce((s: number, b: any, i: number) => {
+    const key = `${b.so_no || b.so_number || ''}|${b.sku || b.fg_sku || ''}|${i}`
+    return s + (Number(drafts[key]) || 0)
+  }, 0)
+  const remaining = Math.round((greyFreeQty - draftTotal) * 1000) / 1000
+  const over = draftTotal > greyFreeQty + 0.001
+
+  const save = async () => {
+    const rows = breakdown
+      .map((b: any, i: number) => {
+        const key = `${b.so_no || b.so_number || ''}|${b.sku || b.fg_sku || ''}|${i}`
+        return {
+          qty: Number(drafts[key]) || 0,
+          so_number: String(b.so_no || b.so_number || ''),
+          fg_sku: String(b.sku || b.fg_sku || ''),
+          printed_code: String(b.p_code || b.printed_code || materialCode),
+        }
+      })
+      .filter((r: { qty: number }) => r.qty > 0)
+    if (!rows.length) {
+      setMsg('Enter allocation qty on at least one SKU')
+      return
+    }
+    if (over) {
+      setMsg(`Total allocation ${draftTotal} exceeds available ${greyFreeQty} ${unit}`)
+      return
+    }
+    setSaving(true)
+    setMsg('')
+    try {
+      for (const row of rows) {
+        await api.post('/grey/planning/allocate-grey', {
+          grey_code: materialCode,
+          printed_code: row.printed_code || materialCode,
+          qty: row.qty,
+          so_number: row.so_number,
+          fg_sku: row.fg_sku,
+          unit,
+          reason: 'MRP inline allocation',
+        })
+      }
+      setDrafts({})
+      setMsg(`Allocated ${draftTotal} ${unit} across ${rows.length} SKU${rows.length === 1 ? '' : 's'}`)
+      onSaved()
+    } catch (e: unknown) {
+      setMsg(apiErrorMessage(e, 'Allocate failed'))
+    }
+    setSaving(false)
+  }
+
+  return (
+    <div className="py-2 space-y-2">
+      <p className="text-xs font-semibold text-gray-500 uppercase mb-1">
+        Breakdown — Grey → P-Code → FG hierarchy:
+      </p>
+      <div className="flex flex-wrap gap-3 text-xs bg-white border border-blue-100 rounded-lg px-3 py-2">
+        <span>Total Grey Available: <b className="font-mono text-[#002B5B]">{greyFreeQty} {unit}</b></span>
+        <span>Already allocated: <b>{alreadyTotal} {unit}</b></span>
+        <span>This session: <b className={over ? 'text-red-600' : 'text-green-700'}>{draftTotal} {unit}</b></span>
+        <span>Remaining: <b className={remaining < 0 ? 'text-red-600' : 'text-gray-800'}>{remaining} {unit}</b></span>
+      </div>
+      {over && (
+        <p className="text-[11px] text-red-700">Total allocation exceeds available grey — reduce quantities before saving.</p>
+      )}
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-gray-400">
+            <th className="text-left py-1 pr-3">SO Number</th>
+            <th className="text-left py-1 pr-3">FG SKU</th>
+            <th className="text-left py-1 pr-3">P-Code / Printed Fabric</th>
+            <th className="text-right py-1 pr-3">Required Qty</th>
+            <th className="text-right py-1 pr-3">Already Allocated</th>
+            <th className="text-right py-1 pr-3">Allocation Qty</th>
+            <th className="text-left py-1">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {breakdown.map((b: any, i: number) => {
+            const status = String(b.status || 'Pending')
+            const statusColor =
+              status === 'Allocated' || status === 'Printed Available' || status === 'Grey Allocated'
+                ? 'text-green-700 bg-green-50'
+                : status === 'Partial' || status === 'Partial Printed'
+                  ? 'text-amber-700 bg-amber-50'
+                  : status === 'Locked-Cut'
+                    ? 'text-blue-700 bg-blue-100'
+                    : status === '—'
+                      ? 'text-gray-500 bg-gray-50'
+                      : 'text-red-700 bg-red-50'
+            const alloc = Number(b.allocated_qty ?? 0)
+            const key = `${b.so_no || b.so_number || ''}|${b.sku || b.fg_sku || ''}|${i}`
+            return (
+              <tr key={i} className="border-t border-blue-100">
+                <td className="py-1 pr-3 font-semibold text-[#002B5B]">{b.so_no}</td>
+                <td className="py-1 pr-3 font-mono text-gray-700">{b.sku || b.fg_sku || '—'}</td>
+                <td className="py-1 pr-3 font-mono text-[#002B5B]">
+                  {b.p_code || b.printed_code || '—'}
+                </td>
+                <td className="py-1 pr-3 text-right font-semibold">
+                  {b.qty_req} {unit}
+                </td>
+                <td className="py-1 pr-3 text-right font-semibold text-gray-700">
+                  {alloc} {unit}
+                </td>
+                <td className="py-1 pr-3 text-right" onClick={e => e.stopPropagation()}>
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.001"
+                    value={drafts[key] ?? ''}
+                    placeholder="0"
+                    onChange={e => setDrafts(d => ({ ...d, [key]: e.target.value }))}
+                    className="w-24 border border-gray-200 rounded px-1.5 py-0.5 text-right font-mono"
+                  />
+                </td>
+                <td className="py-1">
+                  <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] font-semibold ${statusColor}`}>
+                    {status}
+                  </span>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      <div className="flex flex-wrap items-center gap-2" onClick={e => e.stopPropagation()}>
+        <button
+          type="button"
+          disabled={saving || over || draftTotal <= 0}
+          onClick={save}
+          className="text-xs px-3 py-1.5 rounded-lg bg-[#002B5B] text-white font-medium hover:bg-blue-900 disabled:opacity-40"
+        >
+          {saving ? 'Saving…' : 'Save allocations'}
+        </button>
+        <a
+          href="/grey?tab=planning&plan=allocate"
+          className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50"
+        >
+          Advanced Grey / Printed →
+        </a>
+        {msg && <span className={`text-xs ${msg.toLowerCase().includes('fail') || msg.toLowerCase().includes('exceed') ? 'text-red-600' : 'text-green-700'}`}>{msg}</span>}
+      </div>
+    </div>
+  )
+}
+
 type MRPTabProps = {
   onCreateJO?: (p: { so_number: string; fabric_code: string; fabric_name: string; fabric_qty: number }) => void
 }
@@ -588,6 +780,11 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
   const { data: lastMRP } = useQuery({
     queryKey: ['mrp-last'],
     queryFn: () => api.get('/production/mrp/last').then(r => r.data),
+  })
+  const { data: greyStock = [] } = useQuery<any[]>({
+    queryKey: ['grey-planning-stock'],
+    queryFn: () => api.get('/grey/planning/grey-stock').then(r => r.data),
+    staleTime: 15_000,
   })
 
   const activeSONumbers: string[] = mrpResult?.so_numbers || lastMRP?.so_numbers || []
@@ -824,21 +1021,36 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
                   {expandedMat === code && mat.breakdown && (
                     <tr key={`${code}-breakdown`}>
                       <td colSpan={7} className="px-4 py-0 bg-blue-50">
+                        {canInlineGreyAlloc(mat, code) ? (
+                          <GreyInlineAllocPanel
+                            materialCode={code}
+                            mat={mat}
+                            greyFreeQty={(() => {
+                              const snap = (greyStock as any[]).find(
+                                (s: any) => String(s.fabric_code || '').trim().toUpperCase() === String(code).trim().toUpperCase(),
+                              )
+                              const free = Number(snap?.grey_free_qty ?? snap?.available_qty)
+                              if (Number.isFinite(free) && free >= 0) return free
+                              return Number(mat.available || 0)
+                            })()}
+                            onSaved={async () => {
+                              qc.invalidateQueries({ queryKey: ['mrp-last'] })
+                              qc.invalidateQueries({ queryKey: ['grey-planning-stock'] })
+                              try {
+                                const res = await api.get('/production/mrp/last')
+                                setMrpResult(res.data)
+                              } catch { /* keep current MRP rows */ }
+                            }}
+                          />
+                        ) : (
                         <div className="py-2 space-y-1">
                           <p className="text-xs font-semibold text-gray-500 uppercase mb-1">
                             Breakdown — Grey → P-Code → FG hierarchy:
                           </p>
                           <p className="text-[11px] text-gray-500 mb-1">
                             Allocation is planned at P-Code; FG stays visible for full SKU status traceability.
-                            Allocated Qty here is read-only — use Grey Fabric → Planning &amp; Allocation to act.
                           </p>
                           <div className="flex flex-wrap gap-2 mb-2">
-                            <a
-                              href="/grey?tab=planning&plan=allocate"
-                              className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-[#002B5B] text-white font-medium hover:bg-blue-900"
-                            >
-                              Open Allocate Grey / Printed →
-                            </a>
                             <a
                               href="/grey?tab=planning&plan=tree"
                               className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 font-medium hover:bg-gray-50"
@@ -894,6 +1106,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
                             </tbody>
                           </table>
                         </div>
+                        )}
                       </td>
                     </tr>
                   )}
@@ -1126,7 +1339,7 @@ export default function Production() {
   }, [processJOs, allJOs, readyLines, soList])
 
   const skuOptions = useMemo(() => {
-    const fromJO = processJOs.map(j => j.sku).concat(allJOs.map(j => j.sku))
+    const fromJO = processJOs.flatMap(j => joLineSkus(j)).concat(allJOs.flatMap(j => joLineSkus(j)))
     const fromReady = (readyLines as { sku?: string }[]).map(r => String(r.sku || ''))
     return [...new Set([...fromJO, ...fromReady].map(s => s.trim()).filter(Boolean))]
       .sort((a, b) => a.localeCompare(b))
@@ -1210,7 +1423,7 @@ export default function Production() {
   const filteredProcessJOs = useMemo(() => {
     let rows = [...processJOs]
     if (filterSO) rows = rows.filter(j => j.so_number === filterSO)
-    if (filterSku) rows = rows.filter(j => j.sku === filterSku)
+    if (filterSku) rows = rows.filter(j => joMatchesSkuFilter(j, filterSku))
     if (filterVendor) {
       rows = rows.filter(j =>
         String(j.vendor_name || '').toLowerCase() === filterVendor.toLowerCase()
@@ -1218,7 +1431,10 @@ export default function Production() {
       )
     }
     rows = rows.filter(j =>
-      matchesListQuery([j.jo_number, j.so_number, j.sku, j.sku_name, j.vendor_name, soBuyerMap.get(j.so_number)]),
+      matchesListQuery([
+        j.jo_number, j.so_number, j.sku, j.sku_name, j.vendor_name, soBuyerMap.get(j.so_number),
+        ...joLineSkus(j),
+      ]),
     )
     const dir = sortDir === 'asc' ? 1 : -1
     rows.sort((a, b) => {
@@ -1234,7 +1450,7 @@ export default function Production() {
   const filteredAllJOs = useMemo(() => {
     let rows = [...allJOs]
     if (filterSO) rows = rows.filter(j => j.so_number === filterSO)
-    if (filterSku) rows = rows.filter(j => j.sku === filterSku)
+    if (filterSku) rows = rows.filter(j => joMatchesSkuFilter(j, filterSku))
     if (filterVendor) {
       rows = rows.filter(j =>
         String(j.vendor_name || '').toLowerCase() === filterVendor.toLowerCase()
@@ -1242,7 +1458,10 @@ export default function Production() {
       )
     }
     rows = rows.filter(j =>
-      matchesListQuery([j.jo_number, j.so_number, j.sku, j.sku_name, j.vendor_name, j.process, soBuyerMap.get(j.so_number)]),
+      matchesListQuery([
+        j.jo_number, j.so_number, j.sku, j.sku_name, j.vendor_name, j.process, soBuyerMap.get(j.so_number),
+        ...joLineSkus(j),
+      ]),
     )
     const dir = sortDir === 'asc' ? 1 : -1
     rows.sort((a, b) => {
@@ -1607,7 +1826,7 @@ export default function Production() {
               {String(jo.so_source || '').toLowerCase() === 'manual' && (
                 <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-medium">manual SO</span>
               )}
-              {' · '}SKU: <b>{jo.sku}</b> {jo.sku_name ? `— ${jo.sku_name}` : ''}
+              {' · '}SKU: <b>{formatJoHeaderSku(jo)}</b>
             </p>
             {/* Routing bar */}
             {jo.routing && jo.routing.length > 0 && (
@@ -2171,33 +2390,10 @@ export default function Production() {
               <button
                 type="button"
                 onClick={() => {
-                  const headers = [
-                    'jo_number', 'jo_date', 'so_number', 'so_source', 'sku', 'sku_name', 'process',
-                    'status', 'planned_qty', 'received_qty', 'issued_qty', 'balance_qty',
-                    'vendor_name', 'fabric_code', 'fabric_qty', 'exec_type', 'remarks',
-                  ]
-                  const rows = filteredProcessJOs.map(j => [
-                    j.jo_number,
-                    j.jo_date,
-                    j.so_number,
-                    (j as JO & { so_source?: string }).so_source || 'system',
-                    j.sku,
-                    j.sku_name,
-                    j.process,
-                    j.status,
-                    j.planned_qty,
-                    j.received_qty,
-                    j.issued_qty,
-                    j.balance_qty,
-                    j.vendor_name,
-                    j.fabric_code,
-                    j.fabric_qty,
-                    j.exec_type,
-                    j.remarks,
-                  ])
+                  const rows = filteredProcessJOs.flatMap(j => expandJoExportRows(j))
                   downloadCsv(
                     `${activeProcess.toLowerCase()}_job_orders_${new Date().toISOString().slice(0, 10)}.csv`,
-                    headers,
+                    [...JO_EXPORT_HEADERS],
                     rows,
                   )
                 }}
@@ -3069,7 +3265,7 @@ export default function Production() {
               )}
               {activeJO.process === 'Cutting' && (
                 <span className="block mt-1 text-green-800">
-                  Cutting receive can exceed plan by up to ~10% (efficiency / extra full pieces). Under-receive is always allowed.
+                  Extra pieces can be received with no percentage cap (temporary). Under-receive is always allowed.
                 </span>
               )}
             </div>

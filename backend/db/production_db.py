@@ -2061,7 +2061,8 @@ def receive_pieces(joid: int, data: dict):
     so_number = jo.get('so_number', '')
     sku = data.get('sku') or jo.get('sku', '')
     # Under-receive is always allowed (partial production). Over-receive on Cutting
-    # uses fabric efficiency tolerance (extra complete pieces from lower avg consumption).
+    # is currently uncapped (DEFAULT_CUTTING_RECEIVE_TOLERANCE = None); restore a
+    # fraction via CUTTING_RECEIVE_TOLERANCE. Non-cutting still cannot exceed plan.
     jo_tol = cutting_receive_tolerance_pct() if str(process or "").strip().lower() == "cutting" else 0.0
     if jo_line_id:
         line = conn.execute(
@@ -2078,23 +2079,25 @@ def receive_pieces(joid: int, data: dict):
             (jo_line_id,),
         ).fetchone()[0])
         planned = int(line.get('planned_qty') or 0)
-        cap = int(max_allowed_receive(planned, jo_tol) + 0.999)
-        if already + received > cap:
-            conn.close()
-            raise ValueError(
-                f"Cannot receive {received} pcs — max {cap} allowed on this line "
-                f"(planned {planned} + {jo_tol * 100:.0f}% cutting tolerance, already {already})"
-            )
+        if jo_tol is not None:
+            cap = int(max_allowed_receive(planned, jo_tol) + 0.999)
+            if already + received > cap:
+                conn.close()
+                raise ValueError(
+                    f"Cannot receive {received} pcs — max {cap} allowed on this line "
+                    f"(planned {planned} + {jo_tol * 100:.0f}% cutting tolerance, already {already})"
+                )
     else:
         already = int(jo.get("received_qty") or 0)
         planned = int(jo.get("planned_qty") or 0)
-        cap = int(max_allowed_receive(planned, jo_tol) + 0.999)
-        if already + received > cap:
-            conn.close()
-            raise ValueError(
-                f"Cannot receive {received} pcs — max {cap} allowed "
-                f"(planned {planned} + {jo_tol * 100:.0f}% cutting tolerance, already {already})"
-            )
+        if jo_tol is not None:
+            cap = int(max_allowed_receive(planned, jo_tol) + 0.999)
+            if already + received > cap:
+                conn.close()
+                raise ValueError(
+                    f"Cannot receive {received} pcs — max {cap} allowed "
+                    f"(planned {planned} + {jo_tol * 100:.0f}% cutting tolerance, already {already})"
+                )
 
     try:
         _assert_set_receive_allowed(conn, so_number, sku, process)

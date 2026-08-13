@@ -103,6 +103,42 @@ def test_scenario_2_partial_grey_allocation():
     assert sum(a["qty"] for a in allocs) == 350
 
 
+def test_inline_multi_sku_grey_allocation_from_available_pool():
+    """MRP screen: allocate available grey across SKUs; block when session total exceeds free."""
+    _seed_grey("D7Denim1", 1000)
+    rows = [
+        ("SKU-A", 300),
+        ("SKU-B", 250),
+        ("SKU-C", 200),
+        ("SKU-D", 150),
+        ("SKU-E", 100),
+    ]
+    for sku, qty in rows:
+        r = fae.allocate_grey(
+            {
+                "grey_code": "D7Denim1",
+                "printed_code": "D7Denim1",
+                "qty": qty,
+                "so_number": "SO-0006",
+                "fg_sku": sku,
+                "reason": "MRP inline allocation",
+            }
+        )
+        assert r["ok"] is True
+    snap = fae.grey_stock_snapshot("D7Denim1")[0]
+    assert snap["grey_allocated_qty"] == pytest.approx(1000)
+    assert snap["available_qty"] == pytest.approx(0)
+    with pytest.raises(FabricAllocationError, match="only"):
+        fae.allocate_grey(
+            {
+                "grey_code": "D7Denim1",
+                "printed_code": "D7Denim1",
+                "qty": 1,
+                "fg_sku": "SKU-A",
+            }
+        )
+
+
 # Scenario 3 / 4 — Multiple SKUs same P-code + priority change
 def test_scenario_3_4_multi_sku_and_reallocate():
     _seed_printed("P208", 1000)
