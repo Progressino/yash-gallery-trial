@@ -389,9 +389,10 @@ def _sales_shipment_history_part(sales_df: pd.DataFrame, *, include_fan: bool = 
     if sales_df is None or sales_df.empty or "Sku" not in sales_df.columns:
         return pd.DataFrame()
     src = sales_df
-    # include_fan=True (default): fan rows (combo component copies) are included so that
-    # per-component-SKU quarterly totals reflect actual physical dispatches.
-    # include_fan=False: legacy listing-level view (combo components dropped).
+    # include_fan=True (default): fan rows (_Combo_Fan=True) are component-level dispatch
+    # copies created by OMS for combo listings — they represent actual physical units
+    # dispatched per component SKU and must be counted in quarterly totals.
+    # include_fan=False: legacy listing-level view (Sales History tab, which must match File).
     if not include_fan and "_Combo_Fan" in sales_df.columns:
         from .combo_sku_map import combo_fan_mask
 
@@ -562,7 +563,7 @@ def calculate_quarterly_history(
     combo_sku_map: Optional[dict] = None,
     demand_basis: str = "Sold",
 ) -> pd.DataFrame:
-    sales_part = _sales_shipment_history_part(sales_df)
+    sales_part = _sales_shipment_history_part(sales_df, include_fan=True)
     plat_parts = _collect_platform_shipment_history_parts(
         mtr_df, myntra_df, meesho_df, flipkart_df, snapdeal_df, sku_mapping
     )

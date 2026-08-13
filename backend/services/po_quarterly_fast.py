@@ -633,7 +633,7 @@ def _accumulate_sales_df_shipments(
     from .po_engine import _sales_shipment_history_part
     from .combo_sku_map import combo_fan_mask  # noqa: F401 (kept for _load_unified_sales_df callers)
 
-    part = _sales_shipment_history_part(sales_df)
+    part = _sales_shipment_history_part(sales_df, include_fan=True)
     if part.empty:
         return 0
     # Fan rows (_Combo_Fan=True) are component-level dispatch copies created by the OMS
