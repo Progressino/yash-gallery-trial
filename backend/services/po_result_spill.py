@@ -50,9 +50,10 @@ def spill_df(session_id: str, df: pd.DataFrame) -> None:
     if not session_id or df is None or not hasattr(df, "empty") or df.empty:
         return
     try:
+        from ..services.helpers import _coerce_df_for_parquet
         tmp = _path(session_id).with_suffix(".parquet.tmp")
         final = _path(session_id)
-        df.to_parquet(tmp, index=False)
+        _coerce_df_for_parquet(df).to_parquet(tmp, index=False)
         tmp.replace(final)
         _log.info("PO result spilled (%s rows) session=%s", len(df), session_id[:8])
     except Exception:

@@ -631,18 +631,15 @@ def _accumulate_sales_df_shipments(
 ) -> int:
     """Append unified sales shipment rows for SKU-days not already on platform side."""
     from .po_engine import _sales_shipment_history_part
-    from .combo_sku_map import combo_fan_mask
+    from .combo_sku_map import combo_fan_mask  # noqa: F401 (kept for _load_unified_sales_df callers)
 
     part = _sales_shipment_history_part(sales_df)
     if part.empty:
         return 0
-    # Drop combo-fan component copies so quarterly matches File (listing-level).
-    if "_Combo_Fan" in sales_df.columns:
-        fan = combo_fan_mask(sales_df["_Combo_Fan"])
-        if fan.any():
-            part = _sales_shipment_history_part(sales_df.loc[~fan])
-            if part.empty:
-                return 0
+    # Fan rows (_Combo_Fan=True) are component-level dispatch copies created by the OMS
+    # when a combo listing is sold.  They represent actual physical units dispatched
+    # for each component SKU and must be INCLUDED so quarterly totals match source data.
+    # The combo listing (non-fan) row also stays — it appears as its own quarterly row.
     work = part.copy()
     # Include all net-relevant TxnTypes with correct signs (mirrors _accumulate_shipment_frame).
     _txn_lower = work["TxnType"].astype(str).str.strip().str.lower()

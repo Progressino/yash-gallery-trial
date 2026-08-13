@@ -385,12 +385,14 @@ def _platform_shipment_history_part(
     return tmp.dropna(subset=["Date"])
 
 
-def _sales_shipment_history_part(sales_df: pd.DataFrame) -> pd.DataFrame:
+def _sales_shipment_history_part(sales_df: pd.DataFrame, *, include_fan: bool = True) -> pd.DataFrame:
     if sales_df is None or sales_df.empty or "Sku" not in sales_df.columns:
         return pd.DataFrame()
     src = sales_df
-    # Ignore combo-fan component copies for history / File-matching paths.
-    if "_Combo_Fan" in sales_df.columns:
+    # include_fan=True (default): fan rows (combo component copies) are included so that
+    # per-component-SKU quarterly totals reflect actual physical dispatches.
+    # include_fan=False: legacy listing-level view (combo components dropped).
+    if not include_fan and "_Combo_Fan" in sales_df.columns:
         from .combo_sku_map import combo_fan_mask
 
         fan = combo_fan_mask(sales_df["_Combo_Fan"])
