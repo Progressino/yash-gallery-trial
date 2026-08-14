@@ -442,7 +442,7 @@ jobs:
 
       - name: Warm shared PO cache (PO Fresh defaults)
         continue-on-error: true
-        timeout-minutes: 45
+        timeout-minutes: 2
         run: |
           set -eu
           cd /root/app

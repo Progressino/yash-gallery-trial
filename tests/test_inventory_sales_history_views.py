@@ -346,6 +346,30 @@ def test_sales_history_keeps_prebuilt_combo_fan_except_dpt():
     assert wide["date_totals"] == [2.0]
 
 
+def test_file_matching_totals_exclude_combo_fan():
+    from backend.services.daily_sales_history import filter_sales_history_window
+
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1037DPT19WHITE-4XL", "1037YKBLUE-4XL"],
+            "TxnDate": pd.to_datetime(["2026-07-17"] * 2),
+            "Transaction Type": ["Shipment"] * 2,
+            "Quantity": [1.0, 1.0],
+            "Units_Effective": [1.0, 1.0],
+            "Source": ["Amazon"] * 2,
+            "_Combo_Fan": [False, True],
+        }
+    )
+    listing = filter_sales_history_window(
+        sales, days=1, end_date="2026-07-17", platform="Amazon", include_combo_fan=False
+    )
+    assert float(listing["Units"].sum()) == 1.0
+    po = filter_sales_history_window(
+        sales, days=1, end_date="2026-07-17", platform="Amazon", include_combo_fan=True
+    )
+    assert float(po["Units"].sum()) == 2.0
+
+
 def test_sales_history_meesho_credit_entry_excludes_cancel_and_refund():
     """Meesho CANCELLED/RTO must not inflate Sales History (ops File = sale statuses only)."""
     from backend.services.daily_sales_history import _apply_daily_sales_history_txn_fixup

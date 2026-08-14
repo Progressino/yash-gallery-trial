@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-TIMEOUT_SEC="${PO_WARMUP_TIMEOUT_SEC:-2400}"
+TIMEOUT_SEC="${PO_WARMUP_TIMEOUT_SEC:-90}"
 BASE="${PO_WARMUP_BASE_URL:-http://127.0.0.1:8000}"
 
 echo "==> PO shared-cache warmup via API (${BASE})"

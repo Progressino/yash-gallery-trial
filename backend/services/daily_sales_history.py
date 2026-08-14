@@ -30,6 +30,18 @@ def _is_smoke_test_sku(sku: str) -> bool:
     return u.startswith("SMOKE-") or u.startswith("SMOKE_")
 
 
+def _drop_all_combo_fan_rows(df: pd.DataFrame, sku_col: str) -> pd.DataFrame:
+    """Listing-level rows only — used when comparing Sales History to uploaded files."""
+    if df is None or getattr(df, "empty", True) or "_Combo_Fan" not in df.columns:
+        return df
+    from .combo_sku_map import combo_fan_mask
+
+    fan = combo_fan_mask(df["_Combo_Fan"])
+    if not fan.any():
+        return df
+    return df.loc[~fan].copy()
+
+
 def _drop_dpt_combo_fan_rows(df: pd.DataFrame, sku_col: str) -> pd.DataFrame:
     """PO ignores combo-fan copies on DPT accessory SKUs; Sales History must too."""
     if df is None or getattr(df, "empty", True) or "_Combo_Fan" not in df.columns:
@@ -87,11 +99,20 @@ def align_sales_history_skus_to_po(
     return _drop_dpt_combo_fan_rows(s, sku_col)
 
 
-def _normalize_sales_tall(sales_df: pd.DataFrame | None) -> pd.DataFrame:
+def _normalize_sales_tall(
+    sales_df: pd.DataFrame | None,
+    *,
+    include_combo_fan: bool = True,
+) -> pd.DataFrame:
     if sales_df is None or getattr(sales_df, "empty", True):
         return pd.DataFrame(columns=["OMS_SKU", "Date", "Units", "Source", "TxnType"])
-    s = align_sales_history_skus_to_po(sales_df.copy())
+    s = sales_df.copy()
     sku_col = "Sku" if "Sku" in s.columns else "OMS_SKU"
+    if include_combo_fan:
+        s = align_sales_history_skus_to_po(s)
+        sku_col = "Sku" if "Sku" in s.columns else "OMS_SKU"
+    else:
+        s = _drop_all_combo_fan_rows(s, sku_col)
     date_col = "TxnDate" if "TxnDate" in s.columns else "Date"
     eff_col = "Units_Effective" if "Units_Effective" in s.columns else "Quantity"
     txn_col = "Transaction Type" if "Transaction Type" in s.columns else "TxnType"
@@ -156,8 +177,9 @@ def filter_sales_history_window(
     end_date: str | None = None,
     start_date: str | None = None,
     platform: str | None = None,
+    include_combo_fan: bool = True,
 ) -> pd.DataFrame:
-    tall = _normalize_sales_tall(sales_df)
+    tall = _normalize_sales_tall(sales_df, include_combo_fan=include_combo_fan)
     if tall.empty:
         return tall
     start, end = sales_history_window_bounds(
@@ -278,6 +300,7 @@ def sales_history_data_quality_checks(
         end_date=end_date,
         start_date=start_date,
         platform="Amazon",
+        include_combo_fan=False,
     )
 
     checks: list[dict] = []
