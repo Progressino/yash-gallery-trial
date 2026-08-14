@@ -30,25 +30,73 @@ def _is_smoke_test_sku(sku: str) -> bool:
     return u.startswith("SMOKE-") or u.startswith("SMOKE_")
 
 
+def _drop_dpt_combo_fan_rows(df: pd.DataFrame, sku_col: str) -> pd.DataFrame:
+    """PO ignores combo-fan copies on DPT accessory SKUs; Sales History must too."""
+    if df is None or getattr(df, "empty", True) or "_Combo_Fan" not in df.columns:
+        return df
+    if sku_col not in df.columns:
+        return df
+    from .combo_sku_map import combo_fan_mask
+
+    fan = combo_fan_mask(df["_Combo_Fan"])
+    if not fan.any():
+        return df
+    dpt_fan = fan & df[sku_col].astype(str).str.upper().str.startswith("DPT")
+    if not dpt_fan.any():
+        return df
+    return df.loc[~dpt_fan].copy()
+
+
+def align_sales_history_skus_to_po(
+    sales_df: pd.DataFrame | None,
+    sku_mapping: dict | None = None,
+    combo_map: dict | None = None,
+) -> pd.DataFrame:
+    """Use the same listing→OMS explode as PO so a 30-day export matches recommendations.
+
+    Combo listings stay visible and fan to component SKUs. DPT accessory fan
+    copies are dropped (same rule as ``_sales_shipment_history_part``).
+    """
+    if sales_df is None or getattr(sales_df, "empty", True):
+        return sales_df if sales_df is not None else pd.DataFrame()
+    s = sales_df
+    sku_col = "Sku" if "Sku" in s.columns else ("OMS_SKU" if "OMS_SKU" in s.columns else "")
+    if not sku_col:
+        return s
+    already_fanned = False
+    if "_Combo_Fan" in s.columns:
+        from .combo_sku_map import combo_fan_mask
+
+        already_fanned = bool(combo_fan_mask(s["_Combo_Fan"]).any())
+    if not already_fanned:
+        from .combo_sku_map import explode_sku_qty_dataframe, resolve_active_combo_sku_map
+
+        qty_col = "Quantity" if "Quantity" in s.columns else (
+            "Units_Effective" if "Units_Effective" in s.columns else ""
+        )
+        if qty_col:
+            s = explode_sku_qty_dataframe(
+                s,
+                sku_col=sku_col,
+                qty_col=qty_col,
+                sku_mapping=sku_mapping or {},
+                combo_map=combo_map if combo_map is not None else resolve_active_combo_sku_map(),
+                strip_pl=False,
+                retain_combo_listings=True,
+            )
+    return _drop_dpt_combo_fan_rows(s, sku_col)
+
+
 def _normalize_sales_tall(sales_df: pd.DataFrame | None) -> pd.DataFrame:
     if sales_df is None or getattr(sales_df, "empty", True):
         return pd.DataFrame(columns=["OMS_SKU", "Date", "Units", "Source", "TxnType"])
-    s = sales_df.copy()
+    s = align_sales_history_skus_to_po(sales_df.copy())
     sku_col = "Sku" if "Sku" in s.columns else "OMS_SKU"
     date_col = "TxnDate" if "TxnDate" in s.columns else "Date"
     eff_col = "Units_Effective" if "Units_Effective" in s.columns else "Quantity"
     txn_col = "Transaction Type" if "Transaction Type" in s.columns else "TxnType"
     if sku_col not in s.columns or date_col not in s.columns or eff_col not in s.columns:
         return pd.DataFrame(columns=["OMS_SKU", "Date", "Units", "Source", "TxnType"])
-    # Combo listings are fanned out to component SKUs for PO demand, with the
-    # listing row retained. Sales History must match the uploaded files, so the
-    # synthetic component copies (_Combo_Fan=True) are excluded here.
-    if "_Combo_Fan" in s.columns:
-        from .combo_sku_map import combo_fan_mask
-
-        fan = combo_fan_mask(s["_Combo_Fan"])
-        if fan.any():
-            s = s.loc[~fan]
     dates = pd.to_datetime(s[date_col], errors="coerce")
     # Drop timezone so window filters never mix aware Timestamp with naive columns.
     try:
@@ -650,6 +698,8 @@ def build_sales_history_sales_df(
         td = pd.to_datetime(out["TxnDate"], errors="coerce").dt.normalize()
         out = out.loc[(td >= start) & (td <= end)].copy()
     out = _apply_daily_sales_history_txn_fixup(out)
+    mapping = getattr(sess, "sku_mapping", None) or {}
+    out = align_sales_history_skus_to_po(out, sku_mapping=mapping)
     out = _dedup_sales_linekey_rows(out)
     out = _downcast_sales(out)
     _SALES_HISTORY_FRAME_CACHE[cache_key] = (time.time(), out)

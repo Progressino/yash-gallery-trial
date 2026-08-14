@@ -302,8 +302,34 @@ def test_sales_history_for_sku_timeline():
     assert len(out["rows"]) == 2
 
 
-def test_sales_history_excludes_combo_fan_component_rows():
-    """Combo fan copies (_Combo_Fan=True) must not inflate Sales History units."""
+def test_sales_history_fans_combo_like_po_and_drops_dpt_fan():
+    """Sales History SKUs must match PO: keep listing + kurta fan, drop DPT fan."""
+    from backend.services.daily_sales_history import align_sales_history_skus_to_po
+
+    sales = pd.DataFrame(
+        {
+            "Sku": ["1037DPT19WHITE-4XL"],
+            "TxnDate": pd.to_datetime(["2026-07-17"]),
+            "Transaction Type": ["Shipment"],
+            "Quantity": [1.0],
+            "Units_Effective": [1.0],
+            "Source": ["Amazon"],
+        }
+    )
+    combo = {
+        "1037DPT19WHITE-4XL": [("1037YKBLUE-4XL", 1.0), ("DPT19WHITE", 1.0)],
+    }
+    aligned = align_sales_history_skus_to_po(sales, combo_map=combo)
+    skus = set(aligned["Sku"].astype(str))
+    assert "1037DPT19WHITE-4XL" in skus
+    assert "1037YKBLUE-4XL" in skus
+    assert "DPT19WHITE" not in skus
+    wide = sales_history_wide_matrix(aligned, days=1, end_date="2026-07-17", platform="Amazon")
+    assert set(r["sku"] for r in wide["rows"]) == {"1037DPT19WHITE-4XL", "1037YKBLUE-4XL"}
+    assert wide["date_totals"] == [2.0]
+
+
+def test_sales_history_keeps_prebuilt_combo_fan_except_dpt():
     sales = pd.DataFrame(
         {
             "Sku": ["1037DPT19WHITE-4XL", "1037YKBLUE-4XL", "DPT19WHITE"],
@@ -316,7 +342,8 @@ def test_sales_history_excludes_combo_fan_component_rows():
         }
     )
     wide = sales_history_wide_matrix(sales, days=1, end_date="2026-07-17", platform="Amazon")
-    assert wide["date_totals"] == [1.0]
+    assert set(r["sku"] for r in wide["rows"]) == {"1037DPT19WHITE-4XL", "1037YKBLUE-4XL"}
+    assert wide["date_totals"] == [2.0]
 
 
 def test_sales_history_meesho_credit_entry_excludes_cancel_and_refund():

@@ -186,9 +186,11 @@ export default function SalesHistory() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">📈 Daily Sales History</h1>
           <p className="text-sm text-gray-600 mt-1 max-w-2xl">
-            Net units sold per SKU (shipments minus returns from daily uploads). Default window ends
-            yesterday (IST) — today&apos;s sales file is uploaded the next day. Pick dates below to
-            verify any range before PO calculate.
+            Net units sold per SKU (shipments minus returns from daily uploads). SKUs
+            match PO: combo listings fan to OMS components; DPT accessory fan rows are
+            excluded. Default window ends yesterday (IST) — today&apos;s sales file is
+            uploaded the next day. Pick dates below to verify any range before PO
+            calculate.
           </p>
         </div>
         <Link to="/upload" className="text-sm font-medium text-indigo-700 hover:underline shrink-0">

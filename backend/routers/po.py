@@ -18,7 +18,15 @@ from pydantic import BaseModel
 router = APIRouter()
 
 _IST = ZoneInfo("Asia/Kolkata")
-_SALES_READ_COLS = ["Sku", "TxnDate", "Units_Effective", "Source", "Transaction Type"]
+_SALES_READ_COLS = [
+    "Sku",
+    "TxnDate",
+    "Units_Effective",
+    "Quantity",
+    "Source",
+    "Transaction Type",
+    "_Combo_Fan",
+]
 _PARQUET_DISK_CACHE: dict[tuple, tuple[float, pd.DataFrame]] = {}
 
 
