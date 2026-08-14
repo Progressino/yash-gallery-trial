@@ -472,6 +472,120 @@ def record_inventory_snapshot_date(sess, snapshot_date: str) -> None:
         sess.daily_inventory_history_snapshot_dates = cur
 
 
+def _uploaded_at_ist_iso(value) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        return str(ts.tz_convert(_IST).date())
+    except Exception:
+        raw = str(value).strip()
+        return raw[:10] if len(raw) >= 10 else ""
+
+
+def assign_persisted_snapshot_overlay_dates(headers: list[dict]) -> dict[str, dict]:
+    """Map calendar day → persisted snapshot when several uploads share one as-of date.
+
+    Duplicate ``snapshot_date`` values (the old earliest-filename bug) are
+    reassigned to each row's upload day in IST so mid-gap days can be restored.
+    """
+    assigned: dict[str, dict] = {}
+
+    def _key(h: dict):
+        return str(h.get("uploaded_at") or h.get("uploaded_at_raw") or "")
+
+    def _take(day: str, h: dict) -> None:
+        if len(day) != 10:
+            return
+        prev = assigned.get(day)
+        if prev is None or _key(h) >= _key(prev):
+            assigned[day] = h
+
+    groups: dict[str, list[dict]] = {}
+    undated: list[dict] = []
+    for h in headers or []:
+        d = str(h.get("snapshot_date") or "").strip()[:10]
+        if len(d) != 10:
+            undated.append(h)
+            continue
+        groups.setdefault(d, []).append(h)
+
+    for d, items in groups.items():
+        items_sorted = sorted(items, key=_key)
+        if len(items_sorted) == 1:
+            _take(d, items_sorted[0])
+            continue
+        for h in items_sorted:
+            alt = _uploaded_at_ist_iso(h.get("uploaded_at_raw") or h.get("uploaded_at"))
+            _take(alt if len(alt) == 10 else d, h)
+
+    for h in undated:
+        alt = _uploaded_at_ist_iso(h.get("uploaded_at_raw") or h.get("uploaded_at"))
+        _take(alt, h)
+    return assigned
+
+
+def overlay_persisted_inventory_snapshots(sess, snapshots: list[dict] | None = None) -> int:
+    """Replace derived/carried history days with actual uploaded inventory snapshots."""
+    hist = getattr(sess, "daily_inventory_history_df", None)
+    if hist is None or getattr(hist, "empty", True):
+        return 0
+    work = _ensure_source_column(_ensure_channel_column(hist.copy()))
+    work["Date"] = pd.to_datetime(work["Date"], errors="coerce").dt.normalize()
+    days = pd.to_datetime(work["Date"], errors="coerce").dropna()
+    if days.empty:
+        return 0
+    span = list(pd.date_range(days.min(), days.max(), freq="D"))
+    gaps = set(non_uploaded_inventory_dates(work, span))
+    if not gaps:
+        return 0
+
+    headers = snapshots
+    load_fn = None
+    if headers is None:
+        try:
+            from ..db.forecast_ops_tables import (
+                list_inventory_snapshot_headers,
+                load_inventory_snapshot_by_id,
+            )
+
+            headers = list_inventory_snapshot_headers()
+            load_fn = load_inventory_snapshot_by_id
+        except Exception:
+            return 0
+    if not headers:
+        return 0
+
+    assigned = assign_persisted_snapshot_overlay_dates(headers)
+    restored = 0
+    for day, header in assigned.items():
+        if day not in gaps:
+            continue
+        variant = header.get("df")
+        if variant is None and load_fn is not None and header.get("id"):
+            bundle = load_fn(int(header["id"]))
+            variant = (bundle or {}).get("df")
+        if variant is None or getattr(variant, "empty", True) or "OMS_SKU" not in variant.columns:
+            continue
+        prev_n = len(work)
+        aligned = align_history_day_to_variant(work, variant, day)
+        if aligned is None or getattr(aligned, "empty", True):
+            continue
+        if prev_n and len(aligned) < max(1, int(prev_n * 0.1)):
+            continue
+        work = aligned
+        day_ts = pd.Timestamp(day).normalize()
+        work.loc[work["Date"] == day_ts, "Source"] = "snapshot"
+        record_inventory_snapshot_date(sess, day)
+        restored += 1
+
+    if restored:
+        sess.daily_inventory_history_df = work.reset_index(drop=True)
+    return restored
+
+
 def wide_matrix_upload_end_date(sess) -> pd.Timestamp | None:
     """Last date from the one-time wide Excel upload (not daily snapshot extensions)."""
     meta = read_daily_inventory_history_disk_meta() or {}
@@ -1606,6 +1720,9 @@ def refresh_inventory_history_rollforward(
         cap_ts = pd.Timestamp(cap_date).normalize()
     elif include_snapshot and len(snap) == 10:
         cap_ts = pd.Timestamp(snap).normalize()
+    elif include_snapshot:
+        # Never stamp a new upload onto the last history day when as-of is missing.
+        cap_ts = today_ist_timestamp()
     elif sheet_max is not None:
         cap_ts = pd.Timestamp(sheet_max).normalize()
     else:
@@ -4228,6 +4345,8 @@ __all__ = [
     "inventory_history_matrix_cap_date",
     "inventory_sheet_end_date_from_filename",
     "record_inventory_snapshot_date",
+    "overlay_persisted_inventory_snapshots",
+    "assign_persisted_snapshot_overlay_dates",
     "prune_non_snapshot_post_matrix_days",
     "snapshot_dates_from_history",
     "wide_matrix_upload_end_date",

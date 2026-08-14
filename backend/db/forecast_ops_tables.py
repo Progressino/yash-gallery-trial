@@ -393,6 +393,150 @@ def load_inventory_dataframe() -> pd.DataFrame | None:
     return df
 
 
+def _uploaded_at_iso(uploaded_at) -> str:
+    if uploaded_at is None:
+        return ""
+    try:
+        if hasattr(uploaded_at, "astimezone"):
+            return (
+                uploaded_at.astimezone(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        return str(uploaded_at)
+    except Exception:
+        return str(uploaded_at)
+
+
+def list_inventory_snapshot_headers() -> list[dict]:
+    """All persisted inventory uploads (id + dates), oldest first."""
+    if not normalized_tables_enabled():
+        return []
+    conn = _require_conn()
+    if conn is None:
+        return []
+    try:
+        with conn:
+            rows = conn.execute(
+                """
+                SELECT id, snapshot_date, snapshot_label, uploaded_at, debug
+                FROM forecast_inventory_snapshots
+                ORDER BY uploaded_at ASC
+                """
+            ).fetchall()
+        out: list[dict] = []
+        for r in rows or []:
+            snap_date = r[1]
+            dbg = r[4]
+            if isinstance(dbg, str):
+                try:
+                    dbg = json.loads(dbg)
+                except Exception:
+                    dbg = {}
+            if not isinstance(dbg, dict):
+                dbg = {}
+            out.append(
+                {
+                    "id": int(r[0]),
+                    "snapshot_date": str(snap_date)[:10] if snap_date else "",
+                    "snapshot_label": str(r[2] or ""),
+                    "uploaded_at": _uploaded_at_iso(r[3]),
+                    "uploaded_at_raw": r[3],
+                    "debug": dbg,
+                }
+            )
+        return out
+    except Exception:
+        _log.exception("list_inventory_snapshot_headers failed")
+        return []
+
+
+def load_inventory_snapshot_by_id(snapshot_id: int) -> dict | None:
+    if not normalized_tables_enabled():
+        return None
+    conn = _require_conn()
+    if conn is None:
+        return None
+    try:
+        sid = int(snapshot_id)
+        with conn:
+            snap = conn.execute(
+                """
+                SELECT id, snapshot_date, snapshot_label, uploaded_at, debug
+                FROM forecast_inventory_snapshots
+                WHERE id = %s
+                """,
+                (sid,),
+            ).fetchone()
+            if not snap:
+                return None
+            cur = conn.execute(
+                """
+                SELECT oms_sku, oms_inventory, buffer_stock, amazon_inventory,
+                       flipkart_inventory, myntra_other_inventory, meesho_inventory,
+                       manual_intransit, not_in_inventory_qty, fba_intransit,
+                       marketplace_total, total_inventory, extra
+                FROM forecast_inventory_lines
+                WHERE snapshot_id = %s
+                """,
+                (sid,),
+            )
+            rows = cur.fetchall()
+        if not rows:
+            return None
+        records: list[dict] = []
+        inv_rev = {v: k for k, v in _INVENTORY_KNOWN.items() if k != "OMS_SKU"}
+        for r in rows:
+            rec = {"OMS_SKU": r[0]}
+            for i, col in enumerate(
+                (
+                    "oms_inventory",
+                    "buffer_stock",
+                    "amazon_inventory",
+                    "flipkart_inventory",
+                    "myntra_other_inventory",
+                    "meesho_inventory",
+                    "manual_intransit",
+                    "not_in_inventory_qty",
+                    "fba_intransit",
+                    "marketplace_total",
+                    "total_inventory",
+                ),
+                start=1,
+            ):
+                if r[i]:
+                    rec[inv_rev[col]] = r[i]
+            extra = r[12]
+            if extra:
+                if isinstance(extra, str):
+                    extra = json.loads(extra)
+                if isinstance(extra, dict):
+                    rec.update(extra)
+            records.append(rec)
+        df = pd.DataFrame(records)
+        dbg = snap[4]
+        if isinstance(dbg, str):
+            try:
+                dbg = json.loads(dbg)
+            except Exception:
+                dbg = {}
+        if not isinstance(dbg, dict):
+            dbg = {}
+        snap_date = snap[1]
+        return {
+            "df": df,
+            "snapshot_id": sid,
+            "snapshot_date": str(snap_date)[:10] if snap_date else None,
+            "snapshot_label": str(snap[2] or "") or None,
+            "uploaded_at": _uploaded_at_iso(snap[3]),
+            "debug": dbg,
+        }
+    except Exception:
+        _log.exception("load_inventory_snapshot_by_id failed")
+        return None
+
+
 def _first_col(df: pd.DataFrame, names: tuple[str, ...]) -> str | None:
     lower = {str(c).lower(): c for c in df.columns}
     for n in names:

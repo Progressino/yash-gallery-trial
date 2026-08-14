@@ -79,6 +79,12 @@ def _dates_in_text(text: str) -> list[date]:
     return found
 
 
+def _inventory_asof_today_ist() -> date:
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+
 def infer_inventory_snapshot_date(
     file_parts: list[tuple[str, bytes]] | None = None,
     debug: dict | None = None,
@@ -128,14 +134,19 @@ def infer_inventory_snapshot_date(
             pass
 
     if not candidates:
+        today = _inventory_asof_today_ist()
         return {
-            "snapshot_date": "",
-            "snapshot_date_label": "",
-            "snapshot_date_sources": [],
+            "snapshot_date": today.isoformat(),
+            "snapshot_date_label": today.strftime("%d %b %Y"),
+            "snapshot_date_sources": ["upload day (IST)"],
         }
 
-    candidates.sort(key=lambda x: (x[2], x[0]))
-    primary = candidates[0][0]
+    # Lowest priority number wins; at that tier the *latest* date is the as-of
+    # census (an OMS.rar that also contains an older Amazon ledger must not
+    # stamp the whole upload as the older day).
+    best_pri = min(c[2] for c in candidates)
+    at_pri = [c for c in candidates if c[2] == best_pri]
+    primary = max(at_pri, key=lambda x: x[0])[0]
     iso = primary.isoformat()
     label = primary.strftime("%d %b %Y")
     sources: list[str] = []
@@ -162,6 +173,15 @@ def apply_inventory_snapshot_metadata(
 ) -> dict:
     """Store snapshot date on session + debug after a successful inventory parse."""
     meta = infer_inventory_snapshot_date(file_parts, debug)
+    if not str(meta.get("snapshot_date") or "").strip():
+        today = _inventory_asof_today_ist()
+        meta = {
+            **meta,
+            "snapshot_date": today.isoformat(),
+            "snapshot_date_label": today.strftime("%d %b %Y"),
+            "snapshot_date_sources": list(meta.get("snapshot_date_sources") or [])
+            or ["upload day (IST)"],
+        }
     merged_debug = dict(debug or {})
     merged_debug.update(meta)
     sess.inventory_debug = merged_debug

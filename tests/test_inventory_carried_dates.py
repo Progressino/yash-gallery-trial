@@ -173,3 +173,117 @@ def test_oms_overlay_preserves_amazon_census():
     assert float(jun29.loc[jun29["Channel"] == "oms", "Qty"].iloc[0]) == 3.0
     assert float(jun29.loc[jun29["Channel"] == "amazon", "Qty"].iloc[0]) == 40.0
     assert str(jun29.loc[jun29["Channel"] == "oms", "Source"].iloc[0]) == "snapshot"
+
+
+def test_empty_snapshot_date_does_not_overwrite_last_uploaded_day(monkeypatch):
+    from backend.services.daily_inventory_history import refresh_inventory_history_rollforward
+    from backend.session import AppSession
+
+    monkeypatch.setattr(
+        "backend.services.daily_inventory_history.today_ist_timestamp",
+        lambda: pd.Timestamp("2026-07-06"),
+    )
+    rows = []
+    for d, qty in [("2026-07-04", 100), ("2026-07-05", 90)]:
+        rows.append(
+            {
+                "OMS_SKU": "S1",
+                "Date": pd.Timestamp(d),
+                "Qty": qty,
+                "Source": "uploaded",
+                "Channel": "oms",
+            }
+        )
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(rows)
+    sess.inventory_snapshot_date = ""
+    sess.inventory_df_variant = pd.DataFrame(
+        {
+            "OMS_SKU": ["S1"],
+            "OMS_Inventory": [80],
+            "Total_Inventory": [80],
+            "Amazon_Inventory": [0],
+        }
+    )
+    sess.sales_df = pd.DataFrame(
+        columns=["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "Source"]
+    )
+    result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+    assert result.get("ok")
+    out = sess.daily_inventory_history_df.copy()
+    out["Date"] = pd.to_datetime(out["Date"]).dt.normalize()
+    oms = out[out["Channel"].astype(str).str.lower().eq("oms")].copy()
+    oms["d"] = oms["Date"].dt.strftime("%Y-%m-%d")
+    jul5 = oms.loc[oms["d"] == "2026-07-05"]
+    assert float(jul5["Qty"].iloc[0]) == 90.0
+    assert str(jul5["Source"].iloc[0]).lower() == "uploaded"
+    jul6 = oms.loc[oms["d"] == "2026-07-06"]
+    assert float(jul6["Qty"].iloc[0]) == 80.0
+    assert str(jul6["Source"].iloc[0]).lower() == "snapshot"
+
+
+def test_overlay_restores_carried_days_from_persisted_snapshots():
+    from backend.services.daily_inventory_history import (
+        overlay_persisted_inventory_snapshots,
+        non_uploaded_inventory_dates,
+    )
+    from backend.session import AppSession
+
+    rows = []
+    for d, src, qty in [
+        ("2026-08-08", "snapshot", 1382),
+        ("2026-08-09", "derived", 1382),
+        ("2026-08-10", "derived", 1382),
+        ("2026-08-13", "snapshot", 1337),
+    ]:
+        rows.append(
+            {
+                "OMS_SKU": "DPT21MULTI-M",
+                "Date": pd.Timestamp(d),
+                "Qty": qty,
+                "Source": src,
+                "Channel": "oms",
+            }
+        )
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(rows)
+    n = overlay_persisted_inventory_snapshots(
+        sess,
+        snapshots=[
+            {
+                "snapshot_date": "2026-08-08",
+                "uploaded_at": "2026-08-08T06:00:00Z",
+                "df": pd.DataFrame({"OMS_SKU": ["DPT21MULTI-M"], "OMS_Inventory": [1382]}),
+            },
+            {
+                "snapshot_date": "2026-08-08",
+                "uploaded_at": "2026-08-09T06:00:00Z",
+                "df": pd.DataFrame({"OMS_SKU": ["DPT21MULTI-M"], "OMS_Inventory": [1370]}),
+            },
+            {
+                "snapshot_date": "2026-08-08",
+                "uploaded_at": "2026-08-10T06:00:00Z",
+                "df": pd.DataFrame({"OMS_SKU": ["DPT21MULTI-M"], "OMS_Inventory": [1360]}),
+            },
+            {
+                "snapshot_date": "2026-08-13",
+                "uploaded_at": "2026-08-13T06:00:00Z",
+                "df": pd.DataFrame({"OMS_SKU": ["DPT21MULTI-M"], "OMS_Inventory": [1337]}),
+            },
+        ],
+    )
+    assert n == 2
+    out = sess.daily_inventory_history_df.copy()
+    out["d"] = pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d")
+    by = out.set_index("d")
+    assert str(by.loc["2026-08-09", "Source"]).lower() == "snapshot"
+    assert float(by.loc["2026-08-09", "Qty"]) == 1370
+    assert str(by.loc["2026-08-10", "Source"]).lower() == "snapshot"
+    assert float(by.loc["2026-08-10", "Qty"]) == 1360
+    carried = non_uploaded_inventory_dates(
+        out, list(pd.date_range("2026-08-08", "2026-08-13"))
+    )
+    assert "2026-08-09" not in carried
+    assert "2026-08-10" not in carried
+    assert "2026-08-11" in carried
+    assert "2026-08-12" in carried

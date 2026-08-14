@@ -438,6 +438,18 @@ def ensure_inventory_history_authoritative_for_read(sess) -> pd.DataFrame:
     # channel-split matrices, collapse OMS+Amazon into a blank ~130k series).
     # Keep authoritative history disk-only; UI densify still repairs in-memory.
     df = getattr(sess, "daily_inventory_history_df", None)
+    try:
+        from .daily_inventory_history import overlay_persisted_inventory_snapshots
+
+        restored = overlay_persisted_inventory_snapshots(sess)
+        if restored:
+            try:
+                _main.sync_daily_inventory_history_sidecar(sess)
+            except Exception:
+                pass
+            df = getattr(sess, "daily_inventory_history_df", None)
+    except Exception:
+        _log.exception("overlay persisted inventory snapshots failed")
     return drop_zero_derived_rows(df) if df is not None else pd.DataFrame()
 
 

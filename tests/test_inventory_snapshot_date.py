@@ -29,3 +29,21 @@ def test_infer_date_from_amz_only():
     )
     assert meta["snapshot_date"] == "2026-05-24"
     assert any("Amazon" in s for s in meta["snapshot_date_sources"])
+
+
+def test_infer_prefers_latest_oms_date_not_earliest():
+    meta = infer_inventory_snapshot_date(
+        [
+            ("OMS 08-08-2026.csv", b""),
+            ("OMS 13-08-2026.csv", b""),
+        ],
+        {},
+    )
+    assert meta["snapshot_date"] == "2026-08-13"
+
+
+def test_infer_empty_filename_uses_today_ist():
+    from backend.services.inventory import _inventory_asof_today_ist
+
+    meta = infer_inventory_snapshot_date([("OMS.rar", b"")], {})
+    assert meta["snapshot_date"] == _inventory_asof_today_ist().isoformat()
