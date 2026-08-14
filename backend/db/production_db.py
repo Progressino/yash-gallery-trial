@@ -925,7 +925,15 @@ def _get_ready_to_cut() -> list:
 
 
 def _get_ready_for_process(process: str) -> list:
-    """Get SO+SKU lines with available pieces at previous process."""
+    """SO+SKU lines ready for ``process``.
+
+    Includes:
+    - feeder stock whose *next* hop is this process (e.g. Cutting → Stitching)
+    - stock already sitting *at* this process after issue (e.g. 45 pcs issued
+      Cutting→Stitching must still appear on Ready to Stitch)
+    """
+    from ..services.operation_routing import normalize_process_name
+
     conn2 = _connect()
     try:
         all_stocks = conn2.execute("""
@@ -941,29 +949,42 @@ def _get_ready_for_process(process: str) -> list:
         """).fetchall()
     conn2.close()
 
+    target = normalize_process_name(process)
     result = []
     seen = set()
     for r in all_stocks:
         d = dict(r)
-        routing = get_item_routing(d['sku'])
-        next_p = get_next_process(d['sku'], d['process'])
-        if next_p == process and d['available_qty'] > 0:
-            key = (d['so_number'], d['sku'], d['process'])
-            if key not in seen:
-                seen.add(key)
-                row = {
-                    'so_number': d['so_number'],
-                    'sku': d['sku'],
-                    'available_qty': d['available_qty'],
-                    'from_process': d['process'],
-                    'to_process': process,
-                    'routing': routing,
-                    'updated_at': d.get('updated_at') or '',
-                    'batch': d.get('batch') or '',
-                    'vendor_name': d.get('vendor_name') or '',
-                    'jo_number': d.get('jo_number') or '',
-                }
-                result.append(_enrich_ready_row(row, process))
+        qty = int(d.get("available_qty") or 0)
+        if qty <= 0:
+            continue
+        cur = normalize_process_name(d.get("process") or "")
+        routing = get_item_routing(d["sku"])
+        next_p = get_next_process(d["sku"], d["process"])
+        next_n = normalize_process_name(next_p or "")
+        at_stage = bool(target) and cur == target
+        feeds_stage = bool(target) and next_n == target
+        if not at_stage and not feeds_stage:
+            continue
+        from_proc = d["process"] if feeds_stage and not at_stage else (
+            get_previous_process(d["sku"], process) or d["process"]
+        )
+        key = (d["so_number"], d["sku"], from_proc if feeds_stage and not at_stage else cur)
+        if key in seen:
+            continue
+        seen.add(key)
+        row = {
+            "so_number": d["so_number"],
+            "sku": d["sku"],
+            "available_qty": qty,
+            "from_process": from_proc,
+            "to_process": process,
+            "routing": routing,
+            "updated_at": d.get("updated_at") or "",
+            "batch": d.get("batch") or "",
+            "vendor_name": d.get("vendor_name") or "",
+            "jo_number": d.get("jo_number") or "",
+        }
+        result.append(_enrich_ready_row(row, process))
     return result
 
 

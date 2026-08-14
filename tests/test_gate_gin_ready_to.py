@@ -240,6 +240,62 @@ def test_jo_import_autoroute_ready_to_wip_template(isolated_module_dbs, client):
     assert "1112YKBLACK-L" in skus
 
 
+def test_ready_to_stitch_after_cutting_issue(isolated_module_dbs, client):
+    """Receive 45 on Cutting then issue to Stitching — must stay on Ready to Stitch."""
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "jo_date": "2026-08-14",
+            "so_number": "08-2627",
+            "sku": "1592YKBLUE-XXL",
+            "process": "Cutting",
+            "planned_qty": 50,
+            "lines": [{"sku": "1592YKBLUE-XXL", "style": "XXL", "planned_qty": 50}],
+        },
+    )
+    assert r.status_code == 200, r.text
+    jo = next(
+        o
+        for o in client.get("/api/production/orders").json()
+        if o["jo_number"] == r.json()["jo_number"]
+    )
+    line = jo["lines"][0]
+    rec = client.post(
+        f"/api/production/orders/{jo['id']}/receive-pieces",
+        json={
+            "received_qty": 45,
+            "process": "Cutting",
+            "sku": line["sku"],
+            "jo_line_id": line["id"],
+        },
+    )
+    assert rec.status_code == 200, rec.text
+
+    before = client.get("/api/production/ready-to-process/Stitching")
+    assert before.status_code == 200
+    before_row = next((x for x in before.json() if x.get("sku") == "1592YKBLUE-XXL"), None)
+    assert before_row is not None
+    assert int(before_row.get("available_qty") or 0) == 45
+
+    iss = client.post(
+        f"/api/production/orders/{jo['id']}/issue-pieces",
+        json={
+            "issued_qty": 45,
+            "from_process": "Cutting",
+            "to_process": "Stitching",
+            "sku": "1592YKBLUE-XXL",
+            "jo_line_id": line["id"],
+        },
+    )
+    assert iss.status_code == 200, iss.text
+
+    after = client.get("/api/production/ready-to-process/Stitching")
+    assert after.status_code == 200
+    after_row = next((x for x in after.json() if x.get("sku") == "1592YKBLUE-XXL"), None)
+    assert after_row is not None, after.json()
+    assert int(after_row.get("available_qty") or 0) == 45
+
+
 def test_gin_jo_receive(isolated_module_dbs, client):
     from backend.db import production_db
 

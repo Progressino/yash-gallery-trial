@@ -2481,7 +2481,7 @@ export default function Production() {
               <p className="text-xs text-amber-700">
                 {activeProcess === 'Cutting'
                   ? 'No printed-fabric reservations yet. Reserve fabric under Grey Fabric → Ready to Cut.'
-                  : `No pieces waiting from the previous process for ${activeProcess}.`}
+                    : `No pieces waiting at ${activeProcess} (or the previous process).`}
               </p>
             ) : filteredReadyLines.length === 0 ? (
               <p className="text-xs text-amber-700">No ready lines match the current search / filters.</p>
