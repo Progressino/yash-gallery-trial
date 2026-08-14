@@ -287,3 +287,83 @@ def test_overlay_restores_carried_days_from_persisted_snapshots():
     assert "2026-08-10" not in carried
     assert "2026-08-11" in carried
     assert "2026-08-12" in carried
+
+
+def test_mid_window_snapshot_does_not_drop_later_census():
+    from backend.services.daily_inventory_history import refresh_inventory_history_rollforward
+    from backend.session import AppSession
+
+    rows = []
+    for d, src, qty in [
+        ("2026-08-08", "snapshot", 100),
+        ("2026-08-09", "derived", 100),
+        ("2026-08-13", "snapshot", 80),
+    ]:
+        rows.append(
+            {
+                "OMS_SKU": "S1",
+                "Date": pd.Timestamp(d),
+                "Qty": qty,
+                "Source": src,
+                "Channel": "oms",
+            }
+        )
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(rows)
+    sess.inventory_snapshot_date = "2026-08-11"
+    sess.inventory_df_variant = pd.DataFrame(
+        {
+            "OMS_SKU": ["S1"],
+            "OMS_Inventory": [90],
+            "Total_Inventory": [90],
+            "Amazon_Inventory": [0],
+        }
+    )
+    sess.sales_df = pd.DataFrame(
+        columns=["Sku", "TxnDate", "Transaction Type", "Quantity", "Units_Effective", "Source"]
+    )
+    result = refresh_inventory_history_rollforward(sess, include_snapshot=True)
+    assert result.get("ok")
+    out = sess.daily_inventory_history_df.copy()
+    out["d"] = pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d")
+    by = out.groupby("d", as_index=True).agg(Qty=("Qty", "sum"), Source=("Source", "first"))
+    assert str(by.loc["2026-08-11", "Source"]).lower() == "snapshot"
+    assert float(by.loc["2026-08-11", "Qty"]) == 90
+    assert "2026-08-13" in by.index
+    assert str(by.loc["2026-08-13", "Source"]).lower() == "snapshot"
+    assert float(by.loc["2026-08-13", "Qty"]) == 80
+
+
+def test_overlay_from_disk_day_archive(tmp_path, monkeypatch):
+    from backend.services import daily_inventory_history as dih
+    from backend.session import AppSession
+
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(
+        [
+            {
+                "OMS_SKU": "S1-M",
+                "Date": pd.Timestamp("2026-08-08"),
+                "Qty": 10,
+                "Source": "snapshot",
+                "Channel": "oms",
+            },
+            {
+                "OMS_SKU": "S1-M",
+                "Date": pd.Timestamp("2026-08-09"),
+                "Qty": 10,
+                "Source": "derived",
+                "Channel": "oms",
+            },
+        ]
+    )
+    variant = pd.DataFrame({"OMS_SKU": ["S1-M"], "OMS_Inventory": [7]})
+    path = dih.archive_inventory_day_snapshot(variant, "2026-08-09")
+    assert path
+    n = dih.overlay_persisted_inventory_snapshots(sess)
+    assert n == 1
+    out = sess.daily_inventory_history_df
+    row = out[pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d") == "2026-08-09"].iloc[0]
+    assert str(row["Source"]).lower() == "snapshot"
+    assert float(row["Qty"]) == 7.0

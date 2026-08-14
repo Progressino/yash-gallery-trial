@@ -286,6 +286,7 @@ def align_history_day_to_variant(
 def repair_snapshot_channel_totals(
     hist_df: pd.DataFrame | None,
     variant_df: pd.DataFrame | None,
+    variant_snapshot_date: str | pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Repair the latest snapshot without destroying an explicit channel split."""
     if hist_df is None or hist_df.empty:
@@ -304,6 +305,14 @@ def repair_snapshot_channel_totals(
     if snap_dates.empty:
         return _coalesce_history_rows(work)
     latest = pd.Timestamp(snap_dates.max()).normalize()
+    if variant_snapshot_date is not None:
+        try:
+            as_of = pd.Timestamp(variant_snapshot_date).normalize()
+        except Exception:
+            as_of = None
+        # A mid-window re-upload must not stamp live qty onto a later census day.
+        if as_of is not None and pd.notna(as_of) and as_of != latest:
+            return _coalesce_history_rows(work)
     # Prefer full Actual/variant replacement so OMS day total matches Inventory.
     return align_history_day_to_variant(work, variant_df, latest)
 
@@ -527,6 +536,54 @@ def assign_persisted_snapshot_overlay_dates(headers: list[dict]) -> dict[str, di
     return assigned
 
 
+def _inventory_day_snapshot_dir():
+    return _warm_cache_dir() / "inventory_day_snapshots"
+
+
+def archive_inventory_day_snapshot(variant_df: pd.DataFrame | None, snapshot_date: str) -> str | None:
+    """Persist one day's live inventory so Inv. History can restore it later without Postgres."""
+    day = str(snapshot_date or "").strip()[:10]
+    if len(day) != 10 or variant_df is None or getattr(variant_df, "empty", True):
+        return None
+    if "OMS_SKU" not in variant_df.columns:
+        return None
+    root = _inventory_day_snapshot_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{day}.parquet"
+    keep_cols = [
+        c
+        for c in (
+            "OMS_SKU",
+            "OMS_Inventory",
+            "Amazon_Inventory",
+            "Total_Inventory",
+        )
+        if c in variant_df.columns
+    ]
+    work = variant_df[keep_cols].copy()
+    work.to_parquet(path, index=False)
+    return str(path)
+
+
+def _disk_inventory_day_snapshot_headers() -> list[dict]:
+    root = _inventory_day_snapshot_dir()
+    if not root.is_dir():
+        return []
+    out: list[dict] = []
+    for path in sorted(root.glob("*.parquet")):
+        day = path.stem[:10]
+        if len(day) != 10:
+            continue
+        out.append(
+            {
+                "snapshot_date": day,
+                "uploaded_at": f"{day}T06:00:00Z",
+                "path": str(path),
+            }
+        )
+    return out
+
+
 def overlay_persisted_inventory_snapshots(sess, snapshots: list[dict] | None = None) -> int:
     """Replace derived/carried history days with actual uploaded inventory snapshots."""
     hist = getattr(sess, "daily_inventory_history_df", None)
@@ -545,16 +602,22 @@ def overlay_persisted_inventory_snapshots(sess, snapshots: list[dict] | None = N
     headers = snapshots
     load_fn = None
     if headers is None:
+        headers = []
         try:
             from ..db.forecast_ops_tables import (
                 list_inventory_snapshot_headers,
                 load_inventory_snapshot_by_id,
             )
 
-            headers = list_inventory_snapshot_headers()
+            headers = list_inventory_snapshot_headers() or []
             load_fn = load_inventory_snapshot_by_id
         except Exception:
-            return 0
+            headers = []
+        disk_headers = _disk_inventory_day_snapshot_headers()
+        have = {str(h.get("snapshot_date") or "")[:10] for h in headers}
+        for h in disk_headers:
+            if h["snapshot_date"] not in have:
+                headers.append(h)
     if not headers:
         return 0
 
@@ -564,6 +627,11 @@ def overlay_persisted_inventory_snapshots(sess, snapshots: list[dict] | None = N
         if day not in gaps:
             continue
         variant = header.get("df")
+        if variant is None and header.get("path"):
+            try:
+                variant = pd.read_parquet(header["path"])
+            except Exception:
+                variant = None
         if variant is None and load_fn is not None and header.get("id"):
             bundle = load_fn(int(header["id"]))
             variant = (bundle or {}).get("df")
@@ -1522,6 +1590,7 @@ def repair_inventory_history_integrity(
     hist: pd.DataFrame | None,
     *,
     variant_df: pd.DataFrame | None = None,
+    variant_snapshot_date: str | pd.Timestamp | None = None,
     sales_df: pd.DataFrame | None = None,
     persist_report: bool = True,
 ) -> tuple[pd.DataFrame, dict]:
@@ -1570,7 +1639,9 @@ def repair_inventory_history_integrity(
             report["repaired"] = True
         work = aliased
 
-    repaired_channels = repair_snapshot_channel_totals(work, variant_df)
+    repaired_channels = repair_snapshot_channel_totals(
+        work, variant_df, variant_snapshot_date=variant_snapshot_date
+    )
     if repaired_channels is not None and len(repaired_channels) != len(work):
         report["actions"].append("repair_snapshot_channel_totals")
         report["repaired"] = True
@@ -1759,7 +1830,7 @@ def refresh_inventory_history_rollforward(
             # ``uploaded`` days were discarded and re-derived as CARRIED.
             keep = (merged["Date"] <= auth_end) | (
                 src_l.isin(["snapshot", "uploaded"]) & (merged["Date"] < snap_ts)
-            )
+            ) | (merged["Date"] > snap_ts)
             clip = merged.loc[keep].copy()
             # Drop stale derived after the baseline so extend_history_with_sales
             # recomputes them from sales instead of treating flat copies as truth.
@@ -1827,6 +1898,7 @@ def refresh_inventory_history_rollforward(
         merged, integrity_report = repair_inventory_history_integrity(
             merged,
             variant_df=getattr(sess, "inventory_df_variant", None),
+            variant_snapshot_date=getattr(sess, "inventory_snapshot_date", None),
             sales_df=None,
         )
     except Exception:
@@ -4346,6 +4418,7 @@ __all__ = [
     "inventory_sheet_end_date_from_filename",
     "record_inventory_snapshot_date",
     "overlay_persisted_inventory_snapshots",
+    "archive_inventory_day_snapshot",
     "assign_persisted_snapshot_overlay_dates",
     "prune_non_snapshot_post_matrix_days",
     "snapshot_dates_from_history",

@@ -2925,6 +2925,15 @@ def _inventory_apply_parse_result(
             sess._inventory_pg_snapshot_id = sid
     except Exception:
         _log.exception("PostgreSQL inventory table persist failed")
+    try:
+        from ..services.daily_inventory_history import archive_inventory_day_snapshot
+
+        archive_inventory_day_snapshot(
+            sess.inventory_df_variant,
+            str(getattr(sess, "inventory_snapshot_date", "") or ""),
+        )
+    except Exception:
+        _log.exception("archive_inventory_day_snapshot failed")
     sess._inventory_pre_upload_backup = None
     _session_data_changed(sess)
     _finalize_inventory_data_refresh(sess)

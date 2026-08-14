@@ -82,8 +82,42 @@ def _inventory_history_df_for_matrix_read(sess) -> pd.DataFrame:
             _main._warm_cache["daily_inventory_history_df"] = disk
             sess.daily_inventory_history_df = disk
         except Exception:
-            pass
-        return disk
+            sess.daily_inventory_history_df = disk
+        try:
+            from ..services.daily_inventory_history import (
+                inventory_history_max_date,
+                non_uploaded_inventory_dates,
+                overlay_persisted_inventory_snapshots,
+                persist_inventory_history_authoritative,
+                restore_inventory_history_from_best_disk_backups,
+            )
+
+            mx = inventory_history_max_date(sess.daily_inventory_history_df)
+            if mx is not None:
+                span = list(pd.date_range(mx - pd.Timedelta(days=40), mx, freq="D"))
+                gaps = non_uploaded_inventory_dates(sess.daily_inventory_history_df, span)
+            else:
+                gaps = ["1"]
+            if gaps:
+                repaired = restore_inventory_history_from_best_disk_backups(
+                    sess.daily_inventory_history_df
+                )
+                if repaired is not None and not getattr(repaired, "empty", True):
+                    sess.daily_inventory_history_df = repaired
+                restored = overlay_persisted_inventory_snapshots(sess)
+                if restored or repaired is not None:
+                    persist_inventory_history_authoritative(sess)
+                    try:
+                        import backend.main as _main
+
+                        _main._warm_cache["daily_inventory_history_df"] = (
+                            sess.daily_inventory_history_df
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            logging.getLogger(__name__).exception("inventory history overlay on matrix read failed")
+        return sess.daily_inventory_history_df
     return _inventory_history_df_for_read(sess)
 
 
