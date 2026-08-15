@@ -338,6 +338,7 @@ def init_db():
         ("process_stock", "jo_number", "TEXT DEFAULT ''"),
         # system = matched/from SO master list; manual = free-text SO no (no SO record required)
         ("job_orders", "so_source", "TEXT DEFAULT 'system'"),
+        ("jo_qty_history", "jo_line_id", "INTEGER"),
     ]
     for table, col, decl in migrations:
         try:
@@ -635,6 +636,7 @@ def ready_to_wip_template_rows(stage: str = "Stitching") -> list[dict]:
             "Ready_To_Stage": stage,
             "SO_Number": "SO-EXAMPLE",
             "OMS_SKU": "SKU-EXAMPLE-M",
+            "Component": "",
             "Quantity": 100,
             "JO_Number": "",
             "Batch": "",
@@ -661,6 +663,26 @@ def import_ready_to_wip(rows: list[dict], *, default_stage: str | None = None) -
                 default_stage or ""
             ).strip()
             sku = _wip_cell(raw, "OMS_SKU", "oms_sku", "SKU", "sku", "Sku")
+            component = _wip_cell(
+                raw, "Component", "component", "component_code", "Component_Code"
+            )
+            if sku and component:
+                try:
+                    from ..services.set_components import component_sku, parse_component_sku
+
+                    main, existing = parse_component_sku(sku)
+                    if existing:
+                        if existing.upper() != str(component).strip().upper():
+                            errors.append(
+                                f"row {i}: OMS_SKU {sku} already has component {existing}; "
+                                f"do not also set Component={component}"
+                            )
+                            continue
+                    else:
+                        sku = component_sku(sku, component)
+                except ValueError as e:
+                    errors.append(f"row {i}: {e}")
+                    continue
             so = _wip_cell(raw, "SO_Number", "so_number", "SO", "so")
             qty_raw = _wip_cell(raw, "Quantity", "quantity", "Qty", "qty", "planned_qty", "Planned_Qty")
             try:
@@ -1334,10 +1356,29 @@ def _create_single_jo(data: dict) -> str:
     return num
 
 
+def _line_qty_floor(line: dict) -> int:
+    return max(int(line.get("issued_qty") or 0), int(line.get("received_qty") or 0), 0)
+
+
+def _record_jo_qty_history(conn, joid: int, field: str, old_qty, new_qty, changed_by: str, remarks: str, jo_line_id=None):
+    try:
+        conn.execute(
+            """INSERT INTO jo_qty_history(jo_id, field, old_qty, new_qty, changed_by, remarks, jo_line_id)
+               VALUES(?,?,?,?,?,?,?)""",
+            (joid, field, old_qty, new_qty, changed_by, remarks, jo_line_id),
+        )
+    except Exception:
+        conn.execute(
+            """INSERT INTO jo_qty_history(jo_id, field, old_qty, new_qty, changed_by, remarks)
+               VALUES(?,?,?,?,?,?)""",
+            (joid, field, old_qty, new_qty, changed_by, remarks),
+        )
+
+
 def update_jo(joid: int, data: dict):
     conn = _connect()
     prev = conn.execute(
-        """SELECT so_number, fabric_code, fabric_qty, status, planned_qty,
+        """SELECT so_number, fabric_code, fabric_qty, fabric_issued_qty, status, planned_qty,
                   issued_qty, received_qty, output_qty, so_qty, sku
            FROM job_orders WHERE id=?""",
         (joid,),
@@ -1347,12 +1388,20 @@ def update_jo(joid: int, data: dict):
         raise ValueError("Job order not found")
     prev = dict(prev)
     data = dict(data)
+    changed_by = str(data.pop("changed_by", "") or "")
+    remarks = str(data.pop("qty_change_remarks", "") or "")
+    line_updates = data.pop("lines", None)
+    if line_updates is None:
+        line_updates = data.pop("line_qtys", None)
 
-    # Planned quantity: editable for uploaded + UI JOs with process safety floor.
-    if "planned_qty" in data and data["planned_qty"] is not None:
-        new_plan = int(data["planned_qty"])
+    line_rows = [dict(r) for r in conn.execute(
+        """SELECT id, sku, style, planned_qty, issued_qty, received_qty, rejected_qty
+           FROM jo_lines WHERE jo_id=? ORDER BY id""",
+        (joid,),
+    ).fetchall()]
+
+    def _apply_header_plan(new_plan: int, *, sync_single_line: bool):
         if new_plan < 0:
-            conn.close()
             raise ValueError("planned_qty cannot be negative")
         floor = max(
             int(prev.get("issued_qty") or 0),
@@ -1360,28 +1409,96 @@ def update_jo(joid: int, data: dict):
             int(prev.get("output_qty") or 0),
         )
         if new_plan < floor:
-            conn.close()
             raise ValueError(
                 f"planned_qty cannot be below already processed quantity ({floor}). "
                 "Issued, received, or output pieces already exceed that plan."
             )
         old_plan = int(prev.get("planned_qty") or 0)
         if new_plan != old_plan:
-            conn.execute(
-                """INSERT INTO jo_qty_history(jo_id, field, old_qty, new_qty, changed_by, remarks)
-                   VALUES(?,?,?,?,?,?)""",
-                (
-                    joid,
-                    "planned_qty",
-                    old_plan,
-                    new_plan,
-                    str(data.pop("changed_by", "") or ""),
-                    str(data.pop("qty_change_remarks", "") or ""),
-                ),
-            )
-            # Keep open balance consistent when status is still Created / no receives.
-            bal = max(0, new_plan - int(prev.get("received_qty") or 0))
-            data["balance_qty"] = bal
+            _record_jo_qty_history(conn, joid, "planned_qty", old_plan, new_plan, changed_by, remarks)
+            data["planned_qty"] = new_plan
+            data["balance_qty"] = new_plan - int(prev.get("received_qty") or 0)
+            issued_fab = float(prev.get("fabric_issued_qty") or 0)
+            old_fab = float(prev.get("fabric_qty") or 0)
+            if issued_fab <= 0 and old_plan > 0 and old_fab > 0:
+                data["fabric_qty"] = round(old_fab * (new_plan / old_plan), 3)
+        if sync_single_line and len(line_rows) == 1:
+            ln = line_rows[0]
+            floor_l = _line_qty_floor(ln)
+            if new_plan < floor_l:
+                raise ValueError(
+                    f"planned_qty cannot be below size {ln.get('sku')} processed qty ({floor_l})."
+                )
+            old_l = int(ln.get("planned_qty") or 0)
+            if new_plan != old_l:
+                rec = int(ln.get("received_qty") or 0)
+                conn.execute(
+                    "UPDATE jo_lines SET planned_qty=?, balance_qty=? WHERE id=? AND jo_id=?",
+                    (new_plan, new_plan - rec, ln["id"], joid),
+                )
+                _record_jo_qty_history(
+                    conn, joid, f"line:{ln['id']}:planned_qty", old_l, new_plan,
+                    changed_by, remarks or f"SKU {ln.get('sku')}", ln["id"],
+                )
+
+    try:
+        if line_updates:
+            if data.get("planned_qty") is not None:
+                raise ValueError(
+                    "Do not send header planned_qty together with size-wise quantities. "
+                    "Edit each size; JO total is the sum of sizes."
+                )
+            by_id = {int(r["id"]): r for r in line_rows}
+            if not by_id:
+                raise ValueError("This job order has no size lines to edit.")
+            pending: dict[int, int] = {}
+            for item in line_updates:
+                if not isinstance(item, dict):
+                    continue
+                lid = int(item.get("id") or 0)
+                if lid not in by_id:
+                    raise ValueError(f"jo_line id {lid} does not belong to this job order")
+                if item.get("planned_qty") is None:
+                    continue
+                new_l = int(item["planned_qty"])
+                if new_l < 0:
+                    raise ValueError("Size planned quantity cannot be negative")
+                floor_l = _line_qty_floor(by_id[lid])
+                if new_l < floor_l:
+                    sku = by_id[lid].get("sku") or lid
+                    raise ValueError(
+                        f"planned_qty for {sku} cannot be below issued/received ({floor_l})."
+                    )
+                pending[lid] = new_l
+            if pending:
+                for lid, new_l in pending.items():
+                    ln = by_id[lid]
+                    old_l = int(ln.get("planned_qty") or 0)
+                    rec = int(ln.get("received_qty") or 0)
+                    conn.execute(
+                        "UPDATE jo_lines SET planned_qty=?, balance_qty=? WHERE id=? AND jo_id=?",
+                        (new_l, new_l - rec, lid, joid),
+                    )
+                    if new_l != old_l:
+                        _record_jo_qty_history(
+                            conn, joid, f"line:{lid}:planned_qty", old_l, new_l,
+                            changed_by, remarks or f"SKU {ln.get('sku')}", lid,
+                        )
+                new_plan = 0
+                for ln in line_rows:
+                    lid = int(ln["id"])
+                    new_plan += pending[lid] if lid in pending else int(ln.get("planned_qty") or 0)
+                _apply_header_plan(new_plan, sync_single_line=False)
+        elif "planned_qty" in data and data["planned_qty"] is not None:
+            if len(line_rows) > 1:
+                raise ValueError(
+                    "This job order has multiple sizes. Edit planned quantity per SKU/size; "
+                    "the JO total is always the sum of size quantities."
+                )
+            _apply_header_plan(int(data["planned_qty"]), sync_single_line=True)
+    except ValueError:
+        conn.close()
+        raise
 
     if "so_source" in data and data["so_source"] is not None:
         ss = str(data["so_source"]).strip().lower()
@@ -1403,6 +1520,7 @@ def update_jo(joid: int, data: dict):
         "exec_type",
         "vendor_name",
         "vendor_rate",
+        "fabric_qty",
         "fabric_issued_qty",
         "fabric_received_qty",
         "fabric_consumption",
@@ -1413,6 +1531,7 @@ def update_jo(joid: int, data: dict):
     sets = ", ".join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]
     if not sets:
+        conn.commit()
         conn.close()
         return
     new_status = data.get("status")

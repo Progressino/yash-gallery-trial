@@ -187,6 +187,11 @@ def build_jo_payload_from_import_row(row: dict[str, Any], *, default_process: st
         # Direct component Cutting JO (TOP/PANT/DUPATTA only — never FRONT/BACK).
         from ..db.production_db import get_set_bom_for_sku
 
+        _KNOWN_SET = frozenset({
+            "TOP", "PANT", "DUPATTA", "KURTA", "BOTTOM", "SKIRT", "BLOUSE",
+            "JACKET", "SHIRT", "SHARARA", "GHAGRA", "LEHENGA", "PALAZZO",
+            "TROUSER", "TROUSERS",
+        })
         bom = get_set_bom_for_sku(main_sku)
         if bom:
             set_codes = {str(ln.get("component_code") or "").upper() for ln in set_component_lines(bom)}
@@ -200,6 +205,11 @@ def build_jo_payload_from_import_row(row: dict[str, Any], *, default_process: st
                     f"component_code={component_code} not in Set BOM set-components "
                     f"({', '.join(sorted(set_codes))}). Panels: {', '.join(sorted(panel_codes)) or 'none'}."
                 )
+        elif component_code not in _KNOWN_SET:
+            raise ValueError(
+                f"component_code={component_code} is not a known set component "
+                f"({', '.join(sorted(_KNOWN_SET))}) and no Set BOM exists for {main_sku}."
+            )
         csku = component_sku(main_sku, component_code)
         data.update(
             {

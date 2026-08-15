@@ -341,6 +341,11 @@ class JOIn(BaseModel):
     # None = auto (component JOs when Set BOM exists); False = legacy single JO + receive split
     create_component_jos: Optional[bool] = None
 
+class JOLineQtyUpdate(BaseModel):
+    id: int
+    planned_qty: int
+
+
 class JOUpdate(BaseModel):
     status: Optional[str] = None
     output_qty: Optional[int] = None
@@ -364,6 +369,7 @@ class JOUpdate(BaseModel):
     total_cost: Optional[float] = None
     changed_by: Optional[str] = None
     qty_change_remarks: Optional[str] = None
+    lines: Optional[List[JOLineQtyUpdate]] = None
 
 class FabricIssueIn(BaseModel):
     fabric_code: str
@@ -644,6 +650,53 @@ def process_report():
     return get_process_report()
 
 
+@router.get("/cutting-report")
+def cutting_report(
+    date_from: str = "",
+    date_to: str = "",
+    so_number: str = "",
+    parent_style: str = "",
+    sku: str = "",
+    size: str = "",
+    jo_number: str = "",
+    component: str = "",
+    fabric_code: str = "",
+    status: str = "",
+    aging_bucket: str = "",
+    aging_basis: str = "jo_date",
+    variance: str = "",
+    brand: str = "",
+    search: str = "",
+    group_by: str = "",
+    page: int = 1,
+    page_size: int = 200,
+    export: bool = False,
+):
+    from ..services.cutting_reports import build_cutting_report
+
+    return build_cutting_report(
+        date_from=date_from,
+        date_to=date_to,
+        so_number=so_number,
+        parent_style=parent_style,
+        sku=sku,
+        size=size,
+        jo_number=jo_number,
+        component=component,
+        fabric_code=fabric_code,
+        status=status,
+        aging_bucket=aging_bucket,
+        aging_basis=aging_basis,
+        variance=variance,
+        brand=brand,
+        search=search,
+        group_by=group_by,
+        page=page,
+        page_size=page_size,
+        export=export,
+    )
+
+
 # ── Job Orders ─────────────────────────────────────────────────────────────────
 
 @router.get("/orders")
@@ -843,6 +896,8 @@ def patch_jo(joid: int, body: JOUpdate):
     if not jo:
         raise HTTPException(404, "Job order not found")
     data = {k: v for k, v in body.model_dump().items() if v is not None}
+    if data.get("lines"):
+        data["lines"] = [x if isinstance(x, dict) else x.model_dump() for x in body.lines or []]
     if "exec_type" in data:
         data["exec_type"] = str(data["exec_type"] or "Inhouse").strip()
     if "vendor_name" in data:

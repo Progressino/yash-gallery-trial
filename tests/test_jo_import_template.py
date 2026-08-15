@@ -149,6 +149,21 @@ def test_import_component_code_top_only(isolated_module_dbs, client):
     assert jos[0].get("component_code") == "TOP"
 
 
+def test_import_invalid_component_without_bom_fails():
+    from backend.services.jo_import import build_jo_payload_from_import_row
+
+    with pytest.raises(ValueError, match="not a known set component"):
+        build_jo_payload_from_import_row(
+            {
+                "so_number": "SO-BAD",
+                "sku": "NOSBOM-M",
+                "component_code": "WIDGET",
+                "planned_qty": 5,
+                "process": "Cutting",
+            }
+        )
+
+
 def test_import_empty_component_code_nan_creates_set_component_jos(isolated_module_dbs, client):
     """Blank component_code cells from Excel/CSV must not be treated as literal NAN."""
     client.post(

@@ -12,6 +12,7 @@ import {
   JO_EXPORT_HEADERS,
 } from './joLineHelpers'
 import SetBomPanel from '../components/SetBomPanel'
+import CuttingReportsPanel from './CuttingReportsPanel'
 import { downloadCsv } from '../lib/exportCsv'
 
 type MasterSkuOption = {
@@ -1199,6 +1200,8 @@ export default function Production() {
     fabric_unit: 'MTR', expected_completion: '', remarks: '',
   })
   const [editPlannedQty, setEditPlannedQty] = useState<Record<number, string>>({})
+  const [editLineQty, setEditLineQty] = useState<Record<number, string>>({})
+  const [reportsView, setReportsView] = useState<'cutting' | 'process'>('cutting')
   const [newLines, setNewLines] = useState<{ so_number: string; sku: string; sku_name: string; style: string; planned_qty: number; vendor_rate: number; remarks: string }[]>([])
   const [soLineSearch, setSOLineSearch] = useState('')
   const joImportRef = useRef<HTMLInputElement>(null)
@@ -1506,6 +1509,7 @@ export default function Production() {
     qc.invalidateQueries({ queryKey: ['jos-all'] })
     qc.invalidateQueries({ queryKey: ['ready-to-process'] })
     qc.invalidateQueries({ queryKey: ['process-report'] })
+    qc.invalidateQueries({ queryKey: ['cutting-report'] })
     qc.invalidateQueries({ queryKey: ['prod-issue-notes'] })
     qc.invalidateQueries({ queryKey: ['jo-issue-note'] })
     qc.invalidateQueries({ queryKey: ['jo-panel-wip'] })
@@ -1541,6 +1545,19 @@ export default function Production() {
       setActiveJO(null)
     },
     onError: (e: unknown) => alert(apiErrorMessage(e, 'Could not update job order')),
+  })
+  const updateJoQtyMut = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/production/orders/${id}`, data),
+    onSuccess: async (_res, vars) => {
+      invalidateAll()
+      try {
+        const fresh = await api.get(`/production/orders/${vars.id}`).then(r => r.data)
+        setActiveJO(fresh)
+      } catch {
+        /* list refresh is enough */
+      }
+    },
+    onError: (e: unknown) => alert(apiErrorMessage(e, 'Could not update planned quantity')),
   })
   const issueFabricMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/issue-fabric`, data),
@@ -1875,8 +1892,8 @@ export default function Production() {
               ))}
             </div>
 
-            {/* Edit planned qty for uploaded / existing JOs (floor = issued/received/output) */}
-            {(jo.status === 'Created' || jo.status === 'In Progress') && (
+            {/* Planned qty: size-wise when the JO has multiple SKU/size lines; otherwise header total. */}
+            {(jo.status === 'Created' || jo.status === 'In Progress') && jo.lines.length <= 1 && (
               <div className="bg-white border rounded-lg p-3 flex flex-wrap items-end gap-2">
                 <div>
                   <label className="text-xs text-gray-500">Edit planned qty</label>
@@ -1890,14 +1907,14 @@ export default function Production() {
                 </div>
                 <button
                   type="button"
-                  disabled={updateJOMut.isPending}
+                  disabled={updateJoQtyMut.isPending}
                   onClick={() => {
                     const v = parseInt(editPlannedQty[jo.id] ?? String(jo.planned_qty), 10)
-                    if (!Number.isFinite(v)) {
+                    if (!Number.isFinite(v) || v < 0) {
                       alert('Enter a valid planned quantity')
                       return
                     }
-                    updateJOMut.mutate({
+                    updateJoQtyMut.mutate({
                       id: jo.id,
                       data: {
                         planned_qty: v,
@@ -1910,8 +1927,14 @@ export default function Production() {
                   Save qty
                 </button>
                 <p className="text-[10px] text-gray-500 max-w-xs">
-                  Cannot go below issued/received/output. Changes are written to jo_qty_history.
+                  Cannot go below issued/received/output. JO total equals this size. Written to jo_qty_history.
                 </p>
+              </div>
+            )}
+            {(jo.status === 'Created' || jo.status === 'In Progress') && jo.lines.length > 1 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-[11px] text-amber-900">
+                Edit planned quantity per size in the lines table. JO total is the sum of sizes
+                ({fmt(jo.lines.reduce((s, l) => s + (Number(l.planned_qty) || 0), 0))} pcs).
               </div>
             )}
 
@@ -2060,9 +2083,35 @@ export default function Production() {
             {/* Lines table */}
             {jo.lines.length > 0 && (
               <div className="bg-white rounded-lg border overflow-hidden">
-                <div className="px-3 py-2 bg-gray-50 text-xs font-semibold text-gray-600 flex justify-between">
+                <div className="px-3 py-2 bg-gray-50 text-xs font-semibold text-gray-600 flex justify-between items-center gap-2">
                   <span>Lines — Issue / Receive per SKU</span>
-                  <span className="text-gray-400">{jo.lines.length} lines</span>
+                  <span className="flex items-center gap-2">
+                    {(jo.status === 'Created' || jo.status === 'In Progress') && (
+                      <button
+                        type="button"
+                        disabled={updateJoQtyMut.isPending}
+                        onClick={() => {
+                          const lines = jo.lines.map(line => {
+                            const raw = editLineQty[line.id]
+                            const v = raw == null ? line.planned_qty : parseInt(raw, 10)
+                            return { id: line.id, planned_qty: v }
+                          })
+                          if (lines.some(l => !Number.isFinite(l.planned_qty) || l.planned_qty < 0)) {
+                            alert('Each size planned quantity must be a number ≥ 0')
+                            return
+                          }
+                          updateJoQtyMut.mutate({
+                            id: jo.id,
+                            data: { lines, qty_change_remarks: 'UI size-wise planned_qty edit' },
+                          })
+                        }}
+                        className="px-2 py-1 bg-amber-600 text-white rounded font-medium disabled:opacity-50"
+                      >
+                        Save size qtys
+                      </button>
+                    )}
+                    <span className="text-gray-400">{jo.lines.length} lines</span>
+                  </span>
                 </div>
                 <table className="w-full text-xs">
                   <thead><tr className="text-gray-400 border-b uppercase">
@@ -2081,7 +2130,19 @@ export default function Production() {
                       <tr key={line.id} className="border-t border-gray-50 hover:bg-gray-50">
                         <td className="px-3 py-2 font-mono font-semibold text-[#002B5B]">{line.sku}</td>
                         <td className="px-3 py-2 text-gray-500">{line.style || '—'}</td>
-                        <td className="px-3 py-2 text-right">{fmt(line.planned_qty)}</td>
+                        <td className="px-3 py-2 text-right">
+                          {(jo.status === 'Created' || jo.status === 'In Progress') ? (
+                            <input
+                              type="number"
+                              min={Math.max(line.issued_qty || 0, line.received_qty || 0, 0)}
+                              value={editLineQty[line.id] ?? String(line.planned_qty)}
+                              onChange={e => setEditLineQty(m => ({ ...m, [line.id]: e.target.value }))}
+                              className="w-20 border border-amber-200 bg-amber-50 rounded px-1 py-0.5 text-right font-semibold"
+                            />
+                          ) : (
+                            fmt(line.planned_qty)
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-right text-green-600 font-semibold">{fmt(line.received_qty)}</td>
                         <td className="px-3 py-2 text-right text-red-500">{fmt(line.rejected_qty)}</td>
                         <td className={`px-3 py-2 text-right font-semibold ${line.balance_qty > 0 ? 'text-amber-600' : 'text-green-600'}`}>{fmt(line.balance_qty)}</td>
@@ -2688,6 +2749,22 @@ export default function Production() {
       {/* REPORTS TAB */}
       {tab === 'reports' && (
         <div className="space-y-4">
+          <div className="flex gap-2">
+            {([['cutting', 'Cutting'], ['process', 'All processes']] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setReportsView(key)}
+                className={`px-3 py-1.5 text-xs rounded-lg font-medium ${reportsView === key ? 'bg-[#002B5B] text-white' : 'bg-white border text-gray-600'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {reportsView === 'cutting' ? (
+            <CuttingReportsPanel />
+          ) : (
+        <div className="space-y-4">
           <h3 className="font-semibold text-gray-700">Process-wise Issue / Receive / Balance Report</h3>
           {allProcesses.map(proc => {
             const procRows = (processReport as any[]).filter(r => r.process === proc)
@@ -2727,6 +2804,8 @@ export default function Production() {
             )
           })}
           {processReport.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No data yet.</p>}
+        </div>
+          )}
         </div>
       )}
 

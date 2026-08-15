@@ -105,6 +105,85 @@ def test_manual_so_multi_size_lines_on_single_jo(iso):
     assert sum(int(ln.get("planned_qty") or 0) for ln in full["lines"]) == 25
 
 
+def test_multi_size_rejects_header_only_qty_edit(iso):
+    num = production_db.create_jo(
+        {
+            "so_number": "WALKIN-QTY",
+            "so_source": "manual",
+            "sku": "1264YKGREEN-S",
+            "process": "Cutting",
+            "planned_qty": 50,
+            "create_component_jos": False,
+            "lines": [
+                {"sku": "1264YKGREEN-S", "style": "S", "planned_qty": 20},
+                {"sku": "1264YKGREEN-M", "style": "M", "planned_qty": 30},
+            ],
+        }
+    )
+    jo = next(j for j in production_db.list_jos() if j["jo_number"] == num)
+    with pytest.raises(ValueError, match="multiple sizes"):
+        production_db.update_jo(jo["id"], {"planned_qty": 55})
+
+
+def test_edit_one_size_recalculates_jo_total(iso):
+    num = production_db.create_jo(
+        {
+            "so_number": "WALKIN-QTY2",
+            "so_source": "manual",
+            "sku": "1264YKGREEN-S",
+            "process": "Cutting",
+            "planned_qty": 100,
+            "create_component_jos": False,
+            "lines": [
+                {"sku": "1264YKGREEN-S", "style": "S", "planned_qty": 20},
+                {"sku": "1264YKGREEN-M", "style": "M", "planned_qty": 30},
+                {"sku": "1264YKGREEN-L", "style": "L", "planned_qty": 25},
+                {"sku": "1264YKGREEN-XL", "style": "XL", "planned_qty": 25},
+            ],
+        }
+    )
+    jo = production_db.get_jo(next(j for j in production_db.list_jos() if j["jo_number"] == num)["id"])
+    m_line = next(l for l in jo["lines"] if l["sku"] == "1264YKGREEN-M")
+    production_db.update_jo(
+        jo["id"],
+        {"lines": [{"id": m_line["id"], "planned_qty": 35}], "qty_change_remarks": "M 30→35"},
+    )
+    jo2 = production_db.get_jo(jo["id"])
+    assert int(jo2["planned_qty"]) == 105
+    by_sku = {l["sku"]: int(l["planned_qty"]) for l in jo2["lines"]}
+    assert by_sku["1264YKGREEN-S"] == 20
+    assert by_sku["1264YKGREEN-M"] == 35
+    hist = production_db.list_jo_qty_history(jo["id"])
+    assert any("line:" in str(h.get("field")) for h in hist)
+
+
+def test_size_qty_cannot_go_below_received(iso):
+    num = production_db.create_jo(
+        {
+            "so_number": "WALKIN-QTY3",
+            "so_source": "manual",
+            "sku": "X-S",
+            "process": "Cutting",
+            "planned_qty": 20,
+            "create_component_jos": False,
+            "lines": [
+                {"sku": "X-S", "planned_qty": 10},
+                {"sku": "X-M", "planned_qty": 10},
+            ],
+        }
+    )
+    jo = production_db.get_jo(next(j for j in production_db.list_jos() if j["jo_number"] == num)["id"])
+    line = jo["lines"][0]
+    import sqlite3
+
+    conn = sqlite3.connect(os.environ["PRODUCTION_DB_PATH"])
+    conn.execute("UPDATE jo_lines SET received_qty=8 WHERE id=?", (line["id"],))
+    conn.commit()
+    conn.close()
+    with pytest.raises(ValueError, match="below"):
+        production_db.update_jo(jo["id"], {"lines": [{"id": line["id"], "planned_qty": 5}]})
+
+
 def test_ready_component_not_blocked_by_sibling(iso, monkeypatch):
     """TOP ready when only TOP fabric reserved; PANT stays off list."""
 
