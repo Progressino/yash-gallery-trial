@@ -78,18 +78,36 @@ jobs:
           else:
               raise SystemExit("login failed")
 
-          inv = s.get(
-              f"{base}/api/data/inventory",
-              params={"limit": 3, "offset": 0},
-              timeout=120,
-          )
-          print("inventory_status", inv.status_code)
-          inv.raise_for_status()
-          data = inv.json()
-          if not data.get("loaded"):
-              print("INVENTORY_NOT_LOADED", json.dumps({k: data.get(k) for k in data if k != "rows"})[:500])
-              raise SystemExit("inventory not loaded on prod — re-upload Aug 11 RAR then re-run probe")
+          # Deploy health can be green while session inventory is still hydrating.
+          data = {}
+          wait_deadline = time.time() + 12 * 60
+          while time.time() < wait_deadline:
+              h = s.get(f"{base}/api/health", timeout=30)
+              health = h.json() if h.ok else {}
+              inv = s.get(
+                  f"{base}/api/data/inventory",
+                  params={"limit": 3, "offset": 0},
+                  timeout=120,
+              )
+              print(
+                  "inventory_wait",
+                  "status", inv.status_code,
+                  "warm_cache", health.get("warm_cache"),
+                  "lock", health.get("upload_memory_lock_held"),
+              )
+              inv.raise_for_status()
+              data = inv.json()
+              if data.get("loaded") and int(data.get("total_rows") or 0) > 0:
+                  break
+              print("INVENTORY_NOT_READY", json.dumps({k: data.get(k) for k in data if k != "rows"})[:400])
+              time.sleep(15)
+          else:
+              raise SystemExit(
+                  "inventory still empty after waiting for warm-cache hydrate "
+                  "(not a missing Aug 11 RAR unless health.warm_cache stays false)"
+              )
 
+          print("inventory_status", 200)
           totals = data.get("totals") or {}
           print(
               "TOTALS",
