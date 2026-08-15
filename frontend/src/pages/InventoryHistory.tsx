@@ -16,6 +16,18 @@ import { todayIsoIST } from '../lib/reportingDates'
 const PAGE_SIZE = 100
 const HISTORY_WINDOW_DAYS = 30
 
+function inventoryMatrixErrorMessage(err: unknown): string {
+  const anyErr = err as { code?: string; message?: string } | null
+  const msg = err instanceof Error ? err.message : String(anyErr?.message || '')
+  if (anyErr?.code === 'ECONNABORTED' || /timeout/i.test(msg)) {
+    return (
+      'the server did not finish within 120s. This is usually a background inventory rebuild, not a missing ledger. ' +
+      'Retry in a moment. The matrix uses daily census snapshots (uploaded files), not PO/GRN ordered qty.'
+    )
+  }
+  return msg || 'try refreshing'
+}
+
 type SkuDayRow = { date: string; qty: number; in_stock: boolean; source: string }
 
 function downloadCsv(filename: string, headers: string[], rows: string[][]) {
@@ -468,8 +480,7 @@ export default function InventoryHistory() {
             </p>
           ) : matrixQ.isError ? (
             <p className="p-4 text-sm text-red-700">
-              Matrix load failed —{' '}
-              {matrixQ.error instanceof Error ? matrixQ.error.message : 'try refreshing'}.
+              Matrix load failed — {inventoryMatrixErrorMessage(matrixQ.error)}.
               <button
                 type="button"
                 className="ml-2 underline font-medium"

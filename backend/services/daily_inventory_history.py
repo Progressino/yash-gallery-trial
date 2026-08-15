@@ -37,6 +37,11 @@ _STORE_COLS = ["OMS_SKU", "Date", "Qty", "Source"]
 _CHANNEL_COLS = ["OMS_SKU", "Date", "Qty", "Source", "Channel"]
 _SOURCE_RANK = {"snapshot": 3, "uploaded": 2, "derived": 1}
 
+# Matrix/summary GET must not merge bak-* parquets on every request. Overlay
+# day-archive files at most once per live parquet mtime.
+_MATRIX_DAY_OVERLAY_LOCK = threading.Lock()
+_MATRIX_DAY_OVERLAY_MTIME: float | None = None
+
 # Parent-style codes (YR021) and single-cell day-total leaks (~warehouse census)
 # must never enter Inv History as sellable SKU qty.
 _PARENT_STYLE_SKU_RE = re.compile(r"^YR\d{2,4}$", re.I)
@@ -582,6 +587,63 @@ def _disk_inventory_day_snapshot_headers() -> list[dict]:
             }
         )
     return out
+
+
+def overlay_day_archives_for_read_once(sess) -> int:
+    """Apply ``inventory_day_snapshots/*.parquet`` onto carried days at most once.
+
+    Full bak-file merges belong on upload/hydrate, not GET /matrix. Those merges
+    scan hundreds of thousands of rows per backup and exceeded the 120s UI timeout.
+    """
+    global _MATRIX_DAY_OVERLAY_MTIME
+    hist_path = _warm_cache_dir() / "daily_inventory_history_df.parquet"
+    try:
+        mtime = hist_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    if _MATRIX_DAY_OVERLAY_MTIME == mtime:
+        return 0
+    if not _MATRIX_DAY_OVERLAY_LOCK.acquire(blocking=False):
+        return 0
+    try:
+        if _MATRIX_DAY_OVERLAY_MTIME == mtime:
+            return 0
+        hist = getattr(sess, "daily_inventory_history_df", None)
+        if hist is None or getattr(hist, "empty", True):
+            _MATRIX_DAY_OVERLAY_MTIME = mtime
+            return 0
+        headers = _disk_inventory_day_snapshot_headers()
+        if not headers:
+            _MATRIX_DAY_OVERLAY_MTIME = mtime
+            return 0
+        mx = inventory_history_max_date(hist)
+        if mx is None:
+            _MATRIX_DAY_OVERLAY_MTIME = mtime
+            return 0
+        span = list(pd.date_range(mx - pd.Timedelta(days=40), mx, freq="D"))
+        gaps = set(non_uploaded_inventory_dates(hist, span))
+        useful = [h for h in headers if str(h.get("snapshot_date") or "")[:10] in gaps]
+        if not useful:
+            _MATRIX_DAY_OVERLAY_MTIME = mtime
+            return 0
+        restored = overlay_persisted_inventory_snapshots(sess, snapshots=useful)
+        if restored:
+            persist_inventory_history_authoritative(sess)
+            try:
+                _MATRIX_DAY_OVERLAY_MTIME = hist_path.stat().st_mtime
+            except OSError:
+                _MATRIX_DAY_OVERLAY_MTIME = mtime
+        else:
+            _MATRIX_DAY_OVERLAY_MTIME = mtime
+        return int(restored or 0)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("overlay_day_archives_for_read_once failed")
+        _MATRIX_DAY_OVERLAY_MTIME = mtime
+        return 0
+    finally:
+        _MATRIX_DAY_OVERLAY_LOCK.release()
 
 
 def overlay_persisted_inventory_snapshots(sess, snapshots: list[dict] | None = None) -> int:
@@ -4418,6 +4480,7 @@ __all__ = [
     "inventory_sheet_end_date_from_filename",
     "record_inventory_snapshot_date",
     "overlay_persisted_inventory_snapshots",
+    "overlay_day_archives_for_read_once",
     "archive_inventory_day_snapshot",
     "assign_persisted_snapshot_overlay_dates",
     "prune_non_snapshot_post_matrix_days",

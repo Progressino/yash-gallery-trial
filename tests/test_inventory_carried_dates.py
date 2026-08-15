@@ -367,3 +367,76 @@ def test_overlay_from_disk_day_archive(tmp_path, monkeypatch):
     row = out[pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d") == "2026-08-09"].iloc[0]
     assert str(row["Source"]).lower() == "snapshot"
     assert float(row["Qty"]) == 7.0
+
+
+def test_overlay_day_archives_once_does_not_merge_backups(tmp_path, monkeypatch):
+    from backend.services import daily_inventory_history as dih
+    from backend.session import AppSession
+
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+    dih._MATRIX_DAY_OVERLAY_MTIME = None
+    called = {"restore": 0}
+
+    def _boom(*_a, **_k):
+        called["restore"] += 1
+        raise AssertionError("bak merge must not run on matrix read overlay")
+
+    monkeypatch.setattr(dih, "restore_inventory_history_from_best_disk_backups", _boom)
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(
+        [
+            {
+                "OMS_SKU": "S1-M",
+                "Date": pd.Timestamp("2026-08-09"),
+                "Qty": 10,
+                "Source": "derived",
+                "Channel": "oms",
+            }
+        ]
+    )
+    n = dih.overlay_day_archives_for_read_once(sess)
+    assert n == 0
+    assert called["restore"] == 0
+    n2 = dih.overlay_day_archives_for_read_once(sess)
+    assert n2 == 0
+
+
+def test_overlay_day_archives_applies_gap_file_once(tmp_path, monkeypatch):
+    from backend.services import daily_inventory_history as dih
+    from backend.session import AppSession
+
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+    dih._MATRIX_DAY_OVERLAY_MTIME = None
+    hist_path = tmp_path / "daily_inventory_history_df.parquet"
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(
+        [
+            {
+                "OMS_SKU": "S1-M",
+                "Date": pd.Timestamp("2026-08-08"),
+                "Qty": 10,
+                "Source": "snapshot",
+                "Channel": "oms",
+            },
+            {
+                "OMS_SKU": "S1-M",
+                "Date": pd.Timestamp("2026-08-09"),
+                "Qty": 10,
+                "Source": "derived",
+                "Channel": "oms",
+            },
+        ]
+    )
+    sess.daily_inventory_history_df.to_parquet(hist_path, index=False)
+    dih.archive_inventory_day_snapshot(
+        pd.DataFrame({"OMS_SKU": ["S1-M"], "OMS_Inventory": [7]}),
+        "2026-08-09",
+    )
+    n = dih.overlay_day_archives_for_read_once(sess)
+    assert n == 1
+    row = sess.daily_inventory_history_df
+    day = row[pd.to_datetime(row["Date"]).dt.strftime("%Y-%m-%d") == "2026-08-09"].iloc[0]
+    assert str(day["Source"]).lower() == "snapshot"
+    assert float(day["Qty"]) == 7.0
+    n2 = dih.overlay_day_archives_for_read_once(sess)
+    assert n2 == 0
