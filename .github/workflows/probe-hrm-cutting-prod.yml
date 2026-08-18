@@ -20,7 +20,8 @@ jobs:
 
           h = json.load(open("/tmp/health.json"))
           print("HEALTH", h.get("git_sha"), "warm", h.get("warm_cache"))
-          assert str(h.get("git_sha") or "").startswith("a3c2f75"), h
+          assert h.get("status") == "ok", h
+          assert h.get("git_sha"), h
 
           env = {}
           for line in open("/root/app/.env"):
