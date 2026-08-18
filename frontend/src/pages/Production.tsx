@@ -1214,7 +1214,7 @@ export default function Production() {
   const [editPlannedQty, setEditPlannedQty] = useState<Record<number, string>>({})
   const [editLineQty, setEditLineQty] = useState<Record<number, string>>({})
   const [reportsView, setReportsView] = useState<'cutting' | 'process'>('cutting')
-  const [newLines, setNewLines] = useState<{ so_number: string; sku: string; sku_name: string; style: string; planned_qty: number; vendor_rate: number; remarks: string }[]>([])
+  const [newLines, setNewLines] = useState<{ so_number: string; sku: string; sku_name: string; style: string; planned_qty: number; vendor_rate: number; remarks: string; so_qty?: number }[]>([])
   const [soLineSearch, setSOLineSearch] = useState('')
   const joImportRef = useRef<HTMLInputElement>(null)
   const wipImportRef = useRef<HTMLInputElement>(null)
