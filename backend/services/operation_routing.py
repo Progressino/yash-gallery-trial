@@ -19,6 +19,11 @@ _PROCESS_ALIASES = {
     "PRINTING": "Printing",
     "STITCH": "Stitching",
     "STITCHING": "Stitching",
+    "KAJ": "Kaj Button",
+    "KAJBUTTON": "Kaj Button",
+    "KAJHBUTTON": "Kaj Button",
+    "HANDWORK": "Handwork",
+    "HAND WORK": "Handwork",
     "FINISH": "Finishing",
     "FINISHING": "Finishing",
     "PACK": "Packing",
@@ -30,6 +35,12 @@ def normalize_process_name(raw: str) -> str:
     s = str(raw or "").strip()
     if not s:
         return ""
+    compact = s.upper().replace(" ", "").replace("-", "").replace("_", "")
+    if compact in _PROCESS_ALIASES:
+        return _PROCESS_ALIASES[compact]
+    spaced = s.upper().replace("-", " ").replace("_", " ")
+    if spaced in _PROCESS_ALIASES:
+        return _PROCESS_ALIASES[spaced]
     key = s.upper().replace(" ", "")
     return _PROCESS_ALIASES.get(key) or s.strip().title() if s.islower() else s
 

@@ -440,3 +440,45 @@ def test_overlay_day_archives_applies_gap_file_once(tmp_path, monkeypatch):
     assert float(day["Qty"]) == 7.0
     n2 = dih.overlay_day_archives_for_read_once(sess)
     assert n2 == 0
+
+
+def test_overlay_extends_history_with_snapshots_after_hist_max():
+    """July/August day files after a June-capped matrix must be merged in."""
+    from backend.services.daily_inventory_history import overlay_persisted_inventory_snapshots
+    from backend.session import AppSession
+
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(
+        [
+            {
+                "OMS_SKU": "S1-M",
+                "Date": pd.Timestamp("2026-06-30"),
+                "Qty": 10,
+                "Source": "uploaded",
+                "Channel": "oms",
+            }
+        ]
+    )
+    n = overlay_persisted_inventory_snapshots(
+        sess,
+        snapshots=[
+            {
+                "snapshot_date": "2026-07-15",
+                "uploaded_at": "2026-07-15T06:00:00Z",
+                "df": pd.DataFrame({"OMS_SKU": ["S1-M"], "OMS_Inventory": [22]}),
+            },
+            {
+                "snapshot_date": "2026-08-10",
+                "uploaded_at": "2026-08-10T06:00:00Z",
+                "df": pd.DataFrame({"OMS_SKU": ["S1-M"], "OMS_Inventory": [18]}),
+            },
+        ],
+    )
+    assert n == 2
+    out = sess.daily_inventory_history_df.copy()
+    out["d"] = pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d")
+    by = out.set_index("d")
+    assert float(by.loc["2026-07-15", "Qty"]) == 22.0
+    assert str(by.loc["2026-07-15", "Source"]).lower() == "snapshot"
+    assert float(by.loc["2026-08-10", "Qty"]) == 18.0
+    assert str(by.loc["2026-08-10", "Source"]).lower() == "snapshot"

@@ -46,6 +46,7 @@ class SOIn(BaseModel):
     dispatch_date: Optional[str] = ''  
     ref_number: Optional[str] = ''  
     ref_date: Optional[str] = ''
+    production_mode: Optional[str] = 'inhouse'
     lines: List[SOLineIn] = []
 
 class StatusUpdate(BaseModel):

@@ -14,7 +14,7 @@ import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner
 import { todayIsoIST } from '../lib/reportingDates'
 
 const PAGE_SIZE = 100
-const HISTORY_WINDOW_DAYS = 30
+const HISTORY_WINDOW_DAYS = 60
 
 function inventoryMatrixErrorMessage(err: unknown): string {
   const anyErr = err as { code?: string; message?: string } | null
@@ -192,7 +192,7 @@ export default function InventoryHistory() {
   }
 
   // Prefer summary (checks full history) over matrix (checks windowed view only).
-  // Amazon data outside the current 30-day window would otherwise hide the split toggle.
+  // Amazon data outside the current window would otherwise hide the split toggle.
   const channelSplitAvailable =
     (summaryQ.data as Record<string, unknown>)?.channel_split_available as boolean ??
     matrixQ.data?.channel_split_available ??

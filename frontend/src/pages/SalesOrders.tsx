@@ -25,6 +25,7 @@ interface SalesOrder {
   warehouse: string; delivery_date: string; status: string; notes: string
   source_type: string; ref_demand: string; sales_team: string; payment_terms: string 
 dispatch_date: string; ref_number: string; ref_date: string
+  production_mode?: string
   lines: SOLine[]
 }
 interface SOLine {
@@ -38,6 +39,14 @@ const PRIORITIES = ['Normal', 'High', 'Urgent']
 const DEMAND_STATUSES = ['Draft', 'Submitted', 'Approved', 'In Production', 'Closed', 'Cancelled']
 const SO_STATUSES = ['Draft', 'Submitted', 'Approved', 'In Production', 'Partially Dispatched', 'Dispatched', 'Closed', 'Cancelled']
 const SOURCE_TYPES = ['Sales Team Demand', 'Buyer PO', 'Offline Order']
+const PRODUCTION_MODES = [
+  { value: 'inhouse', label: 'In-house' },
+  { value: 'cut_to_pack', label: 'Cut-to-Pack (vendor)' },
+  { value: 'stitch_to_pack', label: 'Stitch-to-Pack (vendor)' },
+]
+const PRODUCTION_MODE_LABEL: Record<string, string> = Object.fromEntries(
+  PRODUCTION_MODES.map(m => [m.value, m.label]),
+)
 const UOM_OPTIONS = ['PCS', 'SET', 'PAIR', 'BOX', 'MTR', 'KG']
 
 const DEFAULT_BUYERS = ['Myntra', 'Flipkart', 'Amazon', 'Reliance', 'Direct']
@@ -234,7 +243,8 @@ export default function SalesOrders() {
   // SO form
   const [soForm, setSOForm] = useState({
     buyer: '', warehouse: '', sales_team: '', source_type: 'Sales Team Demand',
-    ref_demand: '', delivery_date: '', payment_terms: '', notes: '', dispatch_date: '', ref_number: '', ref_date: ''
+    ref_demand: '', delivery_date: '', payment_terms: '', notes: '', dispatch_date: '', ref_number: '', ref_date: '',
+    production_mode: 'inhouse',
   })
   const [soLines, setSOLines] = useState<{
     sku: string; sku_name: string; qty: number; unit: string; rate: number; remarks: string
@@ -276,7 +286,7 @@ export default function SalesOrders() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sales-orders'] }); qc.invalidateQueries({ queryKey: ['sales-orders-all'] })
       setShowNewSO(false); setSOLines([])
-      setSOForm({ buyer: '', warehouse: '', sales_team: '', source_type: 'Sales Team Demand', ref_demand: '', delivery_date: '', payment_terms: '', notes: '', dispatch_date: '', ref_number: '', ref_date: '' })
+      setSOForm({ buyer: '', warehouse: '', sales_team: '', source_type: 'Sales Team Demand', ref_demand: '', delivery_date: '', payment_terms: '', notes: '', dispatch_date: '', ref_number: '', ref_date: '', production_mode: 'inhouse' })
     }
   })
   const updateDemandMut = useMutation({
@@ -741,6 +751,16 @@ export default function SalesOrders() {
                   </select>
                 </div>
                 <div>
+                  <label className="text-xs text-gray-500">Production path</label>
+                  <select value={soForm.production_mode} onChange={e => setSOForm(f => ({ ...f, production_mode: e.target.value }))}
+                    className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                    {PRODUCTION_MODES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                  </select>
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    Style routing stays full in-house. This SO chooses Cut-to-Pack, Stitch-to-Pack, or in-house so the same style can run differently on another SO at the same time.
+                  </p>
+                </div>
+                <div>
                   <label className="text-xs text-gray-500">Notes</label>
                   <input value={soForm.notes} onChange={e => setSOForm(f => ({ ...f, notes: e.target.value }))}
                     className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
@@ -953,7 +973,7 @@ export default function SalesOrders() {
                   onClick={() => setExpandedSO(expandedSO === o.id ? null : o.id)}>
                   <div>
                     <p className="font-semibold text-gray-800 text-sm">{o.so_number}</p>
-                    <p className="text-xs text-gray-500">{o.buyer} · Delivery: {o.delivery_date || '—'} · {o.source_type || ''}</p>
+                    <p className="text-xs text-gray-500">{o.buyer} · Delivery: {o.delivery_date || '—'} · {o.source_type || ''} · {PRODUCTION_MODE_LABEL[o.production_mode || 'inhouse'] || 'In-house'}</p>
                   </div>
                   <div className="flex items-center gap-2">
                     {/* Progress quick view */}
@@ -976,13 +996,24 @@ export default function SalesOrders() {
 
                 {expandedSO === o.id && (
                   <div className="border-t border-gray-50 px-4 pb-4">
-                    <div className="flex gap-4 text-xs text-gray-400 mt-2 mb-3">
+                    <div className="flex gap-4 text-xs text-gray-400 mt-2 mb-3 flex-wrap items-center">
                       {o.ref_demand && <span>Demand: <span className="text-blue-600 font-medium">{o.ref_demand}</span></span>}
                       {o.dispatch_date && <span>Dispatch: {o.dispatch_date}</span>}
 {o.ref_number && <span>Ref: <span className="font-medium text-gray-600">{o.ref_number}</span></span>}
                       {o.warehouse && <span>WH: {o.warehouse}</span>}
                       {o.payment_terms && <span>Terms: {o.payment_terms}</span>}
                       {o.sales_team && <span>Team: {o.sales_team}</span>}
+                      <span className="flex items-center gap-1">
+                        Path:
+                        <select
+                          value={o.production_mode || 'inhouse'}
+                          onChange={e => updateSOMut.mutate({ id: o.id, data: { production_mode: e.target.value } })}
+                          onClick={e => e.stopPropagation()}
+                          className="border border-gray-200 rounded px-1.5 py-0.5 text-xs text-gray-700"
+                        >
+                          {PRODUCTION_MODES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                        </select>
+                      </span>
                     </div>
                     <table className="w-full text-xs mt-1">
                       <thead>

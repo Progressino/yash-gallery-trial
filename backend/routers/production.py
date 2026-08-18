@@ -338,6 +338,7 @@ class JOIn(BaseModel):
     fabric_qty: Optional[float] = 0
     fabric_unit: Optional[str] = 'MTR'
     lines: List[JOLineIn] = []
+    production_mode: Optional[str] = ''
     # None = auto (component JOs when Set BOM exists); False = legacy single JO + receive split
     create_component_jos: Optional[bool] = None
 
@@ -491,9 +492,10 @@ def get_processes():
     return get_all_routing_steps()
 
 @router.get("/item-routing/{sku}")
-def get_routing(sku: str):
-    """Get process routing for a specific SKU (honors component-level Set BOM routing)."""
+def get_routing(sku: str, so_number: Optional[str] = None, process: Optional[str] = None):
+    """Get process routing for a specific SKU (honors SO production path + Set BOM)."""
     from ..services.set_components import parse_component_sku
+    from ..services.so_production_path import get_so_production_mode, production_path_for, suggested_exec_type
 
     main, comp = parse_component_sku(sku)
     emb_before = False
@@ -512,11 +514,21 @@ def get_routing(sku: str):
                     emb_per_piece = float(ln.get("embroidery_qty_per_piece") or 0)
                     emb_unit = str(ln.get("embroidery_unit") or "")
                     break
+    item_path = get_item_routing(sku)
+    component_path = get_component_routing(sku)
+    path = production_path_for(sku, so_number=so_number, item_path=component_path)
+    mode = get_so_production_mode(so_number) if so_number else "inhouse"
+    current = (process or "").strip()
+    nxt = get_next_process(sku, current, so_number=so_number) if current else get_next_process(sku, "Cutting", so_number=so_number)
     return {
         "sku": sku,
-        "routing": get_component_routing(sku),
-        "item_routing": get_item_routing(sku),
-        "next_after_cutting": get_next_process(sku, "Cutting"),
+        "so_number": so_number or "",
+        "production_mode": mode,
+        "routing": path,
+        "item_routing": item_path,
+        "suggested_exec_type": suggested_exec_type(mode, current or "Cutting"),
+        "next_process": nxt,
+        "next_after_cutting": get_next_process(sku, "Cutting", so_number=so_number),
         "requires_embroidery": requires_emb,
         "embroidery_before_cutting": emb_before,
         "embroidery_type": emb_type,

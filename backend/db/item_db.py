@@ -31,8 +31,10 @@ _DEFAULT_ROUTING = [
     ("Printing",  "Screen / digital printing",     2),
     ("Embroidery","Partial panel / fabric embroidery", 3),
     ("Stitching", "Assembly and stitching",        4),
-    ("Finishing", "Quality check and ironing",     5),
-    ("Packing",   "Tagging and packing",           6),
+    ("Kaj Button", "Kaj / button attaching",       5),
+    ("Handwork",  "Hand embroidery / extra work",  6),
+    ("Finishing", "Quality check and ironing",     7),
+    ("Packing",   "Tagging and packing",           8),
 ]
 
 

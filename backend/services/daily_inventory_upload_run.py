@@ -37,10 +37,9 @@ def clear_stuck_daily_inventory_upload(sess, *, force: bool = False) -> bool:
     sess.daily_inventory_upload_result = {"ok": False, "message": msg}
     return True
 
-# PO engine only uses recent history for Eff_Days / roll-forward (default: last 30 calendar
-# days in the sheet, anchored on the latest snapshot date). Older columns are dropped at
-# ingest to keep memory and Calculate PO fast. Set DAILY_INV_MAX_DAYS to keep more (e.g. 90).
-_MAX_HISTORY_DAYS = int(os.environ.get("DAILY_INV_MAX_DAYS", "30"))
+# Keep July+August visible on Inv. History. PO calculate still trims its own copy.
+# Set DAILY_INV_MAX_DAYS to keep more (e.g. 180) or less.
+_MAX_HISTORY_DAYS = int(os.environ.get("DAILY_INV_MAX_DAYS", "90"))
 
 
 def _series_as_dates(col: pd.Series) -> pd.Series:

@@ -1721,9 +1721,9 @@ def test_cutting_split_and_set_match(isolated_module_dbs, client):
             "style_key": "1001SET",
             "style_name": "Test Set",
             "lines": [
-                {"component_code": "TOP", "component_name": "Top", "qty_per_set": 1},
-                {"component_code": "PANT", "component_name": "Pant", "qty_per_set": 1},
-                {"component_code": "DUPATTA", "component_name": "Dupatta", "qty_per_set": 1},
+                {"component_code": "TOP", "component_name": "Top", "qty_per_set": 1, "default_next_process": "Finishing"},
+                {"component_code": "PANT", "component_name": "Pant", "qty_per_set": 1, "default_next_process": "Finishing"},
+                {"component_code": "DUPATTA", "component_name": "Dupatta", "qty_per_set": 1, "default_next_process": "Finishing"},
             ],
         },
     )
@@ -1759,9 +1759,9 @@ def test_cutting_split_and_set_match(isolated_module_dbs, client):
                 "style_key": key,
                 "style_name": "Test Set",
                 "lines": [
-                    {"component_code": "TOP", "qty_per_set": 1},
-                    {"component_code": "PANT", "qty_per_set": 1},
-                    {"component_code": "DUPATTA", "qty_per_set": 1},
+                    {"component_code": "TOP", "qty_per_set": 1, "default_next_process": "Finishing"},
+                    {"component_code": "PANT", "qty_per_set": 1, "default_next_process": "Finishing"},
+                    {"component_code": "DUPATTA", "qty_per_set": 1, "default_next_process": "Finishing"},
                 ],
             },
         )

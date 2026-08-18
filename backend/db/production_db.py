@@ -1,10 +1,14 @@
 """Production Module DB — Dynamic Routing, Multi-line JO, Stage Stock"""
+import logging
 import sqlite3, os, json
 from datetime import datetime
 from typing import Optional
 
+_log = logging.getLogger(__name__)
+
 _DB = os.environ.get("PRODUCTION_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "production.db"))
 _ITEM_DB = os.environ.get("ITEM_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "items_dev.db"))
+_DEFAULT_ITEM_ROUTING = ["Cutting", "Stitching", "Finishing"]
 
 def _connect():
     conn = sqlite3.connect(_DB)
@@ -339,6 +343,7 @@ def init_db():
         # system = matched/from SO master list; manual = free-text SO no (no SO record required)
         ("job_orders", "so_source", "TEXT DEFAULT 'system'"),
         ("jo_qty_history", "jo_line_id", "INTEGER"),
+        ("job_orders", "production_mode", "TEXT DEFAULT ''"),
     ]
     for table, col, decl in migrations:
         try:
@@ -424,27 +429,65 @@ def _next_jo(conn):
 
 # ── Item Routing from items_dev.db ────────────────────────────────────────────
 
+def _routing_names_for_item_id(conn, item_id: int) -> list[str]:
+    rows = conn.execute(
+        """SELECT rs.name
+           FROM item_routing ir
+           JOIN routing_steps rs ON rs.id = ir.step_id
+           WHERE ir.item_id = ?
+           ORDER BY ir.sort_order ASC""",
+        (item_id,),
+    ).fetchall()
+    from ..services.operation_routing import normalize_process_name
+
+    return [normalize_process_name(r["name"]) or r["name"] for r in rows if r["name"]]
+
+
 def get_item_routing(sku: str) -> list:
-    """Get ordered process list for an item from item_routing + routing_steps."""
+    """Ordered process list from Item Master.
+
+    Size-variant SKUs inherit the parent Style routing. An item that exists but
+    has no routing configured (self or parent) returns ``[]`` so callers do not
+    invent Finishing. Unknown SKUs keep the legacy 3-step default for WIP.
+    """
     try:
         conn = _item_connect()
-        item = conn.execute("SELECT id FROM items WHERE item_code=?", (sku,)).fetchone()
+        code = str(sku or "").strip()
+        item = conn.execute(
+            "SELECT id, parent_id FROM items WHERE upper(item_code)=upper(?)",
+            (code,),
+        ).fetchone()
+        if not item:
+            try:
+                from ..services.helpers import get_parent_sku
+
+                parent_code = get_parent_sku(code)
+            except Exception:
+                parent_code = ""
+            if parent_code and str(parent_code).strip().upper() != code.upper():
+                item = conn.execute(
+                    "SELECT id, parent_id FROM items WHERE upper(item_code)=upper(?)",
+                    (str(parent_code).strip(),),
+                ).fetchone()
         if not item:
             conn.close()
-            return ['Cutting', 'Stitching', 'Finishing']  # default
-        rows = conn.execute("""
-            SELECT rs.name, rs.id as step_id, ir.sort_order
-            FROM item_routing ir
-            JOIN routing_steps rs ON rs.id = ir.step_id
-            WHERE ir.item_id = ?
-            ORDER BY ir.sort_order ASC
-        """, (item['id'],)).fetchall()
+            return list(_DEFAULT_ITEM_ROUTING)
+        seen: set[int] = set()
+        current_id = int(item["id"])
+        found_item = True
+        while current_id and current_id not in seen:
+            seen.add(current_id)
+            names = _routing_names_for_item_id(conn, current_id)
+            if names:
+                conn.close()
+                return names
+            row = conn.execute("SELECT parent_id FROM items WHERE id=?", (current_id,)).fetchone()
+            current_id = int(row["parent_id"]) if row and row["parent_id"] else 0
         conn.close()
-        if rows:
-            return [r['name'] for r in rows]
-        return ['Cutting', 'Stitching', 'Finishing']
+        return [] if found_item else list(_DEFAULT_ITEM_ROUTING)
     except Exception:
-        return ['Cutting', 'Stitching', 'Finishing']
+        _log.exception("get_item_routing failed for sku=%s", sku)
+        return list(_DEFAULT_ITEM_ROUTING)
 
 
 def get_component_routing(sku: str) -> list:
@@ -470,21 +513,34 @@ def get_component_routing(sku: str) -> list:
     return item_path
 
 
-def get_next_process(sku: str, current_process: str) -> Optional[str]:
-    """Next process for a SKU — uses component-level routing when Set BOM defines it."""
+def get_next_process(
+    sku: str,
+    current_process: str,
+    so_number: str | None = None,
+    production_mode: str | None = None,
+) -> Optional[str]:
+    """Next process from configured Style/Component routing (SO vendor path when set)."""
     from ..services.operation_routing import next_process_in_path, normalize_process_name
+    from ..services.so_production_path import production_path_for
 
     if normalize_process_name(current_process) == "Incoming":
         return "Cutting"
 
-    path = get_component_routing(sku)
+    item_path = get_component_routing(sku)
+    path = production_path_for(
+        sku, so_number=so_number, production_mode=production_mode, item_path=item_path
+    )
     cur = normalize_process_name(current_process)
-    # Returning from Embroidery to Cutting: next after Cutting is Stitching (post-embroidery hop).
-    if cur == "Cutting" and "Embroidery" in path:
+    if not path:
+        _log.info("next_process sku=%s current=%s path=[] → none (no routing)", sku, cur)
+        return None
+    # Returning from Embroidery to Cutting: next after the later Cutting hop.
+    if cur == "Cutting" and "Embroidery" in [normalize_process_name(p) for p in path]:
         post = next_process_in_path(path, "Cutting", after_process="Embroidery")
         pre = next_process_in_path(path, "Cutting")
-        # Default child hop is Embroidery; callers issuing after return pass to_process=Stitching.
-        return pre or post
+        nxt = pre or post
+        _log.debug("next_process sku=%s current=Cutting path=%s next=%s", sku, path, nxt)
+        return nxt
     nxt = next_process_in_path(path, current_process)
     if nxt:
         return nxt
@@ -493,13 +549,73 @@ def get_next_process(sku: str, current_process: str) -> Optional[str]:
         if idx + 1 < len(path):
             return path[idx + 1]
     except ValueError:
-        pass
+        _log.info(
+            "next_process sku=%s current=%s not in path=%s → none",
+            sku, cur, path,
+        )
+        return None
     return None
 
 
-def get_previous_process(sku: str, target_process: str) -> Optional[str]:
+def is_valid_routing_hop(
+    sku: str,
+    from_process: str,
+    to_process: str,
+    so_number: str | None = None,
+    production_mode: str | None = None,
+) -> tuple[bool, str]:
+    """Whether ``to_process`` is an allowed next hop on this SKU's routing.
+
+    Returns (ok, message). Adjacent hops on the path are allowed (including
+    Cutting ↔ Embroidery and the post-embroidery Cutting → Stitching hop).
+    Skipping Kaj Button / Handwork to jump to Finishing is rejected.
+    """
+    from ..services.operation_routing import next_process_in_path, normalize_process_name
+    from ..services.so_production_path import production_path_for
+
+    fn = normalize_process_name(from_process)
+    tn = normalize_process_name(to_process)
+    if not tn:
+        return False, "No next process configured for this routing."
+    if fn == "Incoming" and tn == "Cutting":
+        return True, ""
+    item_path = get_component_routing(sku)
+    path = production_path_for(
+        sku, so_number=so_number, production_mode=production_mode, item_path=item_path
+    )
+    if not path:
+        return False, "No next process configured for this routing."
+    norm = [normalize_process_name(p) for p in path]
+    if fn and fn not in norm:
+        return False, f"Current process {from_process} is not on the configured routing."
+    if tn not in norm:
+        return False, f"{to_process} is not on the configured routing for this SKU."
+    expected = next_process_in_path(path, fn) if fn else None
+    if expected and normalize_process_name(expected) == tn:
+        return True, ""
+    if fn == "Cutting" and "Embroidery" in norm:
+        post = next_process_in_path(path, "Cutting", after_process="Embroidery")
+        if post and normalize_process_name(post) == tn:
+            return True, ""
+    for i, step in enumerate(norm[:-1]):
+        if step == fn and norm[i + 1] == tn:
+            return True, ""
+    expected_label = expected or "none"
+    return False, (
+        f"Invalid next process '{to_process}' after '{from_process}'. "
+        f"Configured routing requires '{expected_label}'."
+    )
+
+
+def get_previous_process(
+    sku: str,
+    target_process: str,
+    so_number: str | None = None,
+    production_mode: str | None = None,
+) -> Optional[str]:
     """Process whose stock feeds Ready-To ``target_process``."""
     from ..services.operation_routing import normalize_process_name
+    from ..services.so_production_path import production_path_for
 
     target = normalize_process_name(target_process)
     if not target:
@@ -514,14 +630,18 @@ def get_previous_process(sku: str, target_process: str) -> Optional[str]:
         "Finishing": "Stitching",
         "Packing": "Finishing",
     }
-    path = get_component_routing(sku) or get_item_routing(sku) or []
+    item_path = get_component_routing(sku) or get_item_routing(sku) or []
+    path = production_path_for(
+        sku, so_number=so_number, production_mode=production_mode, item_path=item_path
+    ) or item_path
     norm = [normalize_process_name(p) for p in path]
     try:
         idx = norm.index(target)
     except ValueError:
+        if target == "Finishing" and "Cutting" in norm and "Stitching" not in norm:
+            return "Cutting"
         return _DEFAULT_FEEDER.get(target)
     if idx <= 0:
-        # Target is first/only step (e.g. routing starts at Stitching) — still credit feeder.
         return _DEFAULT_FEEDER.get(target)
     return path[idx - 1]
 
@@ -562,7 +682,7 @@ def get_all_routing_steps() -> list:
         conn.close()
         return [r['name'] for r in rows]
     except Exception:
-        return ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Finishing', 'Packing']
+        return ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Kaj Button', 'Handwork', 'Finishing', 'Packing']
 
 
 # ── Process Stock ──────────────────────────────────────────────────────────────
@@ -871,24 +991,81 @@ def _enrich_ready_row(d: dict, to_process: str) -> dict:
     return d
 
 
-def _cutting_jo_planned_map() -> dict[tuple[str, str], float]:
-    """(so_number, sku) → sum planned_qty on non-cancelled Cutting JOs."""
+def _open_jo_planned_by_sku(process: str) -> dict[tuple[str, str], float]:
+    """(so_number, sku) → planned pcs on non-cancelled JOs for this process.
+
+    Prefers ``jo_lines`` (size-wise). Header qty is used only when a JO has no lines.
+    """
     conn = _connect()
+    out: dict[tuple[str, str], float] = {}
     try:
-        rows = conn.execute(
-            """SELECT so_number, sku, COALESCE(SUM(planned_qty), 0) AS pq
-               FROM job_orders
-               WHERE process='Cutting' AND status NOT IN ('Cancelled')
-               GROUP BY so_number, sku"""
+        line_rows = conn.execute(
+            """SELECT j.so_number, l.sku, COALESCE(SUM(l.planned_qty), 0) AS pq
+               FROM jo_lines l
+               JOIN job_orders j ON j.id = l.jo_id
+               WHERE j.process=? AND j.status NOT IN ('Cancelled')
+               GROUP BY j.so_number, l.sku""",
+            (process,),
         ).fetchall()
-        return {
-            (str(r["so_number"] or "").strip(), str(r["sku"] or "").strip()): float(r["pq"] or 0)
-            for r in rows
-        }
+        for r in line_rows:
+            key = (str(r["so_number"] or "").strip(), str(r["sku"] or "").strip().upper())
+            out[key] = out.get(key, 0.0) + float(r["pq"] or 0)
+        header_rows = conn.execute(
+            """SELECT so_number, sku, planned_qty,
+                      (SELECT COUNT(*) FROM jo_lines WHERE jo_id = job_orders.id) AS nlines
+               FROM job_orders
+               WHERE process=? AND status NOT IN ('Cancelled')""",
+            (process,),
+        ).fetchall()
+        for r in header_rows:
+            if int(r["nlines"] or 0) > 0:
+                continue
+            key = (str(r["so_number"] or "").strip(), str(r["sku"] or "").strip().upper())
+            out[key] = out.get(key, 0.0) + float(r["planned_qty"] or 0)
+        return out
     except Exception:
-        return {}
+        return out
     finally:
         conn.close()
+
+
+def _apply_open_jo_planned(rows: list, process: str) -> list:
+    """Subtract open JO planned qty so Ready-To only shows uncommitted remainder."""
+    planned = _open_jo_planned_by_sku(process)
+    out = []
+    for d in rows:
+        so = str(d.get("so_number") or "").strip()
+        sku = str(d.get("sku") or "").strip().upper()
+        pq = float(planned.get((so, sku), 0) or 0)
+        avail = float(d.get("available_qty") or d.get("reserved_qty") or 0)
+        rem = avail - pq
+        if rem <= 0:
+            continue
+        d = dict(d)
+        d["available_qty"] = int(rem) if rem == int(rem) else rem
+        d["already_planned"] = pq
+        out.append(d)
+    return out
+
+
+def _merge_ready_by_sku(rows: list) -> list:
+    """One Ready-To row per SO+SKU so feeder + at-stage stock share one JO remainder."""
+    merged: dict[tuple[str, str], dict] = {}
+    order: list[tuple[str, str]] = []
+    for d in rows:
+        key = (str(d.get("so_number") or "").strip(), str(d.get("sku") or "").strip().upper())
+        if key not in merged:
+            merged[key] = dict(d)
+            order.append(key)
+            continue
+        m = merged[key]
+        m["available_qty"] = int(m.get("available_qty") or 0) + int(d.get("available_qty") or 0)
+    return [merged[k] for k in order]
+
+
+def _cutting_jo_planned_map() -> dict[tuple[str, str], float]:
+    """(so_number, sku) → sum planned_qty on non-cancelled Cutting JOs."""
+    return _open_jo_planned_by_sku("Cutting")
 
 
 def _get_ready_to_cut() -> list:
@@ -920,7 +1097,13 @@ def _get_ready_to_cut() -> list:
             if remaining <= 0:
                 continue
             d["already_planned"] = max(0, reserved - remaining)
-            d["routing"] = get_item_routing(d.get("sku", ""))
+            try:
+                from ..services.so_production_path import production_path_for
+                d["routing"] = production_path_for(
+                    d.get("sku", ""), so_number=d.get("so_number"), item_path=get_item_routing(d.get("sku", ""))
+                )
+            except Exception:
+                d["routing"] = get_item_routing(d.get("sku", ""))
             d["from_process"] = "Printed"
             d["to_process"] = "Cutting"
             result.append(_enrich_ready_row(d, "Cutting"))
@@ -939,11 +1122,19 @@ def _get_ready_to_cut() -> list:
             d['available_qty'] = int(d.get('available_qty') or 0)
             d['from_process'] = 'Incoming'
             d['to_process'] = 'Cutting'
-            d['routing'] = get_item_routing(d.get('sku', ''))
+            try:
+                from ..services.so_production_path import production_path_for
+                d['routing'] = production_path_for(
+                    d.get('sku', ''), so_number=d.get('so_number'), item_path=get_item_routing(d.get('sku', ''))
+                )
+            except Exception:
+                d['routing'] = get_item_routing(d.get('sku', ''))
             result.append(_enrich_ready_row(d, 'Cutting'))
     finally:
         conn2.close()
-    return result
+    printed = [r for r in result if str(r.get("from_process") or "") != "Incoming"]
+    incoming = [r for r in result if str(r.get("from_process") or "") == "Incoming"]
+    return printed + _apply_open_jo_planned(incoming, "Cutting")
 
 
 def _get_ready_for_process(process: str) -> list:
@@ -980,15 +1171,24 @@ def _get_ready_for_process(process: str) -> list:
         if qty <= 0:
             continue
         cur = normalize_process_name(d.get("process") or "")
+        so = d.get("so_number") or ""
         routing = get_item_routing(d["sku"])
-        next_p = get_next_process(d["sku"], d["process"])
+        try:
+            from ..services.so_production_path import production_path_for
+
+            routing = production_path_for(
+                d["sku"], so_number=so, item_path=routing
+            )
+        except Exception:
+            pass
+        next_p = get_next_process(d["sku"], d["process"], so_number=so)
         next_n = normalize_process_name(next_p or "")
         at_stage = bool(target) and cur == target
         feeds_stage = bool(target) and next_n == target
         if not at_stage and not feeds_stage:
             continue
         from_proc = d["process"] if feeds_stage and not at_stage else (
-            get_previous_process(d["sku"], process) or d["process"]
+            get_previous_process(d["sku"], process, so_number=so) or d["process"]
         )
         key = (d["so_number"], d["sku"], from_proc if feeds_stage and not at_stage else cur)
         if key in seen:
@@ -1007,7 +1207,7 @@ def _get_ready_for_process(process: str) -> list:
             "jo_number": d.get("jo_number") or "",
         }
         result.append(_enrich_ready_row(row, process))
-    return result
+    return _apply_open_jo_planned(_merge_ready_by_sku(result), process)
 
 
 # ── Job Order CRUD ─────────────────────────────────────────────────────────────
@@ -1036,8 +1236,23 @@ def list_jos(status=None, so_number=None, process=None):
     conn.close()
     # Add routing info after connection is closed
     for jo in result:
-        jo['routing'] = get_item_routing(jo.get('sku', ''))
-        jo['next_process'] = get_next_process(jo.get('sku', ''), jo.get('process', ''))
+        jo['routing'] = get_component_routing(jo.get('sku', ''))
+        try:
+            from ..services.so_production_path import production_path_for
+            jo['routing'] = production_path_for(
+                jo.get('sku', ''),
+                so_number=jo.get('so_number'),
+                production_mode=jo.get('production_mode') or None,
+                item_path=jo['routing'],
+            )
+        except Exception:
+            pass
+        jo['next_process'] = get_next_process(
+            jo.get('sku', ''),
+            jo.get('process', ''),
+            so_number=jo.get('so_number'),
+            production_mode=jo.get('production_mode') or None,
+        )
     return result
 
 
@@ -1082,8 +1297,23 @@ def get_jo(joid: int):
     jo['process_stocks'] = {r['process']: {'available': int(r['available_qty']), 'in': int(r['total_in']), 'out': int(r['total_out'])} for r in stocks_rows}
     conn.close()
     # These open their own connections separately - safe after main is closed
-    jo['routing'] = get_item_routing(jo.get('sku', ''))
-    jo['next_process'] = get_next_process(jo.get('sku', ''), jo.get('process', ''))
+    jo['routing'] = get_component_routing(jo.get('sku', ''))
+    try:
+        from ..services.so_production_path import production_path_for
+        jo['routing'] = production_path_for(
+            jo.get('sku', ''),
+            so_number=jo.get('so_number'),
+            production_mode=jo.get('production_mode') or None,
+            item_path=jo['routing'],
+        )
+    except Exception:
+        pass
+    jo['next_process'] = get_next_process(
+        jo.get('sku', ''),
+        jo.get('process', ''),
+        so_number=jo.get('so_number'),
+        production_mode=jo.get('production_mode') or None,
+    )
     try:
         from ..services.jo_issue_notes import get_issue_note_by_jo_id
         jo['issue_note'] = get_issue_note_by_jo_id(jo['id'])
@@ -1108,21 +1338,23 @@ def get_jo_by_number(jo_number: str):
 def validate_jo_creation(process: str, so_number: str, sku: str, planned_qty: int) -> dict:
     if process == 'Cutting':
         return {'ok': True, 'available': 99999, 'message': ''}
-    routing = get_item_routing(sku)
-    try:
-        idx = routing.index(process)
-        if idx == 0:
-            return {'ok': True, 'available': 99999, 'message': ''}
-        prev_process = routing[idx - 1]
-    except ValueError:
-        return {'ok': True, 'available': 99999, 'message': ''}
-    available = get_process_stock(so_number, sku, prev_process)
+    prev_process = get_previous_process(sku, process, so_number=so_number)
+    feeder = get_process_stock(so_number, sku, prev_process) if prev_process else 0
+    at_stage = get_process_stock(so_number, sku, process)
+    planned_open = float(
+        _open_jo_planned_by_sku(process).get(
+            (str(so_number or "").strip(), str(sku or "").strip().upper()), 0
+        )
+        or 0
+    )
+    available = int(feeder) + int(at_stage) - int(planned_open)
     if available <= 0:
+        where = prev_process or process
         return {'ok': False, 'available': 0,
-                'message': f'No pieces available at {prev_process} for {sku}. Complete {prev_process} first.'}
+                'message': f'No pieces available at {where} for {sku}. Complete the previous process first.'}
     if planned_qty > available:
         return {'ok': False, 'available': available,
-                'message': f'Only {available} pieces available at {prev_process}. Cannot plan {planned_qty}.'}
+                'message': f'Only {available} pieces available for {process}. Cannot plan {planned_qty}.'}
     return {'ok': True, 'available': available, 'message': ''}
 
 
@@ -1286,12 +1518,22 @@ def _create_single_jo(data: dict) -> str:
     num = _next_jo(conn)
     process = data.get('process') or data.get('stage') or 'Cutting'
     planned = int(data.get('planned_qty') or 0)
+    try:
+        from ..services.so_production_path import get_so_production_mode, normalize_production_mode
+        production_mode = (
+            normalize_production_mode(data.get("production_mode"))
+            if data.get("production_mode")
+            else get_so_production_mode(so_number)
+        )
+    except Exception:
+        production_mode = str(data.get("production_mode") or "").strip().lower()
     conn.execute("""INSERT INTO job_orders(
         jo_number, jo_date, so_number, so_source, sku, sku_name, process, stage,
         exec_type, vendor_name, vendor_rate, so_qty, planned_qty, balance_qty,
         status, expected_completion, issued_to, remarks,
-        fabric_code, fabric_qty, fabric_unit, main_sku, component_code, sku_role, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+        fabric_code, fabric_qty, fabric_unit, main_sku, component_code, sku_role,
+        production_mode, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
         (num, data.get('jo_date') or datetime.now().strftime('%Y-%m-%d'),
          data.get('so_number',''), so_source, data.get('sku',''), data.get('sku_name',''),
          process, process,
@@ -1304,7 +1546,8 @@ def _create_single_jo(data: dict) -> str:
          data.get('fabric_unit','MTR'),
          str(data.get('main_sku') or '').strip().upper(),
          str(data.get('component_code') or '').strip().upper(),
-         str(data.get('sku_role') or 'MAIN').strip().upper() or 'MAIN'))
+         str(data.get('sku_role') or 'MAIN').strip().upper() or 'MAIN',
+         production_mode))
     joid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in data.get('lines', []):
         pq = int(ln.get('planned_qty', 0))
@@ -1649,10 +1892,32 @@ def issue_pieces(joid: int, data: dict):
         conn.close()
         raise ValueError("Issued qty must be greater than 0")
     jo_line_id = data.get('jo_line_id')
-    from_process = data.get('from_process') or jo.get('process','Cutting')
-    to_process = data.get('to_process') or get_next_process(jo.get('sku',''), from_process)
     so_number = jo.get('so_number','')
     sku = data.get('sku') or jo.get('sku','')
+    from_process = data.get('from_process') or jo.get('process','Cutting')
+    to_process = data.get('to_process') or get_next_process(
+        sku,
+        from_process,
+        so_number=so_number,
+        production_mode=jo.get('production_mode') or None,
+    )
+    if not to_process:
+        conn.close()
+        raise ValueError("No next process configured for this routing.")
+    hop_ok, hop_msg = is_valid_routing_hop(
+        sku,
+        from_process,
+        str(to_process),
+        so_number=so_number,
+        production_mode=jo.get('production_mode') or None,
+    )
+    if not hop_ok:
+        conn.close()
+        _log.info(
+            "issue_pieces rejected jo=%s sku=%s %s→%s: %s",
+            joid, sku, from_process, to_process, hop_msg,
+        )
+        raise ValueError(hop_msg)
 
     try:
         _assert_set_issue_allowed(conn, so_number, sku, from_process, to_process)
@@ -2364,7 +2629,9 @@ def create_next_process_jo(parent_joid: int) -> dict:
     sku = parent.get('sku','')
     so_number = parent.get('so_number','')
     current_process = parent.get('process','Cutting')
-    next_process = get_next_process(sku, current_process)
+    next_process = get_next_process(
+        sku, current_process, so_number=so_number, production_mode=parent.get('production_mode') or None
+    )
     if not next_process:
         conn.close()
         return {'ok': False, 'message': f'{current_process} is the last process for this item'}
@@ -2380,8 +2647,8 @@ def create_next_process_jo(parent_joid: int) -> dict:
     conn.execute("""INSERT INTO job_orders(
         jo_number, jo_date, so_number, so_source, sku, sku_name, process, stage,
         exec_type, vendor_name, vendor_rate, so_qty, planned_qty, balance_qty, status,
-        expected_completion, fabric_code, parent_jo_id, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+        expected_completion, fabric_code, parent_jo_id, production_mode, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
         (num, datetime.now().strftime('%Y-%m-%d'),
          so_number, parent_so_source, sku, parent.get('sku_name',''),
          next_process, next_process,
@@ -2390,7 +2657,7 @@ def create_next_process_jo(parent_joid: int) -> dict:
          float(parent.get('vendor_rate') or 0),
          parent.get('so_qty',0), available, available,
          'Created', parent.get('expected_completion',''),
-         parent.get('fabric_code',''), parent_joid))
+         parent.get('fabric_code',''), parent_joid, parent.get('production_mode') or ''))
     new_joid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     # Copy lines from parent with available qty
@@ -3445,7 +3712,7 @@ def get_jo_panel_wip(joid: int) -> dict:
                 bundle_ready=False,
             )
             issue_from = "Embroidery" if emb_out > 0 else "Cutting"
-            issue_to = get_next_process(psku, issue_from)
+            issue_to = get_next_process(psku, issue_from, so_number=so_number)
             child = conn.execute(
                 """SELECT id, jo_number, process, status, planned_qty, received_qty,
                           measurement_qty, garment_qty, embroidery_type, embroidery_unit
@@ -3521,7 +3788,7 @@ def get_jo_panel_wip(joid: int) -> dict:
                     "embroidery_outstanding": emb_out,
                     "current_location": location or "—",
                     "status": status,
-                    "next_process": get_next_process(psku, "Cutting"),
+                    "next_process": get_next_process(psku, "Cutting", so_number=so_number),
                     "issue_from_process": issue_from,
                     "issue_to_process": issue_to,
                     "issue_to_label": issue_label,

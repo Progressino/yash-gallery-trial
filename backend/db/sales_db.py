@@ -45,6 +45,7 @@ def init_db():
         payment_terms TEXT,
         status        TEXT DEFAULT 'Draft',
         notes         TEXT,
+        production_mode TEXT DEFAULT 'inhouse',
         created_at    TEXT DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS so_lines (
@@ -74,6 +75,7 @@ def init_db():
         "ALTER TABLE so_lines ADD COLUMN merchant_code TEXT DEFAULT ''",
         "ALTER TABLE so_lines ADD COLUMN priority TEXT DEFAULT 'Normal'",
         "ALTER TABLE so_lines ADD COLUMN line_delivery_date TEXT DEFAULT ''",
+        "ALTER TABLE sales_orders ADD COLUMN production_mode TEXT DEFAULT 'inhouse'",
     ]:
         try:
             conn.execute(col_ddl)
@@ -153,14 +155,19 @@ def list_orders(status: str = None):
 def create_order(data: dict):
     conn = _connect()
     num = _next_num(conn, 'sales_orders', 'so_number', 'SO')
+    try:
+        from ..services.so_production_path import normalize_production_mode
+        production_mode = normalize_production_mode(data.get("production_mode"))
+    except Exception:
+        production_mode = str(data.get("production_mode") or "inhouse").strip().lower() or "inhouse"
     conn.execute("""INSERT INTO sales_orders(so_number,so_date,buyer,warehouse,sales_team,source_type,
-        ref_demand,delivery_date,payment_terms,status,notes)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        ref_demand,delivery_date,payment_terms,status,notes,production_mode)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
         (num, data.get('so_date') or datetime.now().strftime('%Y-%m-%d'),
          data.get('buyer') or '', data.get('warehouse') or '', data.get('sales_team') or '',
          data.get('source_type') or 'Sales Team Demand', data.get('ref_demand') or '',
          data.get('delivery_date') or '', data.get('payment_terms') or '',
-         data.get('status') or 'Draft', data.get('notes') or ''))
+         data.get('status') or 'Draft', data.get('notes') or '', production_mode))
     soid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     for ln in data.get('lines', []):
         conn.execute(
@@ -176,7 +183,14 @@ def create_order(data: dict):
     conn.commit(); conn.close(); return num
 
 def update_order(soid: int, data: dict):
-    allowed = ['buyer','warehouse','delivery_date','payment_terms','status','notes','sales_team']
+    if 'production_mode' in data:
+        try:
+            from ..services.so_production_path import normalize_production_mode
+            data = dict(data)
+            data['production_mode'] = normalize_production_mode(data.get('production_mode'))
+        except Exception:
+            pass
+    allowed = ['buyer','warehouse','delivery_date','payment_terms','status','notes','sales_team','production_mode']
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed] + [soid]
     if not sets: return

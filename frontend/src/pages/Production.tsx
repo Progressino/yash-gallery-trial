@@ -383,12 +383,16 @@ const PROCESS_COLORS: Record<string, string> = {
   Finishing: 'bg-green-100 text-green-700',
   Packing: 'bg-teal-100 text-teal-700',
   'Kajh Button': 'bg-orange-100 text-orange-700',
+  'Kaj Button': 'bg-orange-100 text-orange-700',
+  Handwork: 'bg-rose-100 text-rose-700',
 }
 
 const PROCESS_ICONS: Record<string, string> = {
   Cutting: '✂️', Printing: '🖨️', Embroidery: '🧶',
   Stitching: '🧵', Finishing: '✨', Packing: '📦',
   'Kajh Button': '🔘',
+  'Kaj Button': '🔘',
+  Handwork: '🪡',
 }
 
 const fmt = (n: number) => Math.round(n || 0).toLocaleString('en-IN')
@@ -401,6 +405,13 @@ const EXEC_TYPE_OPTIONS = [
 
 function isOutsourceExec(execType: string) {
   return String(execType || '').trim().toLowerCase() === 'outsource'
+}
+
+function suggestedExecType(mode: string | undefined, process: string) {
+  const m = String(mode || 'inhouse').toLowerCase().replace(/[-\s]/g, '_')
+  if (m === 'cut_to_pack' && process === 'Cutting') return 'Outsource'
+  if (m === 'stitch_to_pack' && process === 'Stitching') return 'Outsource'
+  return 'Inhouse'
 }
 
 function execTypeLabel(execType: string) {
@@ -1198,6 +1209,7 @@ export default function Production() {
     exec_type: 'Inhouse', vendor_name: '', vendor_rate: 0,
     planned_qty: 0, so_qty: 0, fabric_code: '', fabric_qty: 0,
     fabric_unit: 'MTR', expected_completion: '', remarks: '',
+    from_ready_to: false,
   })
   const [editPlannedQty, setEditPlannedQty] = useState<Record<number, string>>({})
   const [editLineQty, setEditLineQty] = useState<Record<number, string>>({})
@@ -1299,18 +1311,31 @@ export default function Production() {
     enabled: !!newForm.so_number,
     staleTime: 0,
   })
-  const soLinesFiltered = useMemo(() => {
+  const readyLinesForJo = useMemo(() => {
+    const so = String(newForm.so_number || '')
+    return (readyLines as any[])
+      .filter(r => String(r.so_number || '') === so)
+      .map(r => ({
+        sku: r.sku,
+        sku_name: r.sku_name || r.item_name || '',
+        qty: Number(r.available_qty || r.reserved_qty || 0),
+        available_qty: Number(r.available_qty || r.reserved_qty || 0),
+      }))
+  }, [readyLines, newForm.so_number])
+  const joLinePickerRows = useMemo(() => {
+    const rows = newForm.from_ready_to ? readyLinesForJo : (soLines as any[])
     const q = soLineSearch.trim().toLowerCase()
-    const rows = soLines as any[]
     if (!q) return rows
-    return rows.filter(l =>
+    return rows.filter((l: any) =>
       String(l.sku || '').toLowerCase().includes(q)
       || String(l.sku_name || l.item_name || '').toLowerCase().includes(q),
     )
-  }, [soLines, soLineSearch])
+  }, [newForm.from_ready_to, readyLinesForJo, soLines, soLineSearch])
   const { data: itemRouting } = useQuery({
-    queryKey: ['item-routing', newForm.sku],
-    queryFn: () => api.get(`/production/item-routing/${encodeURIComponent(newForm.sku)}`).then(r => r.data),
+    queryKey: ['item-routing', newForm.sku, newForm.so_number],
+    queryFn: () => api.get(`/production/item-routing/${encodeURIComponent(newForm.sku)}`, {
+      params: newForm.so_number ? { so_number: newForm.so_number } : {},
+    }).then(r => r.data),
     enabled: !!newForm.sku,
   })
   const { data: processors = [] } = useQuery<{ processor_name?: string }[]>({
@@ -1690,14 +1715,19 @@ export default function Production() {
       const sku = opts?.sku || line?.sku || jo.sku
       const fromProc = opts?.fromProcess || jo.process
       let toProc = opts?.toProcess || ''
-      if (!toProc && sku !== jo.sku) {
+      if (!toProc) {
         try {
-          const route = await api.get(`/production/item-routing/${encodeURIComponent(sku)}`)
-          toProc = fromProc === 'Embroidery'
-            ? (route.data?.routing || []).includes('Cutting')
-              ? 'Cutting'
-              : route.data?.next_after_cutting || ''
-            : route.data?.next_after_cutting || ''
+          const route = await api.get(`/production/item-routing/${encodeURIComponent(sku)}`, {
+            params: {
+              ...(jo.so_number ? { so_number: jo.so_number } : {}),
+              process: fromProc,
+            },
+          })
+          toProc = route.data?.next_process || ''
+          if (!toProc && fromProc === 'Embroidery') {
+            const hops = (route.data?.routing || []) as string[]
+            toProc = hops.includes('Cutting') ? 'Cutting' : (route.data?.next_after_cutting || '')
+          }
         } catch {
           toProc = jo.next_process || ''
         }
@@ -1718,7 +1748,7 @@ export default function Production() {
   // ── Add SO lines to new JO ─────────────────────────────────────────────────
   const addSOLineToJO = async (line: any) => {
     if (newLines.find(l => l.sku === line.sku)) return
-    const soQty = Number(line.qty) || 0
+    const soQty = Number(line.available_qty ?? line.qty) || 0
     // Cutting planned qty defaults to SO qty but is independent (may cut fewer pcs).
     setNewLines(ls => [...ls, {
       so_number: newForm.so_number,
@@ -2209,6 +2239,11 @@ export default function Production() {
                   ➡️ Issue to {jo.next_process}
                 </button>
               )}
+              {!jo.next_process && !panelCtx && (
+                <span className="px-3 py-1.5 text-xs bg-gray-50 text-gray-600 rounded-lg border border-gray-200">
+                  No next process configured for this routing
+                </span>
+              )}
               <button onClick={() => openModal('add-cost', jo)} className="px-3 py-1.5 text-xs bg-amber-600 text-white rounded-lg font-medium">💰 Add Cost</button>
               <select value={jo.status} onChange={e => updateJOMut.mutate({ id: jo.id, data: { status: e.target.value } })}
                 className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs">
@@ -2471,6 +2506,7 @@ export default function Production() {
                   so_number: '',
                   sku: '',
                   sku_name: '',
+                  from_ready_to: false,
                 }))
                 setNewLines([])
                 setSOLineSearch('')
@@ -2576,17 +2612,33 @@ export default function Production() {
                       )}
                     </div>
                     <button onClick={() => {
+                      const avail = Number(r.available_qty || r.reserved_qty || 0)
+                      const so = (soList as any[]).find((s: any) => s.so_number === r.so_number)
+                      const exec = suggestedExecType(so?.production_mode, activeProcess)
                       setNewForm(f => ({
                         ...f,
                         so_number: r.so_number,
                         so_source: 'system',
                         sku: r.sku || '',
+                        sku_name: r.sku_name || r.item_name || '',
                         fabric_code: r.fabric_code || '',
                         fabric_qty: r.reserved_qty || 0,
                         process: activeProcess,
-                        planned_qty: r.available_qty || r.reserved_qty || 0,
+                        planned_qty: avail,
+                        so_qty: avail,
+                        exec_type: exec,
+                        from_ready_to: true,
                       }))
-                      setNewLines([])
+                      setNewLines([{
+                        so_number: r.so_number,
+                        sku: r.sku || '',
+                        sku_name: r.sku_name || r.item_name || '',
+                        style: '',
+                        planned_qty: avail,
+                        so_qty: avail,
+                        vendor_rate: 0,
+                        remarks: '',
+                      }])
                       setSOLineSearch('')
                       setModal('new-jo')
                     }} className="text-xs px-2 py-1 bg-[#002B5B] text-white rounded hover:bg-blue-800 shrink-0">
@@ -2858,6 +2910,13 @@ export default function Production() {
               </div>
             )}
 
+            {newForm.from_ready_to && (
+              <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                Opened from Ready to {newForm.process}. This line is pre-filled. You can add other sizes that are
+                also Ready to {newForm.process} on the same SO.
+              </p>
+            )}
+
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               {/* SO source + number — manual does not create a Sales SO record */}
               <div className="md:col-span-3 flex flex-wrap gap-3 items-end">
@@ -2866,21 +2925,23 @@ export default function Production() {
                   <div className="flex rounded-lg border border-gray-200 overflow-hidden text-xs">
                     <button
                       type="button"
+                      disabled={newForm.from_ready_to}
                       onClick={() => {
-                        setNewForm(f => ({ ...f, so_source: 'system', so_number: '', sku: '', sku_name: '' }))
+                        setNewForm(f => ({ ...f, so_source: 'system', so_number: '', sku: '', sku_name: '', from_ready_to: false }))
                         setNewLines([])
                       }}
-                      className={`px-3 py-1.5 ${newForm.so_source === 'system' ? 'bg-[#002B5B] text-white' : 'bg-white text-gray-600'}`}
+                      className={`px-3 py-1.5 ${newForm.so_source === 'system' ? 'bg-[#002B5B] text-white' : 'bg-white text-gray-600'} disabled:opacity-50`}
                     >
                       Existing SO
                     </button>
                     <button
                       type="button"
+                      disabled={newForm.from_ready_to}
                       onClick={() => {
-                        setNewForm(f => ({ ...f, so_source: 'manual', sku: '', sku_name: '' }))
+                        setNewForm(f => ({ ...f, so_source: 'manual', sku: '', sku_name: '', from_ready_to: false }))
                         setNewLines([])
                       }}
-                      className={`px-3 py-1.5 border-l ${newForm.so_source === 'manual' ? 'bg-[#002B5B] text-white' : 'bg-white text-gray-600'}`}
+                      className={`px-3 py-1.5 border-l ${newForm.so_source === 'manual' ? 'bg-[#002B5B] text-white' : 'bg-white text-gray-600'} disabled:opacity-50`}
                     >
                       Manual SO #
                     </button>
@@ -2895,9 +2956,15 @@ export default function Production() {
                       placeholder="e.g. SO-OTS-001 (not created in Sales)"
                       className="w-full border border-amber-200 bg-amber-50 rounded px-2 py-1.5 text-sm mt-1"
                     />
+                  ) : newForm.from_ready_to ? (
+                    <input
+                      value={newForm.so_number}
+                      readOnly
+                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 bg-gray-50"
+                    />
                   ) : (
                     <select value={newForm.so_number} onChange={e => {
-                      setNewForm(f => ({ ...f, so_number: e.target.value, sku: '', sku_name: '' }))
+                      setNewForm(f => ({ ...f, so_number: e.target.value, sku: '', sku_name: '', from_ready_to: false }))
                       setNewLines([])
                       setSOLineSearch('')
                     }}
@@ -2914,7 +2981,8 @@ export default function Production() {
               {/* Process */}
               <div><label className="text-xs text-gray-500">Process *</label>
                 <select value={newForm.process} onChange={e => setNewForm(f => ({ ...f, process: e.target.value }))}
-                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                  disabled={newForm.from_ready_to}
+                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 disabled:bg-gray-50">
                   {allProcesses.map(p => <option key={p}>{p}</option>)}
                 </select>
               </div>
@@ -3095,11 +3163,15 @@ export default function Production() {
               </div>
             )}
 
-            {/* SO Lines — add to JO */}
-            {newForm.so_source === 'system' && newForm.so_number && soLines.length > 0 && (
+            {/* SO / Ready-To lines — add to JO */}
+            {newForm.so_source === 'system' && newForm.so_number && (newForm.from_ready_to ? readyLinesForJo.length > 0 : soLines.length > 0) && (
               <div className="border rounded-xl overflow-hidden">
                 <div className="px-3 py-2 bg-blue-50 text-xs font-semibold text-blue-700 flex flex-wrap justify-between gap-2 items-center">
-                  <span>SO Lines — all styles (live list). Search & scroll to find SKUs.</span>
+                  <span>
+                    {newForm.from_ready_to
+                      ? `Ready to ${newForm.process} on this SO — only sizes currently at this stage`
+                      : 'SO Lines — all styles (live list). Search & scroll to find SKUs.'}
+                  </span>
                   <div className="flex items-center gap-2">
                     <input
                       type="search"
@@ -3108,23 +3180,23 @@ export default function Production() {
                       placeholder="Search SKU…"
                       className="border rounded px-2 py-1 text-xs font-normal w-40"
                     />
-                    <button onClick={() => soLinesFiltered.forEach(addSOLineToJO)} className="text-blue-600 hover:underline">Add all shown</button>
+                    <button onClick={() => joLinePickerRows.forEach(addSOLineToJO)} className="text-blue-600 hover:underline">Add all shown</button>
                   </div>
                 </div>
                 <div className="max-h-56 overflow-y-auto">
                   <table className="w-full text-xs">
                     <thead className="sticky top-0 bg-gray-50 z-10"><tr className="text-gray-400 border-b">
                       <th className="text-left px-3 py-1.5">SKU</th><th className="text-left px-3 py-1.5">Name</th>
-                      <th className="text-right px-3 py-1.5">SO Qty</th><th className="px-3 py-1.5"></th>
+                      <th className="text-right px-3 py-1.5">{newForm.from_ready_to ? 'Ready qty' : 'SO Qty'}</th><th className="px-3 py-1.5"></th>
                     </tr></thead>
                     <tbody>
-                      {soLinesFiltered.map((l: any) => {
+                      {joLinePickerRows.map((l: any) => {
                         const added = newLines.some(nl => nl.sku === l.sku)
                         return (
                           <tr key={l.sku} className="border-t hover:bg-gray-50">
                             <td className="px-3 py-1.5 font-mono font-semibold break-all">{l.sku}</td>
                             <td className="px-3 py-1.5 text-gray-600 break-words">{l.sku_name || l.item_name || '—'}</td>
-                            <td className="px-3 py-1.5 text-right">{l.qty}</td>
+                            <td className="px-3 py-1.5 text-right">{l.available_qty ?? l.qty}</td>
                             <td className="px-3 py-1.5">
                               <button onClick={() => added ? setNewLines(ls => ls.filter(nl => nl.sku !== l.sku)) : addSOLineToJO(l)}
                                 className={`px-2 py-0.5 rounded text-xs font-medium ${added ? 'bg-green-100 text-green-700' : 'bg-[#002B5B] text-white hover:bg-blue-800'}`}>
@@ -3137,8 +3209,9 @@ export default function Production() {
                     </tbody>
                   </table>
                 </div>
-                {soLinesFiltered.length === 0 && (
+                {joLinePickerRows.length === 0 && (
                   <p className="text-xs text-amber-600 px-3 py-2">No SKUs match “{soLineSearch}”.</p>
+                )}
                 )}
               </div>
             )}
@@ -3225,8 +3298,9 @@ export default function Production() {
                   || 0
                 const headerSku = (newForm.sku || '').trim() || (lines[0]?.sku || '')
                 const headerName = (newForm.sku_name || '').trim() || (lines[0]?.sku_name || '')
+                const { from_ready_to: _fromReady, ...formPayload } = newForm
                 createJOMut.mutate({
-                  ...newForm,
+                  ...formPayload,
                   so_source: newForm.so_source || 'system',
                   sku: headerSku,
                   sku_name: headerName,
@@ -3435,7 +3509,10 @@ export default function Production() {
             <div className="bg-purple-50 rounded-lg p-3 text-xs text-purple-700">
               SKU: <b className="font-mono">{issuePiecesSku || activeJO.sku}</b>
               <br />
-              From: <b>{issueFromProcess || activeJO.process}</b> → To: <b>{issuePiecesForm.to_process || activeJO.next_process || 'Next'}</b>
+              From: <b>{issueFromProcess || activeJO.process}</b> → To: <b>{issuePiecesForm.to_process || activeJO.next_process || '—'}</b>
+              {!(issuePiecesForm.to_process || activeJO.next_process) && (
+                <span className="block mt-1 text-amber-800">No next process configured for this routing.</span>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div><label className="text-xs text-gray-500">Panel / SKU</label>
@@ -3444,12 +3521,12 @@ export default function Production() {
               <div><label className="text-xs text-gray-500">From process</label>
                 <input value={issueFromProcess || activeJO.process} readOnly
                   className="w-full border rounded px-2 py-1.5 text-sm mt-1 bg-gray-50" /></div>
-              <div><label className="text-xs text-gray-500">To Process</label>
-                <select value={issuePiecesForm.to_process} onChange={e => setIssuePiecesForm(f => ({ ...f, to_process: e.target.value }))}
-                  className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                  <option value="">Select</option>
-                  {allProcesses.filter(p => p !== activeJO.process).map(p => <option key={p}>{p}</option>)}
-                </select>
+              <div><label className="text-xs text-gray-500">To Process (from routing)</label>
+                <input
+                  value={issuePiecesForm.to_process}
+                  readOnly
+                  className="w-full border rounded px-2 py-1.5 text-sm mt-1 bg-gray-50 font-semibold"
+                />
               </div>
               <div><label className="text-xs text-gray-500">Issue Qty (pcs) *</label>
                 <input type="number" value={issuePiecesForm.issued_qty} onChange={e => setIssuePiecesForm(f => ({ ...f, issued_qty: +e.target.value }))}

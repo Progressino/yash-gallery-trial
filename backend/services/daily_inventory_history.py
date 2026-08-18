@@ -622,7 +622,18 @@ def overlay_day_archives_for_read_once(sess) -> int:
             return 0
         span = list(pd.date_range(mx - pd.Timedelta(days=40), mx, freq="D"))
         gaps = set(non_uploaded_inventory_dates(hist, span))
-        useful = [h for h in headers if str(h.get("snapshot_date") or "")[:10] in gaps]
+        after_max = {
+            str(h.get("snapshot_date") or "")[:10]
+            for h in headers
+            if len(str(h.get("snapshot_date") or "")[:10]) == 10
+            and str(h.get("snapshot_date") or "")[:10] > str(pd.Timestamp(mx).date())
+        }
+        useful = [
+            h
+            for h in headers
+            if str(h.get("snapshot_date") or "")[:10] in gaps
+            or str(h.get("snapshot_date") or "")[:10] in after_max
+        ]
         if not useful:
             _MATRIX_DAY_OVERLAY_MTIME = mtime
             return 0
@@ -658,9 +669,6 @@ def overlay_persisted_inventory_snapshots(sess, snapshots: list[dict] | None = N
         return 0
     span = list(pd.date_range(days.min(), days.max(), freq="D"))
     gaps = set(non_uploaded_inventory_dates(work, span))
-    if not gaps:
-        return 0
-
     headers = snapshots
     load_fn = None
     if headers is None:
@@ -683,10 +691,21 @@ def overlay_persisted_inventory_snapshots(sess, snapshots: list[dict] | None = N
     if not headers:
         return 0
 
+    hist_max = str(pd.Timestamp(days.max()).date())
+    extend_days = {
+        str(h.get("snapshot_date") or "")[:10]
+        for h in headers
+        if len(str(h.get("snapshot_date") or "")[:10]) == 10
+        and str(h.get("snapshot_date") or "")[:10] > hist_max
+    }
+    allowed = gaps | extend_days
+    if not allowed:
+        return 0
+
     assigned = assign_persisted_snapshot_overlay_dates(headers)
     restored = 0
     for day, header in assigned.items():
-        if day not in gaps:
+        if day not in allowed:
             continue
         variant = header.get("df")
         if variant is None and header.get("path"):
