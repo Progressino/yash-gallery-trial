@@ -142,11 +142,66 @@ def _inventory_matrix_payload(
     end_date: Optional[str] = None,
     channel: str = "combined",
 ) -> dict:
-    from ..services.daily_inventory_history import inventory_history_wide_matrix
+    from ..services.daily_inventory_history import (
+        extend_history_gaps_with_sales,
+        inventory_history_view_end_date,
+        inventory_history_wide_matrix,
+    )
     from ..services.sku_mapping import resolve_sku_mapping_base
 
     try:
         df = _inventory_history_df_for_matrix_read(sess)
+        sales_df = _sales_df_for_read(sess)
+        if sales_df is not None and not getattr(sales_df, "empty", True):
+            try:
+                view_end = inventory_history_view_end_date(df, end_date)
+                hist_max = ""
+                if df is not None and not getattr(df, "empty", True) and "Date" in df.columns:
+                    _hist_dates = pd.to_datetime(df["Date"], errors="coerce").dropna()
+                    if not _hist_dates.empty:
+                        hist_max = str(pd.Timestamp(_hist_dates.max()).normalize().date())
+                sales_max = ""
+                if "TxnDate" in sales_df.columns:
+                    _sales_dates = pd.to_datetime(sales_df["TxnDate"], errors="coerce").dropna()
+                    if not _sales_dates.empty:
+                        sales_max = str(pd.Timestamp(_sales_dates.max()).normalize().date())
+                elif "Date" in sales_df.columns:
+                    _sales_dates = pd.to_datetime(sales_df["Date"], errors="coerce").dropna()
+                    if not _sales_dates.empty:
+                        sales_max = str(pd.Timestamp(_sales_dates.max()).normalize().date())
+                cache_key = (
+                    str(view_end or ""),
+                    int(len(df)) if df is not None else 0,
+                    hist_max,
+                    int(len(sales_df)),
+                    sales_max,
+                )
+                cached_key = getattr(sess, "_inventory_matrix_sales_ext_cache_key", None)
+                cached_df = getattr(sess, "_inventory_matrix_sales_ext_cache_df", None)
+                if cached_key == cache_key and cached_df is not None and not getattr(cached_df, "empty", True):
+                    df = cached_df
+                else:
+                    started = datetime.now().timestamp()
+                    extended = extend_history_gaps_with_sales(
+                        df,
+                        sales_df,
+                        cap_date=pd.Timestamp(view_end).normalize() if view_end else None,
+                    )
+                    elapsed = datetime.now().timestamp() - started
+                    if elapsed > 10:
+                        logging.getLogger(__name__).warning(
+                            "inventory matrix sales extension took %.2fs; "
+                            "falling back to snapshot-only carry-forward",
+                            elapsed,
+                        )
+                    elif extended is not None and not getattr(extended, "empty", True):
+                        df = extended
+                        sess._inventory_matrix_sales_ext_cache_key = cache_key
+                        sess._inventory_matrix_sales_ext_cache_df = extended
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "inventory matrix sales extension failed; using snapshot-only carry-forward"
+                )
         # Integrity repair (duplicate/spike detection) intentionally NOT on this path —
         # it scanned/copied ~400k rows and hung the UI at "Loading matrix…". Repair runs
         # on snapshot upload / warm-cache load instead.

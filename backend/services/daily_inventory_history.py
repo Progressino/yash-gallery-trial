@@ -2711,6 +2711,126 @@ def extend_history_with_sales(
     return full.reset_index(drop=True)
 
 
+def extend_history_gaps_with_sales(
+    inv_history: pd.DataFrame,
+    sales_df: Optional[pd.DataFrame],
+    cap_date: Optional[pd.Timestamp] = None,
+) -> pd.DataFrame:
+    """Derive sales-adjusted rows for gaps between authoritative snapshot days.
+
+    Unlike ``extend_history_with_sales()``, which only rolls forward after the
+    latest authoritative day, this helper derives intermediate sales days between
+    each pair of uploaded/snapshot dates and after the last snapshot up to
+    ``cap_date``. The wide matrix then forward-fills only within those derived
+    checkpoints instead of flat-copying one stale snapshot across long gaps.
+    """
+    if inv_history is None or inv_history.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "Date", "Qty", "Source"])
+
+    base = combine_inventory_channels(inv_history)
+    base["Date"] = pd.to_datetime(base["Date"], errors="coerce").dt.normalize()
+    base["Qty"] = pd.to_numeric(base["Qty"], errors="coerce")
+    base = base.dropna(subset=["Date", "Qty", "OMS_SKU"])
+    base = base[base["OMS_SKU"].astype(str).str.len() > 0]
+    if base.empty:
+        return pd.DataFrame(columns=["OMS_SKU", "Date", "Qty", "Source"])
+    base["Qty"] = base["Qty"].astype(float).clip(lower=0.0)
+    if "Source" not in base.columns:
+        base["Source"] = "uploaded"
+    out_cols = ["OMS_SKU", "Date", "Qty", "Source"]
+
+    auth = base[base["Source"].astype(str).str.lower().isin(["snapshot", "uploaded"])].copy()
+    if auth.empty:
+        return extend_history_with_sales(base[out_cols], sales_df, cap_date=cap_date)
+
+    if cap_date is None:
+        cap_date = pd.Timestamp.now().normalize()
+    cap_date = pd.Timestamp(cap_date).normalize()
+    if pd.isna(cap_date):
+        cap_date = pd.Timestamp.now().normalize()
+
+    auth_dates = sorted(pd.to_datetime(auth["Date"], errors="coerce").dropna().dt.normalize().unique())
+    if not auth_dates:
+        return base[out_cols].reset_index(drop=True)
+
+    blocked = set(
+        zip(
+            auth["OMS_SKU"].astype(str).str.strip().str.upper(),
+            auth["Date"].dt.normalize(),
+        )
+    )
+    sales_net = _sales_net_by_sku_day(
+        sales_df,
+        start=pd.Timestamp(auth_dates[0]).normalize() + pd.Timedelta(days=1),
+        end=cap_date,
+    )
+    if sales_net.empty:
+        return base[out_cols].reset_index(drop=True)
+
+    derived_rows: list[pd.DataFrame] = []
+    for i, start_day in enumerate(auth_dates):
+        start_ts = pd.Timestamp(start_day).normalize()
+        next_auth = (
+            pd.Timestamp(auth_dates[i + 1]).normalize()
+            if i + 1 < len(auth_dates)
+            else None
+        )
+        seg_end = cap_date if next_auth is None else min(cap_date, next_auth - pd.Timedelta(days=1))
+        if seg_end <= start_ts:
+            continue
+        seed = auth.loc[auth["Date"] == start_ts].copy()
+        if seed.empty:
+            continue
+        last_snap = seed.groupby("OMS_SKU", as_index=True)["Qty"].max()
+        sku_list = last_snap.index.to_numpy()
+        seg_sales = sales_net.loc[
+            (sales_net["Date"] > start_ts)
+            & (sales_net["Date"] <= seg_end)
+        ].copy()
+        if seg_sales.empty:
+            continue
+        active_days = sorted(pd.to_datetime(seg_sales["Date"], errors="coerce").dropna().dt.normalize().unique())
+        if not active_days:
+            continue
+        pivot = (
+            seg_sales.set_index(["OMS_SKU", "Date"])["Net_Units"]
+            .unstack(fill_value=0.0)
+            .reindex(index=sku_list, columns=pd.DatetimeIndex(active_days), fill_value=0.0)
+        )
+        net_matrix = pivot.to_numpy(dtype=float)
+        prev_qty = last_snap.reindex(sku_list).fillna(0.0).to_numpy(dtype=float)
+        baseline_qty = prev_qty.copy()
+        for di, day in enumerate(active_days):
+            day_ts = pd.Timestamp(day).normalize()
+            net_d = net_matrix[:, di]
+            new_qty = np.clip(prev_qty - net_d, 0.0, baseline_qty)
+            active_mask = (prev_qty > 0) | (np.abs(net_d) > 1e-9)
+            if np.any(active_mask):
+                sku_active = sku_list[active_mask]
+                keep = [
+                    idx
+                    for idx, sku in enumerate(sku_active)
+                    if (str(sku).strip().upper(), day_ts) not in blocked
+                ]
+                if keep:
+                    derived_rows.append(
+                        pd.DataFrame(
+                            {
+                                "OMS_SKU": sku_active[keep],
+                                "Date": day_ts,
+                                "Qty": new_qty[active_mask][keep],
+                                "Source": "derived",
+                            }
+                        )
+                    )
+            prev_qty = new_qty
+
+    if not derived_rows:
+        return base[out_cols].reset_index(drop=True)
+    derived = pd.concat(derived_rows, ignore_index=True)
+    return pd.concat([base[out_cols], derived[out_cols]], ignore_index=True).reset_index(drop=True)
+
+
 def _sales_net_by_sku_day(
     sales_df: pd.DataFrame | None,
     *,
@@ -4490,6 +4610,7 @@ __all__ = [
     "overlay_inventory_variant_from_history",
     "coverage_days_within",
     "extend_history_with_sales",
+    "extend_history_gaps_with_sales",
     "should_skip_inventory_history_extend",
     "refresh_inventory_history_rollforward",
     "append_snapshot_inventory_to_history",

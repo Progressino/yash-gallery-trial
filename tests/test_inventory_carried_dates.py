@@ -2,6 +2,8 @@
 import pandas as pd
 
 from backend.services.daily_inventory_history import (
+    extend_history_gaps_with_sales,
+    extend_history_with_sales,
     inventory_history_wide_matrix,
     merge_inventory_history_preserving_channels,
     non_uploaded_inventory_dates,
@@ -482,3 +484,146 @@ def test_overlay_extends_history_with_snapshots_after_hist_max():
     assert str(by.loc["2026-07-15", "Source"]).lower() == "snapshot"
     assert float(by.loc["2026-08-10", "Qty"]) == 18.0
     assert str(by.loc["2026-08-10", "Source"]).lower() == "snapshot"
+
+
+def test_matrix_gap_days_use_sales_adjusted_qty():
+    hist = pd.DataFrame(
+        [
+            {"OMS_SKU": "SKU-A", "Date": pd.Timestamp("2026-07-02"), "Qty": 10, "Source": "snapshot", "Channel": "oms"},
+            {"OMS_SKU": "SKU-A", "Date": pd.Timestamp("2026-07-06"), "Qty": 5, "Source": "snapshot", "Channel": "oms"},
+            {"OMS_SKU": "SKU-B", "Date": pd.Timestamp("2026-07-02"), "Qty": 5, "Source": "snapshot", "Channel": "oms"},
+            {"OMS_SKU": "SKU-B", "Date": pd.Timestamp("2026-07-06"), "Qty": 4, "Source": "snapshot", "Channel": "oms"},
+        ]
+    )
+    sales = pd.DataFrame(
+        [
+            {"Sku": "SKU-A", "TxnDate": "2026-07-03 23:59:00", "Units_Effective": 2},
+            {"Sku": "SKU-A", "TxnDate": "2026-07-05 00:01:00", "Units_Effective": 3},
+            {"Sku": "SKU-B", "TxnDate": "2026-07-04 12:00:00", "Units_Effective": 1},
+        ]
+    )
+
+    extended = extend_history_gaps_with_sales(hist, sales, cap_date=pd.Timestamp("2026-07-06"))
+    out = inventory_history_wide_matrix(
+        extended,
+        days=5,
+        end_date="2026-07-06",
+        channel="oms",
+    )
+
+    assert out["dates"] == [
+        "2026-07-02",
+        "2026-07-03",
+        "2026-07-04",
+        "2026-07-05",
+        "2026-07-06",
+    ]
+    by_sku = {row["sku"]: row["qtys"] for row in out["rows"]}
+    assert by_sku["SKU-A"] == [10.0, 8.0, 8.0, 5.0, 5.0]
+    assert by_sku["SKU-B"] == [5.0, 5.0, 4.0, 4.0, 4.0]
+    assert out["date_totals"] == [15.0, 13.0, 12.0, 9.0, 9.0]
+    assert out["gap_dates"] == ["2026-07-03", "2026-07-04", "2026-07-05"]
+
+
+def test_matrix_no_duplicate_carry_forward():
+    hist = pd.DataFrame(
+        [
+            {"OMS_SKU": "SKU-A", "Date": pd.Timestamp("2026-07-02"), "Qty": 10, "Source": "snapshot", "Channel": "oms"},
+            {"OMS_SKU": "SKU-A", "Date": pd.Timestamp("2026-07-06"), "Qty": 3, "Source": "snapshot", "Channel": "oms"},
+        ]
+    )
+    sales = pd.DataFrame(
+        [
+            {"Sku": "SKU-A", "TxnDate": "2026-07-03", "Units_Effective": 2},
+            {"Sku": "SKU-A", "TxnDate": "2026-07-04", "Units_Effective": 1},
+            {"Sku": "SKU-A", "TxnDate": "2026-07-06", "Units_Effective": 4},
+        ]
+    )
+
+    extended = extend_history_gaps_with_sales(hist, sales, cap_date=pd.Timestamp("2026-07-06"))
+    out = inventory_history_wide_matrix(
+        extended,
+        days=5,
+        end_date="2026-07-06",
+        channel="oms",
+    )
+    qtys = {row["sku"]: row["qtys"] for row in out["rows"]}["SKU-A"]
+
+    assert qtys == [10.0, 8.0, 7.0, 7.0, 3.0]
+    assert qtys[1] == qtys[0] - 2
+    assert qtys[2] == qtys[1] - 1
+    assert qtys[3] == qtys[2]
+    assert qtys[4] == qtys[3] - 4
+
+
+def test_matrix_no_sales_keeps_flat_ffill():
+    hist = pd.DataFrame(
+        [
+            {"OMS_SKU": "SKU-A", "Date": pd.Timestamp("2026-07-02"), "Qty": 10, "Source": "snapshot", "Channel": "oms"},
+            {"OMS_SKU": "SKU-A", "Date": pd.Timestamp("2026-07-06"), "Qty": 10, "Source": "snapshot", "Channel": "oms"},
+        ]
+    )
+    out = inventory_history_wide_matrix(
+        hist,
+        days=5,
+        end_date="2026-07-06",
+        sales_df=pd.DataFrame(),
+        channel="oms",
+    )
+    qtys = {row["sku"]: row["qtys"] for row in out["rows"]}["SKU-A"]
+    assert qtys == [10.0, 10.0, 10.0, 10.0, 10.0]
+
+
+def test_matrix_date_boundary_inclusion_with_sales():
+    hist = pd.DataFrame(
+        [
+            {"OMS_SKU": "SKU-A", "Date": pd.Timestamp("2026-07-01"), "Qty": 20, "Source": "snapshot", "Channel": "oms"},
+            {"OMS_SKU": "SKU-A", "Date": pd.Timestamp("2026-08-16"), "Qty": 12, "Source": "snapshot", "Channel": "oms"},
+        ]
+    )
+    sales = pd.DataFrame(
+        [
+            {"Sku": "SKU-A", "TxnDate": "2026-07-02 00:00:00", "Units_Effective": 5},
+            {"Sku": "SKU-A", "TxnDate": "2026-08-16 23:59:59", "Units_Effective": 3},
+            {"Sku": "SKU-A", "TxnDate": "2026-08-17 00:00:01", "Units_Effective": 7},
+        ]
+    )
+    extended = extend_history_gaps_with_sales(hist, sales, cap_date=pd.Timestamp("2026-08-16"))
+    out = inventory_history_wide_matrix(
+        extended,
+        days=46,
+        end_date="2026-08-16",
+        channel="oms",
+    )
+    qtys = {row["sku"]: row["qtys"] for row in out["rows"]}["SKU-A"]
+    assert out["dates"][0] == "2026-07-02"
+    assert out["dates"][-1] == "2026-08-16"
+    assert qtys[0] == 15.0
+    assert qtys[-1] == 12.0
+
+
+def test_matrix_multiple_skus_independent_carry():
+    hist = pd.DataFrame(
+        [
+            {"OMS_SKU": "SKU-A", "Date": pd.Timestamp("2026-07-02"), "Qty": 10, "Source": "snapshot", "Channel": "oms"},
+            {"OMS_SKU": "SKU-A", "Date": pd.Timestamp("2026-07-05"), "Qty": 6, "Source": "snapshot", "Channel": "oms"},
+            {"OMS_SKU": "SKU-B", "Date": pd.Timestamp("2026-07-02"), "Qty": 6, "Source": "snapshot", "Channel": "oms"},
+            {"OMS_SKU": "SKU-B", "Date": pd.Timestamp("2026-07-05"), "Qty": 6, "Source": "snapshot", "Channel": "oms"},
+        ]
+    )
+    sales = pd.DataFrame(
+        [
+            {"Sku": "SKU-A", "TxnDate": "2026-07-03", "Units_Effective": 2},
+            {"Sku": "SKU-A", "TxnDate": "2026-07-04", "Units_Effective": 2},
+        ]
+    )
+    extended = extend_history_gaps_with_sales(hist, sales, cap_date=pd.Timestamp("2026-07-05"))
+    out = inventory_history_wide_matrix(
+        extended,
+        days=4,
+        end_date="2026-07-05",
+        channel="oms",
+    )
+    by_sku = {row["sku"]: row["qtys"] for row in out["rows"]}
+    assert by_sku["SKU-A"] == [10.0, 8.0, 6.0, 6.0]
+    assert by_sku["SKU-B"] == [6.0, 6.0, 6.0, 6.0]
