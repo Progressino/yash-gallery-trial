@@ -3210,8 +3210,7 @@ export default function Production() {
                   </table>
                 </div>
                 {joLinePickerRows.length === 0 && (
-                  <p className="text-xs text-amber-600 px-3 py-2">No SKUs match “{soLineSearch}”.</p>
-                )}
+                  <p className="text-xs text-amber-600 px-3 py-2">No SKUs match &quot;{soLineSearch}&quot;.</p>
                 )}
               </div>
             )}
