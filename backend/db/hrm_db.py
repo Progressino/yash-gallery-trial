@@ -82,6 +82,48 @@ def _now_iso() -> str:
     return now_ist().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _parse_clock(value: str | None) -> str:
+    """Normalize a datetime string to 'YYYY-MM-DD HH:MM:SS'. Empty stays empty."""
+    raw = str(value or "").strip().replace("T", " ")
+    if not raw:
+        return ""
+    raw = raw[:19]
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+    raise ValueError("Invalid time. Use YYYY-MM-DD HH:MM")
+
+
+def timer_status(started_at: str | None, ended_at: str | None) -> str:
+    st = str(started_at or "").strip()
+    en = str(ended_at or "").strip()
+    if st and en:
+        return "Completed"
+    if st:
+        return "In Progress"
+    return "Not Started"
+
+
+def _timer_payload(log: dict | None) -> dict:
+    log = log or {}
+    started = str(log.get("started_at") or "").strip()
+    ended = str(log.get("ended_at") or "").strip()
+    try:
+        mins = int(log.get("duration_minutes") or 0)
+    except (TypeError, ValueError):
+        mins = 0
+    if not mins and started and ended:
+        mins = _duration_minutes(started, ended)
+    return {
+        "started_at": started,
+        "ended_at": ended,
+        "duration_minutes": mins,
+        "timer_status": timer_status(started, ended),
+    }
+
+
 def in_task_action_window(task_date: str, *, as_of: date | None = None) -> bool:
     """True if as_of is within task_date .. task_date+2 (IST calendar days inclusive)."""
     as_of = as_of or today_ist()
@@ -301,6 +343,10 @@ def init_db():
         "ALTER TABLE task_logs ADD COLUMN is_reassignment INTEGER DEFAULT 0",
         "ALTER TABLE task_logs ADD COLUMN reassigned_from_employee_id INTEGER DEFAULT 0",
         "ALTER TABLE task_logs ADD COLUMN reassignment_clone_id INTEGER DEFAULT 0",
+        # Daily work report (DWR) time tracking per responsibility/day
+        "ALTER TABLE task_logs ADD COLUMN started_at TEXT DEFAULT ''",
+        "ALTER TABLE task_logs ADD COLUMN ended_at TEXT DEFAULT ''",
+        "ALTER TABLE task_logs ADD COLUMN duration_minutes INTEGER DEFAULT 0",
     ):
         try:
             conn.execute(sql)
@@ -1351,15 +1397,20 @@ def mark_task(
         approved_at = ""
 
     existing = conn.execute(
-        "SELECT id, marked_at, approval_status FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        "SELECT id, marked_at, approval_status, status FROM task_logs WHERE responsibility_id=? AND log_date=?",
         (responsibility_id, log_date),
     ).fetchone()
     if existing:
-        if not allow_override:
+        existing_status = str(existing["status"] or "Pending").strip() or "Pending"
+        # A timer-only Pending DWR row is not a committed quality mark — employee can still mark Done.
+        timer_only = existing_status in ("Pending",)
+        if not allow_override and not timer_only:
             conn.close()
             return "locked"
         # HOD status editing only until end of next day after first assignment/mark
-        if not hod_status_editable(existing["marked_at"] if "marked_at" in existing.keys() else None):
+        if allow_override and not timer_only and not hod_status_editable(
+            existing["marked_at"] if "marked_at" in existing.keys() else None
+        ):
             conn.close()
             return "window_closed"
         conn.execute(
@@ -1453,6 +1504,147 @@ def mark_task(
                 ),
             )
 
+    conn.commit()
+    conn.close()
+    return True
+
+
+def _responsibility_owner(conn, responsibility_id: int):
+    return conn.execute(
+        "SELECT employee_id FROM responsibilities WHERE id=? AND active=1",
+        (responsibility_id,),
+    ).fetchone()
+
+
+def _ensure_task_log_row(conn, responsibility_id: int, employee_id: int, log_date: str) -> dict:
+    row = conn.execute(
+        "SELECT * FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        (responsibility_id, log_date),
+    ).fetchone()
+    if row:
+        return dict(row)
+    conn.execute(
+        """INSERT INTO task_logs(responsibility_id, employee_id, log_date, status)
+           VALUES(?,?,?,'Pending')""",
+        (responsibility_id, employee_id, log_date),
+    )
+    row = conn.execute(
+        "SELECT * FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        (responsibility_id, log_date),
+    ).fetchone()
+    return dict(row)
+
+
+def start_responsibility_timer(
+    responsibility_id: int,
+    log_date: str,
+    *,
+    allow_override: bool = False,
+):
+    """Record start time on the day's DWR row. Does not overwrite other responsibilities."""
+    if not allow_override and not in_task_action_window(log_date):
+        return "window_closed"
+    conn = _connect()
+    resp = _responsibility_owner(conn, responsibility_id)
+    if not resp:
+        conn.close()
+        return "not_found"
+    row = _ensure_task_log_row(conn, responsibility_id, int(resp["employee_id"]), log_date)
+    started = str(row.get("started_at") or "").strip()
+    ended = str(row.get("ended_at") or "").strip()
+    if ended:
+        conn.close()
+        return "already_ended"
+    if started:
+        conn.commit()
+        conn.close()
+        return True
+    now = _now_iso()
+    conn.execute(
+        "UPDATE task_logs SET started_at=? WHERE responsibility_id=? AND log_date=?",
+        (now, responsibility_id, log_date),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def end_responsibility_timer(
+    responsibility_id: int,
+    log_date: str,
+    *,
+    allow_override: bool = False,
+):
+    if not allow_override and not in_task_action_window(log_date):
+        return "window_closed"
+    conn = _connect()
+    resp = _responsibility_owner(conn, responsibility_id)
+    if not resp:
+        conn.close()
+        return "not_found"
+    row = conn.execute(
+        "SELECT * FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        (responsibility_id, log_date),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return "not_started"
+    row = dict(row)
+    started = str(row.get("started_at") or "").strip()
+    ended = str(row.get("ended_at") or "").strip()
+    if not started:
+        conn.close()
+        return "not_started"
+    if ended:
+        conn.commit()
+        conn.close()
+        return True
+    now = _now_iso()
+    mins = _duration_minutes(started, now)
+    conn.execute(
+        """UPDATE task_logs SET ended_at=?, duration_minutes=?
+           WHERE responsibility_id=? AND log_date=?""",
+        (now, mins, responsibility_id, log_date),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def set_responsibility_manual_time(
+    responsibility_id: int,
+    log_date: str,
+    started_at: str | None,
+    ended_at: str | None,
+    *,
+    allow_override: bool = False,
+):
+    """Set or edit DWR start/end times. End cannot be earlier than start."""
+    if not allow_override and not in_task_action_window(log_date):
+        return "window_closed"
+    try:
+        start = _parse_clock(started_at)
+        end = _parse_clock(ended_at)
+    except ValueError:
+        return "invalid_time"
+    if end and not start:
+        return "missing_start"
+    if start and end:
+        fmt = "%Y-%m-%d %H:%M:%S"
+        if datetime.strptime(end, fmt) < datetime.strptime(start, fmt):
+            return "invalid_range"
+    conn = _connect()
+    resp = _responsibility_owner(conn, responsibility_id)
+    if not resp:
+        conn.close()
+        return "not_found"
+    _ensure_task_log_row(conn, responsibility_id, int(resp["employee_id"]), log_date)
+    mins = _duration_minutes(start, end) if start and end else 0
+    conn.execute(
+        """UPDATE task_logs SET started_at=?, ended_at=?, duration_minutes=?
+           WHERE responsibility_id=? AND log_date=?""",
+        (start, end, mins, responsibility_id, log_date),
+    )
     conn.commit()
     conn.close()
     return True
@@ -2428,9 +2620,11 @@ def get_hod_dashboard(
 
     conn = _connect()
     resp_sql = """
-        SELECT r.*, e.name as employee_name
+        SELECT r.*, e.name as employee_name,
+               le.name as linked_to_employee_name
         FROM responsibilities r
         JOIN employees e ON e.id=r.employee_id
+        LEFT JOIN employees le ON le.id=r.linked_to_employee_id
         WHERE r.department_id=? AND r.active=1
     """
     resp_params: list = [department_id]
@@ -2444,7 +2638,10 @@ def get_hod_dashboard(
         """
         SELECT tl.responsibility_id, tl.log_date, tl.status, tl.remarks,
                tl.marked_by, tl.marked_at, tl.blocker_employee_id, tl.blocker_reason,
-               be.name as blocker_name
+               be.name as blocker_name,
+               COALESCE(tl.started_at,'') as started_at,
+               COALESCE(tl.ended_at,'') as ended_at,
+               COALESCE(tl.duration_minutes,0) as duration_minutes
         FROM task_logs tl
         JOIN responsibilities r ON r.id=tl.responsibility_id
         LEFT JOIN employees be ON be.id=tl.blocker_employee_id
@@ -2458,6 +2655,9 @@ def get_hod_dashboard(
     for l in logs:
         key = (l["responsibility_id"], l["log_date"])
         mat = l["marked_at"] if "marked_at" in l.keys() else ""
+        ld = dict(l)
+        status = l["status"]
+        quality_marked = str(status or "Pending").strip() not in ("Pending", "")
         log_map[key] = {
             "status": l["status"],
             "remarks": l["remarks"],
@@ -2465,8 +2665,9 @@ def get_hod_dashboard(
             "marked_at": mat or "",
             "blocker_name": l["blocker_name"] or "",
             "blocker_reason": l["blocker_reason"] or "",
-            "marked": True,
+            "marked": quality_marked,
             "editable": hod_status_editable(mat),
+            **_timer_payload(ld),
         }
 
     result = []
@@ -2495,6 +2696,10 @@ def get_hod_dashboard(
                     "blocker_reason": "",
                     "marked": False,
                     "editable": True,
+                    "started_at": "",
+                    "ended_at": "",
+                    "duration_minutes": 0,
+                    "timer_status": "Not Started",
                 },
             )
         if not rd["dates"] and dates:
@@ -2691,7 +2896,10 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         SELECT id, responsibility_id, status, remarks, marked_by, marked_at,
                blocker_employee_id, blocker_reason,
                COALESCE(approval_status,'') as approval_status,
-               COALESCE(approved_by,'') as approved_by
+               COALESCE(approved_by,'') as approved_by,
+               COALESCE(started_at,'') as started_at,
+               COALESCE(ended_at,'') as ended_at,
+               COALESCE(duration_minutes,0) as duration_minutes
         FROM task_logs
         WHERE employee_id=? AND log_date=?
         """,
@@ -2785,6 +2993,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         log = log_map.get(rid)
         status = (log or {}).get("status") or "Pending"
         re_out = reassign_out_map.get(rid)
+        quality_marked = status not in ("Pending", "")
         item = {
             "responsibility_id": rid,
             "task_log_id": (log or {}).get("id"),
@@ -2799,7 +3008,8 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             "linked_to_employee_name": rdict.get("linked_to_employee_name") or "",
             "approval_status": (log or {}).get("approval_status") or "",
             "status": status,
-            "marked": bool(log),
+            "marked": quality_marked,
+            "quality_marked": quality_marked,
             "remarks": (log or {}).get("remarks") or "",
             "marked_by": (log or {}).get("marked_by") or "",
             "blocker_reason": (log or {}).get("blocker_reason") or "",
@@ -2807,6 +3017,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             "in_action_window": in_task_action_window(day),
             "reassigned_out": bool(re_out),
             "reassigned_to_name": (re_out or {}).get("assignee_name") or "",
+            **_timer_payload(log),
         }
         # Original still holds master — if reassigned for the day, don't force pending scoreboard
         if re_out and not log:
@@ -2886,6 +3097,58 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         "time_period_filter": TIME_PERIODS,
         "performance_cutover": PERFORMANCE_CUTOVER_DATE,
     }
+
+
+def list_dwr_rows(
+    *,
+    employee_id: int | None = None,
+    department_id: int | None = None,
+    check_date: str | None = None,
+) -> dict:
+    """Flat Daily Work Report rows for Admin/HOD (one row per responsibility that day)."""
+    day = check_date or today_ist().isoformat()
+    emp_ids: list[int] = []
+    if employee_id:
+        emp_ids = [int(employee_id)]
+    else:
+        conn = _connect()
+        q = "SELECT id FROM employees WHERE IFNULL(status,'Active') != 'Inactive'"
+        params: list = []
+        if department_id:
+            q += " AND department_id=?"
+            params.append(int(department_id))
+        emp_ids = [int(r["id"]) for r in conn.execute(q, params).fetchall()]
+        conn.close()
+
+    rows: list[dict] = []
+    for eid in emp_ids:
+        snap = get_employee_day_check(eid, day)
+        if not snap:
+            continue
+        emp = snap.get("employee") or {}
+        for bucket in ("worked_on", "not_worked", "other", "whenever_required"):
+            for item in snap.get(bucket) or []:
+                linked_name = item.get("linked_to_employee_name") or ""
+                rows.append(
+                    {
+                        "employee_id": eid,
+                        "employee_name": emp.get("name") or "",
+                        "department_name": emp.get("department_name") or "",
+                        "check_date": day,
+                        "responsibility_id": item.get("responsibility_id"),
+                        "title": item.get("title"),
+                        "frequency": item.get("frequency"),
+                        "status": item.get("status"),
+                        "timer_status": item.get("timer_status") or "Not Started",
+                        "started_at": item.get("started_at") or "",
+                        "ended_at": item.get("ended_at") or "",
+                        "duration_minutes": int(item.get("duration_minutes") or 0),
+                        "linked_to_employee_id": item.get("linked_to_employee_id"),
+                        "linked_to_employee_name": linked_name,
+                        "linked_person": linked_name or "Self-complete",
+                    }
+                )
+    return {"check_date": day, "rows": rows}
 
 
 def mark_unmarked_daily_as_missed(

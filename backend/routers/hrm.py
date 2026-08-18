@@ -43,6 +43,7 @@ from ..db.hrm_db import (
     get_hod_dashboard,
     get_appraisal,
     get_employee_day_check,
+    list_dwr_rows,
     mark_unmarked_daily_as_missed,
     get_performance,
     employee_department_id,
@@ -60,6 +61,9 @@ from ..db.hrm_db import (
     get_task_based_report,
     find_employees_by_name_prefix,
     set_manual_task_duration,
+    start_responsibility_timer,
+    end_responsibility_timer,
+    set_responsibility_manual_time,
     FREQUENCIES,
     PRIORITIES,
     TIME_PERIODS,
@@ -262,6 +266,12 @@ class TaskMarkIn(BaseModel):
     remarks: Optional[str] = ""
     blocker_employee_id: Optional[int] = None
     blocker_reason: Optional[str] = ""
+
+
+class ResponsibilityTimerIn(BaseModel):
+    log_date: str
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
 
 
 class IssueIn(BaseModel):
@@ -628,6 +638,70 @@ def post_mark_task(body: TaskMarkIn, request: Request):
     if ok == "invalid_status":
         raise HTTPException(400, "Invalid status")
     raise HTTPException(404, "Responsibility not found")
+
+
+def _timer_http_result(ok):
+    if ok is True:
+        return {"ok": True}
+    if ok == "window_closed":
+        raise HTTPException(
+            409,
+            "Time can be recorded on the task date through the next 2 IST days",
+        )
+    if ok == "not_found":
+        raise HTTPException(404, "Responsibility not found")
+    if ok == "already_ended":
+        raise HTTPException(400, "Already completed — use Manual Time to edit")
+    if ok == "not_started":
+        raise HTTPException(400, "Start the timer first, or enter start time manually")
+    if ok == "missing_start":
+        raise HTTPException(400, "Start time is required when entering an end time")
+    if ok == "invalid_range":
+        raise HTTPException(400, "End time cannot be earlier than start time")
+    if ok == "invalid_time":
+        raise HTTPException(400, "Invalid time. Use YYYY-MM-DD HH:MM")
+    raise HTTPException(400, str(ok))
+
+
+@router.post("/tasks/{responsibility_id}/start")
+def post_start_responsibility_timer(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
+    scope = _scope_from_request(request)
+    assert_responsibility_in_scope(scope, responsibility_id)
+    return _timer_http_result(
+        start_responsibility_timer(
+            responsibility_id,
+            body.log_date,
+            allow_override=scope.can_edit_assignments,
+        )
+    )
+
+
+@router.post("/tasks/{responsibility_id}/end")
+def post_end_responsibility_timer(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
+    scope = _scope_from_request(request)
+    assert_responsibility_in_scope(scope, responsibility_id)
+    return _timer_http_result(
+        end_responsibility_timer(
+            responsibility_id,
+            body.log_date,
+            allow_override=scope.can_edit_assignments,
+        )
+    )
+
+
+@router.post("/tasks/{responsibility_id}/manual-time")
+def post_responsibility_manual_time(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
+    scope = _scope_from_request(request)
+    assert_responsibility_in_scope(scope, responsibility_id)
+    return _timer_http_result(
+        set_responsibility_manual_time(
+            responsibility_id,
+            body.log_date,
+            body.started_at,
+            body.ended_at,
+            allow_override=scope.can_edit_assignments,
+        )
+    )
 
 
 @router.post("/tasks/logs/{log_id}/approve")
@@ -1076,6 +1150,29 @@ def employee_day_check(
     if not data:
         raise HTTPException(404, "Employee not found")
     return data
+
+
+@router.get("/dwr")
+def get_dwr(
+    request: Request,
+    employee_id: Optional[int] = None,
+    department_id: Optional[int] = None,
+    check_date: Optional[str] = None,
+):
+    """Admin/HOD Daily Work Report for a selected employee and date."""
+    scope = _scope_from_request(request)
+    assert_hrm_hod_or_admin(scope)
+    if employee_id is not None:
+        assert_employee_in_scope(scope, employee_id)
+    if department_id is not None:
+        assert_department_in_scope(scope, department_id)
+    if department_id is None and employee_id is None and scope.department_id:
+        department_id = scope.department_id
+    return list_dwr_rows(
+        employee_id=employee_id,
+        department_id=department_id,
+        check_date=check_date,
+    )
 
 
 @router.post("/employee-check/{employee_id}/mark-unmarked-missed")

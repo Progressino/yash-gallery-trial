@@ -35,8 +35,16 @@ def normalize_production_mode(raw: str | None) -> str:
         "internal": "inhouse",
         "c2p": "cut_to_pack",
         "cuttopack": "cut_to_pack",
+        "cut_pack": "cut_to_pack",
+        "cutpack": "cut_to_pack",
         "s2p": "stitch_to_pack",
         "stitchtopack": "stitch_to_pack",
+        "stich_to_pack": "stitch_to_pack",
+        "stichtopack": "stitch_to_pack",
+        "stich_pack": "stitch_to_pack",
+        "stichpack": "stitch_to_pack",
+        "stitch_pack": "stitch_to_pack",
+        "stitchpack": "stitch_to_pack",
     }
     s = aliases.get(s, s)
     return s if s in PRODUCTION_MODES else "inhouse"

@@ -2462,9 +2462,43 @@ def receive_pieces(joid: int, data: dict):
         raise ValueError("Received qty must be greater than 0")
     rejected = int(data.get('rejected_qty', 0))
     jo_line_id = data.get('jo_line_id')
+    if jo_line_id in (None, '', 0, '0'):
+        jo_line_id = None
+    else:
+        try:
+            jo_line_id = int(jo_line_id)
+        except (TypeError, ValueError):
+            jo_line_id = None
     process = data.get('process') or jo.get('process', 'Cutting')
     so_number = jo.get('so_number', '')
     sku = data.get('sku') or jo.get('sku', '')
+    # JO-level receive (no line id) must still bind to a line so Cutting Report
+    # balance = planned − received includes this qty.
+    if jo_line_id is None:
+        lines = [dict(r) for r in conn.execute(
+            "SELECT id, sku, planned_qty FROM jo_lines WHERE jo_id=? ORDER BY id",
+            (joid,),
+        ).fetchall()]
+        if lines:
+            sku_u = str(sku or "").strip().upper()
+            chosen = None
+            for ln in lines:
+                ln_sku = str(ln.get("sku") or "").strip().upper()
+                already_ln = int(conn.execute(
+                    "SELECT COALESCE(SUM(received_qty),0) FROM jo_piece_receipts WHERE jo_line_id=?",
+                    (ln["id"],),
+                ).fetchone()[0])
+                planned_ln = int(ln.get("planned_qty") or 0)
+                remaining = planned_ln - already_ln
+                if sku_u and ln_sku == sku_u and remaining > 0:
+                    chosen = ln
+                    break
+                if chosen is None and remaining > 0:
+                    chosen = ln
+            if chosen is None:
+                chosen = lines[0]
+            jo_line_id = int(chosen["id"])
+            sku = (chosen.get("sku") or sku).strip()
     # Under-receive is always allowed (partial production). Over-receive on Cutting
     # is currently uncapped (DEFAULT_CUTTING_RECEIVE_TOLERANCE = None); restore a
     # fraction via CUTTING_RECEIVE_TOLERANCE. Non-cutting still cannot exceed plan.
@@ -2520,8 +2554,9 @@ def receive_pieces(joid: int, data: dict):
     conn.execute("""UPDATE job_orders SET
         received_qty = COALESCE(received_qty,0) + ?,
         output_qty = COALESCE(output_qty,0) + ?,
+        balance_qty = COALESCE(planned_qty,0) - (COALESCE(received_qty,0) + ?),
         status = CASE WHEN status='Created' THEN 'In Progress' ELSE status END,
-        updated_at = datetime('now') WHERE id=?""", (received, received, joid))
+        updated_at = datetime('now') WHERE id=?""", (received, received, received, joid))
     if jo_line_id:
         conn.execute("""UPDATE jo_lines SET
             received_qty = COALESCE(received_qty,0) + ?,
@@ -2699,7 +2734,7 @@ def get_process_report() -> list:
                SUM(j.issued_qty) as issued,
                SUM(j.received_qty) as received,
                SUM(j.rejected_qty) as rejected,
-               SUM(j.balance_qty) as balance
+               SUM(COALESCE(j.planned_qty,0) - COALESCE(j.received_qty,0)) as balance
         FROM job_orders j
         WHERE j.status NOT IN ('Cancelled')
         GROUP BY j.process, j.so_number, j.sku

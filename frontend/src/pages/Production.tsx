@@ -409,8 +409,8 @@ function isOutsourceExec(execType: string) {
 
 function suggestedExecType(mode: string | undefined, process: string) {
   const m = String(mode || 'inhouse').toLowerCase().replace(/[-\s]/g, '_')
-  if (m === 'cut_to_pack' && process === 'Cutting') return 'Outsource'
-  if (m === 'stitch_to_pack' && process === 'Stitching') return 'Outsource'
+  if ((m === 'cut_to_pack' || m === 'cutpack' || m === 'cut_pack' || m === 'c2p') && process === 'Cutting') return 'Outsource'
+  if ((m === 'stitch_to_pack' || m === 'stich_to_pack' || m === 'stitchpack' || m === 'stichpack' || m === 's2p') && process === 'Stitching') return 'Outsource'
   return 'Inhouse'
 }
 
@@ -3483,7 +3483,7 @@ export default function Production() {
                     ...receiveForm,
                     process: activeJO.process,
                     sku: line?.sku || activeJO.sku,
-                    jo_line_id: activeLineId ?? undefined,
+                    jo_line_id: (activeLineId ?? activeJO.lines?.[0]?.id) || undefined,
                   },
                 })
               }}

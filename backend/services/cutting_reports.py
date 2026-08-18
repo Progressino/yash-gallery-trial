@@ -102,6 +102,44 @@ def _safe_div(num: float, den: float) -> float | None:
     return round(float(num) / float(den), 4)
 
 
+def _allocate_header_receipts(
+    rec_line: dict[int, int],
+    rec_jo: dict[int, int],
+    lines_by_jo: dict[int, list[dict]],
+) -> dict[int, int]:
+    """Apply JO-level receipts (jo_line_id IS NULL) onto matching lines.
+
+    Receive (JO level) historically stored jo_line_id=NULL. Cutting Report only
+    summed line-level receipts, so balance stayed at planned. Allocate leftover
+    header qty onto lines by remaining plan, then remainder on the first line.
+    """
+    extra = dict(rec_line)
+    for jid, lines in lines_by_jo.items():
+        if not lines:
+            continue
+        allocated = sum(int(extra.get(int(ln["id"]), 0) or 0) for ln in lines)
+        leftover = max(0, int(rec_jo.get(int(jid), 0) or 0) - allocated)
+        if leftover <= 0:
+            continue
+        ordered = sorted(lines, key=lambda ln: int(ln.get("planned_qty") or 0), reverse=True)
+        for ln in ordered:
+            if leftover <= 0:
+                break
+            lid = int(ln["id"])
+            planned = int(ln.get("planned_qty") or 0)
+            already = int(extra.get(lid, 0) or 0)
+            room = max(0, planned - already)
+            if room <= 0:
+                continue
+            take = min(leftover, room)
+            extra[lid] = already + take
+            leftover -= take
+        if leftover > 0:
+            lid = int(ordered[0]["id"])
+            extra[lid] = int(extra.get(lid, 0) or 0) + leftover
+    return extra
+
+
 def _maps(conn):
     rec_line = {
         int(r["jo_line_id"]): int(r["qty"] or 0)
@@ -200,6 +238,7 @@ def build_cutting_report(
             d = dict(r)
             lines_by_jo.setdefault(int(d["jo_id"]), []).append(d)
         rec_line, rec_jo, iss_line, iss_jo, last_act = _maps(conn)
+        rec_line = _allocate_header_receipts(rec_line, rec_jo, lines_by_jo)
     finally:
         conn.close()
 

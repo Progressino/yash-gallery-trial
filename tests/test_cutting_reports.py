@@ -93,3 +93,72 @@ def test_cutting_report_filters_and_zero_fabric(iso):
     empty = build_cutting_report(so_number="NOPE", export=True)
     assert empty["total"] == 0
     assert empty["kpis"]["planned_qty"] == 0
+
+
+def test_cutting_report_jo_level_receive_reduces_balance(iso):
+    """Receive (JO level) with no jo_line_id must still drop Cutting Report balance."""
+    num = production_db.create_jo(
+        {
+            "so_number": "SO-CUT-JO",
+            "so_source": "manual",
+            "sku": "1001-M",
+            "process": "Cutting",
+            "planned_qty": 40,
+            "create_component_jos": False,
+            "jo_date": date.today().isoformat(),
+            "lines": [{"sku": "1001-M", "style": "M", "planned_qty": 40}],
+        }
+    )
+    jo = next(j for j in production_db.list_jos() if j["jo_number"] == num)
+    before = build_cutting_report(so_number="SO-CUT-JO", export=True)
+    assert before["rows"][0]["balance_qty"] == 40
+    production_db.receive_pieces(jo["id"], {"received_qty": 10})
+    after = build_cutting_report(so_number="SO-CUT-JO", export=True)
+    row = after["rows"][0]
+    assert row["received_qty"] == 10
+    assert row["balance_qty"] == 30
+    jo_after = next(j for j in production_db.list_jos() if j["id"] == jo["id"])
+    assert int(jo_after["received_qty"]) == 10
+    assert int(jo_after["balance_qty"]) == 30
+    proc = next(
+        r
+        for r in production_db.get_process_report()
+        if r["process"] == "Cutting" and r.get("so_number") == "SO-CUT-JO"
+    )
+    assert int(proc["balance"]) == 30
+
+
+def test_cutting_report_allocates_legacy_null_line_receipts(iso):
+    """Historical JO-level receipts (jo_line_id NULL) must still count on the line."""
+    import sqlite3
+
+    num = production_db.create_jo(
+        {
+            "so_number": "SO-CUT-NULL",
+            "so_source": "manual",
+            "sku": "1001-L",
+            "process": "Cutting",
+            "planned_qty": 20,
+            "create_component_jos": False,
+            "jo_date": date.today().isoformat(),
+            "lines": [{"sku": "1001-L", "style": "L", "planned_qty": 20}],
+        }
+    )
+    jo = next(j for j in production_db.list_jos() if j["jo_number"] == num)
+    conn = sqlite3.connect(production_db._DB)
+    conn.execute(
+        """INSERT INTO jo_piece_receipts(
+               jo_id, jo_line_id, process, so_number, sku, receipt_date, received_qty, rejected_qty
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (jo["id"], None, "Cutting", "SO-CUT-NULL", "1001-L", date.today().isoformat(), 8, 0),
+    )
+    conn.execute(
+        "UPDATE job_orders SET received_qty=8, balance_qty=12 WHERE id=?",
+        (jo["id"],),
+    )
+    conn.commit()
+    conn.close()
+    out = build_cutting_report(so_number="SO-CUT-NULL", export=True)
+    row = out["rows"][0]
+    assert row["received_qty"] == 8
+    assert row["balance_qty"] == 12

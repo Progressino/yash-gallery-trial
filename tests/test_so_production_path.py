@@ -166,3 +166,31 @@ def test_validate_jo_creation_subtracts_open_planned(iso):
     v = production_db.validate_jo_creation("Stitching", "SO-V1", "1001-M", 10)
     assert v["ok"] is False
     assert v["available"] == 0
+
+
+def test_stich_alias_and_stitch_to_pack_path(iso, monkeypatch):
+    from backend.services.so_production_path import normalize_production_mode
+
+    assert normalize_production_mode("stich_to_pack") == "stitch_to_pack"
+    assert normalize_production_mode("Cut-Pack") == "cut_to_pack"
+    monkeypatch.setattr(
+        production_db,
+        "get_item_routing",
+        lambda sku: ["Cutting", "Embroidery", "Stitching", "Finishing"],
+    )
+    monkeypatch.setattr(
+        production_db,
+        "get_component_routing",
+        lambda sku: ["Cutting", "Embroidery", "Stitching", "Finishing"],
+    )
+    so = sales_db.create_order(
+        {"production_mode": "stich_to_pack", "lines": [{"sku": "1001-XL", "qty": 30}]}
+    )
+    assert production_db.get_next_process("1001-XL", "Cutting", so_number=so) == "Stitching"
+    assert production_db.get_next_process("1001-XL", "Stitching", so_number=so) == "Finishing"
+    conn = production_db._connect()
+    production_db._update_process_stock(conn, so, "1001-XL", "Cutting", qty_in=30)
+    conn.commit()
+    conn.close()
+    stitch = production_db.get_ready_to_process("Stitching")
+    assert any(r.get("sku") == "1001-XL" and r.get("so_number") == so for r in stitch)

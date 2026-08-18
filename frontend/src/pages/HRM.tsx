@@ -88,6 +88,26 @@ const fmtDateTime = (iso: string) => {
   return d.toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
 }
 
+function toDatetimeLocal(s?: string) {
+  if (!s) return ''
+  return String(s).replace(' ', 'T').slice(0, 16)
+}
+
+function timerBadgeClass(st: string) {
+  if (st === 'Completed') return 'bg-green-100 text-green-800'
+  if (st === 'In Progress') return 'bg-amber-100 text-amber-800'
+  return 'bg-gray-100 text-gray-600'
+}
+
+function LinkedPersonLine({ item }: { item: any }) {
+  const name = item?.linked_to_employee_name
+  return (
+    <p className="text-xs text-indigo-800 mt-0.5">
+      Supervisor / Approver: {name ? <b>{name}</b> : <span className="text-gray-500">Self-complete</span>}
+    </p>
+  )
+}
+
 export default function HRM() {
   const qc = useQueryClient()
   const authUser = useAuth(s => s.user)
@@ -141,6 +161,9 @@ export default function HRM() {
   const [respAssignedByFilter, setRespAssignedByFilter] = useState('')
   const [manualTimeOpen, setManualTimeOpen] = useState<number | null>(null)
   const [manualTimeVal, setManualTimeVal] = useState('')
+  const [dwrManualId, setDwrManualId] = useState<number | null>(null)
+  const [dwrManualStart, setDwrManualStart] = useState('')
+  const [dwrManualEnd, setDwrManualEnd] = useState('')
   const [empNameSuggest, setEmpNameSuggest] = useState<any[]>([])
   const [audioPreview, setAudioPreview] = useState<string | null>(null)
   void audioPreview
@@ -151,7 +174,7 @@ export default function HRM() {
   const [completeNotes, setCompleteNotes] = useState('')
   const [approvalModal, setApprovalModal] = useState<{ id: number; title: string; action: 'approve' | 'reject' } | null>(null)
   const [approvalNotes, setApprovalNotes] = useState('')
-  const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks'>('responsibilities')
+  const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks' | 'dwr'>('responsibilities')
   const [editDept, setEditDept] = useState<any>(null)
   const [editEmp, setEditEmp] = useState<any>(null)
   const [editResp, setEditResp] = useState<any>(null)
@@ -315,6 +338,16 @@ export default function HRM() {
     queryFn: () => api.get(`/hrm/hod-dashboard/${hodDept}?from_date=${fromDate}&to_date=${toDate}${hodEmp ? `&employee_id=${hodEmp}` : ''}`).then(r => r.data),
     enabled: !!hodDept,
   })
+  const { data: dwrData } = useQuery({
+    queryKey: ['hrm-dwr', hodDept, hodEmp, toDate],
+    queryFn: () => {
+      const p = new URLSearchParams({ check_date: toDate })
+      if (hodEmp) p.set('employee_id', String(hodEmp))
+      if (hodDept) p.set('department_id', String(hodDept))
+      return api.get(`/hrm/dwr?${p}`).then(r => r.data)
+    },
+    enabled: tab === 'hod' && hodSubTab === 'dwr' && !!hodDept,
+  })
   const { data: issues = [] } = useQuery({
     queryKey: ['hrm-issues', selDept, selEmp, fromDate, toDate, issueStatusFilter, issueQ],
     queryFn: () => {
@@ -349,7 +382,7 @@ export default function HRM() {
   const { data: dayCheck, isFetching: dayCheckLoading } = useQuery({
     queryKey: ['hrm-employee-check', checkEmp, checkDate],
     queryFn: () => api.get(`/hrm/employee-check/${checkEmp}?check_date=${checkDate}`).then(r => r.data),
-    enabled: !!checkEmp && (tab === 'check' || (tab === 'dashboard' && isEmployeeScope)),
+    enabled: !!checkEmp && (tab === 'check' || tab === 'hod' || (tab === 'dashboard' && isEmployeeScope)),
     refetchInterval: tab === 'check' ? 60_000 : false,
   })
   const markMissedMut = useMutation({
@@ -409,6 +442,7 @@ export default function HRM() {
       qc.invalidateQueries({ queryKey: ['hrm-hod'] })
       qc.invalidateQueries({ queryKey: ['hrm-perf'] })
       qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
+      qc.invalidateQueries({ queryKey: ['hrm-dwr'] })
       setBlockedModal(null)
     },
     onError: (err: any) => {
@@ -437,8 +471,35 @@ export default function HRM() {
       qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
       qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
       qc.invalidateQueries({ queryKey: ['hrm-perf'] })
+      qc.invalidateQueries({ queryKey: ['hrm-dwr'] })
     },
     onError: (err: any) => alert(err?.response?.data?.detail || 'Approval failed'),
+  })
+  const invalidateDwr = () => {
+    qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
+    qc.invalidateQueries({ queryKey: ['hrm-hod'] })
+    qc.invalidateQueries({ queryKey: ['hrm-dwr'] })
+  }
+  const startRespMut = useMutation({
+    mutationFn: ({ id, log_date }: { id: number; log_date: string }) =>
+      api.post(`/hrm/tasks/${id}/start`, { log_date }),
+    onSuccess: invalidateDwr,
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not start timer'),
+  })
+  const endRespMut = useMutation({
+    mutationFn: ({ id, log_date }: { id: number; log_date: string }) =>
+      api.post(`/hrm/tasks/${id}/end`, { log_date }),
+    onSuccess: invalidateDwr,
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not end timer'),
+  })
+  const manualRespTimeMut = useMutation({
+    mutationFn: ({ id, log_date, started_at, ended_at }: { id: number; log_date: string; started_at: string; ended_at: string }) =>
+      api.post(`/hrm/tasks/${id}/manual-time`, { log_date, started_at, ended_at }),
+    onSuccess: () => {
+      invalidateDwr()
+      setDwrManualId(null)
+    },
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not save time'),
   })
   const importRespMut = useMutation({
     mutationFn: (file: File) => {
@@ -788,6 +849,89 @@ export default function HRM() {
     markTaskMut.mutate({ responsibility_id: respId, log_date: logDate, status })
   }
 
+  const renderRespCheck = (i: any, opts?: { showMark?: boolean }) => {
+    const showMark = opts?.showMark !== false
+    const ts = i.timer_status || 'Not Started'
+    const canTime = i.in_action_window !== false || canEditAssignments
+    const canMark = showMark && (!i.marked || i.status === 'Pending' || canEditAssignments)
+    const openManual = () => {
+      setDwrManualId(i.responsibility_id)
+      setDwrManualStart(toDatetimeLocal(i.started_at))
+      setDwrManualEnd(toDatetimeLocal(i.ended_at))
+    }
+    return (
+      <div className="flex-1 min-w-0">
+        <p className="font-medium text-sm text-gray-800">{i.title}</p>
+        <p className="text-xs text-gray-400">
+          {i.frequency} · {i.status}{i.approval_status ? ` · ${i.approval_status}` : ''}{i.marked_by ? ` · ${i.marked_by}` : ''}{i.blocker_reason ? ` — ${i.blocker_reason}` : ''}
+        </p>
+        <LinkedPersonLine item={i} />
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${timerBadgeClass(ts)}`}>{ts}</span>
+          <span className="text-[11px] text-gray-500">Start: {fmtDateTime(i.started_at)}</span>
+          <span className="text-[11px] text-gray-500">End: {fmtDateTime(i.ended_at)}</span>
+          <span className="text-[11px] font-semibold text-[#002B5B]">{fmtDuration(i.duration_minutes)}</span>
+        </div>
+        {canTime && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            {ts === 'Not Started' && (
+              <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" onClick={() => startRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Start</button>
+            )}
+            {ts === 'In Progress' && (
+              <button type="button" className="text-xs px-2 py-0.5 bg-amber-600 text-white rounded" onClick={() => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>■ End</button>
+            )}
+            {dwrManualId === i.responsibility_id ? (
+              <div className="flex flex-wrap items-center gap-1 w-full">
+                <label className="text-[10px] text-gray-500">Start
+                  <input type="datetime-local" value={dwrManualStart} onChange={e => setDwrManualStart(e.target.value)} className="ml-1 border rounded px-1 py-0.5 text-xs" />
+                </label>
+                <label className="text-[10px] text-gray-500">End
+                  <input type="datetime-local" value={dwrManualEnd} onChange={e => setDwrManualEnd(e.target.value)} className="ml-1 border rounded px-1 py-0.5 text-xs" />
+                </label>
+                <button type="button" className="text-xs px-2 py-0.5 bg-green-700 text-white rounded" onClick={() => {
+                  if (dwrManualStart && dwrManualEnd && dwrManualEnd < dwrManualStart) {
+                    alert('End time cannot be earlier than start time')
+                    return
+                  }
+                  manualRespTimeMut.mutate({
+                    id: i.responsibility_id,
+                    log_date: checkDate,
+                    started_at: dwrManualStart ? dwrManualStart.replace('T', ' ') : '',
+                    ended_at: dwrManualEnd ? dwrManualEnd.replace('T', ' ') : '',
+                  })
+                }}>Save time</button>
+                <button type="button" className="text-xs text-gray-500" onClick={() => setDwrManualId(null)}>Cancel</button>
+              </div>
+            ) : (
+              <button type="button" className="text-[10px] text-blue-600 underline" onClick={openManual}>Manual time</button>
+            )}
+          </div>
+        )}
+        {canMark && (
+          <select
+            defaultValue=""
+            onChange={e => {
+              const val = e.target.value
+              if (!val) return
+              handleStatusSelect(i.responsibility_id, checkDate, val)
+              e.target.value = ''
+            }}
+            className="mt-1.5 text-xs border rounded px-1.5 py-1 bg-white"
+          >
+            <option value="">Mark status…</option>
+            {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
+          </select>
+        )}
+        {i.task_log_id && i.approval_status === 'Pending' && (canEditAssignments || Number(scope?.employee_id) === Number(i.linked_to_employee_id)) && (
+          <div className="flex gap-1 mt-1">
+            <button type="button" className="text-xs px-2 py-0.5 bg-green-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: i.task_log_id, action: 'Approved' })}>Approve</button>
+            <button type="button" className="text-xs px-2 py-0.5 bg-red-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: i.task_log_id, action: 'Cancelled' })}>Cancel</button>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   const deptName = (id: any) => (depts as any[]).find(d => d.id === id)?.name || '—'
 
   const ALL_TABS: [Tab, string][] = [
@@ -1097,6 +1241,13 @@ export default function HRM() {
                         {CATEGORIES.map(c => <option key={c}>{c}</option>)}
                       </select>
                     </div>
+                    <div><label className="text-xs text-gray-500">Linked Person (supervisor / approver)</label>
+                      <select value={quickResp.linked_to_employee_id} onChange={e => setQuickResp(f => ({ ...f, linked_to_employee_id: e.target.value }))}
+                        className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="">Self-complete</option>
+                        {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                    </div>
                   </>
                 ) : (
                   <div><label className="text-xs text-gray-500">Due Date</label>
@@ -1312,7 +1463,7 @@ export default function HRM() {
                 <div>
                   <h3 className="font-bold text-lg">{dayCheck.employee?.name}</h3>
                   <p className="text-teal-100 text-sm">{dayCheck.employee?.department_name} · {dayCheck.employee?.designation || '—'}</p>
-                  <p className="text-teal-200 text-xs mt-1">Check date: {dayCheck.check_date}</p>
+                  <p className="text-teal-200 text-xs mt-1">Check date: {dayCheck.check_date} · this screen is the Daily Work Report (DWR)</p>
                 </div>
                 <div className="text-right">
                   <p className="text-3xl font-bold">{dayCheck?.summary?.completion_pct ?? 0}%</p>
@@ -1334,10 +1485,7 @@ export default function HRM() {
                         <li key={i.responsibility_id} className="px-4 py-3">
                           <div className="flex items-start gap-2">
                             <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
-                            <div>
-                              <p className="font-medium text-sm text-gray-800">{i.title}</p>
-                              <p className="text-xs text-gray-400">{i.frequency} · {i.status}{i.marked_by ? ` · ${i.marked_by}` : ''}</p>
-                            </div>
+                            {renderRespCheck(i, { showMark: canEditAssignments })}
                           </div>
                         </li>
                       ))}
@@ -1354,25 +1502,7 @@ export default function HRM() {
                         <li key={i.responsibility_id} className="px-4 py-3">
                           <div className="flex items-start gap-2">
                             <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
-                            <div className="flex-1 min-w-0">
-                              <p className="font-medium text-sm text-gray-800">{i.title}</p>
-                              <p className="text-xs text-gray-400">{i.frequency} · {i.status}{i.blocker_reason ? ` — ${i.blocker_reason}` : ''}</p>
-                              {(!i.marked || canEditAssignments) && (
-                                <select
-                                  defaultValue=""
-                                  onChange={e => {
-                                    const val = e.target.value
-                                    if (!val) return
-                                    handleStatusSelect(i.responsibility_id, checkDate, val)
-                                    e.target.value = ''
-                                  }}
-                                  className="mt-1.5 text-xs border rounded px-1.5 py-1 bg-white"
-                                >
-                                  <option value="">Mark status…</option>
-                                  {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
-                                </select>
-                              )}
-                            </div>
+                            {renderRespCheck(i)}
                           </div>
                         </li>
                       ))}
@@ -1425,34 +1555,7 @@ export default function HRM() {
                       <li key={i.responsibility_id} className="px-4 py-3">
                         <div className="flex items-start gap-2">
                           <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
-                          <div className="flex-1 min-w-0">
-                            <p className="font-medium text-sm text-gray-800">{i.title}</p>
-                            <p className="text-xs text-gray-400">
-                              {i.status}{i.approval_status ? ` · ${i.approval_status}` : ''}
-                              {i.linked_to_employee_name ? ` · Linked: ${i.linked_to_employee_name}` : ' · Self-complete'}
-                            </p>
-                            {(!i.marked || canEditAssignments) && (
-                              <select
-                                defaultValue=""
-                                onChange={e => {
-                                  const val = e.target.value
-                                  if (!val) return
-                                  handleStatusSelect(i.responsibility_id, checkDate, val)
-                                  e.target.value = ''
-                                }}
-                                className="mt-1.5 text-xs border rounded px-1.5 py-1 bg-white"
-                              >
-                                <option value="">Mark status…</option>
-                                {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
-                              </select>
-                            )}
-                            {i.task_log_id && i.approval_status === 'Pending' && (canEditAssignments || Number(scope?.employee_id) === Number(i.linked_to_employee_id)) && (
-                              <div className="flex gap-1 mt-1">
-                                <button type="button" className="text-xs px-2 py-0.5 bg-green-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: i.task_log_id, action: 'Approved' })}>Approve</button>
-                                <button type="button" className="text-xs px-2 py-0.5 bg-red-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: i.task_log_id, action: 'Cancelled' })}>Cancel</button>
-                              </div>
-                            )}
-                          </div>
+                          {renderRespCheck(i)}
                         </div>
                       </li>
                     ))}
@@ -1669,11 +1772,12 @@ export default function HRM() {
                     <p className="text-[10px] text-gray-400 mt-0.5">Repeats every 3 months from the selected month</p>
                   </div>
                 )}
-                <div><label className="text-xs text-gray-500">Linked To (approval)</label>
+                <div><label className="text-xs text-gray-500">Linked Person (supervisor / approver)</label>
                   <select value={respForm.linked_to_employee_id} onChange={e => setRespForm(f => ({ ...f, linked_to_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Self-complete (no approval)</option>
                     {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                   </select>
+                  <p className="text-[10px] text-gray-400 mt-0.5">Shown on Employee Check so the employee knows who supervises or approves this task.</p>
                 </div>
                 <div><label className="text-xs text-gray-500">Category</label>
                   <select value={respForm.category} onChange={e => setRespForm(f => ({ ...f, category: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
@@ -1736,13 +1840,13 @@ export default function HRM() {
                 </div>
                 <table className="w-full text-sm">
                   <thead className="text-gray-400 text-xs uppercase bg-gray-50">
-                    <tr><th className="text-left px-4 py-2">Task</th><th className="text-left px-4 py-2">Description</th><th className="text-left px-4 py-2">Frequency</th><th className="text-left px-4 py-2">Priority</th><th className="text-left px-4 py-2">Added By</th><th className="px-4 py-2"></th></tr>
+                    <tr><th className="text-left px-4 py-2">Task</th><th className="text-left px-4 py-2">Description</th><th className="text-left px-4 py-2">Frequency</th><th className="text-left px-4 py-2">Linked Person</th><th className="text-left px-4 py-2">Priority</th><th className="text-left px-4 py-2">Added By</th><th className="px-4 py-2"></th></tr>
                   </thead>
                   <tbody>
                     {resps.map((r: any) => (
                       <tr key={r.id} className="border-t hover:bg-gray-50">
                         {editResp?.id === r.id ? (
-                          <td colSpan={6} className="px-4 py-3">
+                          <td colSpan={7} className="px-4 py-3">
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                               <input value={editResp.title} onChange={e => setEditResp((x: any) => ({ ...x, title: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Title" />
                               <input value={editResp.description || ''} onChange={e => setEditResp((x: any) => ({ ...x, description: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Description" />
@@ -1755,8 +1859,12 @@ export default function HRM() {
                               <select value={editResp.employee_id} onChange={e => setEditResp((x: any) => ({ ...x, employee_id: +e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2">
                                 {(canEditAssignments ? pickerEmps : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                               </select>
+                              <select value={editResp.linked_to_employee_id || ''} onChange={e => setEditResp((x: any) => ({ ...x, linked_to_employee_id: e.target.value ? +e.target.value : '' }))} className="border rounded px-2 py-1 text-sm col-span-2">
+                                <option value="">Self-complete (no Linked Person)</option>
+                                {(canEditAssignments ? pickerEmps : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                              </select>
                               <div className="flex gap-2 col-span-2">
-                                <button onClick={() => updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id } })} disabled={!editResp.title || updateRespMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
+                                <button onClick={() => updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null } })} disabled={!editResp.title || updateRespMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
                                 <button onClick={() => setEditResp(null)} className="px-3 py-1 border rounded text-xs">Cancel</button>
                               </div>
                             </div>
@@ -1766,12 +1874,13 @@ export default function HRM() {
                             <td className="px-4 py-2 font-medium">{r.title}{r.mandatory ? <span className="ml-1 text-[10px] text-red-600">*</span> : null}</td>
                             <td className="px-4 py-2 text-xs text-gray-500">{r.description || '—'}</td>
                             <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.frequency === 'Daily' ? 'bg-blue-100 text-blue-700' : r.frequency === 'Weekly' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'}`}>{r.frequency}{r.schedule_weekday ? ` · ${r.schedule_weekday}` : ''}{r.schedule_month_day ? ` · D${r.schedule_month_day}` : ''}</span></td>
+                            <td className="px-4 py-2 text-xs text-indigo-800">{r.linked_to_employee_name || 'Self-complete'}</td>
                             <td className="px-4 py-2 text-xs"><span className={`px-1.5 py-0.5 rounded ${priorityStyle(r.priority || 'Medium')}`}>{r.priority || 'Medium'}</span></td>
                             <td className="px-4 py-2 text-xs text-gray-400">{r.added_by || '—'}</td>
                             <td className="px-4 py-2">
                               {canMutateRecords && (
                                 <div className="flex gap-2">
-                                  <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id })} className="text-xs text-blue-600">✏️</button>
+                                  <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '' })} className="text-xs text-blue-600">✏️</button>
                                   {canDeleteHrm && (
                                     <button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button>
                                   )}
@@ -2019,6 +2128,9 @@ export default function HRM() {
                 <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
               </>
             )}
+            {hodSubTab === 'dwr' && (
+              <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+            )}
           </div>
           <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
             <button onClick={() => setHodSubTab('responsibilities')}
@@ -2028,6 +2140,10 @@ export default function HRM() {
             <button onClick={() => setHodSubTab('tasks')}
               className={`px-3 py-1.5 rounded-md text-xs font-medium ${hodSubTab === 'tasks' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
               ✅ Tasks {hodPendingTasks.length > 0 && <span className="ml-1 bg-amber-500 text-white px-1.5 rounded-full">{hodPendingTasks.length}</span>}
+            </button>
+            <button onClick={() => setHodSubTab('dwr')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium ${hodSubTab === 'dwr' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
+              🕒 Daily Work Report
             </button>
           </div>
           {!hodDept && <p className="text-center text-gray-400 py-8 text-sm">Select a department</p>}
@@ -2075,6 +2191,50 @@ export default function HRM() {
               )}
             </div>
           )}
+          {hodDept && hodSubTab === 'dwr' && (
+            <div className="bg-white rounded-xl border overflow-hidden">
+              <div className="px-4 py-3 bg-teal-800 text-white font-semibold">
+                Daily Work Report — {toDate}
+                {hodEmp ? ` · ${hodDeptEmployees.find((e: any) => e.id === hodEmp)?.name || ''}` : ' · all employees'}
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-gray-400 text-xs uppercase bg-gray-50">
+                    <tr>
+                      <th className="text-left px-3 py-2">Employee</th>
+                      <th className="text-left px-3 py-2">Responsibility</th>
+                      <th className="text-left px-3 py-2">Status</th>
+                      <th className="text-left px-3 py-2">Timer</th>
+                      <th className="text-left px-3 py-2">Start</th>
+                      <th className="text-left px-3 py-2">End</th>
+                      <th className="text-left px-3 py-2">Duration</th>
+                      <th className="text-left px-3 py-2">Linked Person</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(dwrData?.rows || []).map((row: any) => (
+                      <tr key={`${row.employee_id}-${row.responsibility_id}`} className="border-t">
+                        <td className="px-3 py-2">{row.employee_name}</td>
+                        <td className="px-3 py-2">
+                          <p className="font-medium">{row.title}</p>
+                          <p className="text-[10px] text-gray-400">{row.frequency}</p>
+                        </td>
+                        <td className="px-3 py-2">{row.status}</td>
+                        <td className="px-3 py-2"><span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${timerBadgeClass(row.timer_status)}`}>{row.timer_status}</span></td>
+                        <td className="px-3 py-2 text-xs">{fmtDateTime(row.started_at)}</td>
+                        <td className="px-3 py-2 text-xs">{fmtDateTime(row.ended_at)}</td>
+                        <td className="px-3 py-2 text-xs font-semibold">{fmtDuration(row.duration_minutes)}</td>
+                        <td className="px-3 py-2 text-xs text-indigo-800">{row.linked_person || row.linked_to_employee_name || 'Self-complete'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {!(dwrData?.rows || []).length && (
+                  <p className="text-center text-gray-400 py-8 text-sm">No DWR rows for this date. Select an employee and date, or ask the employee to start their responsibilities in Employee Check.</p>
+                )}
+              </div>
+            </div>
+          )}
           {hodDept && hodSubTab === 'responsibilities' && hodData && (
             <div className="bg-white rounded-xl border overflow-hidden">
               <div className="px-4 py-3 bg-[#002B5B] text-white flex justify-between">
@@ -2103,6 +2263,7 @@ export default function HRM() {
                         <td className="px-3 py-2 sticky left-0 bg-white z-10">
                           <p className="font-semibold text-[#002B5B]">{r.employee_name}</p>
                           <p className="text-gray-600">{r.title}</p>
+                          <p className="text-[10px] text-indigo-700">{r.linked_to_employee_name ? `Approver: ${r.linked_to_employee_name}` : 'Self-complete'}</p>
                         </td>
                         <td className="px-3 py-2 text-gray-400">{r.frequency}</td>
                         {(hodData.dates || []).map((d: string) => {

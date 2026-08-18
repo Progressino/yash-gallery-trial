@@ -182,3 +182,80 @@ def test_hod_cannot_patch_responsibility_via_flags(monkeypatch, hrm):
     hod = build_hrm_scope({"role_name": "HOD", "hrm_department_id": 1})
     assert hod.can_mutate_assignment_records is False
     assert hod.can_delete_hrm_records is False
+
+
+def test_responsibility_timer_dwr_and_linked_person(hrm):
+    create_department({"name": f"DWR-{uuid.uuid4().hex[:6]}"})
+    did = hrm.list_departments()[0]["id"]
+    create_employee({"name": "Worker A", "department_id": did})
+    create_employee({"name": "Supervisor S", "department_id": did})
+    emps = list_employees(did)
+    worker = next(e for e in emps if e["name"] == "Worker A")
+    supervisor = next(e for e in emps if e["name"] == "Supervisor S")
+    r1 = create_responsibility(
+        {
+            "employee_id": worker["id"],
+            "title": "Morning check",
+            "frequency": "Daily",
+            "linked_to_employee_id": supervisor["id"],
+        }
+    )
+    r2 = create_responsibility(
+        {
+            "employee_id": worker["id"],
+            "title": "EOD report",
+            "frequency": "Daily",
+        }
+    )
+    day = hrm.today_ist().isoformat()
+    assert hrm.start_responsibility_timer(r1, day) is True
+    snap = get_employee_day_check(worker["id"], day)
+    items = snap["worked_on"] + snap["not_worked"] + snap["other"]
+    i1 = next(i for i in items if i["responsibility_id"] == r1)
+    i2 = next(i for i in items if i["responsibility_id"] == r2)
+    assert i1["timer_status"] == "In Progress"
+    assert i1["started_at"]
+    assert i1["linked_to_employee_name"] == "Supervisor S"
+    assert i2["timer_status"] == "Not Started"
+    assert not i2["started_at"]
+    assert i2["linked_to_employee_name"] == ""
+
+    assert hrm.end_responsibility_timer(r1, day) is True
+    snap = get_employee_day_check(worker["id"], day)
+    items = snap["worked_on"] + snap["not_worked"] + snap["other"]
+    i1 = next(i for i in items if i["responsibility_id"] == r1)
+    assert i1["timer_status"] == "Completed"
+    assert i1["ended_at"]
+    assert i1["duration_minutes"] >= 0
+
+    # Manual times on a second responsibility must not overwrite the first
+    assert (
+        hrm.set_responsibility_manual_time(
+            r2, day, f"{day} 09:00:00", f"{day} 11:30:00"
+        )
+        is True
+    )
+    assert (
+        hrm.set_responsibility_manual_time(
+            r2, day, f"{day} 12:00:00", f"{day} 11:00:00"
+        )
+        == "invalid_range"
+    )
+    snap = get_employee_day_check(worker["id"], day)
+    items = snap["worked_on"] + snap["not_worked"] + snap["other"]
+    i1 = next(i for i in items if i["responsibility_id"] == r1)
+    i2 = next(i for i in items if i["responsibility_id"] == r2)
+    assert i1["timer_status"] == "Completed"
+    assert i2["timer_status"] == "Completed"
+    assert i2["duration_minutes"] == 150
+
+    # Starting the timer must not lock quality mark (Done)
+    assert mark_task(r1, day, "Done") is True
+    dwr = hrm.list_dwr_rows(employee_id=worker["id"], check_date=day)
+    assert len(dwr["rows"]) >= 2
+    d1 = next(r for r in dwr["rows"] if r["responsibility_id"] == r1)
+    d2 = next(r for r in dwr["rows"] if r["responsibility_id"] == r2)
+    assert d1["status"] == "Done"
+    assert d1["linked_person"] == "Supervisor S"
+    assert d2["linked_person"] == "Self-complete"
+    assert d2["duration_minutes"] == 150
