@@ -1,0 +1,124 @@
+name: Probe HRM DWR + Cutting Balance (prod)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Authenticated HRM + cutting-report checks
+        run: |
+          set -eu
+          curl -sf --connect-timeout 8 --max-time 20 http://127.0.0.1:8000/api/health | tee /tmp/health.json
+          echo
+          python3 - <<'PY'
+          import json, os, sys
+          from datetime import date
+          import requests
+
+          h = json.load(open("/tmp/health.json"))
+          print("HEALTH", h.get("git_sha"), "warm", h.get("warm_cache"))
+          assert str(h.get("git_sha") or "").startswith("a3c2f75"), h
+
+          env = {}
+          for line in open("/root/app/.env"):
+              line = line.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              k, _, v = line.partition("=")
+              env[k.strip()] = v.strip().strip('"').strip("'")
+          user, pw = env.get("AUTH_USERNAME"), env.get("AUTH_PASSWORD")
+          if not user or not pw:
+              sys.exit("missing AUTH_USERNAME/PASSWORD")
+
+          base = "http://127.0.0.1:8000"
+          s = requests.Session()
+          r = s.post(
+              f"{base}/api/auth/login",
+              json={"username": user, "password": pw},
+              headers={"X-Device-Id": "gha-gate-smoke"},
+              timeout=60,
+          )
+          print("LOGIN", r.status_code, (r.text or "")[:180])
+          r.raise_for_status()
+          assert r.json().get("ok") is True or r.json().get("token") or r.json().get("user"), r.text
+
+          scope = s.get(f"{base}/api/hrm/scope", timeout=30)
+          print("SCOPE", scope.status_code, (scope.text or "")[:240])
+          scope.raise_for_status()
+          sc = scope.json()
+          print("role", sc.get("role") or sc.get("role_name"), "can_use_employee_check", sc.get("can_use_employee_check"))
+
+          today = date.today().isoformat()
+          dwr = s.get(f"{base}/api/hrm/dwr", params={"check_date": today}, timeout=60)
+          print("DWR", dwr.status_code, (dwr.text or "")[:300])
+          if dwr.status_code == 403:
+              print("DWR forbidden for this login (expected if not HOD/Admin)")
+          else:
+              dwr.raise_for_status()
+              body = dwr.json()
+              assert "rows" in body, body
+              print("dwr_rows", len(body.get("rows") or []), "date", body.get("check_date"))
+              if body.get("rows"):
+                  row = body["rows"][0]
+                  for k in ("title", "status", "timer_status", "started_at", "ended_at", "duration_minutes", "linked_person"):
+                      assert k in row, (k, row.keys())
+                  print("dwr_sample", {k: row.get(k) for k in ("employee_name", "title", "status", "timer_status", "linked_person", "duration_minutes")})
+
+          emps = s.get(f"{base}/api/hrm/employees", timeout=30)
+          print("EMPS", emps.status_code, "n", len(emps.json()) if emps.ok else emps.text[:120])
+          if emps.ok and emps.json():
+              eid = emps.json()[0]["id"]
+              chk = s.get(f"{base}/api/hrm/employee-check/{eid}", params={"check_date": today}, timeout=60)
+              print("CHECK", chk.status_code)
+              if chk.status_code == 403:
+                  print("employee-check forbidden (Admin without check tab is OK)")
+              else:
+                  chk.raise_for_status()
+                  snap = chk.json()
+                  items = []
+                  for bucket in ("worked_on", "not_worked", "other", "whenever_required"):
+                      items.extend(snap.get(bucket) or [])
+                  print("check_items", len(items), "employee", (snap.get("employee") or {}).get("name"))
+                  if items:
+                      it = items[0]
+                      for k in ("timer_status", "started_at", "ended_at", "linked_to_employee_name"):
+                          assert k in it, (k, it.keys())
+                      print("check_sample", {k: it.get(k) for k in ("title", "status", "timer_status", "linked_to_employee_name")})
+
+                  resps = s.get(f"{base}/api/hrm/responsibilities", timeout=30)
+                  if resps.ok and resps.json():
+                      rid = resps.json()[0]["id"]
+                      bad = s.post(
+                          f"{base}/api/hrm/tasks/{rid}/manual-time",
+                          json={"log_date": today, "started_at": f"{today} 12:00", "ended_at": f"{today} 11:00"},
+                          timeout=30,
+                      )
+                      print("INVALID_RANGE", bad.status_code, (bad.text or "")[:200])
+                      assert bad.status_code in (400, 409, 403), bad.text
+                      if bad.status_code == 400:
+                          assert "earlier" in (bad.text or "").lower() or "invalid" in (bad.text or "").lower()
+
+          cut = s.get(f"{base}/api/production/cutting-report", params={"export": "true"}, timeout=90)
+          print("CUTTING", cut.status_code)
+          cut.raise_for_status()
+          out = cut.json()
+          assert out.get("ok") is True or "rows" in out, list(out.keys())[:20]
+          rows = out.get("rows") or []
+          print("cutting_rows", len(rows), "kpis", out.get("kpis"))
+          mismatches = []
+          received_nonzero = 0
+          for row in rows:
+              planned = int(row.get("planned_qty") or 0)
+              received = int(row.get("received_qty") or 0)
+              balance = int(row.get("balance_qty") or 0)
+              if received:
+                  received_nonzero += 1
+              if balance != planned - received:
+                  mismatches.append((row.get("jo_number"), planned, received, balance))
+          print("received_nonzero_rows", received_nonzero, "balance_mismatches", len(mismatches))
+          assert not mismatches, mismatches[:5]
+          print("PROBE_OK")
+          PY
