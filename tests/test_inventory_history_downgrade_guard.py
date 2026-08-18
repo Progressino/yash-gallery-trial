@@ -54,6 +54,32 @@ def test_inventory_history_is_newer_than_rejects_channel_split_loss():
     )
 
 
+def test_inventory_history_is_newer_than_prefers_more_census_days():
+    """Same max-date overlay that restores snapshot days must be allowed to persist."""
+    carried = pd.DataFrame(
+        {
+            "OMS_SKU": ["A", "A"],
+            "Date": pd.to_datetime(["2026-07-02", "2026-08-17"]),
+            "Qty": [10.0, 8.0],
+            "Source": ["derived", "snapshot"],
+        }
+    )
+    restored = carried.copy()
+    restored.loc[0, "Source"] = "snapshot"
+    assert inventory_history_is_newer_than(
+        restored,
+        carried,
+        incoming_uploaded_at="2026-08-17T10:00:00Z",
+        existing_uploaded_at="2026-08-17T10:00:00Z",
+    )
+    assert not inventory_history_is_newer_than(
+        carried,
+        restored,
+        incoming_uploaded_at="2026-08-17T10:00:00Z",
+        existing_uploaded_at="2026-08-17T10:00:00Z",
+    )
+
+
 def test_inventory_history_is_newer_than_rejects_equal_uploaded_at_rewrite():
     a = _hist("A", "2026-07-23", 3)
     b = _hist("A", "2026-07-23", 3)

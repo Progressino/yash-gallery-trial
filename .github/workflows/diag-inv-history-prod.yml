@@ -1,0 +1,121 @@
+name: Diagnose Inv History snapshots (prod)
+
+# Dump day-archive files vs history Source tags, restore census days onto
+# the live parquet, then dump again. Hunt leftover Inventory RARs on the host.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: self-hosted
+    timeout-minutes: 25
+    steps:
+      - name: Clear stuck sparse-checkout (self-hosted)
+        run: |
+          set +e
+          for d in "${GITHUB_WORKSPACE}" /root/actions-runner/_work/yash-gallery-trial/yash-gallery-trial; do
+            [ -n "$d" ] && [ -d "$d/.git" ] || continue
+            git -C "$d" sparse-checkout disable 2>/dev/null
+            git -C "$d" config core.sparseCheckout false 2>/dev/null
+            rm -f "$d/.git/info/sparse-checkout" 2>/dev/null
+          done
+          true
+
+      - name: Checkout repair script
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Dump snapshot archives vs history dates
+        run: |
+          set -euo pipefail
+          CID="$(docker ps --format '{{.Names}}' | grep -E 'progressino-backend|backend' | head -1 || true)"
+          if [ -z "${CID}" ]; then
+            echo "FATAL: no backend container"
+            docker ps || true
+            exit 1
+          fi
+          echo "CID=${CID}" >> "$GITHUB_ENV"
+          echo "Container: ${CID}"
+          docker exec -e PYTHONPATH=/srv -e WARM_CACHE_DIR=/data/warm_cache -w /srv "${CID}" python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import pandas as pd
+
+          cache = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
+          snap = cache / "inventory_day_snapshots"
+          hist_path = cache / "daily_inventory_history_df.parquet"
+          print("CACHE", cache)
+          print("SNAP_DIR", snap, "exists", snap.is_dir())
+          files = sorted(snap.glob("*.parquet")) if snap.is_dir() else []
+          print("SNAP_COUNT", len(files))
+          print("SNAP_DATES", [p.stem[:10] for p in files])
+          if not hist_path.is_file():
+              print("MISSING_HIST", hist_path)
+              raise SystemExit(0)
+          h = pd.read_parquet(hist_path)
+          h["Date"] = pd.to_datetime(h["Date"], errors="coerce").dt.normalize()
+          h = h.dropna(subset=["Date"])
+          print("HIST_ROWS", len(h), "MIN", str(h["Date"].min().date()), "MAX", str(h["Date"].max().date()))
+          if "Source" in h.columns:
+              print("SOURCE_COUNTS", h["Source"].astype(str).str.lower().value_counts().to_dict())
+          else:
+              print("SOURCE_COUNTS missing")
+          print("--- JUL/AUG DAYS ---")
+          for d in pd.date_range("2026-07-01", "2026-08-17"):
+              day = pd.Timestamp(d).normalize()
+              sub = h[h["Date"] == day]
+              counts = sub["Source"].astype(str).str.lower().value_counts().to_dict() if not sub.empty and "Source" in sub.columns else {}
+              qty = float(pd.to_numeric(sub["Qty"], errors="coerce").fillna(0).sum()) if not sub.empty else 0.0
+              skus = int(sub["OMS_SKU"].nunique()) if not sub.empty else 0
+              has_file = (snap / f"{day.date()}.parquet").is_file()
+              print(
+                  f"DAY {day.date()} file={int(has_file)} rows={len(sub)} skus={skus} qty={qty:.0f} src={counts}"
+              )
+          PY
+          echo "=== HOST RAR SEARCH ==="
+          find /tmp /root /data /root/app-data /root/app -iname '*inventory*.rar' -o -iname '*inv*jul*.rar' -o -iname '*inv*aug*.rar' 2>/dev/null | head -80 || true
+
+      - name: Copy overlay + repair into backend container
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          docker cp backend/services/daily_inventory_history.py \
+            "${CID}:/srv/backend/services/daily_inventory_history.py"
+          docker cp backend/scripts/repair_inv_history_from_disk_archives.py \
+            "${CID}:/srv/backend/scripts/repair_inv_history_from_disk_archives.py"
+          docker exec "${CID}" ls -lah \
+            /srv/backend/services/daily_inventory_history.py \
+            /srv/backend/scripts/repair_inv_history_from_disk_archives.py
+
+      - name: Restore census days from archives onto parquet
+        run: |
+          set -euo pipefail
+          docker exec -e PYTHONPATH=/srv -e WARM_CACHE_DIR=/data/warm_cache -w /srv "${CID}" \
+            python3 backend/scripts/repair_inv_history_from_disk_archives.py
+
+      - name: Dump after repair
+        run: |
+          set -euo pipefail
+          docker exec -e PYTHONPATH=/srv -e WARM_CACHE_DIR=/data/warm_cache -w /srv "${CID}" python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import pandas as pd
+
+          cache = Path(os.environ.get("WARM_CACHE_DIR", "/data/warm_cache"))
+          snap = cache / "inventory_day_snapshots"
+          h = pd.read_parquet(cache / "daily_inventory_history_df.parquet")
+          h["Date"] = pd.to_datetime(h["Date"], errors="coerce").dt.normalize()
+          print("AFTER SOURCE_COUNTS", h["Source"].astype(str).str.lower().value_counts().to_dict() if "Source" in h.columns else "missing")
+          src = h["Source"].astype(str).str.strip().str.lower()
+          dates = h["Date"]
+          auth = sorted({str(pd.Timestamp(d).date()) for d in dates[src.isin(["snapshot", "uploaded"])].dropna().unique()})
+          print("AFTER AUTH_DATES", len(auth), auth)
+          print("--- JUL/AUG AFTER ---")
+          for d in pd.date_range("2026-07-01", "2026-08-17"):
+              day = pd.Timestamp(d).normalize()
+              sub = h[h["Date"] == day]
+              counts = sub["Source"].astype(str).str.lower().value_counts().to_dict() if not sub.empty and "Source" in sub.columns else {}
+              has_file = (snap / f"{day.date()}.parquet").is_file()
+              print(f"DAY {day.date()} file={int(has_file)} src={counts}")
+          PY

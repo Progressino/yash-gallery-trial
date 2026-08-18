@@ -38,9 +38,9 @@ _CHANNEL_COLS = ["OMS_SKU", "Date", "Qty", "Source", "Channel"]
 _SOURCE_RANK = {"snapshot": 3, "uploaded": 2, "derived": 1}
 
 # Matrix/summary GET must not merge bak-* parquets on every request. Overlay
-# day-archive files at most once per live parquet mtime.
+# day-archive files at most once per (history parquet, snapshot-dir) token.
 _MATRIX_DAY_OVERLAY_LOCK = threading.Lock()
-_MATRIX_DAY_OVERLAY_MTIME: float | None = None
+_MATRIX_DAY_OVERLAY_MTIME: object | None = None
 
 # Parent-style codes (YR021) and single-cell day-total leaks (~warehouse census)
 # must never enter Inv History as sellable SKU qty.
@@ -570,6 +570,47 @@ def archive_inventory_day_snapshot(variant_df: pd.DataFrame | None, snapshot_dat
     return str(path)
 
 
+def _matrix_overlay_token() -> tuple:
+    """Skip overlay only when both history parquet and day-archive files are unchanged."""
+    hist_path = _warm_cache_dir() / "daily_inventory_history_df.parquet"
+    snap_dir = _inventory_day_snapshot_dir()
+    try:
+        hist_mtime = hist_path.stat().st_mtime
+    except OSError:
+        hist_mtime = 0.0
+    snap_mtime = 0.0
+    snap_n = 0
+    try:
+        files = list(snap_dir.glob("*.parquet")) if snap_dir.is_dir() else []
+        snap_n = len(files)
+        if files:
+            snap_mtime = max(p.stat().st_mtime for p in files)
+    except OSError:
+        snap_mtime = 0.0
+        snap_n = 0
+    return (hist_mtime, snap_mtime, snap_n)
+
+
+def _pending_disk_snapshot_headers(hist: pd.DataFrame | None, headers: list[dict]) -> list[dict]:
+    """Every on-disk daily census not already tagged Source=snapshot in history.
+
+    Do not limit this to a rolling 40-day window: July uploads must still overlay
+    when the live matrix ends in August.
+    """
+    if not headers:
+        return []
+    already = set(snapshot_dates_from_history(hist))
+    pending = []
+    seen: set[str] = set()
+    for h in headers:
+        day = str(h.get("snapshot_date") or "")[:10]
+        if len(day) != 10 or day in already or day in seen:
+            continue
+        seen.add(day)
+        pending.append(h)
+    return pending
+
+
 def _disk_inventory_day_snapshot_headers() -> list[dict]:
     root = _inventory_day_snapshot_dir()
     if not root.is_dir():
@@ -596,63 +637,44 @@ def overlay_day_archives_for_read_once(sess) -> int:
     scan hundreds of thousands of rows per backup and exceeded the 120s UI timeout.
     """
     global _MATRIX_DAY_OVERLAY_MTIME
-    hist_path = _warm_cache_dir() / "daily_inventory_history_df.parquet"
-    try:
-        mtime = hist_path.stat().st_mtime
-    except OSError:
-        mtime = 0.0
-    if _MATRIX_DAY_OVERLAY_MTIME == mtime:
+    token = _matrix_overlay_token()
+    if _MATRIX_DAY_OVERLAY_MTIME == token:
         return 0
     # Wait for an in-progress overlay instead of returning stale July/August days.
     if not _MATRIX_DAY_OVERLAY_LOCK.acquire(blocking=True, timeout=90):
         return 0
     try:
-        if _MATRIX_DAY_OVERLAY_MTIME == mtime:
+        token = _matrix_overlay_token()
+        if _MATRIX_DAY_OVERLAY_MTIME == token:
             return 0
         hist = getattr(sess, "daily_inventory_history_df", None)
         if hist is None or getattr(hist, "empty", True):
-            _MATRIX_DAY_OVERLAY_MTIME = mtime
+            _MATRIX_DAY_OVERLAY_MTIME = token
             return 0
         headers = _disk_inventory_day_snapshot_headers()
         if not headers:
-            _MATRIX_DAY_OVERLAY_MTIME = mtime
+            _MATRIX_DAY_OVERLAY_MTIME = token
             return 0
-        mx = inventory_history_max_date(hist)
-        if mx is None:
-            _MATRIX_DAY_OVERLAY_MTIME = mtime
-            return 0
-        span = list(pd.date_range(mx - pd.Timedelta(days=40), mx, freq="D"))
-        gaps = set(non_uploaded_inventory_dates(hist, span))
-        after_max = {
-            str(h.get("snapshot_date") or "")[:10]
-            for h in headers
-            if len(str(h.get("snapshot_date") or "")[:10]) == 10
-            and str(h.get("snapshot_date") or "")[:10] > str(pd.Timestamp(mx).date())
-        }
-        useful = [
-            h
-            for h in headers
-            if str(h.get("snapshot_date") or "")[:10] in gaps
-            or str(h.get("snapshot_date") or "")[:10] in after_max
-        ]
+        useful = _pending_disk_snapshot_headers(hist, headers)
         if not useful:
-            _MATRIX_DAY_OVERLAY_MTIME = mtime
+            _MATRIX_DAY_OVERLAY_MTIME = token
             return 0
         restored = overlay_persisted_inventory_snapshots(sess, snapshots=useful)
         if restored:
-            persist_inventory_history_authoritative(sess)
-            try:
-                _MATRIX_DAY_OVERLAY_MTIME = hist_path.stat().st_mtime
-            except OSError:
-                _MATRIX_DAY_OVERLAY_MTIME = mtime
-        else:
-            _MATRIX_DAY_OVERLAY_MTIME = mtime
-        return int(restored or 0)
+            wrote = persist_inventory_history_authoritative(sess, force=True)
+            if wrote:
+                _MATRIX_DAY_OVERLAY_MTIME = _matrix_overlay_token()
+            else:
+                # Do not skip later requests — census days are in memory only until disk accepts.
+                _MATRIX_DAY_OVERLAY_MTIME = None
+            return int(restored)
+        _MATRIX_DAY_OVERLAY_MTIME = token
+        return 0
     except Exception:
         import logging
 
         logging.getLogger(__name__).exception("overlay_day_archives_for_read_once failed")
-        _MATRIX_DAY_OVERLAY_MTIME = mtime
+        _MATRIX_DAY_OVERLAY_MTIME = None
         return 0
     finally:
         _MATRIX_DAY_OVERLAY_LOCK.release()
@@ -699,7 +721,12 @@ def overlay_persisted_inventory_snapshots(sess, snapshots: list[dict] | None = N
         if len(str(h.get("snapshot_date") or "")[:10]) == 10
         and str(h.get("snapshot_date") or "")[:10] > hist_max
     }
-    allowed = gaps | extend_days
+    pending_files = {
+        str(h.get("snapshot_date") or "")[:10]
+        for h in headers
+        if len(str(h.get("snapshot_date") or "")[:10]) == 10
+    } - set(snapshot_dates_from_history(work))
+    allowed = gaps | extend_days | pending_files
     if not allowed:
         return 0
 
@@ -1364,6 +1391,17 @@ def inventory_history_authoritative_cap_date(sess) -> pd.Timestamp:
     return today_ist_timestamp()
 
 
+def _authoritative_history_day_count(hist: pd.DataFrame | None) -> int:
+    """Unique calendar days tagged snapshot or uploaded (real census, not carry-forward)."""
+    if hist is None or getattr(hist, "empty", True) or "Date" not in hist.columns:
+        return 0
+    if "Source" not in hist.columns:
+        return 0
+    src = hist["Source"].astype(str).str.strip().str.lower()
+    dates = pd.to_datetime(hist["Date"], errors="coerce").dt.normalize()
+    return int(dates[src.isin(["snapshot", "uploaded"])].nunique())
+
+
 def inventory_history_is_newer_than(
     incoming: pd.DataFrame | None,
     existing: pd.DataFrame | None,
@@ -1408,6 +1446,12 @@ def inventory_history_is_newer_than(
             return True
         if in_max < ex_max:
             return False
+    # Restoring census days (day-archive overlay / bak merge) must beat a same-max
+    # frame whose Jul/Aug columns were flattened to Source=derived.
+    in_auth = _authoritative_history_day_count(incoming)
+    ex_auth = _authoritative_history_day_count(existing)
+    if in_auth > ex_auth:
+        return True
     # Equal timestamps must not rewrite disk — stale warm sessions used to
     # clobber a just-rebuilt channel matrix with the same uploaded_at.
     if in_at > 0 or ex_at > 0:
@@ -4396,16 +4440,7 @@ def restore_inventory_history_from_best_disk_backups(
     ):
         return merged
 
-    def _auth_days(df: pd.DataFrame | None) -> int:
-        if df is None or getattr(df, "empty", True) or "Date" not in df.columns:
-            return 0
-        if "Source" not in df.columns:
-            return 0
-        src = df["Source"].astype(str).str.strip().str.lower()
-        dates = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
-        return int(dates[src.isin(["snapshot", "uploaded"])].nunique())
-
-    if _auth_days(merged) > _auth_days(current):
+    if _authoritative_history_day_count(merged) > _authoritative_history_day_count(current):
         return merged
     return None
 
@@ -4505,8 +4540,17 @@ def reconcile_inventory_history_disk_integrity(*, repair: bool = True) -> dict:
     return report
 
 
-def persist_inventory_history_authoritative(sess, df: pd.DataFrame | None = None) -> bool:
-    """Atomically persist inventory history parquet + meta from one dataframe."""
+def persist_inventory_history_authoritative(
+    sess,
+    df: pd.DataFrame | None = None,
+    *,
+    force: bool = False,
+) -> bool:
+    """Atomically persist inventory history parquet + meta from one dataframe.
+
+    ``force=True`` writes even when max-date / uploaded_at are unchanged — used
+    when day-archive overlay restores Source=snapshot on carried columns.
+    """
     import json
 
     from ..services.helpers import _coerce_df_for_parquet
@@ -4522,18 +4566,11 @@ def persist_inventory_history_authoritative(sess, df: pd.DataFrame | None = None
         )
     except Exception:
         pass
-    clear_inventory_channel_view_cache()
-    try:
-        from ..routers.po import clear_warm_cache_parquet_cache
-
-        clear_warm_cache_parquet_cache("daily_inventory_history_df")
-    except Exception:
-        pass
     sess.daily_inventory_history_df = work
     cache = _warm_cache_dir()
     cache.mkdir(parents=True, exist_ok=True)
     hist_path = cache / "daily_inventory_history_df.parquet"
-    if hist_path.is_file():
+    if hist_path.is_file() and not force:
         try:
             old = pd.read_parquet(hist_path)
             disk_meta = read_daily_inventory_history_disk_meta() or {}
@@ -4548,6 +4585,13 @@ def persist_inventory_history_authoritative(sess, df: pd.DataFrame | None = None
                 return False
         except Exception:
             pass
+    clear_inventory_channel_view_cache()
+    try:
+        from ..routers.po import clear_warm_cache_parquet_cache
+
+        clear_warm_cache_parquet_cache("daily_inventory_history_df")
+    except Exception:
+        pass
     _coerce_df_for_parquet(work).to_parquet(hist_path, index=False)
     meta = daily_inventory_history_meta_bundle(sess)
     (cache / _DAILY_INV_META_FILENAME).write_text(json.dumps(meta, default=str, indent=2), encoding="utf-8")

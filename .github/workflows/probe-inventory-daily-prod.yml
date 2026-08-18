@@ -244,6 +244,20 @@ jobs:
           if not any(x.startswith("2026-08-") for x in mx_dates):
               raise SystemExit(f"matrix days=60 missing August columns: {mx_dates[:8]}")
           print("MATRIX_JULY_AUGUST_OK", {"n_dates": len(mx_dates), "sample": mx_dates[:4]})
+          gaps = [str(x)[:10] for x in (mx_body.get("gap_dates") or [])]
+          uploaded = [str(x)[:10] for x in (mx_body.get("uploaded_dates") or [])]
+          print("MATRIX_UPLOADED_COUNT", len(uploaded), "sample", uploaded[:12])
+          print("MATRIX_GAP_COUNT", len(gaps), "sample", gaps[:12])
+          jul_aug_gaps = [d for d in gaps if "2026-07-01" <= d <= "2026-08-16"]
+          jul_aug_up = [d for d in uploaded if "2026-07-01" <= d <= "2026-08-16"]
+          print("JUL_AUG_UPLOADED", len(jul_aug_up), jul_aug_up)
+          print("JUL_AUG_GAPS", len(jul_aug_gaps), jul_aug_gaps)
+          if len(jul_aug_gaps) >= 40:
+              raise SystemExit(
+                  "Inv. History still marks 40+ Jul/Aug days as CARRIED "
+                  f"({len(jul_aug_gaps)} gaps). Overlay/persist did not restore census days."
+              )
+          print("MATRIX_JUL_AUG_CENSUS_OK")
 
           jul = next(x for x in date_list if x.startswith("2026-07-"))
           aug = next(x for x in date_list if x.startswith("2026-08-"))

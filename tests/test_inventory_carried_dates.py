@@ -406,8 +406,10 @@ def test_overlay_day_archives_once_does_not_merge_backups(tmp_path, monkeypatch)
 def test_overlay_day_archives_applies_gap_file_once(tmp_path, monkeypatch):
     from backend.services import daily_inventory_history as dih
     from backend.session import AppSession
+    import backend.main as _main
 
     monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(_main, "_warm_cache", {}, raising=False)
     dih._MATRIX_DAY_OVERLAY_MTIME = None
     hist_path = tmp_path / "daily_inventory_history_df.parquet"
     sess = AppSession()
@@ -442,6 +444,56 @@ def test_overlay_day_archives_applies_gap_file_once(tmp_path, monkeypatch):
     assert float(day["Qty"]) == 7.0
     n2 = dih.overlay_day_archives_for_read_once(sess)
     assert n2 == 0
+    disk = pd.read_parquet(hist_path)
+    persisted = disk[pd.to_datetime(disk["Date"]).dt.strftime("%Y-%m-%d") == "2026-08-09"].iloc[0]
+    assert str(persisted["Source"]).lower() == "snapshot"
+    assert float(persisted["Qty"]) == 7.0
+
+
+def test_overlay_day_archives_applies_snapshot_older_than_40_days(tmp_path, monkeypatch):
+    """July day files must overlay even when history max is mid-August."""
+    from backend.services import daily_inventory_history as dih
+    from backend.session import AppSession
+    import backend.main as _main
+
+    monkeypatch.setenv("WARM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(_main, "_warm_cache", {}, raising=False)
+    dih._MATRIX_DAY_OVERLAY_MTIME = None
+    hist_path = tmp_path / "daily_inventory_history_df.parquet"
+    sess = AppSession()
+    sess.daily_inventory_history_df = pd.DataFrame(
+        [
+            {
+                "OMS_SKU": "S1-M",
+                "Date": pd.Timestamp("2026-07-02"),
+                "Qty": 10,
+                "Source": "derived",
+                "Channel": "oms",
+            },
+            {
+                "OMS_SKU": "S1-M",
+                "Date": pd.Timestamp("2026-08-17"),
+                "Qty": 8,
+                "Source": "snapshot",
+                "Channel": "oms",
+            },
+        ]
+    )
+    sess.daily_inventory_history_df.to_parquet(hist_path, index=False)
+    dih.archive_inventory_day_snapshot(
+        pd.DataFrame({"OMS_SKU": ["S1-M"], "OMS_Inventory": [22]}),
+        "2026-07-02",
+    )
+    n = dih.overlay_day_archives_for_read_once(sess)
+    assert n == 1
+    row = sess.daily_inventory_history_df
+    day = row[pd.to_datetime(row["Date"]).dt.strftime("%Y-%m-%d") == "2026-07-02"].iloc[0]
+    assert str(day["Source"]).lower() == "snapshot"
+    assert float(day["Qty"]) == 22.0
+    disk = pd.read_parquet(hist_path)
+    persisted = disk[pd.to_datetime(disk["Date"]).dt.strftime("%Y-%m-%d") == "2026-07-02"].iloc[0]
+    assert str(persisted["Source"]).lower() == "snapshot"
+    assert float(persisted["Qty"]) == 22.0
 
 
 def test_overlay_extends_history_with_snapshots_after_hist_max():
