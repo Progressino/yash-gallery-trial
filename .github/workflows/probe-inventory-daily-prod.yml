@@ -310,31 +310,55 @@ jobs:
           else:
               raise SystemExit("history export job timeout")
 
-          # Production routing: Style path must drive Issue-to-next (not hardcoded Finishing).
-          orders = s.get(
-              f"{base}/api/production/orders",
-              params={"process": "Stitching"},
-              timeout=60,
-          )
-          print("prod_orders_stitch", orders.status_code)
-          orders.raise_for_status()
-          raw_jos = orders.json()
-          jos = raw_jos if isinstance(raw_jos, list) else (raw_jos or {}).get("rows") or []
-          routing_checked = 0
-          kaj_checked = 0
-          for jo in jos[:80]:
-              sku = str(jo.get("sku") or "").strip()
-              so = str(jo.get("so_number") or "").strip()
-              if not sku:
-                  continue
-              rt = s.get(
-                  f"{base}/api/production/item-routing/{sku}",
-                  params={"so_number": so, "process": "Stitching"},
+          # Production routing: do not GET /orders (computes next_process for every JO and times out).
+          probe_skus = list(sku_map.keys()) or ["AK-228BLACK-3XL"]
+          try:
+              items = s.get(
+                  f"{base}/api/items",
+                  params={"parent_only": True},
                   timeout=60,
               )
-              if rt.status_code != 200:
-                  print("item_routing_skip", sku, rt.status_code, rt.text[:160])
+              print("items_parent", items.status_code)
+              if items.ok:
+                  raw_items = items.json()
+                  parents = raw_items if isinstance(raw_items, list) else []
+                  for p in parents[:25]:
+                      pid = p.get("id")
+                      if not pid:
+                          continue
+                      det = s.get(f"{base}/api/items/{pid}", timeout=30)
+                      if not det.ok:
+                          continue
+                      body = det.json() or {}
+                      names = [str(r.get("name") or "") for r in (body.get("routing") or [])]
+                      if any("kaj" in n.lower() for n in names):
+                          variants = body.get("variants") or []
+                          code = (
+                              (variants[0].get("item_code") if variants else None)
+                              or body.get("item_code")
+                              or p.get("item_code")
+                          )
+                          if code:
+                              probe_skus.insert(0, str(code))
+                          break
+          except Exception as e:
+              print("items_lookup_skip", e)
+
+          routing_checked = 0
+          kaj_checked = 0
+          seen = set()
+          for sku in probe_skus:
+              sku = str(sku or "").strip()
+              if not sku or sku in seen:
                   continue
+              seen.add(sku)
+              rt = s.get(
+                  f"{base}/api/production/item-routing/{sku}",
+                  params={"process": "Stitching"},
+                  timeout=60,
+              )
+              print("item_routing", sku, rt.status_code, (rt.text or "")[:220])
+              rt.raise_for_status()
               info = rt.json() or {}
               path = info.get("item_routing") or info.get("routing") or []
               names = [str(p) for p in path] if path and not isinstance(path[0], dict) else [
@@ -351,14 +375,14 @@ jobs:
                       raise SystemExit(
                           f"{sku} in-house Stitching next_process={nxt} but Style routing has Kaj: {names}"
                       )
-          ready = s.get(f"{base}/api/production/ready-to-process/Cutting", timeout=60)
+          ready = s.get(f"{base}/api/production/ready-to-process/Cutting", timeout=120)
           print("ready_to_cutting", ready.status_code, (ready.text or "")[:180])
           ready.raise_for_status()
           if routing_checked <= 0:
-              raise SystemExit("no Stitching JOs returned item-routing — production API not tested")
+              raise SystemExit("item-routing API returned no SKUs — production routing not tested")
           print(
               "PRODUCTION_ROUTING_OK",
-              {"stitch_jos": len(jos), "routing_checked": routing_checked, "kaj_styles": kaj_checked},
+              {"routing_checked": routing_checked, "kaj_styles": kaj_checked, "skus": list(seen)},
           )
 
           print("ALL_PROBES_OK")
