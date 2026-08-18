@@ -89,7 +89,7 @@ def main(argv: list[str]) -> int:
     except Exception:
         pass
     # Force accept by clearing disk meta uploaded_at comparison path when needed
-    ok = persist_inventory_history_authoritative(sess, merged)
+    ok = persist_inventory_history_authoritative(sess, merged, force=True)
     print(f"Persisted={ok}", flush=True)
     try:
         from backend.services.po_shared_cache import invalidate_all_shared_caches

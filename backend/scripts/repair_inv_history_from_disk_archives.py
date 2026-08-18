@@ -66,7 +66,6 @@ def main() -> int:
         _inventory_day_snapshot_dir,
         overlay_persisted_inventory_snapshots,
         persist_inventory_history_authoritative,
-        restore_inventory_history_from_best_disk_backups,
     )
     from backend.session import AppSession
     import backend.services.daily_inventory_history as dih
@@ -107,23 +106,46 @@ def main() -> int:
     n_overlay = overlay_persisted_inventory_snapshots(sess)
     print("overlay_days", n_overlay, flush=True)
 
-    restored = restore_inventory_history_from_best_disk_backups(sess.daily_inventory_history_df)
-    if restored is not None:
-        after_overlay = _auth_dates(sess.daily_inventory_history_df)
-        after_bak = _auth_dates(restored)
-        if len(after_bak) > len(after_overlay):
-            print(
-                "bak_restore auth_days",
-                len(after_overlay),
-                "->",
-                len(after_bak),
-                flush=True,
-            )
-            sess.daily_inventory_history_df = restored
-        else:
-            print("bak_restore skipped (no extra census days)", flush=True)
-    else:
-        print("bak_restore none", flush=True)
+    # Full bak-* union OOMs the 2GB container (exit 137). Pull only census days
+    # that the live parquet is still missing, one backup at a time.
+    have = set(_auth_dates(sess.daily_inventory_history_df))
+    bak_added = 0
+    for bak in sorted(_CACHE.glob("daily_inventory_history_df.parquet.bak-*")):
+        if "bak-before-archive-repair" in bak.name:
+            continue
+        try:
+            size_mb = bak.stat().st_size / (1024 * 1024)
+            print(f"bak_scan {bak.name} {size_mb:.1f}MB", flush=True)
+            if size_mb > 250:
+                print("bak_skip too large", bak.name, flush=True)
+                continue
+            df = pd.read_parquet(bak)
+        except Exception as exc:
+            print("bak_read_fail", bak.name, exc, flush=True)
+            continue
+        if df is None or df.empty or "Date" not in df.columns or "Source" not in df.columns:
+            del df
+            continue
+        src = df["Source"].astype(str).str.strip().str.lower()
+        df = df.loc[src.isin(["snapshot", "uploaded"])].copy()
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.normalize()
+        df = df.dropna(subset=["Date"])
+        day_s = df["Date"].dt.strftime("%Y-%m-%d")
+        df = df.loc[~day_s.isin(have)].copy()
+        if df.empty:
+            del df
+            continue
+        new_days = sorted({str(pd.Timestamp(d).date()) for d in df["Date"].unique()})
+        print("bak_census", bak.name, "days", new_days, flush=True)
+        from backend.services.daily_inventory_history import merge_inventory_history
+
+        sess.daily_inventory_history_df = merge_inventory_history(
+            sess.daily_inventory_history_df, df
+        )
+        have.update(new_days)
+        bak_added += len(new_days)
+        del df
+    print("bak_added_days", bak_added, flush=True)
 
     wrote = persist_inventory_history_authoritative(sess, force=True)
     print("persist", wrote, flush=True)

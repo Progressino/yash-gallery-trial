@@ -29,15 +29,15 @@ jobs:
       - name: Dump snapshot archives vs history dates
         run: |
           set -euo pipefail
-          CID="$(docker ps --format '{{.Names}}' | grep -E 'progressino-backend|backend' | head -1 || true)"
-          if [ -z "${CID}" ]; then
-            echo "FATAL: no backend container"
-            docker ps || true
+          CID="progressino-backend-1"
+          if ! docker ps --format '{{.Names}}' | grep -qx "${CID}"; then
+            echo "FATAL: ${CID} is not running"
+            docker ps --format '{{.Names}}' || true
             exit 1
           fi
           echo "CID=${CID}" >> "$GITHUB_ENV"
           echo "Container: ${CID}"
-          docker exec -e PYTHONPATH=/srv -e WARM_CACHE_DIR=/data/warm_cache -w /srv "${CID}" python3 - <<'PY'
+          docker exec -e PYTHONPATH=/srv -e WARM_CACHE_DIR=/data/warm_cache -e PYTHONUNBUFFERED=1 -w /srv "${CID}" python3 -u - <<'PY'
           from pathlib import Path
           import os
           import pandas as pd
@@ -74,7 +74,9 @@ jobs:
               )
           PY
           echo "=== HOST RAR SEARCH ==="
-          find /tmp /root /data /root/app-data /root/app -iname '*inventory*.rar' -o -iname '*inv*jul*.rar' -o -iname '*inv*aug*.rar' 2>/dev/null | head -80 || true
+          find /tmp /root /data /root/app-data /root/app \( -iname '*inventory*.rar' -o -iname '*inv*jul*.rar' -o -iname '*inv*aug*.rar' \) 2>/dev/null | head -80 || true
+          echo "=== BAK FILES ==="
+          docker exec "${CID}" sh -c 'ls -lh /data/warm_cache/daily_inventory_history_df.parquet* 2>/dev/null | head -40'
 
       - name: Copy overlay + repair into backend container
         working-directory: ${{ github.workspace }}
@@ -84,15 +86,28 @@ jobs:
             "${CID}:/srv/backend/services/daily_inventory_history.py"
           docker cp backend/scripts/repair_inv_history_from_disk_archives.py \
             "${CID}:/srv/backend/scripts/repair_inv_history_from_disk_archives.py"
+          docker cp backend/scripts/apply_oms_matrix_authoritative_prod.py \
+            "${CID}:/srv/backend/scripts/apply_oms_matrix_authoritative_prod.py"
+          docker cp ops/prod-fix/inventory-matrix-oms-2026-07-source-authoritative.csv \
+            "${CID}:/tmp/inventory-matrix-oms-2026-07-source-authoritative.csv"
           docker exec "${CID}" ls -lah \
             /srv/backend/services/daily_inventory_history.py \
-            /srv/backend/scripts/repair_inv_history_from_disk_archives.py
+            /srv/backend/scripts/repair_inv_history_from_disk_archives.py \
+            /srv/backend/scripts/apply_oms_matrix_authoritative_prod.py \
+            /tmp/inventory-matrix-oms-2026-07-source-authoritative.csv
 
       - name: Restore census days from archives onto parquet
         run: |
           set -euo pipefail
-          docker exec -e PYTHONPATH=/srv -e WARM_CACHE_DIR=/data/warm_cache -w /srv "${CID}" \
-            python3 backend/scripts/repair_inv_history_from_disk_archives.py
+          docker exec -e PYTHONPATH=/srv -e WARM_CACHE_DIR=/data/warm_cache -e PYTHONUNBUFFERED=1 -w /srv "${CID}" \
+            python3 -u backend/scripts/repair_inv_history_from_disk_archives.py
+
+      - name: Apply July OMS authoritative matrix
+        run: |
+          set -euo pipefail
+          docker exec -e PYTHONPATH=/srv -e WARM_CACHE_DIR=/data/warm_cache -e PYTHONUNBUFFERED=1 -w /srv "${CID}" \
+            python3 -u backend/scripts/apply_oms_matrix_authoritative_prod.py \
+            /tmp/inventory-matrix-oms-2026-07-source-authoritative.csv
 
       - name: Dump after repair
         run: |
