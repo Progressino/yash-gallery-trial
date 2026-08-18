@@ -603,7 +603,8 @@ def overlay_day_archives_for_read_once(sess) -> int:
         mtime = 0.0
     if _MATRIX_DAY_OVERLAY_MTIME == mtime:
         return 0
-    if not _MATRIX_DAY_OVERLAY_LOCK.acquire(blocking=False):
+    # Wait for an in-progress overlay instead of returning stale July/August days.
+    if not _MATRIX_DAY_OVERLAY_LOCK.acquire(blocking=True, timeout=90):
         return 0
     try:
         if _MATRIX_DAY_OVERLAY_MTIME == mtime:

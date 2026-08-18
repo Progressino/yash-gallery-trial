@@ -19,7 +19,7 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 30
     steps:
-      - name: Inventory Daily totals + SKU + export + history async job
+      - name: Prod inventory Daily + July/August history + production routing
         run: |
           set -eu
           cd /root/app
@@ -188,13 +188,95 @@ jobs:
               raise SystemExit(f"export OMS {export_oms} != UI {ui_oms}")
           print("EXPORT_MATCHES_UI_OK")
 
-          # History async export
-          start = s.post(
-              f"{base}/api/po/daily-inventory-history/matrix-export",
-              params={"days": 7, "channel": "oms"},
-              timeout=60,
+          # Inv. History dates (triggers snapshot overlay on first request after deploy).
+          date_list = []
+          has_jul = has_aug = False
+          for attempt in range(1, 6):
+              d = s.get(
+                  f"{base}/api/po/daily-inventory-history/dates",
+                  params={"limit": 120},
+                  timeout=180,
+              )
+              print("hist_dates", attempt, d.status_code, (d.text or "")[:240])
+              d.raise_for_status()
+              payload = d.json() or {}
+              raw_dates = payload.get("dates") or []
+              date_list = []
+              for x in raw_dates:
+                  if isinstance(x, dict):
+                      date_list.append(str(x.get("date") or "")[:10])
+                  else:
+                      date_list.append(str(x)[:10])
+              date_list = [x for x in date_list if len(x) == 10]
+              has_jul = any(x.startswith("2026-07-") for x in date_list)
+              has_aug = any(x.startswith("2026-08-") for x in date_list)
+              print(
+                  "HIST_DATE_RANGE",
+                  {
+                      "count": len(date_list),
+                      "newest": date_list[:3],
+                      "oldest": date_list[-3:],
+                      "july": has_jul,
+                      "august": has_aug,
+                  },
+              )
+              if has_jul and has_aug:
+                  break
+              time.sleep(8)
+          else:
+              raise SystemExit(
+                  "Inv. History missing July and/or August 2026 dates: "
+                  f"july={has_jul} august={has_aug} dates={date_list[:8]}"
+              )
+          print("JULY_AUGUST_DATES_OK")
+
+          mx = s.get(
+              f"{base}/api/po/daily-inventory-history/matrix",
+              params={"days": 60, "limit": 5, "channel": "oms"},
+              timeout=180,
           )
-          print("hist_export_start", start.status_code, start.text[:300])
+          print("hist_matrix", mx.status_code, (mx.text or "")[:200])
+          mx.raise_for_status()
+          mx_body = mx.json() or {}
+          mx_dates = [str(x)[:10] for x in (mx_body.get("dates") or [])]
+          if not any(x.startswith("2026-07-") for x in mx_dates):
+              raise SystemExit(f"matrix days=60 missing July columns: {mx_dates[:8]}")
+          if not any(x.startswith("2026-08-") for x in mx_dates):
+              raise SystemExit(f"matrix days=60 missing August columns: {mx_dates[:8]}")
+          print("MATRIX_JULY_AUGUST_OK", {"n_dates": len(mx_dates), "sample": mx_dates[:4]})
+
+          jul = next(x for x in date_list if x.startswith("2026-07-"))
+          aug = next(x for x in date_list if x.startswith("2026-08-"))
+          for day in (jul, aug):
+              byd = s.get(
+                  f"{base}/api/po/daily-inventory-history/by-date",
+                  params={"date": day, "limit": 20, "channel": "oms"},
+                  timeout=180,
+              )
+              print("hist_by_date", day, byd.status_code)
+              byd.raise_for_status()
+              body = byd.json() or {}
+              n = int(body.get("total") or len(body.get("rows") or []) or 0)
+              if n <= 0:
+                  raise SystemExit(f"Inv. History {day} has no SKU rows")
+              print("HIST_DAY_ROWS_OK", day, n)
+
+          # History async export — overlay can exceed 60s on the first POST after deploy.
+          start = None
+          for attempt in range(1, 4):
+              try:
+                  start = s.post(
+                      f"{base}/api/po/daily-inventory-history/matrix-export",
+                      params={"days": 7, "channel": "oms"},
+                      timeout=180,
+                  )
+                  print("hist_export_start", attempt, start.status_code, start.text[:300])
+                  break
+              except Exception as e:
+                  print("hist_export_start retry", attempt, e)
+                  time.sleep(5)
+          if start is None:
+              raise SystemExit("history export POST failed")
           if start.status_code == 404:
               raise SystemExit("matrix-export endpoint missing — deploy incomplete?")
           start.raise_for_status()
@@ -227,6 +309,57 @@ jobs:
               time.sleep(3)
           else:
               raise SystemExit("history export job timeout")
+
+          # Production routing: Style path must drive Issue-to-next (not hardcoded Finishing).
+          orders = s.get(
+              f"{base}/api/production/orders",
+              params={"process": "Stitching"},
+              timeout=60,
+          )
+          print("prod_orders_stitch", orders.status_code)
+          orders.raise_for_status()
+          raw_jos = orders.json()
+          jos = raw_jos if isinstance(raw_jos, list) else (raw_jos or {}).get("rows") or []
+          routing_checked = 0
+          kaj_checked = 0
+          for jo in jos[:80]:
+              sku = str(jo.get("sku") or "").strip()
+              so = str(jo.get("so_number") or "").strip()
+              if not sku:
+                  continue
+              rt = s.get(
+                  f"{base}/api/production/item-routing/{sku}",
+                  params={"so_number": so, "process": "Stitching"},
+                  timeout=60,
+              )
+              if rt.status_code != 200:
+                  print("item_routing_skip", sku, rt.status_code, rt.text[:160])
+                  continue
+              info = rt.json() or {}
+              path = info.get("item_routing") or info.get("routing") or []
+              names = [str(p) for p in path] if path and not isinstance(path[0], dict) else [
+                  str((p or {}).get("name") or "") for p in path
+              ]
+              nxt = str(info.get("next_process") or "")
+              mode = str(info.get("production_mode") or "inhouse").lower().replace("-", "")
+              print("ROUTING", sku, "mode", mode, "path", names, "next_after_stitch", nxt)
+              routing_checked += 1
+              joined = " > ".join(names).lower()
+              if "kaj" in joined:
+                  kaj_checked += 1
+                  if mode == "inhouse" and nxt.lower() in ("finishing", "finish"):
+                      raise SystemExit(
+                          f"{sku} in-house Stitching next_process={nxt} but Style routing has Kaj: {names}"
+                      )
+          ready = s.get(f"{base}/api/production/ready-to-process/Cutting", timeout=60)
+          print("ready_to_cutting", ready.status_code, (ready.text or "")[:180])
+          ready.raise_for_status()
+          if routing_checked <= 0:
+              raise SystemExit("no Stitching JOs returned item-routing — production API not tested")
+          print(
+              "PRODUCTION_ROUTING_OK",
+              {"stitch_jos": len(jos), "routing_checked": routing_checked, "kaj_styles": kaj_checked},
+          )
 
           print("ALL_PROBES_OK")
           PY

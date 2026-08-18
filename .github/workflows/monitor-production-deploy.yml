@@ -33,6 +33,8 @@ jobs:
     steps:
       - name: Probe production health
         id: health
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           for i in 1 2 3 4 5; do
@@ -48,6 +50,16 @@ jobs:
             echo "retry $i…"
             sleep 5
           done
+          # Scheduled 522s during a live Deploy to VPS are expected (nginx/backend rebuild).
+          if [ "${{ github.event_name }}" != "workflow_run" ]; then
+            INPROG="$(gh run list --workflow "Deploy to VPS" --status in_progress --limit 1 --json databaseId --jq 'length' || echo 0)"
+            if [ "${INPROG}" != "0" ]; then
+              echo "::warning::Health failed while Deploy to VPS is in progress — not a production outage"
+              echo "ok=deploying" >> "$GITHUB_OUTPUT"
+              echo "prod_sha=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
           echo "ok=false" >> "$GITHUB_OUTPUT"
           echo "prod_sha=" >> "$GITHUB_OUTPUT"
           exit 1

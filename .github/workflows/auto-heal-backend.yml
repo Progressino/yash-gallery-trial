@@ -34,8 +34,25 @@ jobs:
             exit 1
           fi
 
+      - name: Skip while Deploy to VPS holds the compose lock
+        id: skip
+        run: |
+          set +e
+          LOCK=/var/lock/yash-gallery-deploy.lock
+          if [ -e "$LOCK" ]; then
+            exec 200>"$LOCK"
+            if ! flock -n 200; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "OK: Deploy to VPS holds $LOCK — not restarting backend mid-rebuild"
+              exit 0
+            fi
+            flock -u 200 || true
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
       - name: Probe API health
         id: probe
+        if: steps.skip.outputs.skip != 'true'
         run: |
           set +e
           _ok() {
@@ -60,7 +77,7 @@ jobs:
           echo "WARN: backend not healthy after 3 probes"
 
       - name: Restart backend
-        if: steps.probe.outputs.healthy != '1'
+        if: steps.skip.outputs.skip != 'true' && steps.probe.outputs.healthy != '1'
         run: |
           set -eu
           DC="${{ steps.dc.outputs.cmd }}"
