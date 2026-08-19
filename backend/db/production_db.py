@@ -819,18 +819,26 @@ def import_ready_to_wip(rows: list[dict], *, default_stage: str | None = None) -
                     f"(got stage={stage!r} sku={sku!r} qty={qty_raw!r})"
                 )
                 continue
-            from_process = get_previous_process(sku, stage)
+            jo_mode = None
+            if jo_num:
+                jo = get_jo_by_number(jo_num)
+                if jo:
+                    if not so:
+                        so = jo.get("so_number") or ""
+                    if not vendor:
+                        vendor = jo.get("vendor_name") or ""
+                    jo_mode = jo.get("production_mode") or None
+            if not so:
+                so = "MIGRATE"
+            from_process = get_previous_process(
+                sku,
+                stage,
+                so_number=so if so and so != "MIGRATE" else None,
+                production_mode=jo_mode,
+            )
             if not from_process:
                 errors.append(f"row {i}: cannot resolve previous process for {sku} → {stage}")
                 continue
-            if not so and jo_num:
-                jo = get_jo_by_number(jo_num)
-                if jo:
-                    so = jo.get("so_number") or ""
-                    if not vendor:
-                        vendor = jo.get("vendor_name") or ""
-            if not so:
-                so = "MIGRATE"
             _update_process_stock(
                 conn,
                 so,
@@ -989,6 +997,56 @@ def _enrich_ready_row(d: dict, to_process: str) -> dict:
     finally:
         conn.close()
     return d
+
+
+def get_path_commitment(so_number: str, sku: str, process: str) -> dict:
+    """Open JO planned qty for SO+SKU, split by production_mode (Ready-to-Cut path split)."""
+    from ..services.so_production_path import normalize_production_mode
+
+    so = str(so_number or "").strip()
+    sku_u = str(sku or "").strip().upper()
+    proc = str(process or "").strip()
+    by_mode: dict[str, float] = {}
+    conn = _connect()
+    try:
+        line_rows = conn.execute(
+            """SELECT COALESCE(NULLIF(TRIM(j.production_mode), ''), 'inhouse') AS mode,
+                      COALESCE(SUM(l.planned_qty), 0) AS pq
+               FROM jo_lines l
+               JOIN job_orders j ON j.id = l.jo_id
+               WHERE j.process=? AND j.status NOT IN ('Cancelled')
+                 AND j.so_number=? AND UPPER(l.sku)=?
+               GROUP BY mode""",
+            (proc, so, sku_u),
+        ).fetchall()
+        for r in line_rows:
+            mode = normalize_production_mode(dict(r).get("mode"))
+            by_mode[mode] = by_mode.get(mode, 0.0) + float(dict(r).get("pq") or 0)
+        header_rows = conn.execute(
+            """SELECT id, COALESCE(NULLIF(TRIM(production_mode), ''), 'inhouse') AS mode,
+                      planned_qty,
+                      (SELECT COUNT(*) FROM jo_lines WHERE jo_id = job_orders.id) AS nlines
+               FROM job_orders
+               WHERE process=? AND status NOT IN ('Cancelled')
+                 AND so_number=? AND UPPER(sku)=?""",
+            (proc, so, sku_u),
+        ).fetchall()
+        for r in header_rows:
+            d = dict(r)
+            if int(d.get("nlines") or 0) > 0:
+                continue
+            mode = normalize_production_mode(d.get("mode"))
+            by_mode[mode] = by_mode.get(mode, 0.0) + float(d.get("planned_qty") or 0)
+    finally:
+        conn.close()
+    total = sum(by_mode.values())
+    return {
+        "so_number": so,
+        "sku": sku_u,
+        "process": proc,
+        "total_planned": total,
+        "by_mode": {k: int(v) if v == int(v) else v for k, v in sorted(by_mode.items())},
+    }
 
 
 def _open_jo_planned_by_sku(process: str) -> dict[tuple[str, str], float]:

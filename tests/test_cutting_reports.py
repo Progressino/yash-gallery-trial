@@ -162,3 +162,50 @@ def test_cutting_report_allocates_legacy_null_line_receipts(iso):
     row = out["rows"][0]
     assert row["received_qty"] == 8
     assert row["balance_qty"] == 12
+
+
+def test_cutting_report_daily_balance(iso):
+    """Activity date shows opening, cut-today, and closing balance."""
+    import sqlite3
+
+    today = date.today()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    today_s = today.isoformat()
+    num = production_db.create_jo(
+        {
+            "so_number": "SO-DAILY",
+            "so_source": "manual",
+            "sku": "1001-M",
+            "process": "Cutting",
+            "planned_qty": 100,
+            "production_mode": "inhouse",
+            "create_component_jos": False,
+            "jo_date": today_s,
+            "lines": [{"sku": "1001-M", "style": "M", "planned_qty": 100}],
+        }
+    )
+    jo = next(j for j in production_db.list_jos() if j["jo_number"] == num)
+    lid = jo["lines"][0]["id"]
+    conn = sqlite3.connect(production_db._DB)
+    conn.execute(
+        """INSERT INTO jo_piece_receipts(
+               jo_id, jo_line_id, process, so_number, sku, receipt_date, received_qty, rejected_qty
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (jo["id"], lid, "Cutting", "SO-DAILY", "1001-M", yesterday, 30, 0),
+    )
+    conn.execute(
+        """INSERT INTO jo_piece_receipts(
+               jo_id, jo_line_id, process, so_number, sku, receipt_date, received_qty, rejected_qty
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (jo["id"], lid, "Cutting", "SO-DAILY", "1001-M", today_s, 20, 0),
+    )
+    conn.commit()
+    conn.close()
+
+    out = build_cutting_report(activity_date=today_s, export=True)
+    row = next(r for r in out["rows"] if r["so_number"] == "SO-DAILY")
+    assert row["opening_balance"] == 70
+    assert row["received_on_date"] == 20
+    assert row["closing_balance"] == 50
+    assert row["production_mode"] == "inhouse"
+    assert out["kpis"]["received_on_date"] == 20

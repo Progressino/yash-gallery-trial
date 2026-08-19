@@ -140,36 +140,48 @@ def _allocate_header_receipts(
     return extra
 
 
-def _maps(conn):
+def _maps(conn, as_of: date | None = None):
+    as_of_s = as_of.isoformat() if as_of else None
+    rec_line_sql = """SELECT jo_line_id, SUM(received_qty) AS qty
+               FROM jo_piece_receipts WHERE jo_line_id IS NOT NULL"""
+    rec_jo_sql = "SELECT jo_id, SUM(received_qty) AS qty FROM jo_piece_receipts"
+    iss_line_sql = """SELECT jo_line_id, SUM(issued_qty) AS qty
+               FROM jo_piece_issues WHERE jo_line_id IS NOT NULL"""
+    iss_jo_sql = "SELECT jo_id, SUM(issued_qty) AS qty FROM jo_piece_issues"
+    rec_line_params: list = []
+    rec_jo_params: list = []
+    iss_line_params: list = []
+    iss_jo_params: list = []
+    if as_of_s:
+        rec_line_sql += " AND substr(receipt_date,1,10) <= ?"
+        rec_line_params.append(as_of_s)
+        rec_jo_sql += " WHERE substr(receipt_date,1,10) <= ?"
+        rec_jo_params.append(as_of_s)
+        iss_line_sql += " AND substr(issue_date,1,10) <= ?"
+        iss_line_params.append(as_of_s)
+        iss_jo_sql += " WHERE substr(issue_date,1,10) <= ?"
+        iss_jo_params.append(as_of_s)
+    rec_line_sql += " GROUP BY jo_line_id"
+    rec_jo_sql += " GROUP BY jo_id"
+    iss_line_sql += " GROUP BY jo_line_id"
+    iss_jo_sql += " GROUP BY jo_id"
     rec_line = {
         int(r["jo_line_id"]): int(r["qty"] or 0)
-        for r in conn.execute(
-            """SELECT jo_line_id, SUM(received_qty) AS qty
-               FROM jo_piece_receipts WHERE jo_line_id IS NOT NULL
-               GROUP BY jo_line_id"""
-        ).fetchall()
+        for r in conn.execute(rec_line_sql, rec_line_params).fetchall()
         if r["jo_line_id"] is not None
     }
     rec_jo = {
         int(r["jo_id"]): int(r["qty"] or 0)
-        for r in conn.execute(
-            "SELECT jo_id, SUM(received_qty) AS qty FROM jo_piece_receipts GROUP BY jo_id"
-        ).fetchall()
+        for r in conn.execute(rec_jo_sql, rec_jo_params).fetchall()
     }
     iss_line = {
         int(r["jo_line_id"]): int(r["qty"] or 0)
-        for r in conn.execute(
-            """SELECT jo_line_id, SUM(issued_qty) AS qty
-               FROM jo_piece_issues WHERE jo_line_id IS NOT NULL
-               GROUP BY jo_line_id"""
-        ).fetchall()
+        for r in conn.execute(iss_line_sql, iss_line_params).fetchall()
         if r["jo_line_id"] is not None
     }
     iss_jo = {
         int(r["jo_id"]): int(r["qty"] or 0)
-        for r in conn.execute(
-            "SELECT jo_id, SUM(issued_qty) AS qty FROM jo_piece_issues GROUP BY jo_id"
-        ).fetchall()
+        for r in conn.execute(iss_jo_sql, iss_jo_params).fetchall()
     }
     last_act = {
         int(r["jo_id"]): str(r["last_d"] or "")[:19]
@@ -183,6 +195,52 @@ def _maps(conn):
         ).fetchall()
     }
     return rec_line, rec_jo, iss_line, iss_jo, last_act
+
+
+def _activity_maps(conn, day: date) -> tuple[dict[int, int], dict[int, int], dict[int, int], dict[int, int]]:
+    """Receipts/issues on a single calendar day (line-level and JO-level)."""
+    day_s = day.isoformat()
+    rec_line = {
+        int(r["jo_line_id"]): int(r["qty"] or 0)
+        for r in conn.execute(
+            """SELECT jo_line_id, SUM(received_qty) AS qty
+               FROM jo_piece_receipts
+               WHERE jo_line_id IS NOT NULL AND substr(receipt_date,1,10)=?
+               GROUP BY jo_line_id""",
+            (day_s,),
+        ).fetchall()
+        if r["jo_line_id"] is not None
+    }
+    rec_jo = {
+        int(r["jo_id"]): int(r["qty"] or 0)
+        for r in conn.execute(
+            """SELECT jo_id, SUM(received_qty) AS qty
+               FROM jo_piece_receipts WHERE substr(receipt_date,1,10)=?
+               GROUP BY jo_id""",
+            (day_s,),
+        ).fetchall()
+    }
+    iss_line = {
+        int(r["jo_line_id"]): int(r["qty"] or 0)
+        for r in conn.execute(
+            """SELECT jo_line_id, SUM(issued_qty) AS qty
+               FROM jo_piece_issues
+               WHERE jo_line_id IS NOT NULL AND substr(issue_date,1,10)=?
+               GROUP BY jo_line_id""",
+            (day_s,),
+        ).fetchall()
+        if r["jo_line_id"] is not None
+    }
+    iss_jo = {
+        int(r["jo_id"]): int(r["qty"] or 0)
+        for r in conn.execute(
+            """SELECT jo_id, SUM(issued_qty) AS qty
+               FROM jo_piece_issues WHERE substr(issue_date,1,10)=?
+               GROUP BY jo_id""",
+            (day_s,),
+        ).fetchall()
+    }
+    return rec_line, rec_jo, iss_line, iss_jo
 
 
 def _match(val: str, needle: str) -> bool:
@@ -212,9 +270,13 @@ def build_cutting_report(
     page: int = 1,
     page_size: int = 200,
     export: bool = False,
+    as_of_date: str = "",
+    activity_date: str = "",
 ) -> dict[str, Any]:
     today = _today_ist()
     so_map = _so_lookup()
+    as_of = _parse_day(as_of_date) or _parse_day(activity_date)
+    activity = _parse_day(activity_date)
     conn = production_db._connect()
     try:
         jos = [
@@ -224,7 +286,8 @@ def build_cutting_report(
                           planned_qty, issued_qty, received_qty, rejected_qty, balance_qty,
                           expected_completion, fabric_code, fabric_qty, fabric_unit,
                           fabric_issued_qty, fabric_received_qty, fabric_consumption,
-                          main_sku, component_code, sku_role, created_at, updated_at
+                          main_sku, component_code, sku_role, created_at, updated_at,
+                          production_mode
                    FROM job_orders
                    WHERE process='Cutting' AND IFNULL(status,'') != 'Cancelled'"""
             ).fetchall()
@@ -237,8 +300,16 @@ def build_cutting_report(
         ).fetchall():
             d = dict(r)
             lines_by_jo.setdefault(int(d["jo_id"]), []).append(d)
-        rec_line, rec_jo, iss_line, iss_jo, last_act = _maps(conn)
+        rec_line, rec_jo, iss_line, iss_jo, last_act = _maps(conn, as_of=as_of)
         rec_line = _allocate_header_receipts(rec_line, rec_jo, lines_by_jo)
+        opening_rec_line, opening_rec_jo, opening_iss_line, opening_iss_jo, _ = (
+            _maps(conn, as_of=(activity - timedelta(days=1)) if activity else None)
+        )
+        opening_rec_line = _allocate_header_receipts(opening_rec_line, opening_rec_jo, lines_by_jo)
+        act_rec_line, act_rec_jo, act_iss_line, act_iss_jo = (
+            _activity_maps(conn, activity) if activity else ({}, {}, {}, {})
+        )
+        act_rec_line = _allocate_header_receipts(act_rec_line, act_rec_jo, lines_by_jo)
     finally:
         conn.close()
 
@@ -282,6 +353,9 @@ def build_cutting_report(
                 line_planned = header_planned
                 line_received = header_received
                 line_issued = header_issued
+                opening_received = int(opening_rec_jo.get(jid, 0))
+                received_on_day = int(act_rec_jo.get(jid, 0))
+                issued_on_day = int(act_iss_jo.get(jid, 0))
                 line_sku = str(jo.get("sku") or "")
                 style = ""
                 line_comp = str(jo.get("component_code") or "")
@@ -291,10 +365,16 @@ def build_cutting_report(
                 line_planned = int(ln.get("planned_qty") or 0)
                 line_received = int(rec_line.get(lid, ln.get("received_qty") or 0))
                 line_issued = int(iss_line.get(lid, ln.get("issued_qty") or 0))
+                opening_received = int(opening_rec_line.get(lid, 0))
+                received_on_day = int(act_rec_line.get(lid, 0))
+                issued_on_day = int(act_iss_line.get(lid, 0))
                 line_sku = str(ln.get("sku") or jo.get("sku") or "")
                 style = str(ln.get("style") or "")
                 line_comp = str(ln.get("component_code") or jo.get("component_code") or "")
                 share = (line_planned / header_planned) if header_planned else (1.0 / n_src)
+
+            opening_balance = line_planned - opening_received
+            closing_balance = line_planned - line_received
 
             main = str(jo.get("main_sku") or "") or (parse_component_sku(line_sku)[0] or line_sku)
             parent = style_key_for_set_bom(main or line_sku)
@@ -343,6 +423,11 @@ def build_cutting_report(
                 "issued_qty": line_issued,
                 "received_qty": line_received,
                 "balance_qty": line_planned - line_received,
+                "opening_balance": opening_balance,
+                "closing_balance": closing_balance,
+                "received_on_date": received_on_day if activity else None,
+                "issued_on_date": issued_on_day if activity else None,
+                "production_mode": jo.get("production_mode") or "",
                 "qty_variance": variance_qty,
                 "status": st,
                 "jo_status": jo.get("status") or "",
@@ -410,6 +495,12 @@ def build_cutting_report(
         "received_qty": _sum("received_qty"),
         "issued_qty": _sum("issued_qty"),
         "balance_qty": _sum("balance_qty"),
+        "opening_balance": _sum("opening_balance"),
+        "closing_balance": _sum("closing_balance"),
+        "received_on_date": _sum("received_on_date") if activity else None,
+        "issued_on_date": _sum("issued_on_date") if activity else None,
+        "as_of_date": as_of.isoformat() if as_of else "",
+        "activity_date": activity.isoformat() if activity else "",
         "pending_jos": len(pending_jos),
         "over_qty": float(sum(max(0, int(r["qty_variance"])) for r in filtered)),
         "under_qty": float(sum(max(0, -int(r["qty_variance"])) for r in filtered if r["status"] in {"under", "pending"})),

@@ -751,13 +751,13 @@ export default function SalesOrders() {
                   </select>
                 </div>
                 <div>
-                  <label className="text-xs text-gray-500">Production path</label>
+                  <label className="text-xs text-gray-500">Default production path (optional)</label>
                   <select value={soForm.production_mode} onChange={e => setSOForm(f => ({ ...f, production_mode: e.target.value }))}
                     className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
                     {PRODUCTION_MODES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                   </select>
                   <p className="text-[10px] text-gray-500 mt-1">
-                    Style routing stays full in-house. This SO chooses Cut-to-Pack, Stitch-to-Pack, or in-house so the same style can run differently on another SO at the same time.
+                    Optional hint only — actual path is chosen per SKU/qty when creating a Job Order at Ready-to-Cut (or later stages).
                   </p>
                 </div>
                 <div>

@@ -403,6 +403,16 @@ const EXEC_TYPE_OPTIONS = [
   { value: 'Outsource', label: 'Outsource' },
 ] as const
 
+const PRODUCTION_MODE_OPTIONS = [
+  { value: 'inhouse', label: 'In-house' },
+  { value: 'cut_to_pack', label: 'Cut-to-Pack (vendor)' },
+  { value: 'stitch_to_pack', label: 'Stitch-to-Pack (vendor)' },
+] as const
+
+const PRODUCTION_MODE_LABEL: Record<string, string> = Object.fromEntries(
+  PRODUCTION_MODE_OPTIONS.map(m => [m.value, m.label]),
+)
+
 function isOutsourceExec(execType: string) {
   return String(execType || '').trim().toLowerCase() === 'outsource'
 }
@@ -1209,6 +1219,7 @@ export default function Production() {
     exec_type: 'Inhouse', vendor_name: '', vendor_rate: 0,
     planned_qty: 0, so_qty: 0, fabric_code: '', fabric_qty: 0,
     fabric_unit: 'MTR', expected_completion: '', remarks: '',
+    production_mode: 'inhouse',
     from_ready_to: false,
   })
   const [editPlannedQty, setEditPlannedQty] = useState<Record<number, string>>({})
@@ -1332,12 +1343,28 @@ export default function Production() {
     )
   }, [newForm.from_ready_to, readyLinesForJo, soLines, soLineSearch])
   const { data: itemRouting } = useQuery({
-    queryKey: ['item-routing', newForm.sku, newForm.so_number],
+    queryKey: ['item-routing', newForm.sku, newForm.so_number, newForm.production_mode, newForm.process],
     queryFn: () => api.get(`/production/item-routing/${encodeURIComponent(newForm.sku)}`, {
-      params: newForm.so_number ? { so_number: newForm.so_number } : {},
+      params: {
+        ...(newForm.so_number ? { so_number: newForm.so_number } : {}),
+        ...(newForm.production_mode ? { production_mode: newForm.production_mode } : {}),
+        ...(newForm.process ? { process: newForm.process } : {}),
+      },
     }).then(r => r.data),
     enabled: !!newForm.sku,
   })
+  const { data: pathCommitment } = useQuery({
+    queryKey: ['path-commitment', newForm.so_number, newForm.sku, newForm.process],
+    queryFn: () => api.get('/production/path-commitment', {
+      params: { so_number: newForm.so_number, sku: newForm.sku, process: newForm.process },
+    }).then(r => r.data),
+    enabled: modal === 'new-jo' && !!newForm.so_number && !!newForm.sku && newForm.so_source === 'system',
+  })
+  useEffect(() => {
+    if (!newForm.production_mode || !newForm.process) return
+    const exec = suggestedExecType(newForm.production_mode, newForm.process)
+    setNewForm(f => (f.exec_type === exec ? f : { ...f, exec_type: exec }))
+  }, [newForm.production_mode, newForm.process])
   const { data: processors = [] } = useQuery<{ processor_name?: string }[]>({
     queryKey: ['purchase-processors'],
     queryFn: () => api.get('/purchase/processors').then(r => r.data),
@@ -2614,7 +2641,8 @@ export default function Production() {
                     <button onClick={() => {
                       const avail = Number(r.available_qty || r.reserved_qty || 0)
                       const so = (soList as any[]).find((s: any) => s.so_number === r.so_number)
-                      const exec = suggestedExecType(so?.production_mode, activeProcess)
+                      const defaultMode = so?.production_mode || 'inhouse'
+                      const exec = suggestedExecType(defaultMode, activeProcess)
                       setNewForm(f => ({
                         ...f,
                         so_number: r.so_number,
@@ -2626,6 +2654,7 @@ export default function Production() {
                         process: activeProcess,
                         planned_qty: avail,
                         so_qty: avail,
+                        production_mode: defaultMode,
                         exec_type: exec,
                         from_ready_to: true,
                       }))
@@ -2912,8 +2941,15 @@ export default function Production() {
 
             {newForm.from_ready_to && (
               <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                Opened from Ready to {newForm.process}. This line is pre-filled. You can add other sizes that are
-                also Ready to {newForm.process} on the same SO.
+                Opened from Ready to {newForm.process}. Choose production path and qty for this JO — the same SO/SKU can be split across In-house, Cut-to-Pack, and Stitch-to-Pack.
+              </p>
+            )}
+            {pathCommitment && Number(pathCommitment.total_planned || 0) > 0 && (
+              <p className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                Already on open JOs for this SO/SKU: <b>{pathCommitment.total_planned}</b> pcs
+                {Object.entries(pathCommitment.by_mode || {}).map(([mode, qty]) => (
+                  <span key={mode} className="ml-2">{PRODUCTION_MODE_LABEL[mode] || mode}: {qty as number}</span>
+                ))}
               </p>
             )}
 
@@ -2985,6 +3021,23 @@ export default function Production() {
                   className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1 disabled:bg-gray-50">
                   {allProcesses.map(p => <option key={p}>{p}</option>)}
                 </select>
+              </div>
+              {/* Production path — decided at JO creation (Ready-to-Cut), not SO level */}
+              <div className="md:col-span-2">
+                <label className="text-xs text-gray-500">Production path *</label>
+                <select
+                  value={newForm.production_mode}
+                  onChange={e => setNewForm(f => ({ ...f, production_mode: e.target.value }))}
+                  className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+                >
+                  {PRODUCTION_MODE_OPTIONS.map(m => (
+                    <option key={m.value} value={m.value}>{m.label}</option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-gray-500 mt-1">
+                  Path is chosen here when creating the JO. Enter planned qty below to split the same SKU across paths (e.g. 500 in-house + 500 Cut-to-Pack).
+                  {itemRouting?.routing?.length ? ` Routing: ${itemRouting.routing.join(' → ')}` : ''}
+                </p>
               </div>
               {/* Execution / vendor */}
               <div><label className="text-xs text-gray-500">Execution type</label>

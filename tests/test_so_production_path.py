@@ -194,3 +194,79 @@ def test_stich_alias_and_stitch_to_pack_path(iso, monkeypatch):
     conn.close()
     stitch = production_db.get_ready_to_process("Stitching")
     assert any(r.get("sku") == "1001-XL" and r.get("so_number") == so for r in stitch)
+
+
+def test_same_sku_split_across_production_paths(iso, monkeypatch):
+    """SO+SKU can have multiple open JOs with different production_mode (qty-level path split)."""
+    monkeypatch.setattr(production_db, "get_item_routing", lambda sku: ["Cutting", "Stitching", "Finishing"])
+    monkeypatch.setattr(production_db, "get_component_routing", lambda sku: ["Cutting", "Stitching", "Finishing"])
+    conn = production_db._connect()
+    production_db._update_process_stock(conn, "SO-SPLIT", "1001-M", "Cutting", qty_in=1000)
+    conn.commit()
+    conn.close()
+
+    production_db.create_jo(
+        {
+            "so_number": "SO-SPLIT",
+            "so_source": "manual",
+            "sku": "1001-M",
+            "process": "Cutting",
+            "production_mode": "inhouse",
+            "planned_qty": 500,
+            "create_component_jos": False,
+            "lines": [{"sku": "1001-M", "planned_qty": 500}],
+        }
+    )
+    production_db.create_jo(
+        {
+            "so_number": "SO-SPLIT",
+            "so_source": "manual",
+            "sku": "1001-M",
+            "process": "Cutting",
+            "production_mode": "cut_to_pack",
+            "planned_qty": 500,
+            "create_component_jos": False,
+            "lines": [{"sku": "1001-M", "planned_qty": 500}],
+        }
+    )
+    commit = production_db.get_path_commitment("SO-SPLIT", "1001-M", "Cutting")
+    assert commit["total_planned"] == 1000
+    assert commit["by_mode"]["inhouse"] == 500
+    assert commit["by_mode"]["cut_to_pack"] == 500
+
+    after = production_db.get_ready_to_process("Cutting")
+    leftover = next((r for r in after if r.get("sku") == "1001-M" and r.get("so_number") == "SO-SPLIT"), None)
+    assert leftover is None
+
+
+def test_jo_production_mode_overrides_so_for_routing(iso, monkeypatch):
+    monkeypatch.setattr(
+        production_db,
+        "get_item_routing",
+        lambda sku: ["Cutting", "Embroidery", "Stitching", "Finishing"],
+    )
+    monkeypatch.setattr(
+        production_db,
+        "get_component_routing",
+        lambda sku: ["Cutting", "Embroidery", "Stitching", "Finishing"],
+    )
+    so = sales_db.create_order(
+        {"production_mode": "inhouse", "lines": [{"sku": "1001-S", "qty": 20}]}
+    )
+    num = production_db.create_jo(
+        {
+            "so_number": so,
+            "so_source": "system",
+            "sku": "1001-S",
+            "process": "Cutting",
+            "production_mode": "cut_to_pack",
+            "planned_qty": 20,
+            "create_component_jos": False,
+            "lines": [{"sku": "1001-S", "planned_qty": 20}],
+        }
+    )
+    jo = next(j for j in production_db.list_jos() if j["jo_number"] == num)
+    assert jo.get("production_mode") == "cut_to_pack"
+    assert production_db.get_next_process(
+        "1001-S", "Cutting", so_number=so, production_mode=jo.get("production_mode")
+    ) == "Finishing"

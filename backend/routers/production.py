@@ -492,10 +492,20 @@ def get_processes():
     return get_all_routing_steps()
 
 @router.get("/item-routing/{sku}")
-def get_routing(sku: str, so_number: Optional[str] = None, process: Optional[str] = None):
-    """Get process routing for a specific SKU (honors SO production path + Set BOM)."""
+def get_routing(
+    sku: str,
+    so_number: Optional[str] = None,
+    process: Optional[str] = None,
+    production_mode: Optional[str] = None,
+):
+    """Get process routing for a specific SKU (honors explicit/JO production path + Set BOM)."""
     from ..services.set_components import parse_component_sku
-    from ..services.so_production_path import get_so_production_mode, production_path_for, suggested_exec_type
+    from ..services.so_production_path import (
+        get_so_production_mode,
+        normalize_production_mode,
+        production_path_for,
+        suggested_exec_type,
+    )
 
     main, comp = parse_component_sku(sku)
     emb_before = False
@@ -516,10 +526,16 @@ def get_routing(sku: str, so_number: Optional[str] = None, process: Optional[str
                     break
     item_path = get_item_routing(sku)
     component_path = get_component_routing(sku)
-    path = production_path_for(sku, so_number=so_number, item_path=component_path)
-    mode = get_so_production_mode(so_number) if so_number else "inhouse"
+    mode = (
+        normalize_production_mode(production_mode)
+        if production_mode
+        else get_so_production_mode(so_number) if so_number else "inhouse"
+    )
+    path = production_path_for(
+        sku, so_number=so_number, production_mode=mode, item_path=component_path
+    )
     current = (process or "").strip()
-    nxt = get_next_process(sku, current, so_number=so_number) if current else get_next_process(sku, "Cutting", so_number=so_number)
+    nxt = get_next_process(sku, current, so_number=so_number, production_mode=mode) if current else get_next_process(sku, "Cutting", so_number=so_number, production_mode=mode)
     return {
         "sku": sku,
         "so_number": so_number or "",
@@ -528,7 +544,7 @@ def get_routing(sku: str, so_number: Optional[str] = None, process: Optional[str
         "item_routing": item_path,
         "suggested_exec_type": suggested_exec_type(mode, current or "Cutting"),
         "next_process": nxt,
-        "next_after_cutting": get_next_process(sku, "Cutting", so_number=so_number),
+        "next_after_cutting": get_next_process(sku, "Cutting", so_number=so_number, production_mode=mode),
         "requires_embroidery": requires_emb,
         "embroidery_before_cutting": emb_before,
         "embroidery_type": emb_type,
@@ -680,6 +696,8 @@ def cutting_report(
     brand: str = "",
     search: str = "",
     group_by: str = "",
+    as_of_date: str = "",
+    activity_date: str = "",
     page: int = 1,
     page_size: int = 200,
     export: bool = False,
@@ -703,6 +721,8 @@ def cutting_report(
         brand=brand,
         search=search,
         group_by=group_by,
+        as_of_date=as_of_date,
+        activity_date=activity_date,
         page=page,
         page_size=page_size,
         export=export,
@@ -714,6 +734,14 @@ def cutting_report(
 @router.get("/orders")
 def get_jos(status: Optional[str] = None, so_number: Optional[str] = None, process: Optional[str] = None):
     return list_jos(status, so_number, process)
+
+@router.get("/path-commitment")
+def path_commitment(so_number: str, sku: str, process: str = "Cutting"):
+    """Open JO planned qty for SO+SKU, split by production path (supports qty-level path split)."""
+    from ..db.production_db import get_path_commitment
+
+    return get_path_commitment(so_number, sku, process)
+
 
 @router.get("/orders/validate")
 def validate_jo(process: str, so_number: str, sku: str, planned_qty: int = 0):

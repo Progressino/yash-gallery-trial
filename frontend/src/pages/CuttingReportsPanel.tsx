@@ -18,6 +18,11 @@ type CuttingRow = {
   issued_qty: number
   received_qty: number
   balance_qty: number
+  opening_balance?: number
+  closing_balance?: number
+  received_on_date?: number | null
+  issued_on_date?: number | null
+  production_mode?: string
   qty_variance: number
   status: string
   last_activity_date: string
@@ -60,6 +65,7 @@ export default function CuttingReportsPanel() {
     date_from: '', date_to: '', so_number: '', parent_style: '', sku: '', size: '',
     jo_number: '', component: '', fabric_code: '', status: '', aging_bucket: '',
     aging_basis: 'jo_date', variance: '', brand: '', search: '', group_by: 'so',
+    as_of_date: '', activity_date: '',
   })
   const [page, setPage] = useState(1)
   const params = useMemo(() => ({ ...filters, page, page_size: 150 }), [filters, page])
@@ -99,6 +105,11 @@ export default function CuttingReportsPanel() {
     ['Total Planned', fmt(kpis.planned_qty), 'text-[#002B5B]'],
     ['Total Received', fmt(kpis.received_qty), 'text-emerald-700'],
     ['Total Balance', fmt(kpis.balance_qty), 'text-amber-700'],
+    ...(filters.activity_date ? [
+      ['Opening Bal.', fmt(kpis.opening_balance), 'text-slate-700'],
+      ['Cut Today', fmt(kpis.received_on_date), 'text-emerald-800'],
+      ['Closing Bal.', fmt(kpis.closing_balance), 'text-amber-800'],
+    ] as [string, string, string][] : []),
     ['Pending JOs', fmt(kpis.pending_jos), 'text-amber-800'],
     ['Over Cutting', fmt(kpis.over_qty), 'text-rose-700'],
     ['Under Cutting', fmt(kpis.under_qty), 'text-orange-700'],
@@ -113,8 +124,9 @@ export default function CuttingReportsPanel() {
         <div>
           <h3 className="font-semibold text-gray-800">Cutting summary &amp; balance</h3>
           <p className="text-[11px] text-gray-500">
-            Balance = Planned − Received (negative = over-receipt). Variance = Received − Planned.
-            KPIs use the full filtered set, not the current page.
+            Balance = Planned − Received (negative = over-receipt). Set <b>Activity date</b> for daily opening / cut / closing balance.
+            {filters.as_of_date ? ` As-of ${filters.as_of_date}.` : ''}
+            {filters.activity_date ? ` Daily view: ${filters.activity_date}.` : ''}
           </p>
         </div>
         <button type="button" onClick={() => void exportAll()} className="px-3 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg">
@@ -134,6 +146,7 @@ export default function CuttingReportsPanel() {
       <div className="bg-white border rounded-xl p-3 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 text-xs">
         {[
           ['date_from', 'JO from', 'date'], ['date_to', 'JO to', 'date'],
+          ['as_of_date', 'As-of date', 'date'], ['activity_date', 'Activity date', 'date'],
           ['so_number', 'SO No', 'text'], ['parent_style', 'Parent style', 'text'],
           ['sku', 'SKU', 'text'], ['size', 'Size', 'text'],
           ['jo_number', 'Cutting JO', 'text'], ['component', 'Component', 'text'],
@@ -232,7 +245,7 @@ export default function CuttingReportsPanel() {
         <table className="w-full text-[11px]">
           <thead className="bg-gray-50 text-gray-500 uppercase sticky top-0">
             <tr>
-              {['SO', 'JO', 'Style', 'SKU', 'Size', 'Comp', 'Fabric', 'Plan', 'Iss', 'Rec', 'Bal', 'Var', 'Status', 'Age', 'BOM Avg', 'Act Avg', 'Save %'].map(h => (
+              {['SO', 'JO', 'Path', 'Style', 'SKU', 'Size', 'Comp', 'Fabric', 'Plan', 'Iss', 'Rec', 'Bal', 'Open', 'Close', 'Today', 'Var', 'Status', 'Age', 'BOM Avg', 'Act Avg', 'Save %'].map(h => (
                 <th key={h} className="text-left px-2 py-2 whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -242,6 +255,7 @@ export default function CuttingReportsPanel() {
               <tr key={`${r.jo_number}-${r.sku}-${i}`} className="border-t border-gray-50 hover:bg-slate-50">
                 <td className="px-2 py-1.5 font-semibold text-[#002B5B]">{r.so_number}</td>
                 <td className="px-2 py-1.5 font-mono">{r.jo_number}</td>
+                <td className="px-2 py-1.5 text-[10px]">{r.production_mode || '—'}</td>
                 <td className="px-2 py-1.5">{r.parent_style}</td>
                 <td className="px-2 py-1.5 font-mono">{r.sku}</td>
                 <td className="px-2 py-1.5">{r.size || '—'}</td>
@@ -251,6 +265,9 @@ export default function CuttingReportsPanel() {
                 <td className="px-2 py-1.5 text-right">{fmt(r.issued_qty)}</td>
                 <td className="px-2 py-1.5 text-right text-emerald-700">{fmt(r.received_qty)}</td>
                 <td className={`px-2 py-1.5 text-right font-semibold ${r.balance_qty > 0 ? 'text-amber-700' : r.balance_qty < 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{fmt(r.balance_qty)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-600">{fmt(r.opening_balance)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-800">{fmt(r.closing_balance)}</td>
+                <td className="px-2 py-1.5 text-right text-emerald-800 font-medium">{fmt(r.received_on_date)}</td>
                 <td className={`px-2 py-1.5 text-right ${r.qty_variance > 0 ? 'text-rose-700' : r.qty_variance < 0 ? 'text-orange-700' : ''}`}>{fmt(r.qty_variance)}</td>
                 <td className="px-2 py-1.5"><span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${statusClass[r.status] || 'bg-gray-100'}`}>{r.status}</span></td>
                 <td className="px-2 py-1.5">{r.aging_bucket ? `${r.aging_bucket} (${r.aging_days}d)` : '—'}</td>
@@ -262,7 +279,7 @@ export default function CuttingReportsPanel() {
               </tr>
             ))}
             {rows.length === 0 && (
-              <tr><td colSpan={17} className="text-center text-gray-400 py-8">No Cutting JOs match these filters.</td></tr>
+              <tr><td colSpan={21} className="text-center text-gray-400 py-8">No Cutting JOs match these filters.</td></tr>
             )}
           </tbody>
         </table>
