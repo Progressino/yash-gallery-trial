@@ -1,0 +1,36 @@
+name: Probe inventory RAR upload (prod)
+
+# Upload Aug 1–3 fixture RARs on prod and verify Inv. History dates.
+# Manual only — avoids re-uploading inventory on every deploy.
+on:
+  workflow_dispatch:
+
+jobs:
+  upload-probe:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
+    runs-on: self-hosted
+    timeout-minutes: 45
+    steps:
+      - name: Wait for backend after deploy
+        if: github.event_name == 'workflow_run'
+        run: sleep 150
+
+      - name: Checkout fixtures
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Upload Aug 1–3 inventory RARs and verify history
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -eu
+          cd /root/app
+          set -a
+          # shellcheck disable=SC1091
+          . ./.env
+          set +a
+          export POST_DEPLOY_COOLDOWN=0
+          export INV_FIXTURE_DIR="${GITHUB_WORKSPACE}/ops/test-fixtures/inventory"
+          python3 "${GITHUB_WORKSPACE}/backend/scripts/probe_inventory_upload_prod.py"

@@ -19,6 +19,15 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 30
     steps:
+      - name: Wait for backend after deploy
+        if: github.event_name == 'workflow_run'
+        run: sleep 120
+
+      - name: Checkout (for optional fixture paths)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Prod inventory Daily + July/August history + production routing
         run: |
           set -eu
@@ -82,13 +91,27 @@ jobs:
           data = {}
           wait_deadline = time.time() + 12 * 60
           while time.time() < wait_deadline:
-              h = s.get(f"{base}/api/health", timeout=30)
-              health = h.json() if h.ok else {}
-              inv = s.get(
-                  f"{base}/api/data/inventory",
-                  params={"limit": 3, "offset": 0},
-                  timeout=120,
-              )
+              try:
+                  h = s.get(f"{base}/api/health", timeout=20)
+                  health = h.json() if h.ok else {}
+              except Exception as e:
+                  print("health_poll_err", e)
+                  time.sleep(10)
+                  continue
+              try:
+                  inv = s.get(
+                      f"{base}/api/data/inventory",
+                      params={"limit": 3, "offset": 0},
+                      timeout=45,
+                  )
+              except requests.exceptions.ReadTimeout:
+                  print("inventory_wait timeout — server busy, retrying…")
+                  time.sleep(10)
+                  continue
+              except Exception as e:
+                  print("inventory_wait err", e)
+                  time.sleep(10)
+                  continue
               print(
                   "inventory_wait",
                   "status", inv.status_code,
