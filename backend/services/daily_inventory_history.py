@@ -2811,6 +2811,11 @@ def extend_history_gaps_with_sales(
     if sales_net.empty:
         return base[out_cols].reset_index(drop=True)
 
+    # Pre-group blocked set by day for O(1) lookup inside the hot loop
+    blocked_by_day: dict = {}
+    for _bsku, _bday in blocked:
+        blocked_by_day.setdefault(_bday, set()).add(_bsku)
+
     derived_rows: list[pd.DataFrame] = []
     for i, start_day in enumerate(auth_dates):
         start_ts = pd.Timestamp(start_day).normalize()
@@ -2851,12 +2856,12 @@ def extend_history_gaps_with_sales(
             active_mask = (prev_qty > 0) | (np.abs(net_d) > 1e-9)
             if np.any(active_mask):
                 sku_active = sku_list[active_mask]
-                keep = [
-                    idx
-                    for idx, sku in enumerate(sku_active)
-                    if (str(sku).strip().upper(), day_ts) not in blocked
-                ]
-                if keep:
+                blocked_today = blocked_by_day.get(day_ts, None)
+                if blocked_today:
+                    keep = np.where(~np.isin(sku_active, list(blocked_today)))[0]
+                else:
+                    keep = np.arange(len(sku_active))
+                if len(keep):
                     derived_rows.append(
                         pd.DataFrame(
                             {

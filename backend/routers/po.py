@@ -194,6 +194,9 @@ def _inventory_matrix_payload(
                             "falling back to snapshot-only carry-forward",
                             elapsed,
                         )
+                        # Cache snapshot-only so we don't retry this expensive call on every request.
+                        sess._inventory_matrix_sales_ext_cache_key = cache_key
+                        sess._inventory_matrix_sales_ext_cache_df = df
                     elif extended is not None and not getattr(extended, "empty", True):
                         df = extended
                         sess._inventory_matrix_sales_ext_cache_key = cache_key
