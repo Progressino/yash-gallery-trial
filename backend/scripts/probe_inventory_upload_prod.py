@@ -82,9 +82,36 @@ def _clear_stuck(session: requests.Session) -> None:
     print("RESET_STUCK", r.status_code, (r.text or "")[:120])
 
 
+def _request_with_retry(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    retries: int = 12,
+    backoff: float = 5.0,
+    **kwargs,
+) -> requests.Response:
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            r = session.request(method, url, **kwargs)
+            r.raise_for_status()
+            return r
+        except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout) as e:
+            last_err = e
+            print("request_retry", method, url, attempt, e)
+            time.sleep(backoff * attempt)
+    raise SystemExit(f"request failed after {retries} retries: {last_err}")
+
+
 def _coverage(session: requests.Session) -> dict:
-    r = session.get(f"{BASE}/api/data/coverage", params={"light": "1"}, timeout=45)
-    r.raise_for_status()
+    r = _request_with_retry(
+        session,
+        "GET",
+        f"{BASE}/api/data/coverage",
+        params={"light": "1"},
+        timeout=60,
+    )
     return r.json()
 
 
@@ -92,7 +119,12 @@ def _wait_inventory_done(session: requests.Session) -> dict:
     start = time.time()
     saw_running = False
     while time.time() - start < POLL_SEC:
-        cov = _coverage(session)
+        try:
+            cov = _coverage(session)
+        except SystemExit as e:
+            print("coverage_retry", e)
+            time.sleep(10)
+            continue
         st = str(cov.get("inventory_upload_status") or "idle")
         msg = str(cov.get("inventory_upload_message") or "")
         pct = int(cov.get("inventory_upload_progress") or 0)
@@ -105,7 +137,7 @@ def _wait_inventory_done(session: requests.Session) -> dict:
             return cov
         elif saw_running and st == "idle":
             return cov
-        time.sleep(3)
+        time.sleep(5)
     raise SystemExit("inventory upload poll timeout")
 
 
@@ -137,12 +169,13 @@ def _upload_rar(session: requests.Session, path: Path) -> None:
 
 
 def _matrix_has_date(session: requests.Session, day: str) -> bool:
-    r = session.get(
+    r = _request_with_retry(
+        session,
+        "GET",
         f"{BASE}/api/po/daily-inventory-history/matrix",
         params={"days": 60, "limit": 3, "channel": "oms"},
         timeout=120,
     )
-    r.raise_for_status()
     body = r.json() or {}
     uploaded = {str(x)[:10] for x in (body.get("uploaded_dates") or [])}
     gaps = {str(x)[:10] for x in (body.get("gap_dates") or [])}
@@ -171,7 +204,16 @@ def main() -> int:
 
     for path in fixtures:
         _clear_stuck(session)
+        # Skip if this snapshot date is already present (safe to re-run probe).
+        day_hint = path.stem.split("-Aug-26")[0].split()[-1]
+        if day_hint.isdigit():
+            maybe = f"2026-08-{int(day_hint):02d}"
+            if _matrix_has_date(session, maybe):
+                print("SKIP_ALREADY_UPLOADED", path.name, maybe)
+                continue
         _upload_rar(session, path)
+        print("COOLDOWN 30s before next upload")
+        time.sleep(30)
 
     missing = [d for d in EXPECTED_DATES if not _matrix_has_date(session, d)]
     if missing:
