@@ -204,7 +204,14 @@ def check_calculate_gate(sess, *, cov=None, light: bool = False) -> dict[str, An
         blockers.append("Session or inventory restore is still running — wait and retry.")
 
     bg = background_job_names(sess)
-    for job in ("inventory_upload", "daily_inventory_upload", "session_restore"):
+    for job in (
+        "inventory_upload",
+        "daily_inventory_upload",
+        "session_restore",
+        "daily_auto_ingest",
+        "sales_rebuild",
+        "returns_import",
+    ):
         if job in bg:
             blockers.append(f"{job.replace('_', ' ')} is still processing.")
 

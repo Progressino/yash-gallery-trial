@@ -1497,7 +1497,9 @@ def _mark_daily_auto_ingest_running(sess: AppSession, message: str) -> None:
     sess.sales_rebuild_message = ""
 
 
-def _mark_inventory_upload_running(sess: AppSession, message: str, *, progress: int = 2) -> None:
+def _mark_inventory_upload_running(
+    sess: AppSession, message: str, *, progress: int = 2, session_id: str | None = None
+) -> None:
     """Set inventory ingest status without waiting on ``_daily_restore_lock``.
 
     ``/inventory-auto`` and chunked finalize used ``_session_lock_apply`` here, which
@@ -1507,8 +1509,10 @@ def _mark_inventory_upload_running(sess: AppSession, message: str, *, progress: 
         backup_inventory_before_upload(sess)
     sess.inventory_upload_status = "running"
     sess.inventory_upload_started = time.time()
-    _set_inventory_upload_progress(sess, progress, message)
+    sess._inv_progress_persisted = -1
+    _set_inventory_upload_progress(sess, progress, message, session_id=session_id)
     sess.inventory_upload_result = {}
+    _persist_inventory_upload_status(sess, session_id)
 
 
 async def _session_lock_apply(sess, fn: Callable[[], Any]) -> Any:
@@ -2520,7 +2524,26 @@ def _classify_inventory_file_parts(
     return oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes, detected
 
 
-def _set_inventory_upload_progress(sess: AppSession, pct: int, message: str) -> None:
+def _persist_inventory_upload_status(sess: AppSession, session_id: str | None = None) -> None:
+    """Light persist so coverage polls see running/done across reconnects (when PG enabled)."""
+    sid = (session_id or getattr(sess, "_persist_sid", None) or "").strip()
+    if not sid:
+        return
+    setattr(sess, "_persist_sid", sid)
+    try:
+        from ..db.forecast_session_pg import pg_session_persist_enabled, persist_session_bundle_thread_safe
+
+        if not pg_session_persist_enabled():
+            return
+        persist_session_bundle_thread_safe(sid, sess)
+    except Exception:
+        _log.exception("persist inventory upload status failed (session=%s…)", sid[:8])
+
+
+def _set_inventory_upload_progress(
+    sess: AppSession, pct: int, message: str, *, session_id: str | None = None
+) -> None:
+    del session_id  # status persisted explicitly on start/done/error
     sess.inventory_upload_progress = max(0, min(100, int(pct)))
     sess.inventory_upload_message = message
 
@@ -2730,7 +2753,10 @@ def _inventory_parse_heavy(
     warnings: list[str],
 ) -> tuple[Any, Any, dict]:
     """CPU/RAM-heavy inventory parse — no session lock (progress fields updated on sess)."""
-    _set_inventory_upload_progress(sess, 45, "Merging OMS, Flipkart, Myntra, and Amazon stock…")
+    _set_inventory_upload_progress(
+        sess, 45, "Merging OMS, Flipkart, Myntra, and Amazon stock…",
+        session_id=getattr(sess, "_persist_sid", None),
+    )
     df_variant, debug = load_inventory_consolidated(
         oms_bytes_list or None,
         fk_bytes,
@@ -2766,7 +2792,9 @@ def _inventory_parse_heavy(
         )
     except Exception:
         df_parent = df_variant
-    _set_inventory_upload_progress(sess, 80, "Building parent-SKU rollup…")
+    _set_inventory_upload_progress(
+        sess, 80, "Building parent-SKU rollup…", session_id=getattr(sess, "_persist_sid", None),
+    )
     return df_variant, df_parent, debug
 
 
@@ -2781,7 +2809,9 @@ def _inventory_apply_parse_result(
     warnings: list[str],
 ) -> dict:
     """Commit parsed inventory to the session (brief lock)."""
-    _set_inventory_upload_progress(sess, 95, "Finalizing snapshot…")
+    _set_inventory_upload_progress(
+        sess, 95, "Finalizing snapshot…", session_id=getattr(sess, "_persist_sid", None),
+    )
     missing_oms = upload_bundle_expects_oms(file_parts) and not oms_loaded_in_debug(debug)
     if missing_oms:
         warnings.append("OMS inventory CSV missing or empty inside the bundle.")
@@ -2946,7 +2976,9 @@ def _inventory_apply_parse_result(
     )
     if not df_variant.empty:
         sess.inventory_upload_status = "done"
-        _set_inventory_upload_progress(sess, 100, payload["message"])
+        _set_inventory_upload_progress(
+            sess, 100, payload["message"], session_id=getattr(sess, "_persist_sid", None),
+        )
     else:
         sess.inventory_upload_status = "error"
         sess.inventory_upload_progress = 0
@@ -2954,6 +2986,7 @@ def _inventory_apply_parse_result(
     sess.inventory_upload_result = payload
     sess.inventory_upload_message = payload["message"]
     sess.inventory_upload_started = 0.0
+    _persist_inventory_upload_status(sess, getattr(sess, "_persist_sid", None))
     return payload
 
 
@@ -2961,7 +2994,9 @@ def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, 
     """Parse assembled inventory file bytes on the inventory worker thread."""
     sess = _resolve_upload_session(session_id)
     if sess is None:
+        _log.error("inventory-auto worker: session %s… not found", (session_id or "")[:8])
         return
+    setattr(sess, "_persist_sid", session_id)
     route_notes: list[str] = []
     try:
         from ..services.upload_file_sniff import partition_files_by_upload_target
@@ -2986,7 +3021,7 @@ def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, 
     if len(file_parts) > 3:
         fnames += f" (+{len(file_parts) - 3} more)"
     _mark_inventory_upload_running(
-        sess, f"Classifying {len(file_parts)} file(s): {fnames}…", progress=5,
+        sess, f"Classifying {len(file_parts)} file(s): {fnames}…", progress=5, session_id=session_id,
     )
     warnings: list[str] = []
     try:
@@ -2997,6 +3032,7 @@ def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, 
         sess.inventory_upload_progress = 0
         sess.inventory_upload_message = str(e)
         sess.inventory_upload_result = {"ok": False, "message": str(e)}
+        _persist_inventory_upload_status(sess, session_id)
         return
 
     if not any([oms_bytes_list, fk_bytes, myntra_bytes, amz_bytes]):
@@ -3004,6 +3040,7 @@ def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, 
         sess.inventory_upload_progress = 0
         sess.inventory_upload_message = "No inventory files recognized."
         sess.inventory_upload_result = {"ok": False, "message": "No inventory files recognized."}
+        _persist_inventory_upload_status(sess, session_id)
         return
 
     _amz_is_archive = False
@@ -3011,10 +3048,12 @@ def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, 
         _amz_is_archive = amz_bytes[:6] == _RAR_MAGIC or amz_bytes[:4] == b"PK\x03\x04"
     if _amz_is_archive:
         _set_inventory_upload_progress(
-            sess, 20, "Extracting archive and reading inner CSV files…",
+            sess, 20, "Extracting archive and reading inner CSV files…", session_id=session_id,
         )
     else:
-        _set_inventory_upload_progress(sess, 25, "Parsing marketplace inventory files…")
+        _set_inventory_upload_progress(
+            sess, 25, "Parsing marketplace inventory files…", session_id=session_id,
+        )
 
     sku_mapping = dict(sess.sku_mapping or {})
 
@@ -3051,6 +3090,7 @@ def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, 
         _session_lock_apply_sync(sess, apply_work)
         if sess.inventory_upload_status == "done":
             _finish_inventory_server_save(sess, session_id)
+        _persist_inventory_upload_status(sess, session_id)
     except Exception as e:
         _log.exception("inventory-auto parse")
         sess.inventory_upload_status = "error"
@@ -3058,6 +3098,7 @@ def _run_inventory_auto_from_parts(session_id: str, file_parts: list[tuple[str, 
         sess.inventory_upload_started = 0.0
         sess.inventory_upload_message = f"Parse error: {e}"
         sess.inventory_upload_result = {"ok": False, "message": f"Parse error: {e}"}
+        _persist_inventory_upload_status(sess, session_id)
 
 
 def _run_inventory_auto_worker(session_id: str, file_parts: list[tuple[str, bytes]]) -> None:
@@ -3160,7 +3201,8 @@ async def upload_inventory_auto(
         )
         if route_notes:
             inv_msg = "Auto-routed: " + "; ".join(route_notes) + " " + inv_msg
-        _mark_inventory_upload_running(sess, "Upload received — starting parse…")
+        _mark_inventory_upload_running(sess, "Upload received — starting parse…", session_id=sid)
+        setattr(sess, "_persist_sid", sid)
         INVENTORY_EXECUTOR.submit(_run_inventory_auto_worker, sid, file_parts)
         return JSONResponse(
             content={
@@ -5094,8 +5136,16 @@ def _finalize_chunk_upload_worker(session_id: str, upload_id: str) -> None:
 
 
 def _finalize_chunk_upload(session_id: str, upload_id: str) -> None:
-    """Queue chunk finalize on the dedicated upload executor (never blocks behind warm-cache)."""
-    DAILY_UPLOAD_EXECUTOR.submit(_finalize_chunk_upload_worker, session_id, upload_id)
+    """Queue chunk finalize — inventory uses INVENTORY_EXECUTOR so RAR uploads are not
+    stuck behind a multi-minute daily sales ingest on DAILY_UPLOAD_EXECUTOR."""
+    try:
+        target = chunk_store.get_target(session_id, upload_id)
+    except Exception:
+        target = "daily-auto"
+    if target == "inventory-auto":
+        INVENTORY_EXECUTOR.submit(_finalize_chunk_upload_worker, session_id, upload_id)
+    else:
+        DAILY_UPLOAD_EXECUTOR.submit(_finalize_chunk_upload_worker, session_id, upload_id)
 
 
 @router.post("/chunk/complete")
@@ -5142,7 +5192,10 @@ async def chunk_upload_complete(
     if target == "daily-auto":
         _mark_daily_auto_ingest_running(sess, "Assembling uploaded files…")
     else:
-        _mark_inventory_upload_running(sess, "Assembling uploaded chunks…", progress=1)
+        _mark_inventory_upload_running(
+            sess, "Assembling uploaded chunks…", progress=1, session_id=sid,
+        )
+        setattr(sess, "_persist_sid", sid)
 
     # Use the dedicated daily/inventory upload executor so chunk finalization
     # does not wait behind unrelated heavy jobs (cache/restore/PO work).

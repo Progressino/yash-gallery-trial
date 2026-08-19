@@ -784,32 +784,57 @@ export async function waitForInventoryUpload(
 ): Promise<CoverageResponse> {
   const start = Date.now()
   let sawRunning = false
+  let lastProgress = -1
+  let lastProgressAt = start
+  const STALL_MS = 120_000
   while (Date.now() - start < maxMs) {
     if (shouldAbort?.()) {
       throw new Error('Inventory upload cancelled — you can upload again.')
     }
     const cov = await getCoverageResilient({ light: true, timeout: POLL_TIMEOUT_MS })
     const st = cov.inventory_upload_status ?? 'idle'
+    const pct = cov.inventory_upload_progress ?? 0
+    const msg = cov.inventory_upload_message || 'Parsing inventory…'
     if (st === 'running') {
       sawRunning = true
-      const pct = cov.inventory_upload_progress ?? 0
-      onTick?.(cov.inventory_upload_message || 'Parsing inventory…', pct)
+      if (pct !== lastProgress) {
+        lastProgress = pct
+        lastProgressAt = Date.now()
+        onTick?.(msg, pct)
+      } else if (Date.now() - lastProgressAt >= STALL_MS) {
+        onTick?.(
+          `${msg} (still working — large daily RAR bundles can take several minutes)`,
+          pct > 0 ? pct : 5,
+        )
+        lastProgressAt = Date.now()
+      } else {
+        onTick?.(msg, pct > 0 ? pct : 5)
+      }
       await new Promise(r => setTimeout(r, 1500))
       continue
     }
     if (st === 'error') {
-      throw new Error(cov.inventory_upload_message || 'Inventory upload failed')
+      const detail = cov.inventory_upload_warnings?.length
+        ? `${msg} — ${cov.inventory_upload_warnings.slice(0, 2).join('; ')}`
+        : msg
+      throw new Error(detail || 'Inventory upload failed')
     }
     if (st === 'done') {
-      onTick?.(cov.inventory_upload_message || 'Inventory snapshot updated.')
+      onTick?.(msg || 'Inventory snapshot updated.', 100)
       return cov
     }
     if (sawRunning && st === 'idle') {
       return cov
     }
+    if (!sawRunning) {
+      onTick?.('Waiting for server to start inventory parse…', 2)
+    }
     await new Promise(r => setTimeout(r, 1500))
   }
-  throw new Error('Inventory upload timed out — use “Clear stuck”, then upload again.')
+  throw new Error(
+    'Inventory upload timed out — click “Clear stuck”, wait one minute, then upload again. ' +
+    'If files are large, upload one day at a time.',
+  )
 }
 
 /** Poll until Tier-1 bulk history parse finishes (MTR / Myntra / Meesho / Flipkart / Snapdeal). */

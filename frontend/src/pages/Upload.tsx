@@ -2221,7 +2221,7 @@ export default function Upload() {
                   })
                   if (res.ok) {
                     if (res.ingest_async) {
-                      showToast('success', `${res.message}`, 6000)
+                      showToast('success', res.message || 'Upload received — parsing on server…', 6000)
                       setInvProgress({ pct: 5, msg: 'Upload complete — parsing on server…', phase: 'parse' })
                       const cov = await waitForInventoryUpload(
                         (msg, pct) => {
@@ -2236,7 +2236,7 @@ export default function Upload() {
                         () => invWaitAbortRef.current,
                       )
                       setBuildingMsg('')
-                      setInvProgress(null)
+                      setInvProgress({ pct: 100, msg: cov.inventory_upload_message || 'Inventory updated.', phase: 'parse' })
                       setCoverage(cov)
                       const results = cov.inventory_upload_file_results ?? []
                       const saved = results.filter(r => r.status === 'loaded').length
@@ -2246,7 +2246,7 @@ export default function Upload() {
                         ...skipped.map(r => `${r.filename}: ${r.reason ?? 'skipped'}`),
                       ]
                       captureGenericAlert('inv', warnings.length ? warnings : undefined, {
-                        parsed: results.length || files.length,
+                        parsed: results.length || invFiles.length,
                         kept: saved || cov.inventory_upload_rows,
                         dropped: skipped.length,
                         fileResults: results,
@@ -2255,6 +2255,11 @@ export default function Upload() {
                         (cov.inventory_upload_amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null,
                       )
                       notifyPostInventoryUpload(cov)
+                      showToast(
+                        'success',
+                        cov.inventory_upload_message || `Inventory updated (${saved || cov.inventory_upload_rows || 0} SKUs).`,
+                        10_000,
+                      )
                     } else {
                       setInventoryAmzDisclaimer((res.debug?.amz_disclaimer as InventoryAmazonDisclaimer | undefined) ?? null)
                       const issues = (res.debug && 'warnings' in res.debug && Array.isArray(res.debug.warnings))
@@ -2304,7 +2309,12 @@ export default function Upload() {
                 } else {
                   showToast('error', e instanceof Error ? e.message : 'Upload failed')
                 }
-              } finally { setL('inv', false); setBuildingMsg(''); setInvProgress(null) }
+              } finally {
+                setL('inv', false)
+                setBuildingMsg('')
+                // Keep progress banner briefly on success; clear on next tick if done.
+                setTimeout(() => setInvProgress(null), 2500)
+              }
             }}
           />
           {inventoryAmzDisclaimer && (
