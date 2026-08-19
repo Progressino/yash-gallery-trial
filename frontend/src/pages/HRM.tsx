@@ -1850,21 +1850,82 @@ export default function HRM() {
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                               <input value={editResp.title} onChange={e => setEditResp((x: any) => ({ ...x, title: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Title" />
                               <input value={editResp.description || ''} onChange={e => setEditResp((x: any) => ({ ...x, description: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Description" />
-                              <select value={editResp.frequency} onChange={e => setEditResp((x: any) => ({ ...x, frequency: e.target.value }))} className="border rounded px-2 py-1 text-sm">
-                                {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
-                              </select>
-                              <select value={editResp.category} onChange={e => setEditResp((x: any) => ({ ...x, category: e.target.value }))} className="border rounded px-2 py-1 text-sm">
-                                {CATEGORIES.map(c => <option key={c}>{c}</option>)}
-                              </select>
-                              <select value={editResp.employee_id} onChange={e => setEditResp((x: any) => ({ ...x, employee_id: +e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2">
-                                {(canEditAssignments ? pickerEmps : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
-                              </select>
-                              <select value={editResp.linked_to_employee_id || ''} onChange={e => setEditResp((x: any) => ({ ...x, linked_to_employee_id: e.target.value ? +e.target.value : '' }))} className="border rounded px-2 py-1 text-sm col-span-2">
-                                <option value="">Self-complete (no Linked Person)</option>
-                                {(canEditAssignments ? pickerEmps : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
-                              </select>
+                              <div>
+                                <label className="text-[10px] text-gray-400">Frequency</label>
+                                <select value={editResp.frequency} onChange={e => setEditResp((x: any) => ({ ...x, frequency: e.target.value }))} className="w-full border rounded px-2 py-1 text-sm">
+                                  {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
+                                </select>
+                              </div>
+                              {(editResp.frequency === 'Weekly' || editResp.frequency === 'Fortnightly') && (
+                                <div>
+                                  <label className="text-[10px] text-gray-400">Weekday *</label>
+                                  <select value={editResp.schedule_weekday || ''} onChange={e => setEditResp((x: any) => ({ ...x, schedule_weekday: e.target.value }))} className="w-full border rounded px-2 py-1 text-sm">
+                                    <option value="">Select</option>
+                                    {WEEKDAYS.map(d => <option key={d}>{d}</option>)}
+                                  </select>
+                                </div>
+                              )}
+                              {editResp.frequency === 'Monthly' && (
+                                <div>
+                                  <label className="text-[10px] text-gray-400">Day of month *</label>
+                                  <input type="number" min={1} max={31} value={editResp.schedule_month_day || ''} onChange={e => setEditResp((x: any) => ({ ...x, schedule_month_day: +e.target.value }))} className="w-full border rounded px-2 py-1 text-sm" />
+                                </div>
+                              )}
+                              {editResp.frequency === 'Quarterly' && (
+                                <div>
+                                  <label className="text-[10px] text-gray-400">Anchor month *</label>
+                                  <select value={editResp.schedule_month || ''} onChange={e => setEditResp((x: any) => ({ ...x, schedule_month: +e.target.value }))} className="w-full border rounded px-2 py-1 text-sm">
+                                    <option value="">Select</option>
+                                    {MONTHS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                                  </select>
+                                </div>
+                              )}
+                              <div>
+                                <label className="text-[10px] text-gray-400">Category</label>
+                                <select value={editResp.category} onChange={e => setEditResp((x: any) => ({ ...x, category: e.target.value }))} className="w-full border rounded px-2 py-1 text-sm">
+                                  {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-gray-400">Priority</label>
+                                <select value={editResp.priority || 'Medium'} onChange={e => setEditResp((x: any) => ({ ...x, priority: e.target.value }))} className="w-full border rounded px-2 py-1 text-sm">
+                                  {PRIORITIES.map(pr => <option key={pr}>{pr}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-gray-400">Mandatory</label>
+                                <select value={editResp.mandatory ? 'yes' : 'no'} onChange={e => setEditResp((x: any) => ({ ...x, mandatory: e.target.value === 'yes' }))} className="w-full border rounded px-2 py-1 text-sm">
+                                  <option value="no">No</option>
+                                  <option value="yes">Yes</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-gray-400">Time Period</label>
+                                <select value={editResp.time_period || ''} onChange={e => setEditResp((x: any) => ({ ...x, time_period: e.target.value }))} className="w-full border rounded px-2 py-1 text-sm">
+                                  <option value="">—</option>
+                                  {TIME_PERIODS.map(tp => <option key={tp}>{tp}</option>)}
+                                </select>
+                              </div>
+                              <div className="col-span-2">
+                                <label className="text-[10px] text-gray-400">Assigned To</label>
+                                <select value={editResp.employee_id} onChange={e => setEditResp((x: any) => ({ ...x, employee_id: +e.target.value }))} className="w-full border rounded px-2 py-1 text-sm">
+                                  {(canEditAssignments ? pickerEmps : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                                </select>
+                              </div>
+                              <div className="col-span-2">
+                                <label className="text-[10px] text-gray-400">Linked To (supervisor / approver)</label>
+                                <select value={editResp.linked_to_employee_id || ''} onChange={e => setEditResp((x: any) => ({ ...x, linked_to_employee_id: e.target.value ? +e.target.value : '' }))} className="w-full border rounded px-2 py-1 text-sm">
+                                  <option value="">Self-complete (no Linked Person)</option>
+                                  {(canEditAssignments ? pickerEmps : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                                </select>
+                              </div>
                               <div className="flex gap-2 col-span-2">
-                                <button onClick={() => updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null } })} disabled={!editResp.title || updateRespMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
+                                <button onClick={() => {
+                                  if ((editResp.frequency === 'Weekly' || editResp.frequency === 'Fortnightly') && !editResp.schedule_weekday) { alert('Select a weekday for Weekly/Fortnightly'); return }
+                                  if (editResp.frequency === 'Monthly' && !(editResp.schedule_month_day > 0)) { alert('Select calendar day for Monthly'); return }
+                                  if (editResp.frequency === 'Quarterly' && !(editResp.schedule_month > 0)) { alert('Select anchor month for Quarterly'); return }
+                                  updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null, priority: editResp.priority || 'Medium', mandatory: !!editResp.mandatory, schedule_weekday: editResp.schedule_weekday || '', schedule_month_day: editResp.schedule_month_day || 0, schedule_month: editResp.schedule_month || 0, time_period: editResp.time_period || '' } })
+                                }} disabled={!editResp.title || updateRespMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
                                 <button onClick={() => setEditResp(null)} className="px-3 py-1 border rounded text-xs">Cancel</button>
                               </div>
                             </div>
@@ -1880,7 +1941,7 @@ export default function HRM() {
                             <td className="px-4 py-2">
                               {canMutateRecords && (
                                 <div className="flex gap-2">
-                                  <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '' })} className="text-xs text-blue-600">✏️</button>
+                                  <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '', priority: r.priority || 'Medium', mandatory: !!r.mandatory, schedule_weekday: r.schedule_weekday || '', schedule_month_day: r.schedule_month_day || 0, schedule_month: r.schedule_month || 0, time_period: r.time_period || '' })} className="text-xs text-blue-600">✏️</button>
                                   {canDeleteHrm && (
                                     <button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button>
                                   )}
