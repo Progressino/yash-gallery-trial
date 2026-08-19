@@ -2550,6 +2550,7 @@ export default function Production() {
             Optional <code className="bg-gray-100 px-1 rounded">component_code</code>=TOP|PANT|DUPATTA for one component only.
             <strong> Do not import FRONT/BACK</strong> — they are panels inside the TOP JO after Receive.
             Optional <code className="bg-gray-100 px-1 rounded">create_component_jos</code>: yes (default) | no.
+            {' '}Optional <code className="bg-gray-100 px-1 rounded">production_mode</code>: <em>inhouse</em> | <em>cut_to_pack</em> | <em>stitch_to_pack</em> (blank = SO default). Split same SKU across paths with separate rows.
           </p>
 
           {/* Ready to process — always visible for stage context */}

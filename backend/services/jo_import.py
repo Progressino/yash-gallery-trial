@@ -21,6 +21,7 @@ JO_IMPORT_COLUMNS = [
     "component_code",
     "planned_qty",
     "process",
+    "production_mode",
     "create_component_jos",
     "exec_type",
     "vendor_name",
@@ -41,27 +42,27 @@ def jo_import_template_csv() -> str:
     header = ",".join(JO_IMPORT_COLUMNS)
     # Example 1: one main size row → TOP + PANT + DUPATTA JOs (panels live under TOP).
     row_main = (
-        "SO-0001,TEST SKU-M,,10,Cutting,yes,Inhouse,,0,2026-08-15,"
+        "SO-0001,TEST SKU-M,,10,Cutting,,yes,Inhouse,,0,2026-08-15,"
         ",,,Test Style M,"
         "\"Recommended: one row per size. Creates TOP/PANT/DUPATTA Cutting JOs from Set BOM. "
         "Do NOT add FRONT/BACK rows — panels appear inside TOP JO after Receive.\""
     )
-    # Example 2: only TOP component JO (FRONT/BACK still panels inside that JO).
+    # Example 2: Cut-to-Pack row (vendor path — skips in-house processes).
     row_top = (
-        "SO-0001,TEST SKU-M,TOP,10,Cutting,no,Inhouse,,0,2026-08-15,"
+        "SO-0001,TEST SKU-M,TOP,10,Cutting,cut_to_pack,no,Outsource,Vendor XYZ,0,2026-08-15,"
         "FABRIC-TOP,20,MTR,Top only,"
-        "\"Optional: component_code=TOP creates one Cutting JO (TEST SKU-M-TOP). "
-        "FRONT/BACK embroidery WIP stays on this JO — not separate import lines.\""
+        "\"production_mode: inhouse | cut_to_pack | stitch_to_pack. "
+        "Blank = inherit from SO default. Determines downstream workflow.\""
     )
-    # Example 3: Pant alone (no panels).
+    # Example 3: Stitch-to-Pack row.
     row_pant = (
-        "SO-0001,TEST SKU-M,PANT,10,Cutting,no,Inhouse,,0,2026-08-15,"
+        "SO-0001,TEST SKU-M,PANT,10,Cutting,stitch_to_pack,no,Outsource,Vendor ABC,0,2026-08-15,"
         "FABRIC-PANT,15,MTR,Pant only,"
-        "\"Optional: component_code=PANT or DUPATTA for sibling pieces that stitch independently.\""
+        "\"stitch_to_pack route: Cutting → Stitching → Finishing (skips Embroidery/Handwork/Kaj).\""
     )
     # Example 4: Stitching (no component explode).
     row_stitch = (
-        "SO-0001,TEST SKU-M-TOP,,10,Stitching,no,Outsource,Vendor ABC,25,2026-08-25,"
+        "SO-0001,TEST SKU-M-TOP,,10,Stitching,,no,Outsource,Vendor ABC,25,2026-08-25,"
         ",,,,"
         "\"Later processes: use the component JO SKU (…-TOP) or main SKU as needed. "
         "create_component_jos is ignored outside Cutting.\""
@@ -166,6 +167,10 @@ def build_jo_payload_from_import_row(row: dict[str, Any], *, default_process: st
     elif process != "Cutting":
         create_component_jos = False if create_component_jos is None else create_component_jos
 
+    raw_mode = _import_cell_str(
+        row.get("production_mode") or row.get("production_path") or row.get("path")
+    )
+
     data: dict[str, Any] = {
         "so_number": so_number,
         "sku": main_sku,
@@ -182,6 +187,8 @@ def build_jo_payload_from_import_row(row: dict[str, Any], *, default_process: st
         "fabric_unit": str(row.get("fabric_unit") or "MTR").strip() or "MTR",
         "create_component_jos": create_component_jos,
     }
+    if raw_mode:
+        data["production_mode"] = raw_mode
 
     if raw_comp:
         # Direct component Cutting JO (TOP/PANT/DUPATTA only — never FRONT/BACK).
