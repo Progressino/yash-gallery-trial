@@ -7,16 +7,9 @@ on:
 
 jobs:
   upload-probe:
-    if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: self-hosted
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
-      - name: Wait for backend after deploy
-        if: github.event_name == 'workflow_run'
-        run: sleep 150
-
       - name: Checkout fixtures
         uses: actions/checkout@v4
         with:
