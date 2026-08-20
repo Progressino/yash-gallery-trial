@@ -1235,6 +1235,30 @@ export default function HRM() {
                         {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
                       </select>
                     </div>
+                    {(quickResp.frequency === 'Weekly' || quickResp.frequency === 'Fortnightly') && (
+                      <div><label className="text-xs text-gray-500">Weekday *</label>
+                        <select value={quickResp.schedule_weekday} onChange={e => setQuickResp(f => ({ ...f, schedule_weekday: e.target.value }))}
+                          className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                          <option value="">Select</option>
+                          {WEEKDAYS.map(d => <option key={d}>{d}</option>)}
+                        </select>
+                      </div>
+                    )}
+                    {quickResp.frequency === 'Monthly' && (
+                      <div><label className="text-xs text-gray-500">Day of month *</label>
+                        <input type="number" min={1} max={31} value={quickResp.schedule_month_day || ''} onChange={e => setQuickResp(f => ({ ...f, schedule_month_day: +e.target.value }))}
+                          className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
+                      </div>
+                    )}
+                    {quickResp.frequency === 'Quarterly' && (
+                      <div><label className="text-xs text-gray-500">Anchor month *</label>
+                        <select value={quickResp.schedule_month || ''} onChange={e => setQuickResp(f => ({ ...f, schedule_month: +e.target.value }))}
+                          className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                          <option value="">Select</option>
+                          {MONTHS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                        </select>
+                      </div>
+                    )}
                     <div><label className="text-xs text-gray-500">Category</label>
                       <select value={quickResp.category} onChange={e => setQuickResp(f => ({ ...f, category: e.target.value }))}
                         className="w-full border rounded px-2 py-1.5 text-sm mt-1">
@@ -1246,6 +1270,20 @@ export default function HRM() {
                         className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                         <option value="">Self-complete</option>
                         {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                    </div>
+                    <div><label className="text-xs text-gray-500">{t(lang, 'mandatory')}</label>
+                      <select value={quickResp.mandatory ? 'yes' : 'no'} onChange={e => setQuickResp(f => ({ ...f, mandatory: e.target.value === 'yes' }))}
+                        className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="no">{t(lang, 'no')}</option>
+                        <option value="yes">{t(lang, 'yes')}</option>
+                      </select>
+                    </div>
+                    <div><label className="text-xs text-gray-500">{t(lang, 'timePeriod')}</label>
+                      <select value={quickResp.time_period} onChange={e => setQuickResp(f => ({ ...f, time_period: e.target.value }))}
+                        className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="">—</option>
+                        {TIME_PERIODS.map(tp => <option key={tp}>{tp}</option>)}
                       </select>
                     </div>
                   </>

@@ -590,7 +590,9 @@ def patch_responsibility(rid: int, body: ResponsibilityUpdate, request: Request)
     if body.employee_id is not None:
         assert_employee_in_scope(scope, body.employee_id)
     try:
-        update_responsibility(rid, {k: v for k, v in body.model_dump().items() if v is not None})
+        # exclude_unset: only fields the client sent; keep False/0/"" so mandatory
+        # and schedule clears persist (do not drop falsy values).
+        update_responsibility(rid, body.model_dump(exclude_unset=True))
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {"ok": True}
