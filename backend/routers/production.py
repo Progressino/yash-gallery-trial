@@ -732,8 +732,23 @@ def cutting_report(
 # ── Job Orders ─────────────────────────────────────────────────────────────────
 
 @router.get("/orders")
-def get_jos(status: Optional[str] = None, so_number: Optional[str] = None, process: Optional[str] = None):
-    return list_jos(status, so_number, process)
+def get_jos(
+    status: Optional[str] = None,
+    so_number: Optional[str] = None,
+    process: Optional[str] = None,
+    light: Optional[int] = 0,
+    limit: Optional[int] = None,
+    offset: Optional[int] = 0,
+):
+    """List job orders. ``light=1`` omits fabric/cost child rows for faster list loads."""
+    return list_jos(
+        status,
+        so_number,
+        process,
+        light=bool(light),
+        limit=limit,
+        offset=offset or 0,
+    )
 
 @router.get("/path-commitment")
 def path_commitment(so_number: str, sku: str, process: str = "Cutting"):

@@ -412,6 +412,22 @@ def init_db():
         ic.close()
     except Exception:
         pass
+    # Hot-path indexes for JO list (process filter + child aggregates).
+    for ddl in (
+        "CREATE INDEX IF NOT EXISTS idx_job_orders_process_id ON job_orders(process, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_job_orders_status ON job_orders(status)",
+        "CREATE INDEX IF NOT EXISTS idx_jo_lines_jo_id ON jo_lines(jo_id)",
+        "CREATE INDEX IF NOT EXISTS idx_jo_piece_issues_line ON jo_piece_issues(jo_line_id)",
+        "CREATE INDEX IF NOT EXISTS idx_jo_piece_receipts_line ON jo_piece_receipts(jo_line_id)",
+        "CREATE INDEX IF NOT EXISTS idx_jo_fabric_issues_jo ON jo_fabric_issues(jo_id)",
+        "CREATE INDEX IF NOT EXISTS idx_jo_fabric_returns_jo ON jo_fabric_returns(jo_id)",
+        "CREATE INDEX IF NOT EXISTS idx_jo_cost_entries_jo ON jo_cost_entries(jo_id)",
+        "CREATE INDEX IF NOT EXISTS idx_process_stock_so_sku ON process_stock(so_number, sku)",
+    ):
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
@@ -518,6 +534,7 @@ def get_next_process(
     current_process: str,
     so_number: str | None = None,
     production_mode: str | None = None,
+    item_path: list | None = None,
 ) -> Optional[str]:
     """Next process from configured Style/Component routing (SO vendor path when set)."""
     from ..services.operation_routing import next_process_in_path, normalize_process_name
@@ -526,7 +543,8 @@ def get_next_process(
     if normalize_process_name(current_process) == "Incoming":
         return "Cutting"
 
-    item_path = get_component_routing(sku)
+    if item_path is None:
+        item_path = get_component_routing(sku)
     path = production_path_for(
         sku, so_number=so_number, production_mode=production_mode, item_path=item_path
     )
@@ -1270,47 +1288,180 @@ def _get_ready_for_process(process: str) -> list:
 
 # ── Job Order CRUD ─────────────────────────────────────────────────────────────
 
-def list_jos(status=None, so_number=None, process=None):
+def list_jos(status=None, so_number=None, process=None, *, light: bool = False, limit: int | None = None, offset: int = 0):
+    """List job orders with batched child loads (no per-row N+1).
+
+    ``light=True`` skips fabric issues/returns/cost entries (list UI); detail
+    endpoints still load the full payload via ``get_jo``.
+    """
     conn = _connect()
     conditions, params = [], []
-    if status: conditions.append("status=?"); params.append(status)
-    if so_number: conditions.append("so_number=?"); params.append(so_number)
-    if process: conditions.append("process=?"); params.append(process)
-    where = "WHERE " + " AND ".join(conditions) if conditions else ""
-    rows = conn.execute(f"SELECT * FROM job_orders {where} ORDER BY id DESC", params).fetchall()
-    result = []
-    for r in rows:
-        jo = dict(r)
-        jo['lines'] = _get_jo_lines_with_stats(conn, jo['id'])
-        jo['fabric_issues'] = [dict(l) for l in conn.execute("SELECT * FROM jo_fabric_issues WHERE jo_id=?", (jo['id'],)).fetchall()]
-        jo['fabric_returns'] = [dict(l) for l in conn.execute("SELECT * FROM jo_fabric_returns WHERE jo_id=?", (jo['id'],)).fetchall()]
-        jo['cost_entries'] = [dict(l) for l in conn.execute("SELECT * FROM jo_cost_entries WHERE jo_id=?", (jo['id'],)).fetchall()]
-        stocks_rows = conn.execute(
-            "SELECT process, available_qty, total_in, total_out FROM process_stock WHERE so_number=? AND sku=?",
-            (jo.get('so_number',''), jo.get('sku',''))
-        ).fetchall()
-        jo['process_stocks'] = {r['process']: {'available': int(r['available_qty']), 'in': int(r['total_in']), 'out': int(r['total_out'])} for r in stocks_rows}
-        result.append(jo)
-    conn.close()
-    # Add routing info after connection is closed
+    if status:
+        conditions.append("status=?")
+        params.append(status)
+    if so_number:
+        conditions.append("so_number=?")
+        params.append(so_number)
+    if process:
+        conditions.append("process=?")
+        params.append(process)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    sql = f"SELECT * FROM job_orders {where} ORDER BY id DESC"
+    if limit is not None and int(limit) > 0:
+        sql += " LIMIT ? OFFSET ?"
+        params.extend([int(limit), max(0, int(offset or 0))])
+    rows = conn.execute(sql, params).fetchall()
+    if not rows:
+        conn.close()
+        return []
+
+    result = [dict(r) for r in rows]
+    jo_ids = [int(j["id"]) for j in result]
+    placeholders = ",".join("?" * len(jo_ids))
+
+    # Batch: lines
+    lines_by_jo: dict[int, list] = {jid: [] for jid in jo_ids}
+    line_rows = conn.execute(
+        f"SELECT * FROM jo_lines WHERE jo_id IN ({placeholders})", jo_ids
+    ).fetchall()
+    line_ids: list[int] = []
+    for lr in line_rows:
+        ln = dict(lr)
+        ln["issued_qty"] = 0
+        ln["received_qty"] = 0
+        ln["rejected_qty"] = 0
+        lines_by_jo[int(ln["jo_id"])].append(ln)
+        line_ids.append(int(ln["id"]))
+
+    # Batch: piece issue/receipt aggregates per line
+    issued_map: dict[int, int] = {}
+    received_map: dict[int, int] = {}
+    rejected_map: dict[int, int] = {}
+    if line_ids:
+        lp = ",".join("?" * len(line_ids))
+        for lid, qty in conn.execute(
+            f"SELECT jo_line_id, COALESCE(SUM(issued_qty),0) FROM jo_piece_issues "
+            f"WHERE jo_line_id IN ({lp}) GROUP BY jo_line_id",
+            line_ids,
+        ):
+            issued_map[int(lid)] = int(qty)
+        for lid, qty in conn.execute(
+            f"SELECT jo_line_id, COALESCE(SUM(received_qty),0) FROM jo_piece_receipts "
+            f"WHERE jo_line_id IN ({lp}) GROUP BY jo_line_id",
+            line_ids,
+        ):
+            received_map[int(lid)] = int(qty)
+        for lid, qty in conn.execute(
+            f"SELECT jo_line_id, COALESCE(SUM(rejected_qty),0) FROM jo_piece_receipts "
+            f"WHERE jo_line_id IN ({lp}) GROUP BY jo_line_id",
+            line_ids,
+        ):
+            rejected_map[int(lid)] = int(qty)
+
+    for jid, lines in lines_by_jo.items():
+        for ln in lines:
+            lid = int(ln["id"])
+            ln["issued_qty"] = issued_map.get(lid, 0)
+            ln["received_qty"] = received_map.get(lid, 0)
+            ln["rejected_qty"] = rejected_map.get(lid, 0)
+            ln["balance_qty"] = int(ln.get("planned_qty") or 0) - int(ln["received_qty"])
+
+    fabric_issues_by_jo: dict[int, list] = {jid: [] for jid in jo_ids}
+    fabric_returns_by_jo: dict[int, list] = {jid: [] for jid in jo_ids}
+    cost_by_jo: dict[int, list] = {jid: [] for jid in jo_ids}
+    if not light:
+        for fr in conn.execute(
+            f"SELECT * FROM jo_fabric_issues WHERE jo_id IN ({placeholders})", jo_ids
+        ):
+            fabric_issues_by_jo[int(fr["jo_id"])].append(dict(fr))
+        for fr in conn.execute(
+            f"SELECT * FROM jo_fabric_returns WHERE jo_id IN ({placeholders})", jo_ids
+        ):
+            fabric_returns_by_jo[int(fr["jo_id"])].append(dict(fr))
+        for fr in conn.execute(
+            f"SELECT * FROM jo_cost_entries WHERE jo_id IN ({placeholders})", jo_ids
+        ):
+            cost_by_jo[int(fr["jo_id"])].append(dict(fr))
+
+    # Batch process_stock for unique SO+SKU pairs
+    pairs = {
+        (str(j.get("so_number") or ""), str(j.get("sku") or ""))
+        for j in result
+        if j.get("so_number") or j.get("sku")
+    }
+    stock_map: dict[tuple[str, str], dict] = {}
+    if pairs:
+        # SQLite has no tuple IN; fetch by distinct SOs then filter in Python,
+        # or one query per unique SO (usually << N JOs).
+        so_list = sorted({p[0] for p in pairs})
+        for so in so_list:
+            skus = sorted({p[1] for p in pairs if p[0] == so})
+            if not skus:
+                continue
+            sp = ",".join("?" * len(skus))
+            for sr in conn.execute(
+                f"SELECT so_number, sku, process, available_qty, total_in, total_out "
+                f"FROM process_stock WHERE so_number=? AND sku IN ({sp})",
+                [so, *skus],
+            ):
+                key = (str(sr["so_number"] or ""), str(sr["sku"] or ""))
+                stock_map.setdefault(key, {})[sr["process"]] = {
+                    "available": int(sr["available_qty"]),
+                    "in": int(sr["total_in"]),
+                    "out": int(sr["total_out"]),
+                }
+
     for jo in result:
-        jo['routing'] = get_component_routing(jo.get('sku', ''))
-        try:
-            from ..services.so_production_path import production_path_for
-            jo['routing'] = production_path_for(
-                jo.get('sku', ''),
-                so_number=jo.get('so_number'),
-                production_mode=jo.get('production_mode') or None,
-                item_path=jo['routing'],
-            )
-        except Exception:
-            pass
-        jo['next_process'] = get_next_process(
-            jo.get('sku', ''),
-            jo.get('process', ''),
-            so_number=jo.get('so_number'),
-            production_mode=jo.get('production_mode') or None,
+        jid = int(jo["id"])
+        jo["lines"] = lines_by_jo.get(jid, [])
+        jo["fabric_issues"] = fabric_issues_by_jo.get(jid, [])
+        jo["fabric_returns"] = fabric_returns_by_jo.get(jid, [])
+        jo["cost_entries"] = cost_by_jo.get(jid, [])
+        jo["process_stocks"] = stock_map.get(
+            (str(jo.get("so_number") or ""), str(jo.get("sku") or "")), {}
         )
+
+    conn.close()
+
+    # Routing: cache by (sku, production_mode) within this request
+    routing_cache: dict[tuple[str, str], list] = {}
+    next_cache: dict[tuple[str, str, str, str], Optional[str]] = {}
+    try:
+        from ..services.so_production_path import production_path_for
+    except Exception:
+        production_path_for = None  # type: ignore
+
+    for jo in result:
+        sku = jo.get("sku", "") or ""
+        mode = str(jo.get("production_mode") or "")
+        so = jo.get("so_number") or ""
+        proc = jo.get("process", "") or ""
+        cache_key = (sku, mode)
+        if cache_key not in routing_cache:
+            item_path = get_component_routing(sku)
+            if production_path_for is not None:
+                try:
+                    routing_cache[cache_key] = production_path_for(
+                        sku,
+                        so_number=so,
+                        production_mode=mode or None,
+                        item_path=item_path,
+                    )
+                except Exception:
+                    routing_cache[cache_key] = item_path
+            else:
+                routing_cache[cache_key] = item_path
+        jo["routing"] = list(routing_cache[cache_key])
+        nkey = (sku, proc, mode, so)
+        if nkey not in next_cache:
+            next_cache[nkey] = get_next_process(
+                sku,
+                proc,
+                so_number=so,
+                production_mode=mode or None,
+                item_path=routing_cache[cache_key],
+            )
+        jo["next_process"] = next_cache[nkey]
     return result
 
 

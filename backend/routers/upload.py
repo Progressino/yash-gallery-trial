@@ -2904,6 +2904,10 @@ def _inventory_apply_parse_result(
 
     apply_inventory_snapshot_metadata(sess, file_parts, debug)
     try:
+        _set_inventory_upload_progress(
+            sess, 96, "Hydrating inventory history…",
+            session_id=getattr(sess, "_persist_sid", None),
+        )
         from ..services.po_session_hydrate import ensure_inventory_history_authoritative_for_read
 
         # Upload sessions often have empty history; without this, append no-ops
@@ -2912,6 +2916,10 @@ def _inventory_apply_parse_result(
     except Exception:
         _log.exception("hydrate inventory history before snapshot append failed")
     try:
+        _set_inventory_upload_progress(
+            sess, 97, "Appending snapshot to Inv. History…",
+            session_id=getattr(sess, "_persist_sid", None),
+        )
         from ..services.daily_inventory_history import append_snapshot_inventory_to_history
 
         hist = append_snapshot_inventory_to_history(sess)
@@ -2929,6 +2937,10 @@ def _inventory_apply_parse_result(
         # Always sync sidecar when we have history on the session (even if this
         # day's column was already present) so disk/warm match the upload.
         try:
+            _set_inventory_upload_progress(
+                sess, 98, "Writing history parquet…",
+                session_id=getattr(sess, "_persist_sid", None),
+            )
             import backend.main as _main
 
             hist_df = getattr(sess, "daily_inventory_history_df", None)
@@ -2938,6 +2950,10 @@ def _inventory_apply_parse_result(
             _log.exception("sync_daily_inventory_history_sidecar failed")
     except Exception:
         _log.exception("append_snapshot_inventory_to_history failed")
+    _set_inventory_upload_progress(
+        sess, 99, "Refreshing inventory cache…",
+        session_id=getattr(sess, "_persist_sid", None),
+    )
     refresh_inventory_api_cache(sess)
     try:
         from ..db.forecast_ops_tables import persist_inventory_dataframe

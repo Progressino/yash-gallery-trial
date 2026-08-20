@@ -218,7 +218,17 @@ def persist_inventory_dataframe(
     conn = _require_conn()
     if conn is None:
         return None
-    rows = [_inventory_row_from_series(r) for _, r in df.iterrows() if str(r.get("OMS_SKU", "")).strip()]
+    rows = []
+    # Prefer vectorized column reads over iterrows for large snapshots.
+    if "OMS_SKU" in df.columns:
+        sku_series = df["OMS_SKU"].astype(str).str.strip()
+        mask = sku_series != ""
+        if mask.any():
+            sub = df.loc[mask]
+            for _, r in sub.iterrows():
+                rows.append(_inventory_row_from_series(r))
+    else:
+        rows = [_inventory_row_from_series(r) for _, r in df.iterrows() if str(r.get("OMS_SKU", "")).strip()]
     if not rows:
         return None
     try:

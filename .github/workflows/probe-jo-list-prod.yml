@@ -1,0 +1,35 @@
+name: Probe JO list latency (prod)
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Deploy to VPS"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  jo-list-probe:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
+    runs-on: self-hosted
+    timeout-minutes: 15
+    steps:
+      - name: Wait for backend after deploy
+        if: github.event_name == 'workflow_run'
+        run: sleep 90
+
+      - name: Checkout probe script
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Time Cutting JO list (light + full)
+        run: |
+          set -eu
+          cd /root/app
+          set -a
+          # shellcheck disable=SC1091
+          . ./.env
+          set +a
+          python3 "${GITHUB_WORKSPACE}/backend/scripts/probe_jo_list_prod.py"

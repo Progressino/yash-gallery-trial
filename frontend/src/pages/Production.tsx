@@ -1260,15 +1260,17 @@ export default function Production() {
     queryKey: ['prod-stats'],
     queryFn: () => api.get('/production/stats').then(r => r.data),
   })
-  const { data: processJOs = [] } = useQuery<JO[]>({
+  const { data: processJOs = [], isLoading: josLoading, isFetching: josFetching, isError: josError, error: josErr } = useQuery<JO[]>({
     queryKey: ['jos-process', activeProcess, filterStatus],
-    queryFn: () => api.get(`/production/orders?process=${encodeURIComponent(activeProcess)}${filterStatus ? `&status=${filterStatus}` : ''}`).then(r => r.data),
+    queryFn: () => api.get(`/production/orders?process=${encodeURIComponent(activeProcess)}${filterStatus ? `&status=${filterStatus}` : ''}&light=1`).then(r => r.data),
     enabled: tab === 'process',
+    staleTime: 30_000,
   })
-  const { data: allJOs = [] } = useQuery<JO[]>({
+  const { data: allJOs = [], isLoading: allJosLoading } = useQuery<JO[]>({
     queryKey: ['jos-all', filterStatus],
-    queryFn: () => api.get(`/production/orders${filterStatus ? `?status=${filterStatus}` : ''}`).then(r => r.data),
+    queryFn: () => api.get(`/production/orders${filterStatus ? `?status=${filterStatus}` : ''}&light=1`).then(r => r.data),
     enabled: tab === 'tracker',
+    staleTime: 30_000,
   })
   const { data: readyLines = [] } = useQuery({
     queryKey: ['ready-to-process', activeProcess, filterJO, filterSku, filterVendor, filterMinQty, filterDateFrom, filterDateTo, listSearch],
@@ -1308,6 +1310,12 @@ export default function Production() {
     queryKey: ['jo-panel-wip', expanded],
     queryFn: () => api.get(`/production/orders/${expanded}/panel-wip`).then(r => r.data),
     enabled: expanded != null,
+  })
+  const { data: expandedJoDetail } = useQuery<JO>({
+    queryKey: ['jo-detail', expanded],
+    queryFn: () => api.get(`/production/orders/${expanded}`).then(r => r.data),
+    enabled: expanded != null,
+    staleTime: 15_000,
   })
   const { data: soList = [] } = useQuery({
     queryKey: ['so-list'],
@@ -1864,8 +1872,12 @@ export default function Production() {
 
   const allProcesses = processes.length > 0 ? processes : ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Finishing', 'Packing']
 
-  const renderJOCard = (jo: JO) => {
-    const isExpanded = expanded === jo.id
+  const renderJOCard = (baseJo: JO) => {
+    const isExpanded = expanded === baseJo.id
+    const detail = isExpanded && expandedJoDetail?.id === baseJo.id ? expandedJoDetail : null
+    const jo: JO = detail
+      ? { ...baseJo, ...detail, lines: detail.lines?.length ? detail.lines : baseJo.lines }
+      : baseJo
     const panelCtx = isExpanded && expandedPanelWip?.has_panels && expandedPanelWip?.jo_id === jo.id
       ? expandedPanelWip
       : null
@@ -2683,7 +2695,15 @@ export default function Production() {
           {/* JO list */}
           <div className="space-y-3">
             {filteredProcessJOs.map(renderJOCard)}
-            {processJOs.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No {activeProcess} job orders.</p>}
+            {(josLoading || josFetching) && processJOs.length === 0 && (
+              <p className="text-center text-amber-700 py-8 text-sm">Loading {activeProcess} job orders…</p>
+            )}
+            {josError && (
+              <p className="text-center text-red-600 py-4 text-sm">
+                Failed to load job orders: {(josErr as any)?.message || 'request error'}
+              </p>
+            )}
+            {!josLoading && !josFetching && processJOs.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No {activeProcess} job orders.</p>}
             {processJOs.length > 0 && filteredProcessJOs.length === 0 && (
               <p className="text-center text-gray-400 py-8 text-sm">No job orders match the current search / filters.</p>
             )}
@@ -2747,7 +2767,8 @@ export default function Production() {
             </div>
           </div>
           {filteredAllJOs.map(renderJOCard)}
-          {allJOs.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No job orders found.</p>}
+          {allJosLoading && allJOs.length === 0 && <p className="text-center text-amber-700 py-8 text-sm">Loading all job orders…</p>}
+          {!allJosLoading && allJOs.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No job orders found.</p>}
           {allJOs.length > 0 && filteredAllJOs.length === 0 && (
             <p className="text-center text-gray-400 py-8 text-sm">No job orders match the current search / filters.</p>
           )}
