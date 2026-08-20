@@ -54,8 +54,8 @@ def main() -> int:
 
     results = {}
     for label, path in (
-        ("cutting_light", "/api/production/orders?process=Cutting&light=1"),
-        ("cutting_full", "/api/production/orders?process=Cutting"),
+        ("cutting_light", "/api/production/orders?process=Cutting&light=1&limit=150"),
+        ("cutting_full", "/api/production/orders?process=Cutting&limit=150"),
         ("stats", "/api/production/stats"),
         ("ready_cutting", "/api/production/ready-to-process/Cutting"),
     ):
@@ -88,10 +88,9 @@ def main() -> int:
             print("TIMING_FAIL", label, f"{elapsed:.3f}s", e)
             raise SystemExit(f"{label} failed: {e}") from e
 
-    # Targets: list should be under 15s after optimization (was multi-minute).
     light_s = float(results["cutting_light"]["seconds"])
-    if light_s > 30:
-        raise SystemExit(f"Cutting light list too slow: {light_s:.1f}s (target <30s)")
+    if light_s > 20:
+        raise SystemExit(f"Cutting light list too slow: {light_s:.1f}s (target <20s for first page)")
     print("JO_LIST_PROBE_OK", json.dumps(results))
     return 0
 

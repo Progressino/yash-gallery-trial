@@ -1260,15 +1260,16 @@ export default function Production() {
     queryKey: ['prod-stats'],
     queryFn: () => api.get('/production/stats').then(r => r.data),
   })
+  const [joListLimit, setJoListLimit] = useState(150)
   const { data: processJOs = [], isLoading: josLoading, isFetching: josFetching, isError: josError, error: josErr } = useQuery<JO[]>({
-    queryKey: ['jos-process', activeProcess, filterStatus],
-    queryFn: () => api.get(`/production/orders?process=${encodeURIComponent(activeProcess)}${filterStatus ? `&status=${filterStatus}` : ''}&light=1`).then(r => r.data),
+    queryKey: ['jos-process', activeProcess, filterStatus, joListLimit],
+    queryFn: () => api.get(`/production/orders?process=${encodeURIComponent(activeProcess)}${filterStatus ? `&status=${filterStatus}` : ''}&light=1&limit=${joListLimit}`).then(r => r.data),
     enabled: tab === 'process',
     staleTime: 30_000,
   })
   const { data: allJOs = [], isLoading: allJosLoading } = useQuery<JO[]>({
     queryKey: ['jos-all', filterStatus],
-    queryFn: () => api.get(`/production/orders${filterStatus ? `?status=${filterStatus}` : ''}&light=1`).then(r => r.data),
+    queryFn: () => api.get(`/production/orders${filterStatus ? `?status=${filterStatus}` : ''}&light=1&limit=300`).then(r => r.data),
     enabled: tab === 'tracker',
     staleTime: 30_000,
   })
@@ -2368,7 +2369,7 @@ export default function Production() {
           {/* Process selector */}
           <div className="flex flex-wrap gap-1 bg-gray-100 p-1 rounded-lg w-fit">
             {allProcesses.map(p => (
-              <button key={p} onClick={() => { setActiveProcess(p); setExpanded(null); clearListFilters() }}
+              <button key={p} onClick={() => { setActiveProcess(p); setExpanded(null); setJoListLimit(150); clearListFilters() }}
                 className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${activeProcess === p ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
                 {PROCESS_ICONS[p] || ''} {p}
               </button>
@@ -2694,7 +2695,6 @@ export default function Production() {
 
           {/* JO list */}
           <div className="space-y-3">
-            {filteredProcessJOs.map(renderJOCard)}
             {(josLoading || josFetching) && processJOs.length === 0 && (
               <p className="text-center text-amber-700 py-8 text-sm">Loading {activeProcess} job orders…</p>
             )}
@@ -2706,6 +2706,19 @@ export default function Production() {
             {!josLoading && !josFetching && processJOs.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No {activeProcess} job orders.</p>}
             {processJOs.length > 0 && filteredProcessJOs.length === 0 && (
               <p className="text-center text-gray-400 py-8 text-sm">No job orders match the current search / filters.</p>
+            )}
+            {filteredProcessJOs.map(renderJOCard)}
+            {processJOs.length >= joListLimit && (
+              <div className="flex justify-center py-3">
+                <button
+                  type="button"
+                  onClick={() => setJoListLimit(n => n + 150)}
+                  disabled={josFetching}
+                  className="px-4 py-2 text-sm border rounded-lg text-[#002B5B] hover:bg-slate-50 disabled:opacity-50"
+                >
+                  {josFetching ? 'Loading…' : `Load more Job Orders (showing ${processJOs.length})`}
+                </button>
+              </div>
             )}
           </div>
         </div>

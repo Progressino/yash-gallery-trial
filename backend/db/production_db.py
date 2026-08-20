@@ -9,6 +9,8 @@ _log = logging.getLogger(__name__)
 _DB = os.environ.get("PRODUCTION_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "production.db"))
 _ITEM_DB = os.environ.get("ITEM_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "items_dev.db"))
 _DEFAULT_ITEM_ROUTING = ["Cutting", "Stitching", "Finishing"]
+_ITEM_ROUTING_CACHE: dict[str, tuple] = {}
+_SET_BOM_CACHE: dict[str, Optional[dict]] = {}
 
 def _connect():
     conn = sqlite3.connect(_DB)
@@ -466,44 +468,62 @@ def get_item_routing(sku: str) -> list:
     has no routing configured (self or parent) returns ``[]`` so callers do not
     invent Finishing. Unknown SKUs keep the legacy 3-step default for WIP.
     """
+    code = str(sku or "").strip().upper()
+    if not code:
+        return list(_DEFAULT_ITEM_ROUTING)
+    cached = _ITEM_ROUTING_CACHE.get(code)
+    if cached is not None:
+        return list(cached)
     try:
         conn = _item_connect()
-        code = str(sku or "").strip()
-        item = conn.execute(
-            "SELECT id, parent_id FROM items WHERE upper(item_code)=upper(?)",
-            (code,),
-        ).fetchone()
-        if not item:
-            try:
-                from ..services.helpers import get_parent_sku
-
-                parent_code = get_parent_sku(code)
-            except Exception:
-                parent_code = ""
-            if parent_code and str(parent_code).strip().upper() != code.upper():
-                item = conn.execute(
-                    "SELECT id, parent_id FROM items WHERE upper(item_code)=upper(?)",
-                    (str(parent_code).strip(),),
-                ).fetchone()
-        if not item:
+        try:
+            path = _item_routing_with_conn(conn, code)
+        finally:
             conn.close()
-            return list(_DEFAULT_ITEM_ROUTING)
-        seen: set[int] = set()
-        current_id = int(item["id"])
-        found_item = True
-        while current_id and current_id not in seen:
-            seen.add(current_id)
-            names = _routing_names_for_item_id(conn, current_id)
-            if names:
-                conn.close()
-                return names
-            row = conn.execute("SELECT parent_id FROM items WHERE id=?", (current_id,)).fetchone()
-            current_id = int(row["parent_id"]) if row and row["parent_id"] else 0
-        conn.close()
-        return [] if found_item else list(_DEFAULT_ITEM_ROUTING)
+        _ITEM_ROUTING_CACHE[code] = tuple(path)
+        if len(_ITEM_ROUTING_CACHE) > 12000:
+            # Drop arbitrary older half when unbounded growth threatens memory.
+            for k in list(_ITEM_ROUTING_CACHE.keys())[:6000]:
+                _ITEM_ROUTING_CACHE.pop(k, None)
+        return list(path)
     except Exception:
         _log.exception("get_item_routing failed for sku=%s", sku)
         return list(_DEFAULT_ITEM_ROUTING)
+
+
+def _item_routing_with_conn(conn, code: str) -> list:
+    item = conn.execute(
+        "SELECT id, parent_id FROM items WHERE upper(item_code)=upper(?)",
+        (code,),
+    ).fetchone()
+    if not item:
+        try:
+            from ..services.helpers import get_parent_sku
+
+            parent_code = get_parent_sku(code)
+        except Exception:
+            parent_code = ""
+        if parent_code and str(parent_code).strip().upper() != code.upper():
+            item = conn.execute(
+                "SELECT id, parent_id FROM items WHERE upper(item_code)=upper(?)",
+                (str(parent_code).strip(),),
+            ).fetchone()
+    if not item:
+        return list(_DEFAULT_ITEM_ROUTING)
+    seen: set[int] = set()
+    current_id = int(item["id"])
+    while current_id and current_id not in seen:
+        seen.add(current_id)
+        names = _routing_names_for_item_id(conn, current_id)
+        if names:
+            return names
+        row = conn.execute("SELECT parent_id FROM items WHERE id=?", (current_id,)).fetchone()
+        current_id = int(row["parent_id"]) if row and row["parent_id"] else 0
+    return []
+
+
+def clear_item_routing_cache() -> None:
+    _ITEM_ROUTING_CACHE.clear()
 
 
 def get_component_routing(sku: str) -> list:
@@ -1383,33 +1403,33 @@ def list_jos(status=None, so_number=None, process=None, *, light: bool = False, 
         ):
             cost_by_jo[int(fr["jo_id"])].append(dict(fr))
 
-    # Batch process_stock for unique SO+SKU pairs
-    pairs = {
-        (str(j.get("so_number") or ""), str(j.get("sku") or ""))
-        for j in result
-        if j.get("so_number") or j.get("sku")
-    }
+    # Batch process_stock for unique SO+SKU pairs (full detail only — list UI
+    # loads stocks when a card is expanded via GET /orders/{id}).
     stock_map: dict[tuple[str, str], dict] = {}
-    if pairs:
-        # SQLite has no tuple IN; fetch by distinct SOs then filter in Python,
-        # or one query per unique SO (usually << N JOs).
-        so_list = sorted({p[0] for p in pairs})
-        for so in so_list:
-            skus = sorted({p[1] for p in pairs if p[0] == so})
-            if not skus:
-                continue
-            sp = ",".join("?" * len(skus))
-            for sr in conn.execute(
-                f"SELECT so_number, sku, process, available_qty, total_in, total_out "
-                f"FROM process_stock WHERE so_number=? AND sku IN ({sp})",
-                [so, *skus],
-            ):
-                key = (str(sr["so_number"] or ""), str(sr["sku"] or ""))
-                stock_map.setdefault(key, {})[sr["process"]] = {
-                    "available": int(sr["available_qty"]),
-                    "in": int(sr["total_in"]),
-                    "out": int(sr["total_out"]),
-                }
+    if not light:
+        pairs = {
+            (str(j.get("so_number") or ""), str(j.get("sku") or ""))
+            for j in result
+            if j.get("so_number") or j.get("sku")
+        }
+        if pairs:
+            so_list = sorted({p[0] for p in pairs})
+            for so in so_list:
+                skus = sorted({p[1] for p in pairs if p[0] == so})
+                if not skus:
+                    continue
+                sp = ",".join("?" * len(skus))
+                for sr in conn.execute(
+                    f"SELECT so_number, sku, process, available_qty, total_in, total_out "
+                    f"FROM process_stock WHERE so_number=? AND sku IN ({sp})",
+                    [so, *skus],
+                ):
+                    key = (str(sr["so_number"] or ""), str(sr["sku"] or ""))
+                    stock_map.setdefault(key, {})[sr["process"]] = {
+                        "available": int(sr["available_qty"]),
+                        "in": int(sr["total_in"]),
+                        "out": int(sr["total_out"]),
+                    }
 
     for jo in result:
         jid = int(jo["id"])
@@ -1422,6 +1442,21 @@ def list_jos(status=None, so_number=None, process=None, *, light: bool = False, 
         )
 
     conn.close()
+
+    # Prefetch item routings for unique SKUs with one items DB connection.
+    unique_skus = sorted({str(j.get("sku") or "").strip().upper() for j in result if j.get("sku")})
+    missing = [s for s in unique_skus if s and s not in _ITEM_ROUTING_CACHE]
+    if missing:
+        try:
+            ic = _item_connect()
+            try:
+                for code in missing:
+                    path = _item_routing_with_conn(ic, code)
+                    _ITEM_ROUTING_CACHE[code] = tuple(path)
+            finally:
+                ic.close()
+        except Exception:
+            _log.exception("batch item routing prefetch failed")
 
     # Routing: cache by (sku, production_mode) within this request
     routing_cache: dict[tuple[str, str], list] = {}
@@ -3338,6 +3373,8 @@ def get_set_bom_for_sku(sku: str) -> Optional[dict]:
     raw = str(sku or "").strip().upper()
     if not raw:
         return None
+    if raw in _SET_BOM_CACHE:
+        return _SET_BOM_CACHE[raw]
     conn = _connect()
     # Prefer exact style_key match, then stripped parent, then main of component.
     candidates = []
@@ -3348,6 +3385,7 @@ def get_set_bom_for_sku(sku: str) -> Optional[dict]:
     candidates.append(raw)
     candidates.append(style_key_for_set_bom(raw))
     seen = set()
+    bom = None
     for key in candidates:
         k = str(key or "").strip().upper()
         if not k or k in seen:
@@ -3355,10 +3393,13 @@ def get_set_bom_for_sku(sku: str) -> Optional[dict]:
         seen.add(k)
         bom = _hydrate_set_bom(conn, _set_bom_header_row(conn, k))
         if bom:
-            conn.close()
-            return bom
+            break
     conn.close()
-    return None
+    _SET_BOM_CACHE[raw] = bom
+    if len(_SET_BOM_CACHE) > 8000:
+        for k in list(_SET_BOM_CACHE.keys())[:4000]:
+            _SET_BOM_CACHE.pop(k, None)
+    return bom
 
 
 def upsert_set_bom(data: dict) -> dict:
@@ -3369,6 +3410,7 @@ def upsert_set_bom(data: dict) -> dict:
     )
     from ..services.set_components import normalize_component_code
 
+    _SET_BOM_CACHE.clear()
     style_key = str(data.get("style_key") or "").strip().upper()
     if not style_key:
         raise ValueError("style_key is required")
