@@ -121,5 +121,31 @@ jobs:
                   mismatches.append((row.get("jo_number"), planned, received, balance))
           print("received_nonzero_rows", received_nonzero, "balance_mismatches", len(mismatches))
           assert not mismatches, mismatches[:5]
+
+          # Daily view: opening − cut_today ≈ closing (Activity date = today).
+          daily = s.get(
+              f"{base}/api/production/cutting-report",
+              params={"export": "true", "activity_date": today},
+              timeout=90,
+          )
+          print("CUTTING_DAILY", daily.status_code, "activity_date", today)
+          daily.raise_for_status()
+          dout = daily.json()
+          drows = dout.get("rows") or []
+          dk = dout.get("kpis") or {}
+          print("cutting_daily_rows", len(drows), "kpis", dk)
+          daily_bad = []
+          for row in drows:
+              planned = float(row.get("planned_qty") or 0)
+              opening = float(row.get("opening_balance") or 0)
+              cut_today = float(row.get("received_on_date") or 0)
+              closing = float(row.get("closing_balance") if row.get("closing_balance") is not None else row.get("balance_qty") or 0)
+              # Identity: opening − cut_today == closing (within 1 pc rounding)
+              if abs((opening - cut_today) - closing) > 1.01:
+                  daily_bad.append(
+                      (row.get("jo_number"), planned, opening, cut_today, closing)
+                  )
+          print("daily_identity_mismatches", len(daily_bad))
+          assert not daily_bad, daily_bad[:5]
           print("PROBE_OK")
           PY
