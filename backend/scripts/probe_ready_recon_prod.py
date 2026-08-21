@@ -39,20 +39,53 @@ def _env_auth() -> tuple[str, str]:
     return user, pw
 
 
-def _connect():
-    path = Path(PROD_DB)
-    if not path.is_file():
-        # common alternate
-        for alt in (
-            "/root/app/backend/data/production.db",
-            "/root/app/production.db",
-            "/var/lib/progressino/production.db",
+def _find_production_db() -> str:
+    env = os.environ.get("PRODUCTION_DB_PATH", "").strip()
+    candidates = [
+        env,
+        "/root/app/data/production.db",
+        "/root/app/backend/data/production.db",
+        "/root/app/production.db",
+        "/data/production.db",
+    ]
+    for c in candidates:
+        if c and Path(c).is_file():
+            return c
+    # Docker volume (compose prod mounts /data)
+    try:
+        import subprocess
+
+        for cid_cmd in (
+            ["docker", "ps", "-q", "-f", "name=backend"],
+            ["docker", "ps", "-q", "-f", "ancestor=yash-gallery"],
         ):
-            if Path(alt).is_file():
-                path = Path(alt)
-                break
-    if not path.is_file():
-        raise SystemExit(f"production.db not found at {PROD_DB}")
+            try:
+                out = subprocess.check_output(cid_cmd, text=True, timeout=15).strip().splitlines()
+            except Exception:
+                continue
+            for cid in out:
+                cid = cid.strip()
+                if not cid:
+                    continue
+                dest = f"/tmp/production_probe_{cid[:8]}.db"
+                try:
+                    subprocess.check_call(
+                        ["docker", "cp", f"{cid}:/data/production.db", dest],
+                        timeout=60,
+                    )
+                    if Path(dest).is_file():
+                        return dest
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    raise SystemExit(
+        "production.db not found — set PRODUCTION_DB_PATH or ensure docker backend has /data/production.db"
+    )
+
+
+def _connect():
+    path = _find_production_db()
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     return conn, str(path)
