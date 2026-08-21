@@ -1318,6 +1318,62 @@ def _get_ready_for_process(process: str) -> list:
             "jo_number": d.get("jo_number") or "",
         }
         result.append(_enrich_ready_row(row, process))
+    # WIP imports for this stage (Kaj/Handwork/Finishing) must surface even when
+    # Style BOM next-hop skips them (e.g. Stitching → Finishing). Match remaining
+    # feeder stock to the latest import ledger rows.
+    try:
+        conn_w = _connect()
+        try:
+            wip_rows = conn_w.execute(
+                """SELECT from_process, so_number, sku, quantity, jo_number, batch,
+                          vendor_name, created_at
+                   FROM ready_to_wip_imports
+                   WHERE UPPER(TRIM(ready_to_stage))=UPPER(TRIM(?))
+                   ORDER BY id DESC
+                   LIMIT 2000""",
+                (process,),
+            ).fetchall()
+        finally:
+            conn_w.close()
+    except Exception:
+        wip_rows = []
+    for wr in wip_rows:
+        d = dict(wr)
+        so = str(d.get("so_number") or "")
+        sku = str(d.get("sku") or "")
+        from_proc = str(d.get("from_process") or "")
+        if not sku or not from_proc:
+            continue
+        key = (so, sku, from_proc)
+        if key in seen:
+            continue
+        avail = 0
+        for r in all_stocks:
+            rd = dict(r)
+            if (
+                str(rd.get("so_number") or "") == so
+                and str(rd.get("sku") or "") == sku
+                and normalize_process_name(rd.get("process") or "")
+                == normalize_process_name(from_proc)
+            ):
+                avail = int(rd.get("available_qty") or 0)
+                break
+        if avail <= 0:
+            continue
+        seen.add(key)
+        row = {
+            "so_number": so,
+            "sku": sku,
+            "available_qty": avail,
+            "from_process": from_proc,
+            "to_process": process,
+            "routing": get_item_routing(sku),
+            "updated_at": d.get("created_at") or "",
+            "batch": d.get("batch") or "",
+            "vendor_name": d.get("vendor_name") or "",
+            "jo_number": d.get("jo_number") or "",
+        }
+        result.append(_enrich_ready_row(row, process))
     return _apply_open_jo_planned(_merge_ready_by_sku(result), process)
 
 

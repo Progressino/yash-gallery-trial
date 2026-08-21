@@ -245,15 +245,13 @@ def test_ready_to_wip_handwork_kaj_finishing_feeder_defaults(
     assert body.get("failed", 0) == 0, body
     # Stock is always credited on the feeder process.
     assert production_db.get_process_stock("SO-WIP", sku, feeder) == 25
-    # Ready board: empty-path defaults and full paths surface via feeder fallback /
-    # routing. Short paths that end at Stitching still credit stock (asserted above).
-    if not item_path:
-        ready = client.get(f"/api/production/ready-to-process/{stage}")
-        assert ready.status_code == 200
-        row = next((x for x in ready.json() if x.get("sku") == sku), None)
-        assert row is not None, ready.json()
-        assert int(row.get("available_qty") or 0) == 25
-        assert str(row.get("from_process") or "") == feeder
+    # Ready board must list the WIP row (routing next-hop or import ledger).
+    ready = client.get(f"/api/production/ready-to-process/{stage}")
+    assert ready.status_code == 200
+    row = next((x for x in ready.json() if x.get("sku") == sku), None)
+    assert row is not None, ready.json()
+    assert int(row.get("available_qty") or 0) == 25
+    assert str(row.get("from_process") or "") == feeder
 
 
 def test_ready_to_wip_full_path_kaj_handwork_finishing(isolated_module_dbs, client, monkeypatch):
