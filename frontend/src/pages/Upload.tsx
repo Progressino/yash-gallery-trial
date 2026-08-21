@@ -987,8 +987,9 @@ export default function Upload() {
             </p>
           ) : (
             <p>
-              <strong>Data is loading…</strong> The server copies shared history into your session (usually a few seconds
-              after refresh). If rows stay empty after a minute, click <strong>Load Cache</strong> in the sidebar.
+              <strong>Data is loading…</strong> The server attaches shared history into this browser session (usually a few
+              seconds). If still empty after ~30s, click <strong>Restore all from server</strong> above or{' '}
+              <strong>Load Cache</strong> in the sidebar — Job Orders on Production do not wait for these datasets.
             </p>
           )}
         </div>

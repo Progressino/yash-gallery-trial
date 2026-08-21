@@ -1263,15 +1263,17 @@ export default function Production() {
   const [joListLimit, setJoListLimit] = useState(150)
   const { data: processJOs = [], isLoading: josLoading, isFetching: josFetching, isError: josError, error: josErr } = useQuery<JO[]>({
     queryKey: ['jos-process', activeProcess, filterStatus, joListLimit],
-    queryFn: () => api.get(`/production/orders?process=${encodeURIComponent(activeProcess)}${filterStatus ? `&status=${filterStatus}` : ''}&light=1&limit=${joListLimit}`).then(r => r.data),
+    queryFn: () => api.get(`/production/orders?process=${encodeURIComponent(activeProcess)}${filterStatus ? `&status=${filterStatus}` : ''}&light=1&limit=${joListLimit}`, { timeout: 60_000 }).then(r => r.data),
     enabled: tab === 'process',
     staleTime: 30_000,
+    retry: 1,
   })
   const { data: allJOs = [], isLoading: allJosLoading } = useQuery<JO[]>({
     queryKey: ['jos-all', filterStatus],
-    queryFn: () => api.get(`/production/orders${filterStatus ? `?status=${filterStatus}` : ''}&light=1&limit=300`).then(r => r.data),
+    queryFn: () => api.get(`/production/orders${filterStatus ? `?status=${filterStatus}` : ''}&light=1&limit=300`, { timeout: 60_000 }).then(r => r.data),
     enabled: tab === 'tracker',
     staleTime: 30_000,
+    retry: 1,
   })
   const { data: readyLines = [] } = useQuery({
     queryKey: ['ready-to-process', activeProcess, filterJO, filterSku, filterVendor, filterMinQty, filterDateFrom, filterDateTo, listSearch],
@@ -1285,9 +1287,11 @@ export default function Production() {
       if (filterDateFrom) params.set('date_from', filterDateFrom)
       if (filterDateTo) params.set('date_to', filterDateTo)
       const qs = params.toString()
-      return api.get(`/production/ready-to-process/${encodeURIComponent(activeProcess)}${qs ? `?${qs}` : ''}`).then(r => r.data)
+      return api.get(`/production/ready-to-process/${encodeURIComponent(activeProcess)}${qs ? `?${qs}` : ''}`, { timeout: 60_000 }).then(r => r.data)
     },
     enabled: tab === 'process',
+    staleTime: 15_000,
+    retry: 1,
   })
   const { data: processReport = [] } = useQuery({
     queryKey: ['process-report'],

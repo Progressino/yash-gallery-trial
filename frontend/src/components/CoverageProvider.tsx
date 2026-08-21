@@ -1,6 +1,6 @@
 import { useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { cacheHydrateWarm, getCoverage, invalidateDataQueries } from '../api/client'
+import { cacheHydrateWarm, cacheLoad, getCoverage, invalidateDataQueries } from '../api/client'
 import { coverageJobsRunning, coveragePollIntervalMs } from '../lib/coverageJobs'
 import { operationalDataComplete } from '../lib/localSessionHint'
 import { usePOFreshStore } from '../store/poFresh'
@@ -20,6 +20,8 @@ export default function CoverageProvider({
 }) {
   const setCoverage = useSession(s => s.setCoverage)
   const lastHydrateAt = useRef(0)
+  const emptySince = useRef<number | null>(null)
+  const didFallbackLoad = useRef(false)
   const prevSalesRevision = useRef<number | null>(null)
   const prevInventoryRevision = useRef<number | null>(null)
   const prevInvUploadedAt = useRef<string | null>(null)
@@ -33,11 +35,18 @@ export default function CoverageProvider({
     queryKey: ['coverage-poll'],
     queryFn: async () => {
       let c = await getCoverage({ light: true, timeout: 45_000 })
+      const incomplete = !operationalDataComplete(c)
+      if (incomplete) {
+        if (emptySince.current == null) emptySince.current = Date.now()
+      } else {
+        emptySince.current = null
+        didFallbackLoad.current = false
+      }
       // After deploys/restarts the cookie session is empty even when localStorage still
       // looks "loaded". Hydrate whenever PO datasets are incomplete — not only when
       // every marketplace flag is false (partial sessions used to stay stuck at 0/8).
       if (
-        !operationalDataComplete(c) &&
+        incomplete &&
         !coverageJobsRunning(c) &&
         Date.now() - lastHydrateAt.current > 15_000
       ) {
@@ -47,6 +56,24 @@ export default function CoverageProvider({
           c = await getCoverage({ light: true, timeout: 45_000 })
         } catch {
           /* server may be busy — next poll retries */
+        }
+      }
+      // Stuck at 0/8 for >45s with warm server: one Load Cache fallback (hydrate alone
+      // used to return INFLIGHT forever after a dead worker).
+      if (
+        incomplete &&
+        !operationalDataComplete(c) &&
+        !coverageJobsRunning(c) &&
+        !didFallbackLoad.current &&
+        emptySince.current != null &&
+        Date.now() - emptySince.current > 45_000
+      ) {
+        didFallbackLoad.current = true
+        try {
+          await cacheLoad()
+          c = await getCoverage({ light: true, timeout: 45_000 })
+        } catch {
+          /* next poll still retries hydrate */
         }
       }
       setCoverage(c)

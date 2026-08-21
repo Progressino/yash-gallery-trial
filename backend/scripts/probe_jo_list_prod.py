@@ -91,6 +91,33 @@ def main() -> int:
     light_s = float(results["cutting_light"]["seconds"])
     if light_s > 20:
         raise SystemExit(f"Cutting light list too slow: {light_s:.1f}s (target <20s for first page)")
+
+    # Session attach: empty cookie session must leave 0/8 within seconds via hydrate-warm.
+    t0 = time.time()
+    cov0 = s.get(f"{BASE}/api/data/coverage?light=1", timeout=60)
+    cov0.raise_for_status()
+    c0 = cov0.json()
+    hyd = s.post(f"{BASE}/api/cache/hydrate-warm", timeout=60)
+    hyd.raise_for_status()
+    cov1 = s.get(f"{BASE}/api/data/coverage?light=1", timeout=60)
+    cov1.raise_for_status()
+    c1 = cov1.json()
+    hydrate_s = time.time() - t0
+    sales_ok = bool(c1.get("sales")) or int(c1.get("sales_rows") or 0) > 0
+    sku_ok = bool(c1.get("sku_mapping"))
+    results["hydrate"] = {
+        "seconds": round(hydrate_s, 3),
+        "before_sales": bool(c0.get("sales")),
+        "after_sales": sales_ok,
+        "after_sku": sku_ok,
+        "message": (hyd.json() or {}).get("message"),
+    }
+    print("TIMING hydrate", f"{hydrate_s:.3f}s", "sales", sales_ok, "sku", sku_ok, results["hydrate"].get("message"))
+    if not sales_ok and not sku_ok:
+        raise SystemExit("hydrate-warm left session with no sales and no sku_mapping (0/8 stuck)")
+    if hydrate_s > 45:
+        raise SystemExit(f"hydrate-warm too slow: {hydrate_s:.1f}s (target <45s)")
+
     print("JO_LIST_PROBE_OK", json.dumps(results))
     return 0
 

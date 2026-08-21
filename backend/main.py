@@ -315,7 +315,12 @@ def try_fast_warm_cache_hydrate(sess) -> bool:
 
 
 def try_attach_shared_frames_fast(sess) -> bool:
-    """Instant warm-cache attach for coverage/readiness polls — never copies DataFrames."""
+    """Instant warm-cache attach for coverage/readiness polls — never copies DataFrames.
+
+    Always pointer-attaches when the process warm cache has usable frames. Gating on
+    ``shared_frames_enabled()`` previously returned early without attaching sales, so
+    Upload stayed at 0/8 while hydrate queued a multi-minute full copy (or hung).
+    """
     if sess is None:
         return False
     if not _warm_cache:
@@ -323,21 +328,17 @@ def try_attach_shared_frames_fast(sess) -> bool:
     if not _warm_cache:
         return False
     try:
-        from .services.shared_frames import attach_shared_frames, shared_frames_enabled
+        from .services.shared_frames import attach_shared_frames
 
-        if shared_frames_enabled():
-            attach_shared_frames(sess, warm_cache_generation=int(_warm_cache_generation or 0))
-            return True
-        sm = (_warm_cache or {}).get("sku_mapping")
-        if isinstance(sm, dict) and sm and not getattr(sess, "sku_mapping", None):
-            sess.sku_mapping = sm
-        cm = (_warm_cache or {}).get("combo_sku_map")
-        if isinstance(cm, dict) and cm and not getattr(sess, "combo_sku_map", None):
-            from .services.combo_sku_map import combo_bom_from_jsonable
-
-            sess.combo_sku_map = combo_bom_from_jsonable(cm)
-        return bool((_warm_cache or {}).get("sales_df") is not None)
+        attach_shared_frames(sess, warm_cache_generation=int(_warm_cache_generation or 0))
+        sales = getattr(sess, "sales_df", None)
+        inv = getattr(sess, "inventory_df_variant", None)
+        has_sales = sales is not None and hasattr(sales, "__len__") and len(sales) > 0
+        has_inv = inv is not None and hasattr(inv, "__len__") and len(inv) > 0
+        has_sku = bool(getattr(sess, "sku_mapping", None))
+        return bool(has_sales or has_inv or has_sku)
     except Exception:
+        log.exception("try_attach_shared_frames_fast failed")
         return False
 
 
