@@ -1335,6 +1335,11 @@ def _get_ready_for_process(process: str) -> list:
                 feeds_stage = target == "Finishing"
             elif _factory_default_next(cur) == target:
                 feeds_stage = True
+        # Stock sitting at Kaj/Handwork is Ready for THAT stage only. Do not also
+        # list it on Ready Finishing/Handwork via feeder — that double-counted the
+        # same pile after Stitching→Kaj/Handwork issues (344+95+143 ≫ unique JOs).
+        if feeds_stage and cur in ("Kaj Button", "Handwork") and cur != target:
+            feeds_stage = False
         if not at_stage and not feeds_stage:
             continue
         from_proc = d["process"] if feeds_stage and not at_stage else (

@@ -136,23 +136,37 @@ def main() -> int:
     conn, db_path = _connect()
     print("DB", db_path)
 
-    # Today's issues FROM Stitching to Finishing/Kaj/Handwork
+    # Today's issues FROM Stitching — IST calendar day + UTC day + last 36h fallback
     issues = conn.execute(
         """
         SELECT i.id, i.jo_id, i.jo_line_id, i.sku, i.from_process, i.to_process,
                i.issued_qty, i.issue_date, i.created_at, j.jo_number, j.so_number, j.process AS jo_process
         FROM jo_piece_issues i
         LEFT JOIN job_orders j ON j.id = i.jo_id
-        WHERE UPPER(TRIM(IFNULL(i.from_process,''))) = 'STITCHING'
+        WHERE UPPER(REPLACE(TRIM(IFNULL(i.from_process,'')), ' ', '')) IN ('STITCHING')
           AND UPPER(TRIM(IFNULL(i.to_process,''))) IN ('FINISHING', 'KAJ BUTTON', 'HANDWORK')
           AND (
-            substr(IFNULL(i.issue_date, i.created_at), 1, 10) = ?
+            substr(IFNULL(i.issue_date, ''), 1, 10) = ?
             OR substr(IFNULL(i.created_at, ''), 1, 10) = ?
+            OR datetime(IFNULL(i.created_at, i.issue_date)) >= datetime('now', '-36 hours')
           )
         ORDER BY i.id
         """,
         (TODAY, TODAY),
     ).fetchall()
+
+    # Diagnostics when empty
+    if not issues:
+        sample = conn.execute(
+            """
+            SELECT substr(IFNULL(issue_date, created_at),1,10) AS d, from_process, to_process, COUNT(*) AS n
+            FROM jo_piece_issues
+            WHERE UPPER(REPLACE(TRIM(IFNULL(from_process,'')), ' ', '')) = 'STITCHING'
+            GROUP BY 1, 2, 3
+            ORDER BY 1 DESC LIMIT 15
+            """
+        ).fetchall()
+        print("ISSUE_DATE_DIAG", [dict(r) for r in sample])
 
     jo_ids = {int(r["jo_id"]) for r in issues if r["jo_id"] is not None}
     jo_numbers = {str(r["jo_number"] or "") for r in issues if r["jo_number"]}

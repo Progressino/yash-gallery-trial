@@ -300,6 +300,24 @@ def test_stitching_stock_not_on_multiple_ready_boards(isolated_module_dbs, clien
     assert not any(x.get("sku") == "MULTI-BOARD-M" for x in hw)
 
 
+def test_handwork_stock_not_also_on_ready_finishing(isolated_module_dbs, client, monkeypatch):
+    """After Stitching→Handwork issue, stock at Handwork is Ready Handwork only — not Finishing."""
+    from backend.db import production_db
+
+    path = ["Cutting", "Stitching", "Kaj Button", "Handwork", "Finishing"]
+    monkeypatch.setattr(production_db, "get_item_routing", lambda s: list(path))
+    monkeypatch.setattr(production_db, "get_component_routing", lambda s: list(path))
+    conn = production_db._connect()
+    production_db._update_process_stock(conn, "SO-Y", "HW-ONLY-M", "Handwork", qty_in=50)
+    conn.commit()
+    conn.close()
+
+    hw = client.get("/api/production/ready-to-process/Handwork").json()
+    fin = client.get("/api/production/ready-to-process/Finishing").json()
+    assert any(x.get("sku") == "HW-ONLY-M" for x in hw)
+    assert not any(x.get("sku") == "HW-ONLY-M" for x in fin)
+
+
 def test_jo_import_autoroute_ready_to_wip_template(isolated_module_dbs, client):
     """ready_to_*_wip_template.csv must credit stock even if uploaded via JO import."""
     csv = (
