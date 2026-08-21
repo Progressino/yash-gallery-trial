@@ -21,6 +21,7 @@ jobs:
           # shellcheck disable=SC1091
           . ./.env
           set +a
-          # Prefer env PRODUCTION_DB_PATH; script also searches common paths
           export PRODUCTION_DB_PATH="${PRODUCTION_DB_PATH:-/root/app/data/production.db}"
+          # Default today; override with RECON_DATE=YYYY-MM-DD when dispatching
+          export RECON_DATE="${RECON_DATE:-}"
           python3 "${GITHUB_WORKSPACE}/backend/scripts/probe_ready_recon_prod.py"
