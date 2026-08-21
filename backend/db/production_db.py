@@ -1241,6 +1241,39 @@ def _get_ready_to_cut() -> list:
     return printed + _apply_open_jo_planned(incoming, "Cutting")
 
 
+def _factory_default_next(process: str) -> str | None:
+    """Single default downstream hop when Style BOM has no next process."""
+    from ..services.operation_routing import normalize_process_name
+
+    return {
+        "Incoming": "Cutting",
+        "Cutting": "Stitching",
+        "Printing": "Stitching",
+        "Embroidery": "Cutting",
+        "Stitching": "Kaj Button",
+        "Kaj Button": "Handwork",
+        "Handwork": "Finishing",
+        "Finishing": "Packing",
+    }.get(normalize_process_name(process))
+
+
+def _finishing_short_circuit_from_stitching(sku: str, so_number: str | None = None) -> bool:
+    """True when path has Stitching but no Kaj/Handwork — Finishing is fed by Stitching."""
+    from ..services.operation_routing import normalize_process_name
+    from ..services.so_production_path import production_path_for
+
+    item_path = get_component_routing(sku) or get_item_routing(sku) or []
+    path = production_path_for(
+        sku, so_number=so_number, item_path=item_path
+    ) or item_path
+    norm = [normalize_process_name(p) for p in path]
+    return (
+        "Stitching" in norm
+        and "Kaj Button" not in norm
+        and "Handwork" not in norm
+    )
+
+
 def _get_ready_for_process(process: str) -> list:
     """SO+SKU lines ready for ``process``.
 
@@ -1248,6 +1281,10 @@ def _get_ready_for_process(process: str) -> list:
     - feeder stock whose *next* hop is this process (e.g. Cutting → Stitching)
     - stock already sitting *at* this process after issue (e.g. 45 pcs issued
       Cutting→Stitching must still appear on Ready to Stitch)
+
+    Important: the same feeder stock (e.g. leftover at Stitching) must appear on
+    **at most one** Ready board — the Style BOM next hop, or a single factory
+    default / Finishing short-circuit. Never Finishing+Kaj+Handwork at once.
     """
     from ..services.operation_routing import normalize_process_name
 
@@ -1290,12 +1327,14 @@ def _get_ready_for_process(process: str) -> list:
         at_stage = bool(target) and cur == target
         feeder = get_previous_process(d["sku"], process, so_number=so)
         feeder_n = normalize_process_name(feeder or "")
-        # Feeder fallback only when routing has no next hop (incomplete Style BOM).
-        # Never override an explicit next (e.g. Cut-to-Pack Cutting → Finishing must
-        # not also appear on Ready-to-Stitch via Cutting's default feeder role).
+        # Explicit Style/SO next hop wins — one destination only.
         feeds_stage = bool(target) and next_n == target
         if not feeds_stage and not next_n and feeder_n and cur == feeder_n:
-            feeds_stage = True
+            # Incomplete BOM: at most ONE default destination for this feeder.
+            if cur == "Stitching" and _finishing_short_circuit_from_stitching(d["sku"], so):
+                feeds_stage = target == "Finishing"
+            elif _factory_default_next(cur) == target:
+                feeds_stage = True
         if not at_stage and not feeds_stage:
             continue
         from_proc = d["process"] if feeds_stage and not at_stage else (
@@ -1318,9 +1357,9 @@ def _get_ready_for_process(process: str) -> list:
             "jo_number": d.get("jo_number") or "",
         }
         result.append(_enrich_ready_row(row, process))
-    # WIP imports for this stage (Kaj/Handwork/Finishing) must surface even when
-    # Style BOM next-hop skips them (e.g. Stitching → Finishing). Match remaining
-    # feeder stock to the latest import ledger rows.
+    # WIP imports: surface feeder stock for this stage only when Style BOM does
+    # not already route that feeder elsewhere (prevents Stitching leftover from
+    # appearing on Finishing AND Kaj AND Handwork via historical imports).
     try:
         conn_w = _connect()
         try:
@@ -1347,6 +1386,14 @@ def _get_ready_for_process(process: str) -> list:
         key = (so, sku, from_proc)
         if key in seen:
             continue
+        next_from = get_next_process(sku, from_proc, so_number=so if so and so != "MIGRATE" else None)
+        next_from_n = normalize_process_name(next_from or "")
+        # If Style BOM already routes this feeder to another stage, do not also
+        # list it here via a historical WIP import (cross-board inflation).
+        if next_from_n and next_from_n != target:
+            continue
+        # When BOM has no next hop, an explicit Ready-To WIP import for this
+        # stage is authoritative (migration / incomplete routing).
         avail = 0
         for r in all_stocks:
             rd = dict(r)
@@ -2249,6 +2296,32 @@ def issue_pieces(joid: int, data: dict):
     if issued > available:
         conn.close()
         raise ValueError(f"Only {available} pieces available at {from_process}. Cannot issue {issued}.")
+
+    # Idempotent: ignore rapid duplicate submit (double-click / retry) within 8s.
+    recent = conn.execute(
+        """SELECT id, issued_qty FROM jo_piece_issues
+           WHERE jo_id=? AND IFNULL(jo_line_id,0)=IFNULL(?,0)
+             AND UPPER(TRIM(from_process))=UPPER(TRIM(?))
+             AND UPPER(TRIM(to_process))=UPPER(TRIM(?))
+             AND UPPER(TRIM(sku))=UPPER(TRIM(?))
+             AND issued_qty=?
+             AND created_at >= datetime('now', '-8 seconds')
+           ORDER BY id DESC LIMIT 1""",
+        (joid, jo_line_id, from_process, to_process, sku, issued),
+    ).fetchone()
+    if recent:
+        conn.close()
+        _log.info(
+            "issue_pieces idempotent hit jo=%s %s→%s qty=%s issue_id=%s",
+            joid, from_process, to_process, issued, recent["id"],
+        )
+        return {
+            "ok": True,
+            "idempotent": True,
+            "issue_id": int(recent["id"]),
+            "issued_qty": int(recent["issued_qty"] or issued),
+            "message": "Duplicate issue ignored (already recorded within 8s).",
+        }
 
     conn.execute("""INSERT INTO jo_piece_issues(jo_id,jo_line_id,from_process,to_process,so_number,sku,issue_date,issued_qty,issued_by,remarks)
         VALUES(?,?,?,?,?,?,?,?,?,?)""",

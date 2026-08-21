@@ -280,6 +280,26 @@ def test_ready_to_wip_full_path_kaj_handwork_finishing(isolated_module_dbs, clie
         assert int(row.get("available_qty") or 0) == 10
 
 
+def test_stitching_stock_not_on_multiple_ready_boards(isolated_module_dbs, client, monkeypatch):
+    """Leftover Stitching stock with BOM next=Kaj must not also appear on Finishing/Handwork."""
+    from backend.db import production_db
+
+    path = ["Cutting", "Stitching", "Kaj Button", "Finishing"]
+    monkeypatch.setattr(production_db, "get_item_routing", lambda s: list(path))
+    monkeypatch.setattr(production_db, "get_component_routing", lambda s: list(path))
+    conn = production_db._connect()
+    production_db._update_process_stock(conn, "SO-X", "MULTI-BOARD-M", "Stitching", qty_in=40)
+    conn.commit()
+    conn.close()
+
+    kaj = client.get("/api/production/ready-to-process/Kaj Button").json()
+    fin = client.get("/api/production/ready-to-process/Finishing").json()
+    hw = client.get("/api/production/ready-to-process/Handwork").json()
+    assert any(x.get("sku") == "MULTI-BOARD-M" for x in kaj)
+    assert not any(x.get("sku") == "MULTI-BOARD-M" for x in fin)
+    assert not any(x.get("sku") == "MULTI-BOARD-M" for x in hw)
+
+
 def test_jo_import_autoroute_ready_to_wip_template(isolated_module_dbs, client):
     """ready_to_*_wip_template.csv must credit stock even if uploaded via JO import."""
     csv = (

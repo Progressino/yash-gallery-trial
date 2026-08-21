@@ -2581,7 +2581,10 @@ export default function Production() {
             <div className="flex flex-wrap items-center gap-2 mb-2">
               <p className="text-sm font-semibold text-amber-800">
                 ⚡ {activeProcess === 'Cutting' ? 'Ready to Cut' : activeProcess === 'Stitching' ? 'Ready to Stitch' : activeProcess === 'Embroidery' ? 'Ready for Embroidery' : `Ready for ${activeProcess}`}
-                {readyLines.length > 0 ? ` — ${filteredReadyLines.length} of ${readyLines.length} line(s)` : ''}
+                {readyLines.length > 0 ? ` — ${filteredReadyLines.length} of ${readyLines.length} SO+SKU line(s)` : ''}
+                <span className="ml-2 font-normal text-amber-800/80 text-[11px]">
+                  (not JO count — one Stitching JO can feed one next stage; do not sum boards)
+                </span>
               </p>
               <div className="flex items-center gap-2 ml-auto">
                 <a
