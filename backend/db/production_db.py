@@ -3927,7 +3927,7 @@ def get_jo_panel_wip(joid: int) -> dict:
     conn = _connect()
     try:
         row = conn.execute(
-            "SELECT id, sku, process, so_number FROM job_orders WHERE id=?",
+            "SELECT id, sku, process, so_number, production_mode FROM job_orders WHERE id=?",
             (joid,),
         ).fetchone()
         if not row:
@@ -3938,6 +3938,7 @@ def get_jo_panel_wip(joid: int) -> dict:
 
         sku = str(jo.get("sku") or "").strip().upper()
         so_number = str(jo.get("so_number") or "").strip()
+        jo_mode = str(jo.get("production_mode") or "").strip() or None
         main, comp = parse_component_sku(sku)
         bom = get_set_bom_for_sku(sku)
         if not bom:
@@ -3998,7 +3999,9 @@ def get_jo_panel_wip(joid: int) -> dict:
                 bundle_ready=False,
             )
             issue_from = "Embroidery" if emb_out > 0 else "Cutting"
-            issue_to = get_next_process(psku, issue_from, so_number=so_number)
+            issue_to = get_next_process(
+                psku, issue_from, so_number=so_number, production_mode=jo_mode
+            )
             child = conn.execute(
                 """SELECT id, jo_number, process, status, planned_qty, received_qty,
                           measurement_qty, garment_qty, embroidery_type, embroidery_unit
@@ -4033,7 +4036,23 @@ def get_jo_panel_wip(joid: int) -> dict:
                 )
             )
             if emb_done and issue_from == "Cutting" and issue_to == "Embroidery":
-                issue_to = "Stitching"
+                # After embroidery returns to Cutting, hop to the post-embroidery next
+                # on this JO's production path (Cut-to-Pack → Finishing, not BOM Stitching).
+                from ..services.so_production_path import normalize_production_mode
+
+                mode = normalize_production_mode(jo_mode) if jo_mode else None
+                if mode == "cut_to_pack":
+                    issue_to = "Finishing"
+                else:
+                    post = get_next_process(
+                        psku,
+                        "Cutting",
+                        so_number=so_number,
+                        production_mode=jo_mode,
+                        item_path=path,
+                    )
+                    # Prefer Stitching when still on full in-house emb path.
+                    issue_to = post if post and post != "Embroidery" else "Stitching"
             emb_before = bool(int(ln.get("embroidery_before_cutting") or 0))
             emb_type = str(ln.get("embroidery_type") or "").strip()
             emb_unit = str(ln.get("embroidery_unit") or "").strip()
@@ -4074,7 +4093,9 @@ def get_jo_panel_wip(joid: int) -> dict:
                     "embroidery_outstanding": emb_out,
                     "current_location": location or "—",
                     "status": status,
-                    "next_process": get_next_process(psku, "Cutting", so_number=so_number),
+                    "next_process": get_next_process(
+                        psku, "Cutting", so_number=so_number, production_mode=jo_mode
+                    ),
                     "issue_from_process": issue_from,
                     "issue_to_process": issue_to,
                     "issue_to_label": issue_label,

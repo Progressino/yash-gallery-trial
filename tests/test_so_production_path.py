@@ -57,6 +57,55 @@ def test_same_style_two_sos_use_different_paths(iso, monkeypatch):
     assert production_db.get_previous_process("1001-XS", "Finishing", so_number=so_ih) == "Stitching"
 
 
+def test_jo_cut_to_pack_overrides_inhouse_so_next_process(iso, monkeypatch):
+    """Split path: JO production_mode=cut_to_pack must next to Finishing even if SO is inhouse."""
+    monkeypatch.setattr(
+        production_db,
+        "get_item_routing",
+        lambda sku: ["Cutting", "Embroidery", "Stitching", "Finishing"],
+    )
+    monkeypatch.setattr(
+        production_db,
+        "get_component_routing",
+        lambda sku: ["Cutting", "Embroidery", "Stitching", "Finishing"],
+    )
+    so = sales_db.create_order(
+        {
+            "production_mode": "inhouse",
+            "lines": [{"sku": "1785YKRED-S", "qty": 48}],
+        }
+    )
+    assert (
+        production_db.get_next_process("1785YKRED-S", "Cutting", so_number=so) == "Embroidery"
+    )
+    assert (
+        production_db.get_next_process(
+            "1785YKRED-S",
+            "Cutting",
+            so_number=so,
+            production_mode="cut_to_pack",
+        )
+        == "Finishing"
+    )
+    ok, _ = production_db.is_valid_routing_hop(
+        "1785YKRED-S",
+        "Cutting",
+        "Finishing",
+        so_number=so,
+        production_mode="cut_to_pack",
+    )
+    assert ok
+    bad, msg = production_db.is_valid_routing_hop(
+        "1785YKRED-S",
+        "Cutting",
+        "Stitching",
+        so_number=so,
+        production_mode="cut_to_pack",
+    )
+    assert not bad
+    assert "Stitching" in msg or "routing" in msg.lower()
+
+
 def test_cut_to_pack_does_not_appear_on_ready_to_stitch(iso, monkeypatch):
     monkeypatch.setattr(production_db, "get_item_routing", lambda sku: ["Cutting", "Stitching", "Finishing"])
     monkeypatch.setattr(production_db, "get_component_routing", lambda sku: ["Cutting", "Stitching", "Finishing"])

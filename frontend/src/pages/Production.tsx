@@ -238,6 +238,7 @@ interface JO {
   cost_entries: any[]
   routing: string[]
   next_process: string | null
+  production_mode?: string
   process_stocks: Record<string, { available: number; in: number; out: number }>
   issue_note?: IssueNote | null
   garment_qty?: number
@@ -1754,12 +1755,15 @@ export default function Production() {
       const line = jo.lines.find(l => l.id === lineId)
       const sku = opts?.sku || line?.sku || jo.sku
       const fromProc = opts?.fromProcess || jo.process
-      let toProc = opts?.toProcess || ''
+      // Prefer explicit hop / JO next (Cut-to-Pack → Finishing). Re-fetching item-routing
+      // without JO production_mode used to overwrite Finishing with BOM Stitching.
+      let toProc = opts?.toProcess || jo.next_process || ''
       if (!toProc) {
         try {
           const route = await api.get(`/production/item-routing/${encodeURIComponent(sku)}`, {
             params: {
               ...(jo.so_number ? { so_number: jo.so_number } : {}),
+              ...(jo.production_mode ? { production_mode: jo.production_mode } : {}),
               process: fromProc,
             },
           })
@@ -1769,10 +1773,9 @@ export default function Production() {
             toProc = hops.includes('Cutting') ? 'Cutting' : (route.data?.next_after_cutting || '')
           }
         } catch {
-          toProc = jo.next_process || ''
+          toProc = ''
         }
       }
-      if (!toProc) toProc = jo.next_process || ''
       const defaultQty = opts?.issuedQty ?? (
         opts?.sku
           ? (expandedPanelWip?.panels?.find((p: { component_sku: string; issueable_qty?: number }) => p.component_sku === opts.sku)?.issueable_qty || 0)
@@ -2227,7 +2230,7 @@ export default function Production() {
                             <button onClick={() => openModal('receive', jo, line.id)}
                               className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700">✅ Rec</button>
                             {jo.next_process && !panelCtx && (
-                              <button onClick={() => openModal('issue-pieces', jo, line.id)}
+                              <button onClick={() => openModal('issue-pieces', jo, line.id, { toProcess: jo.next_process || undefined })}
                                 className="px-2 py-0.5 text-xs bg-purple-600 text-white rounded hover:bg-purple-700">
                                 → {jo.next_process}
                               </button>
@@ -2279,7 +2282,10 @@ export default function Production() {
               )}
               <button onClick={() => openModal('receive', jo)} className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg font-medium hover:bg-green-700">✅ Receive (JO level)</button>
               {jo.next_process && !panelCtx && (
-                <button onClick={() => openModal('issue-pieces', jo)} className="px-3 py-1.5 text-xs bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700">
+                <button
+                  onClick={() => openModal('issue-pieces', jo, undefined, { toProcess: jo.next_process || undefined })}
+                  className="px-3 py-1.5 text-xs bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700"
+                >
                   ➡️ Issue to {jo.next_process}
                 </button>
               )}
