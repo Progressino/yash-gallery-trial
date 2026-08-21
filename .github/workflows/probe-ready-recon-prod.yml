@@ -1,0 +1,26 @@
+name: Probe Ready-To vs Stitching recon (prod)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ready-recon:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Reconcile Ready-To vs today's Stitching issues
+        run: |
+          set -eu
+          cd /root/app
+          set -a
+          # shellcheck disable=SC1091
+          . ./.env
+          set +a
+          # Prefer env PRODUCTION_DB_PATH; script also searches common paths
+          export PRODUCTION_DB_PATH="${PRODUCTION_DB_PATH:-/root/app/data/production.db}"
+          python3 "${GITHUB_WORKSPACE}/backend/scripts/probe_ready_recon_prod.py"
