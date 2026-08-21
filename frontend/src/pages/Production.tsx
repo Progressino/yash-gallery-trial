@@ -1290,7 +1290,7 @@ export default function Production() {
       const qs = params.toString()
       return api.get(`/production/ready-to-process/${encodeURIComponent(activeProcess)}${qs ? `?${qs}` : ''}`, { timeout: 60_000 }).then(r => r.data)
     },
-    enabled: tab === 'process',
+    enabled: tab === 'process' && !josLoading,
     staleTime: 15_000,
     retry: 1,
   })

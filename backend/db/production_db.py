@@ -661,11 +661,14 @@ def get_previous_process(
     if target == "Cutting":
         return "Incoming"
     # Migration / default feeder chain when item routing is incomplete.
+    # Factory order: … → Stitching → Kaj Button → Handwork → Finishing → Packing
     _DEFAULT_FEEDER = {
         "Stitching": "Cutting",
         "Embroidery": "Cutting",
         "Printing": "Cutting",
-        "Finishing": "Stitching",
+        "Kaj Button": "Stitching",
+        "Handwork": "Kaj Button",
+        "Finishing": "Handwork",
         "Packing": "Finishing",
     }
     item_path = get_component_routing(sku) or get_item_routing(sku) or []
@@ -676,8 +679,13 @@ def get_previous_process(
     try:
         idx = norm.index(target)
     except ValueError:
+        # Cut-to-Pack / short paths: Finishing is fed by Cutting when Stitching is absent.
         if target == "Finishing" and "Cutting" in norm and "Stitching" not in norm:
             return "Cutting"
+        if target == "Finishing" and "Stitching" in norm and "Handwork" not in norm and "Kaj Button" not in norm:
+            return "Stitching"
+        if target == "Handwork" and "Kaj Button" not in norm and "Stitching" in norm:
+            return "Stitching"
         return _DEFAULT_FEEDER.get(target)
     if idx <= 0:
         return _DEFAULT_FEEDER.get(target)
@@ -1280,11 +1288,18 @@ def _get_ready_for_process(process: str) -> list:
         next_p = get_next_process(d["sku"], d["process"], so_number=so)
         next_n = normalize_process_name(next_p or "")
         at_stage = bool(target) and cur == target
+        feeder = get_previous_process(d["sku"], process, so_number=so)
+        feeder_n = normalize_process_name(feeder or "")
+        # Feeder fallback only when routing has no next hop (incomplete Style BOM).
+        # Never override an explicit next (e.g. Cut-to-Pack Cutting → Finishing must
+        # not also appear on Ready-to-Stitch via Cutting's default feeder role).
         feeds_stage = bool(target) and next_n == target
+        if not feeds_stage and not next_n and feeder_n and cur == feeder_n:
+            feeds_stage = True
         if not at_stage and not feeds_stage:
             continue
         from_proc = d["process"] if feeds_stage and not at_stage else (
-            get_previous_process(d["sku"], process, so_number=so) or d["process"]
+            feeder or d["process"]
         )
         key = (d["so_number"], d["sku"], from_proc if feeds_stage and not at_stage else cur)
         if key in seen:

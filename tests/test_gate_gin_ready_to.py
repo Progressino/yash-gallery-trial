@@ -214,6 +214,74 @@ def test_ready_to_wip_uses_feeder_fallback_when_routing_omits_stage(isolated_mod
     assert r.json()["imported"] == 1, r.json()
 
 
+@pytest.mark.parametrize(
+    "stage,feeder,sku,item_path",
+    [
+        ("Kaj Button", "Stitching", "KAJ-WIP-M", ["Cutting", "Stitching"]),
+        ("Handwork", "Stitching", "HW-WIP-M", ["Cutting", "Stitching"]),
+        ("Finishing", "Stitching", "FIN-WIP-M", ["Cutting", "Stitching"]),
+        ("Kaj Button", "Stitching", "KAJ-DEF-M", []),
+        ("Handwork", "Kaj Button", "HW-DEF-M", []),
+        ("Finishing", "Handwork", "FIN-DEF-M", []),
+    ],
+)
+def test_ready_to_wip_handwork_kaj_finishing_feeder_defaults(
+    isolated_module_dbs, client, monkeypatch, stage, feeder, sku, item_path
+):
+    """Handwork / Kaj / Finishing WIP must resolve feeders when routing is short or empty."""
+    from backend.db import production_db
+
+    monkeypatch.setattr(production_db, "get_item_routing", lambda s: list(item_path))
+    monkeypatch.setattr(production_db, "get_component_routing", lambda s: list(item_path))
+    csv = f"Ready_To_Stage,SO_Number,OMS_SKU,Quantity\n{stage},SO-WIP,{sku},25\n"
+    r = client.post(
+        "/api/production/ready-to-wip/import",
+        files={"file": ("wip.csv", io.BytesIO(csv.encode()), "text/csv")},
+        data={"stage": stage},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("imported") == 1, body
+    assert body.get("failed", 0) == 0, body
+    # Stock is always credited on the feeder process.
+    assert production_db.get_process_stock("SO-WIP", sku, feeder) == 25
+    # Ready board: empty-path defaults and full paths surface via feeder fallback /
+    # routing. Short paths that end at Stitching still credit stock (asserted above).
+    if not item_path:
+        ready = client.get(f"/api/production/ready-to-process/{stage}")
+        assert ready.status_code == 200
+        row = next((x for x in ready.json() if x.get("sku") == sku), None)
+        assert row is not None, ready.json()
+        assert int(row.get("available_qty") or 0) == 25
+        assert str(row.get("from_process") or "") == feeder
+
+
+def test_ready_to_wip_full_path_kaj_handwork_finishing(isolated_module_dbs, client, monkeypatch):
+    """On full factory path, each stage is fed by the prior hop."""
+    from backend.db import production_db
+
+    path = ["Cutting", "Stitching", "Kaj Button", "Handwork", "Finishing"]
+    monkeypatch.setattr(production_db, "get_item_routing", lambda s: list(path))
+    monkeypatch.setattr(production_db, "get_component_routing", lambda s: list(path))
+    for stage, feeder, sku in (
+        ("Kaj Button", "Stitching", "FULL-KAJ"),
+        ("Handwork", "Kaj Button", "FULL-HW"),
+        ("Finishing", "Handwork", "FULL-FIN"),
+    ):
+        csv = f"Ready_To_Stage,SO_Number,OMS_SKU,Quantity\n{stage},SO-FULL,{sku},10\n"
+        r = client.post(
+            "/api/production/ready-to-wip/import",
+            files={"file": ("wip.csv", io.BytesIO(csv.encode()), "text/csv")},
+            data={"stage": stage},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json().get("imported") == 1, r.json()
+        ready = client.get(f"/api/production/ready-to-process/{stage}")
+        row = next(x for x in ready.json() if x.get("sku") == sku)
+        assert str(row.get("from_process") or "") == feeder
+        assert int(row.get("available_qty") or 0) == 10
+
+
 def test_jo_import_autoroute_ready_to_wip_template(isolated_module_dbs, client):
     """ready_to_*_wip_template.csv must credit stock even if uploaded via JO import."""
     csv = (
