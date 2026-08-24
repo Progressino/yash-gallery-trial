@@ -1442,6 +1442,7 @@ def list_jos(
     q: str | None = None,
     sku: str | None = None,
     vendor: str | None = None,
+    production_mode: str | None = None,
 ):
     """List job orders with batched child loads (no per-row N+1).
 
@@ -1462,6 +1463,13 @@ def list_jos(
     if process:
         conditions.append("j.process=?")
         params.append(process)
+    mode_f = str(production_mode or "").strip().lower().replace(" ", "_")
+    if mode_f and mode_f not in ("all", "*", "any"):
+        # Match common aliases (cut_to_pack / cuttopack / Cut-Pack, etc.)
+        conditions.append(
+            "LOWER(REPLACE(REPLACE(IFNULL(j.production_mode,''),' ','_'),'-','_')) LIKE ?"
+        )
+        params.append(f"%{mode_f}%")
     sku_f = str(sku or "").strip()
     if sku_f:
         conditions.append(
@@ -1481,12 +1489,13 @@ def list_jos(
             "("
             "j.jo_number LIKE ? COLLATE NOCASE OR j.so_number LIKE ? COLLATE NOCASE "
             "OR j.sku LIKE ? COLLATE NOCASE OR IFNULL(j.sku_name,'') LIKE ? COLLATE NOCASE "
-            "OR IFNULL(j.vendor_name,'') LIKE ? COLLATE NOCASE OR EXISTS ("
+            "OR IFNULL(j.vendor_name,'') LIKE ? COLLATE NOCASE "
+            "OR IFNULL(j.production_mode,'') LIKE ? COLLATE NOCASE OR EXISTS ("
             "SELECT 1 FROM jo_lines jlq WHERE jlq.jo_id=j.id AND ("
             "jlq.sku LIKE ? COLLATE NOCASE OR IFNULL(jlq.sku_name,'') LIKE ? COLLATE NOCASE"
             ")))"
         )
-        params.extend([like, like, like, like, like, like, like])
+        params.extend([like, like, like, like, like, like, like, like])
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     sql = f"SELECT j.* FROM job_orders j {where} ORDER BY j.id DESC"
     if limit is not None and int(limit) > 0:
@@ -1910,6 +1919,16 @@ def create_jo(data: dict) -> str | list[str]:
                     "sku": main_sku or s,
                     "planned_qty": int(ln.get("planned_qty") or 0),
                 })
+            # Defense in depth: never validate summed qty against the header SKU.
+            process = str(payload.get("process") or payload.get("stage") or "Cutting")
+            so_number = str(payload.get("so_number") or "").strip()
+            if process != "Cutting" and so_number:
+                for ln in normalized:
+                    v = validate_jo_creation(
+                        process, so_number, str(ln["sku"]), int(ln["planned_qty"])
+                    )
+                    if not v.get("ok"):
+                        raise ValueError(v.get("message") or "Insufficient Ready qty for a selected size.")
             payload["lines"] = normalized
             payload["planned_qty"] = sum(int(ln["planned_qty"]) for ln in normalized)
             first = normalized[0]

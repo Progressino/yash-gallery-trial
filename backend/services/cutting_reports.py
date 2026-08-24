@@ -387,8 +387,14 @@ def build_cutting_report(
                 line_comp = str(ln.get("component_code") or jo.get("component_code") or "")
                 share = (line_planned / header_planned) if header_planned else (1.0 / n_src)
 
-            opening_balance = line_planned - opening_received
-            closing_balance = line_planned - line_received
+            # Lifetime view (no activity_date): Open must NOT equal Planned —
+            # that made Balance look "wrong". Mirror current balance instead.
+            # Daily view: Open = planned − receipts through yesterday; Close = planned − all receipts.
+            if activity:
+                opening_balance = line_planned - opening_received
+                closing_balance = line_planned - line_received
+            else:
+                opening_balance = closing_balance = line_planned - line_received
 
             main = str(jo.get("main_sku") or "") or (parse_component_sku(line_sku)[0] or line_sku)
             parent = style_key_for_set_bom(main or line_sku)

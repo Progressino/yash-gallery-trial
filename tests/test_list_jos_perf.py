@@ -130,3 +130,33 @@ def test_list_jos_q_searches_beyond_first_page(iso):
     assert len(page2) == 2
     ids = {j["id"] for j in page} | {j["id"] for j in page2}
     assert len(ids) == 4
+
+
+def test_list_jos_production_mode_filter(iso):
+    production_db.create_jo(
+        {
+            "so_number": "SO-C2P",
+            "sku": "C2P-M",
+            "process": "Cutting",
+            "planned_qty": 5,
+            "production_mode": "cut_to_pack",
+            "create_component_jos": False,
+            "lines": [{"sku": "C2P-M", "planned_qty": 5}],
+        }
+    )
+    production_db.create_jo(
+        {
+            "so_number": "SO-IH",
+            "sku": "IH-M",
+            "process": "Cutting",
+            "planned_qty": 5,
+            "production_mode": "inhouse",
+            "create_component_jos": False,
+            "lines": [{"sku": "IH-M", "planned_qty": 5}],
+        }
+    )
+    c2p = production_db.list_jos(process="Cutting", light=True, production_mode="cut_to_pack")
+    assert len(c2p) >= 1
+    assert all("cut" in str(j.get("production_mode") or "").lower() for j in c2p)
+    by_q = production_db.list_jos(process="Cutting", light=True, q="cut_to_pack")
+    assert any(j.get("sku") == "C2P-M" for j in by_q)

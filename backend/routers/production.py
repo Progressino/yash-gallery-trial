@@ -742,11 +742,12 @@ def get_jos(
     q: Optional[str] = None,
     sku: Optional[str] = None,
     vendor: Optional[str] = None,
+    production_mode: Optional[str] = None,
 ):
     """List job orders. ``light=1`` omits fabric/cost child rows for faster list loads.
 
-    Pass ``q`` / ``sku`` / ``vendor`` to search the full JO set (including line SKUs), not only
-    the first page of unfiltered rows.
+    Pass ``q`` / ``sku`` / ``vendor`` / ``production_mode`` to search the full JO set
+    (including line SKUs), not only the first page of unfiltered rows.
     """
     return list_jos(
         status,
@@ -758,6 +759,7 @@ def get_jos(
         q=q,
         sku=sku,
         vendor=vendor,
+        production_mode=production_mode,
     )
 
 @router.get("/path-commitment")
@@ -969,7 +971,12 @@ def post_jo(body: JOIn):
     _ref = get_jo_by_number(num)
     jo_row = get_jo(_ref["id"]) if _ref else None
     issue_note = jo_issue_notes.get_issue_note_by_jo_id(jo_row["id"]) if jo_row else None
-    return {"jo_number": num, "ok": True, "issue_note": issue_note}
+    return {
+        "jo_number": num,
+        "id": jo_row["id"] if jo_row else None,
+        "ok": True,
+        "issue_note": issue_note,
+    }
 
 
 @router.patch("/orders/{joid}")

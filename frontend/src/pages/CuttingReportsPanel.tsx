@@ -124,7 +124,9 @@ export default function CuttingReportsPanel() {
         <div>
           <h3 className="font-semibold text-gray-800">Cutting summary &amp; balance</h3>
           <p className="text-[11px] text-gray-500">
-            Balance = Planned − Received (negative = over-receipt). Set <b>Activity date</b> for daily opening / cut / closing balance.
+            Balance = Planned − Received (negative = over-receipt).
+            {' '}<b>Open / Close / Today</b> are meaningful when <b>Activity date</b> is set (daily opening → cut → closing).
+            Without Activity date, Open/Close mirror current Balance (not full Planned).
             {filters.as_of_date ? ` As-of ${filters.as_of_date}.` : ''}
             {filters.activity_date ? ` Daily view: ${filters.activity_date}.` : ''}
           </p>

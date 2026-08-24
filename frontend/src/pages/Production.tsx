@@ -1210,6 +1210,7 @@ export default function Production() {
   const [filterSku, setFilterSku] = useState('')
   const [filterVendor, setFilterVendor] = useState('')
   const [filterJO, setFilterJO] = useState('')
+  const [filterProductionMode, setFilterProductionMode] = useState('')
   const [filterMinQty, setFilterMinQty] = useState('')
   const [filterDateFrom, setFilterDateFrom] = useState('')
   const [filterDateTo, setFilterDateTo] = useState('')
@@ -1267,10 +1268,12 @@ export default function Production() {
     queryFn: () => api.get('/production/stats').then(r => r.data),
   })
   const [joListLimit, setJoListLimit] = useState(150)
-  const joListHasServerFilter = Boolean(debouncedSearch.trim() || filterSku || filterSO || filterVendor)
+  const joListHasServerFilter = Boolean(
+    debouncedSearch.trim() || filterSku || filterSO || filterVendor || filterProductionMode,
+  )
   const joListFetchLimit = joListHasServerFilter ? Math.max(joListLimit, 5000) : joListLimit
   const { data: processJOs = [], isLoading: josLoading, isFetching: josFetching, isError: josError, error: josErr } = useQuery<JO[]>({
-    queryKey: ['jos-process', activeProcess, filterStatus, joListFetchLimit, debouncedSearch, filterSku, filterSO, filterVendor],
+    queryKey: ['jos-process', activeProcess, filterStatus, joListFetchLimit, debouncedSearch, filterSku, filterSO, filterVendor, filterProductionMode],
     queryFn: () => {
       const params = new URLSearchParams()
       params.set('process', activeProcess)
@@ -1281,6 +1284,7 @@ export default function Production() {
       if (filterSku) params.set('sku', filterSku)
       if (filterSO) params.set('so_number', filterSO)
       if (filterVendor) params.set('vendor', filterVendor)
+      if (filterProductionMode) params.set('production_mode', filterProductionMode)
       return api.get(`/production/orders?${params.toString()}`, { timeout: 90_000 }).then(r => r.data)
     },
     enabled: tab === 'process',
@@ -1509,20 +1513,24 @@ export default function Production() {
 
   const filteredProcessJOs = useMemo(() => {
     let rows = [...processJOs]
-    if (filterSO) rows = rows.filter(j => j.so_number === filterSO)
-    if (filterSku) rows = rows.filter(j => joMatchesSkuFilter(j, filterSku))
-    if (filterVendor) {
+    // When the server already applied q/sku/so/vendor/mode, trust that result —
+    // re-filtering the page locally was limiting search to the first 150 rows.
+    if (!joListHasServerFilter) {
+      if (filterSO) rows = rows.filter(j => j.so_number === filterSO)
+      if (filterSku) rows = rows.filter(j => joMatchesSkuFilter(j, filterSku))
+      if (filterVendor) {
+        rows = rows.filter(j =>
+          String(j.vendor_name || '').toLowerCase() === filterVendor.toLowerCase()
+          || String(soBuyerMap.get(j.so_number) || '').toLowerCase() === filterVendor.toLowerCase(),
+        )
+      }
       rows = rows.filter(j =>
-        String(j.vendor_name || '').toLowerCase() === filterVendor.toLowerCase()
-        || String(soBuyerMap.get(j.so_number) || '').toLowerCase() === filterVendor.toLowerCase(),
+        matchesListQuery([
+          j.jo_number, j.so_number, j.sku, j.sku_name, j.vendor_name, soBuyerMap.get(j.so_number),
+          j.production_mode, ...joLineSkus(j),
+        ]),
       )
     }
-    rows = rows.filter(j =>
-      matchesListQuery([
-        j.jo_number, j.so_number, j.sku, j.sku_name, j.vendor_name, soBuyerMap.get(j.so_number),
-        ...joLineSkus(j),
-      ]),
-    )
     const dir = sortDir === 'asc' ? 1 : -1
     rows.sort((a, b) => {
       if (sortBy === 'jo_date') return String(a.jo_date || '').localeCompare(String(b.jo_date || '')) * dir
@@ -1532,7 +1540,7 @@ export default function Production() {
       return String(a[key] || '').localeCompare(String(b[key] || ''), undefined, { numeric: true }) * dir
     })
     return rows
-  }, [processJOs, filterSO, filterSku, filterVendor, listSearch, sortBy, sortDir, soBuyerMap])
+  }, [processJOs, filterSO, filterSku, filterVendor, listSearch, sortBy, sortDir, soBuyerMap, joListHasServerFilter])
 
   const filteredAllJOs = useMemo(() => {
     let rows = [...allJOs]
@@ -1567,12 +1575,20 @@ export default function Production() {
     setFilterSku('')
     setFilterVendor('')
     setFilterJO('')
+    setFilterProductionMode('')
     setFilterMinQty('')
     setFilterDateFrom('')
     setFilterDateTo('')
     setSortBy('so_number')
     setSortDir('asc')
   }
+
+  /** Keep header planned_qty in sync with multi-size lines (display only; create validates per line). */
+  useEffect(() => {
+    if (newLines.length === 0) return
+    const total = newLines.reduce((s, l) => s + (Number(l.planned_qty) || 0), 0)
+    setNewForm(f => (f.planned_qty === total ? f : { ...f, planned_qty: total }))
+  }, [newLines])
 
   const { data: joValidation } = useQuery({
     queryKey: ['jo-validate', newForm.process, newForm.so_number, newForm.sku, newForm.planned_qty],
@@ -1583,25 +1599,27 @@ export default function Production() {
   /** Per-SKU Ready qty check for multi-size Finishing/Stitching JOs (from Ready board). */
   const multiLineReadyValidation = useMemo(() => {
     if (newForm.process === 'Cutting' || newLines.length === 0) return null
-    if (!newForm.from_ready_to) return null
     const failures: string[] = []
     let minAvail = Number.POSITIVE_INFINITY
     for (const ln of newLines) {
       const ready = readyLinesForJo.find(
         r => String(r.sku || '').trim().toUpperCase() === String(ln.sku || '').trim().toUpperCase(),
       )
+      // Prefer Ready board qty; if not on board, do not invent a fake limit (backend validates).
+      if (!ready && !newForm.from_ready_to) continue
       const avail = Number(ready?.available_qty ?? ready?.qty ?? 0)
       minAvail = Math.min(minAvail, avail)
       const plan = Number(ln.planned_qty) || 0
-      if (plan > avail) {
+      if (ready && plan > avail) {
         failures.push(`Only ${avail} pieces available for ${ln.sku}. Cannot plan ${plan}.`)
       }
     }
     if (failures.length) return { ok: false, message: failures[0], available: 0 }
+    if (newLines.length <= 1 && !newForm.from_ready_to) return null
     return {
       ok: true,
       available: Number.isFinite(minAvail) ? minAvail : 0,
-      message: `${newLines.length} sizes · each within its own Ready qty`,
+      message: `${newLines.length} sizes · each checked against its own Ready qty (not the sum)`,
     }
   }, [newForm.process, newForm.from_ready_to, newLines, readyLinesForJo])
 
@@ -1950,6 +1968,18 @@ export default function Production() {
                 {PROCESS_ICONS[jo.process] || ''} {jo.process}
               </span>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[jo.status] || ''}`}>{jo.status}</span>
+              {jo.production_mode && (
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                  String(jo.production_mode).toLowerCase().includes('cut')
+                    ? 'bg-violet-100 text-violet-800'
+                    : String(jo.production_mode).toLowerCase().includes('stitch')
+                      ? 'bg-cyan-100 text-cyan-800'
+                      : 'bg-slate-100 text-slate-600'
+                }`}>
+                  {PRODUCTION_MODE_LABEL[String(jo.production_mode).toLowerCase().replace(/[\s-]+/g, '_')]
+                    || jo.production_mode}
+                </span>
+              )}
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                 isOutsourceExec(jo.exec_type)
                   ? 'bg-amber-100 text-amber-700'
@@ -2455,6 +2485,14 @@ export default function Production() {
                 <option value="">All vendors / buyers</option>
                 {vendorOptions.map(v => <option key={v} value={v}>{v}</option>)}
               </select>
+              <select value={filterProductionMode} onChange={e => setFilterProductionMode(e.target.value)}
+                className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm max-w-[11rem]"
+                title="Filter by production path (Cut-to-Pack, Stitch-to-Pack, In-house)">
+                <option value="">All paths</option>
+                <option value="inhouse">In-house</option>
+                <option value="cut_to_pack">Cut-to-Pack</option>
+                <option value="stitch_to_pack">Stitch-to-Pack</option>
+              </select>
               <input
                 type="search"
                 value={filterJO}
@@ -2495,7 +2533,7 @@ export default function Production() {
                 title="Toggle sort direction">
                 {sortDir === 'asc' ? '↑ Asc' : '↓ Desc'}
               </button>
-              {(listSearch || filterSO || filterSku || filterVendor) && (
+              {(listSearch || filterSO || filterSku || filterVendor || filterProductionMode) && (
                 <button type="button" onClick={clearListFilters}
                   className="text-xs text-indigo-700 hover:underline ml-1">
                   Clear filters
@@ -2507,6 +2545,9 @@ export default function Production() {
           <div className="flex items-center justify-between flex-wrap gap-2">
             <p className="text-xs text-gray-500">
               Showing {filteredReadyLines.length}/{readyLines.length} ready · {filteredProcessJOs.length}/{processJOs.length} JOs
+              {joListHasServerFilter
+                ? ' · search/filters query all JOs in this process (not only the first 150)'
+                : ' · type SKU / SO / JO# to search the full list'}
             </p>
             <div className="flex items-center gap-2">
               <input
@@ -2591,6 +2632,7 @@ export default function Production() {
                     if (filterSku) params.set('sku', filterSku)
                     if (filterSO) params.set('so_number', filterSO)
                     if (filterVendor) params.set('vendor', filterVendor)
+                    if (filterProductionMode) params.set('production_mode', filterProductionMode)
                     const all = await api.get(`/production/orders?${params.toString()}`, { timeout: 120_000 }).then(r => r.data as JO[])
                     const csvRows = all.flatMap(j => expandJoExportRows(j))
                     downloadCsv(
@@ -3459,6 +3501,10 @@ export default function Production() {
                         remarks: newForm.remarks || '',
                       }]
                     : [])
+                if (!lines.length && !(newForm.sku || '').trim()) {
+                  alert('Add at least one size/SKU line before creating the JO.')
+                  return
+                }
                 const totalPlanned = lines.reduce((s, l) => s + (Number(l.planned_qty) || 0), 0)
                   || newForm.planned_qty
                   || 0
@@ -3471,6 +3517,7 @@ export default function Production() {
                   sku: headerSku,
                   sku_name: headerName,
                   planned_qty: totalPlanned,
+                  // Always send size lines so the server validates each SKU vs its own Ready qty.
                   lines,
                 })
               }}

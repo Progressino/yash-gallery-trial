@@ -211,6 +211,33 @@ def test_cutting_report_daily_balance(iso):
     assert out["kpis"]["received_on_date"] == 20
 
 
+def test_cutting_report_lifetime_open_equals_balance_not_planned(iso):
+    """Without activity_date, Open must mirror Balance (not full Planned)."""
+    num = production_db.create_jo(
+        {
+            "so_number": "SO-LIFE",
+            "so_source": "manual",
+            "sku": "1001-M",
+            "process": "Cutting",
+            "planned_qty": 100,
+            "create_component_jos": False,
+            "lines": [{"sku": "1001-M", "style": "M", "planned_qty": 100}],
+        }
+    )
+    jo = next(j for j in production_db.list_jos() if j["jo_number"] == num)
+    production_db.receive_pieces(
+        jo["id"], {"received_qty": 40, "jo_line_id": jo["lines"][0]["id"]}
+    )
+    out = build_cutting_report(export=True)
+    row = next(r for r in out["rows"] if r["so_number"] == "SO-LIFE")
+    assert row["planned_qty"] == 100
+    assert row["received_qty"] == 40
+    assert row["balance_qty"] == 60
+    assert row["opening_balance"] == 60
+    assert row["closing_balance"] == 60
+    assert row["received_on_date"] in (0, None)
+
+
 def test_cutting_report_daily_balance_multi_line_jo_level_receipt(iso):
     """JO-level (null line) receipts must not scramble cut-today across sizes."""
     import sqlite3
