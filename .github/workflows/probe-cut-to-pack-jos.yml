@@ -1,0 +1,15 @@
+name: Probe Cut-to-Pack Cutting JOs (prod)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Diagnose Cut-to-Pack Cutting JOs
+        run: |
+          set -eu
+          cd /root/app
+          python3 backend/scripts/probe_cut_to_pack_jos_prod.py || true

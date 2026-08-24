@@ -592,6 +592,48 @@ def test_jo_outsource_stores_vendor_name(isolated_module_dbs, client):
     assert jo["vendor_name"] == "ABC Stitching Unit"
 
 
+def test_post_multi_size_finishing_jo_validates_each_line(isolated_module_dbs, client, monkeypatch):
+    """Ready-to-Finishing multi-size JO must not compare total plan vs the first SKU only."""
+    from backend.db import production_db
+
+    monkeypatch.setattr(
+        production_db,
+        "get_previous_process",
+        lambda sku, process, so_number=None, production_mode=None: "Cutting",
+    )
+    conn = production_db._connect()
+    production_db._update_process_stock(conn, "SO-FIN", "1785YKRED-XXL", "Cutting", qty_in=119)
+    production_db._update_process_stock(conn, "SO-FIN", "1785YKRED-XL", "Cutting", qty_in=116)
+    production_db._update_process_stock(conn, "SO-FIN", "1785YKRED-L", "Cutting", qty_in=79)
+    conn.commit()
+    conn.close()
+
+    r = client.post(
+        "/api/production/orders",
+        json={
+            "so_number": "SO-FIN",
+            "so_source": "manual",
+            "sku": "1785YKRED-XXL",
+            "process": "Finishing",
+            "planned_qty": 314,
+            "exec_type": "Outsource",
+            "vendor_name": "Finishing Vendor",
+            "lines": [
+                {"sku": "1785YKRED-XXL", "planned_qty": 119},
+                {"sku": "1785YKRED-XL", "planned_qty": 116},
+                {"sku": "1785YKRED-L", "planned_qty": 79},
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+    jo = client.get(f"/api/production/orders/{r.json()['id']}").json() if r.json().get("id") else None
+    if jo is None:
+        listed = client.get("/api/production/orders?process=Finishing").json()
+        jo = next(o for o in listed if o["jo_number"] == r.json()["jo_number"])
+    assert len(jo["lines"]) == 3
+    assert int(jo["planned_qty"]) == 314
+
+
 def test_receive_pieces_per_line_cutting_jo(isolated_module_dbs, client):
     """Line-level receive on a multi-size cutting JO (cutting challan / Rec button)."""
     r = client.post(

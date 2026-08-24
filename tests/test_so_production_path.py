@@ -217,6 +217,69 @@ def test_validate_jo_creation_subtracts_open_planned(iso):
     assert v["available"] == 0
 
 
+def test_multi_size_finishing_jo_validates_each_sku_availability(iso, monkeypatch):
+    """Combined planned qty must not be checked against only the header SKU's Ready qty."""
+    monkeypatch.setattr(
+        production_db,
+        "get_item_routing",
+        lambda sku: ["Cutting", "Finishing"],
+    )
+    monkeypatch.setattr(
+        production_db,
+        "get_component_routing",
+        lambda sku: ["Cutting", "Finishing"],
+    )
+    monkeypatch.setattr(
+        production_db,
+        "get_previous_process",
+        lambda sku, process, so_number=None, production_mode=None: "Cutting",
+    )
+    conn = production_db._connect()
+    production_db._update_process_stock(conn, "01-2627", "1785YKRED-XXL", "Cutting", qty_in=119)
+    production_db._update_process_stock(conn, "01-2627", "1785YKRED-XL", "Cutting", qty_in=116)
+    production_db._update_process_stock(conn, "01-2627", "1785YKRED-L", "Cutting", qty_in=79)
+    production_db._update_process_stock(conn, "01-2627", "1785YKRED-S", "Cutting", qty_in=48)
+    production_db._update_process_stock(conn, "01-2627", "1785YKRED-5XL", "Cutting", qty_in=65)
+    conn.commit()
+    conn.close()
+
+    # Header-only validation of the SUM would fail (427 > 119)
+    bad = production_db.validate_jo_creation("Finishing", "01-2627", "1785YKRED-XXL", 427)
+    assert bad["ok"] is False
+    assert bad["available"] == 119
+
+    lines = [
+        {"sku": "1785YKRED-XXL", "planned_qty": 119},
+        {"sku": "1785YKRED-XL", "planned_qty": 116},
+        {"sku": "1785YKRED-L", "planned_qty": 79},
+        {"sku": "1785YKRED-S", "planned_qty": 48},
+        {"sku": "1785YKRED-5XL", "planned_qty": 65},
+    ]
+    for ln in lines:
+        v = production_db.validate_jo_creation(
+            "Finishing", "01-2627", ln["sku"], int(ln["planned_qty"])
+        )
+        assert v["ok"] is True, (ln, v)
+
+    num = production_db.create_jo(
+        {
+            "so_number": "01-2627",
+            "so_source": "manual",
+            "sku": "1785YKRED-XXL",
+            "process": "Finishing",
+            "planned_qty": 427,
+            "create_component_jos": False,
+            "lines": lines,
+        }
+    )
+    # Simulate router per-line gate then create
+    assert isinstance(num, str)
+    jo = production_db.get_jo_by_number(num)
+    assert jo is not None
+    assert len(jo["lines"]) == 5
+    assert int(jo["planned_qty"]) == 427
+
+
 def test_stich_alias_and_stitch_to_pack_path(iso, monkeypatch):
     from backend.services.so_production_path import normalize_production_mode
 

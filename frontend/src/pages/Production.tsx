@@ -1201,6 +1201,11 @@ export default function Production() {
   const [expanded, setExpanded] = useState<number | null>(null)
   const [filterStatus, setFilterStatus] = useState('')
   const [listSearch, setListSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(listSearch), 300)
+    return () => clearTimeout(t)
+  }, [listSearch])
   const [filterSO, setFilterSO] = useState('')
   const [filterSku, setFilterSku] = useState('')
   const [filterVendor, setFilterVendor] = useState('')
@@ -1262,9 +1267,22 @@ export default function Production() {
     queryFn: () => api.get('/production/stats').then(r => r.data),
   })
   const [joListLimit, setJoListLimit] = useState(150)
+  const joListHasServerFilter = Boolean(debouncedSearch.trim() || filterSku || filterSO || filterVendor)
+  const joListFetchLimit = joListHasServerFilter ? Math.max(joListLimit, 5000) : joListLimit
   const { data: processJOs = [], isLoading: josLoading, isFetching: josFetching, isError: josError, error: josErr } = useQuery<JO[]>({
-    queryKey: ['jos-process', activeProcess, filterStatus, joListLimit],
-    queryFn: () => api.get(`/production/orders?process=${encodeURIComponent(activeProcess)}${filterStatus ? `&status=${filterStatus}` : ''}&light=1&limit=${joListLimit}`, { timeout: 60_000 }).then(r => r.data),
+    queryKey: ['jos-process', activeProcess, filterStatus, joListFetchLimit, debouncedSearch, filterSku, filterSO, filterVendor],
+    queryFn: () => {
+      const params = new URLSearchParams()
+      params.set('process', activeProcess)
+      if (filterStatus) params.set('status', filterStatus)
+      params.set('light', '1')
+      params.set('limit', String(joListFetchLimit))
+      if (debouncedSearch.trim()) params.set('q', debouncedSearch.trim())
+      if (filterSku) params.set('sku', filterSku)
+      if (filterSO) params.set('so_number', filterSO)
+      if (filterVendor) params.set('vendor', filterVendor)
+      return api.get(`/production/orders?${params.toString()}`, { timeout: 90_000 }).then(r => r.data)
+    },
     enabled: tab === 'process',
     staleTime: 30_000,
     retry: 1,
@@ -1559,8 +1577,35 @@ export default function Production() {
   const { data: joValidation } = useQuery({
     queryKey: ['jo-validate', newForm.process, newForm.so_number, newForm.sku, newForm.planned_qty],
     queryFn: () => api.get(`/production/orders/validate?process=${newForm.process}&so_number=${newForm.so_number}&sku=${newForm.sku}&planned_qty=${newForm.planned_qty}`).then(r => r.data),
-    enabled: !!newForm.so_number && !!newForm.sku && newForm.process !== 'Cutting',
+    enabled: !!newForm.so_number && !!newForm.sku && newForm.process !== 'Cutting' && newLines.length === 0,
   })
+
+  /** Per-SKU Ready qty check for multi-size Finishing/Stitching JOs (from Ready board). */
+  const multiLineReadyValidation = useMemo(() => {
+    if (newForm.process === 'Cutting' || newLines.length === 0) return null
+    if (!newForm.from_ready_to) return null
+    const failures: string[] = []
+    let minAvail = Number.POSITIVE_INFINITY
+    for (const ln of newLines) {
+      const ready = readyLinesForJo.find(
+        r => String(r.sku || '').trim().toUpperCase() === String(ln.sku || '').trim().toUpperCase(),
+      )
+      const avail = Number(ready?.available_qty ?? ready?.qty ?? 0)
+      minAvail = Math.min(minAvail, avail)
+      const plan = Number(ln.planned_qty) || 0
+      if (plan > avail) {
+        failures.push(`Only ${avail} pieces available for ${ln.sku}. Cannot plan ${plan}.`)
+      }
+    }
+    if (failures.length) return { ok: false, message: failures[0], available: 0 }
+    return {
+      ok: true,
+      available: Number.isFinite(minAvail) ? minAvail : 0,
+      message: `${newLines.length} sizes · each within its own Ready qty`,
+    }
+  }, [newForm.process, newForm.from_ready_to, newLines, readyLinesForJo])
+
+  const effectiveJoValidation = multiLineReadyValidation || joValidation
 
   const cuttingMainSku = (newForm.sku || newLines[0]?.sku || '').trim()
   const { data: cuttingSetBomInfo } = useQuery({
@@ -2535,16 +2580,30 @@ export default function Production() {
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  const rows = filteredProcessJOs.flatMap(j => expandJoExportRows(j))
-                  downloadCsv(
-                    `${activeProcess.toLowerCase()}_job_orders_${new Date().toISOString().slice(0, 10)}.csv`,
-                    [...JO_EXPORT_HEADERS],
-                    rows,
-                  )
+                onClick={async () => {
+                  try {
+                    const params = new URLSearchParams()
+                    params.set('process', activeProcess)
+                    if (filterStatus) params.set('status', filterStatus)
+                    params.set('light', '1')
+                    params.set('limit', '20000')
+                    if (listSearch.trim()) params.set('q', listSearch.trim())
+                    if (filterSku) params.set('sku', filterSku)
+                    if (filterSO) params.set('so_number', filterSO)
+                    if (filterVendor) params.set('vendor', filterVendor)
+                    const all = await api.get(`/production/orders?${params.toString()}`, { timeout: 120_000 }).then(r => r.data as JO[])
+                    const csvRows = all.flatMap(j => expandJoExportRows(j))
+                    downloadCsv(
+                      `${activeProcess.toLowerCase()}_job_orders_${new Date().toISOString().slice(0, 10)}.csv`,
+                      [...JO_EXPORT_HEADERS],
+                      csvRows,
+                    )
+                  } catch (err) {
+                    alert(apiErrorMessage(err, 'Export failed'))
+                  }
                 }}
                 className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
-                title="Export currently listed job orders (respects filters/search)"
+                title="Export all matching job orders (full database search, not only the loaded page)"
               >
                 ↓ Export Excel
               </button>
@@ -2721,7 +2780,7 @@ export default function Production() {
               <p className="text-center text-gray-400 py-8 text-sm">No job orders match the current search / filters.</p>
             )}
             {filteredProcessJOs.map(renderJOCard)}
-            {processJOs.length >= joListLimit && (
+            {processJOs.length >= joListFetchLimit && !joListHasServerFilter && (
               <div className="flex justify-center py-3">
                 <button
                   type="button"
@@ -2732,6 +2791,11 @@ export default function Production() {
                   {josFetching ? 'Loading…' : `Load more Job Orders (showing ${processJOs.length})`}
                 </button>
               </div>
+            )}
+            {joListHasServerFilter && (
+              <p className="text-center text-xs text-gray-500 py-2">
+                Search/filters run against all {activeProcess} JOs (showing {processJOs.length} match{processJOs.length === 1 ? '' : 'es'}).
+              </p>
             )}
           </div>
         </div>
@@ -3181,9 +3245,11 @@ export default function Production() {
             )}
 
             {/* Validation message */}
-            {newForm.process !== 'Cutting' && newForm.so_number && newForm.sku && joValidation && (
-              <div className={`rounded-lg px-3 py-2 text-xs ${joValidation.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                {joValidation.ok ? `✅ ${joValidation.available} pieces available` : `❌ ${joValidation.message}`}
+            {newForm.process !== 'Cutting' && newForm.so_number && (newForm.sku || newLines.length > 0) && effectiveJoValidation && (
+              <div className={`rounded-lg px-3 py-2 text-xs ${effectiveJoValidation.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                {effectiveJoValidation.ok
+                  ? `✅ ${effectiveJoValidation.message || `${effectiveJoValidation.available} pieces available`}`
+                  : `❌ ${effectiveJoValidation.message}`}
               </div>
             )}
 
@@ -3414,7 +3480,7 @@ export default function Production() {
                   || (newForm.so_source === 'manual' && newForm.process === 'Cutting'
                     && !newForm.sku.trim() && newLines.length === 0)
                   || (isOutsourceExec(newForm.exec_type) && !newForm.vendor_name.trim())
-                  || (newForm.process !== 'Cutting' && joValidation && !joValidation?.ok)
+                  || (newForm.process !== 'Cutting' && effectiveJoValidation && !effectiveJoValidation?.ok)
                 }
                 className="flex-1 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">
                 {createJOMut.isPending ? 'Creating…' : `Create ${newForm.process} JO`}

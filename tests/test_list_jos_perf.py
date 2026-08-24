@@ -66,18 +66,64 @@ def test_list_jos_batches_lines_and_light_mode(iso):
     assert c2p["routing"] == ["Cutting", "Finishing"]
 
 
-def test_list_jos_limit_offset(iso):
+def test_list_jos_q_searches_beyond_first_page(iso):
+    """Search must hit JO / line SKUs even when the match is past the default page."""
     for i in range(5):
         production_db.create_jo(
             {
-                "so_number": f"SO-L{i}",
-                "sku": f"STYLE{i}-M",
+                "so_number": f"SO-P{i}",
+                "sku": f"COMMON{i}-M",
                 "process": "Cutting",
                 "planned_qty": 1,
                 "create_component_jos": False,
-                "lines": [{"so_number": f"SO-L{i}", "sku": f"STYLE{i}-M", "planned_qty": 1}],
+                "lines": [{"sku": f"COMMON{i}-M", "planned_qty": 1}],
             }
         )
+    production_db.create_jo(
+        {
+            "so_number": "SO-NEEDLE",
+            "sku": "NEEDLESKU-XXL",
+            "process": "Cutting",
+            "planned_qty": 7,
+            "create_component_jos": False,
+            "lines": [
+                {"sku": "NEEDLESKU-XXL", "planned_qty": 4},
+                {"sku": "NEEDLESKU-L", "planned_qty": 3},
+            ],
+        }
+    )
+    # Newest first — needle is first; bury it by creating more after wouldn't work.
+    # Create older needle by inserting then creating many newer rows.
+    buried = production_db.create_jo(
+        {
+            "so_number": "SO-BURIED",
+            "sku": "ZZZ-HIDDEN-M",
+            "process": "Cutting",
+            "planned_qty": 9,
+            "create_component_jos": False,
+            "lines": [{"sku": "ZZZ-HIDDEN-M", "planned_qty": 9}],
+        }
+    )
+    for i in range(8):
+        production_db.create_jo(
+            {
+                "so_number": f"SO-NEW{i}",
+                "sku": f"NEWER{i}-M",
+                "process": "Cutting",
+                "planned_qty": 1,
+                "create_component_jos": False,
+                "lines": [{"sku": f"NEWER{i}-M", "planned_qty": 1}],
+            }
+        )
+    page = production_db.list_jos(process="Cutting", light=True, limit=5)
+    assert all("ZZZ-HIDDEN" not in (j.get("sku") or "") for j in page)
+    found = production_db.list_jos(process="Cutting", light=True, q="ZZZ-HIDDEN", limit=5)
+    assert len(found) == 1
+    assert found[0]["jo_number"] == buried or found[0]["sku"] == "ZZZ-HIDDEN-M"
+    by_sku = production_db.list_jos(process="Cutting", light=True, sku="NEEDLESKU-L", limit=5)
+    assert len(by_sku) == 1
+    assert any(l["sku"] == "NEEDLESKU-L" for l in by_sku[0]["lines"])
+
     page = production_db.list_jos(process="Cutting", light=True, limit=2, offset=0)
     assert len(page) == 2
     page2 = production_db.list_jos(process="Cutting", light=True, limit=2, offset=2)

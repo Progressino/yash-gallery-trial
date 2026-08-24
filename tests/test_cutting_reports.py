@@ -209,3 +209,60 @@ def test_cutting_report_daily_balance(iso):
     assert row["closing_balance"] == 50
     assert row["production_mode"] == "inhouse"
     assert out["kpis"]["received_on_date"] == 20
+
+
+def test_cutting_report_daily_balance_multi_line_jo_level_receipt(iso):
+    """JO-level (null line) receipts must not scramble cut-today across sizes."""
+    import sqlite3
+
+    today = date.today()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    today_s = today.isoformat()
+    num = production_db._create_single_jo(
+        {
+            "so_number": "SO-MULTI-DAILY",
+            "so_source": "manual",
+            "sku": "1001-L",
+            "process": "Cutting",
+            "planned_qty": 100,
+            "create_component_jos": False,
+            "jo_date": today_s,
+            "lines": [
+                {"sku": "1001-L", "style": "L", "planned_qty": 70},
+                {"sku": "1001-4XL", "style": "4XL", "planned_qty": 20},
+                {"sku": "1001-8XL", "style": "8XL", "planned_qty": 10},
+            ],
+        }
+    )
+    jo = next(j for j in production_db.list_jos() if j["jo_number"] == num)
+    conn = sqlite3.connect(production_db._DB)
+    # Yesterday: 50 pcs JO-level → allocated to largest line (L)
+    conn.execute(
+        """INSERT INTO jo_piece_receipts(
+               jo_id, jo_line_id, process, so_number, sku, receipt_date, received_qty, rejected_qty
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (jo["id"], None, "Cutting", "SO-MULTI-DAILY", "1001-L", yesterday, 50, 0),
+    )
+    # Today: 40 pcs JO-level
+    conn.execute(
+        """INSERT INTO jo_piece_receipts(
+               jo_id, jo_line_id, process, so_number, sku, receipt_date, received_qty, rejected_qty
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (jo["id"], None, "Cutting", "SO-MULTI-DAILY", "1001-L", today_s, 40, 0),
+    )
+    conn.execute(
+        "UPDATE job_orders SET received_qty=90, balance_qty=10 WHERE id=?",
+        (jo["id"],),
+    )
+    conn.commit()
+    conn.close()
+
+    out = build_cutting_report(activity_date=today_s, so_number="SO-MULTI-DAILY", export=True)
+    rows = out["rows"]
+    assert len(rows) == 3
+    assert sum(int(r["received_on_date"] or 0) for r in rows) == 40
+    for r in rows:
+        opening = float(r["opening_balance"])
+        cut = float(r["received_on_date"] or 0)
+        closing = float(r["closing_balance"])
+        assert abs((opening - cut) - closing) < 0.01, r

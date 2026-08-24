@@ -302,14 +302,27 @@ def build_cutting_report(
             lines_by_jo.setdefault(int(d["jo_id"]), []).append(d)
         rec_line, rec_jo, iss_line, iss_jo, last_act = _maps(conn, as_of=as_of)
         rec_line = _allocate_header_receipts(rec_line, rec_jo, lines_by_jo)
+        iss_line = _allocate_header_receipts(iss_line, iss_jo, lines_by_jo)
         opening_rec_line, opening_rec_jo, opening_iss_line, opening_iss_jo, _ = (
             _maps(conn, as_of=(activity - timedelta(days=1)) if activity else None)
         )
         opening_rec_line = _allocate_header_receipts(opening_rec_line, opening_rec_jo, lines_by_jo)
-        act_rec_line, act_rec_jo, act_iss_line, act_iss_jo = (
-            _activity_maps(conn, activity) if activity else ({}, {}, {}, {})
-        )
-        act_rec_line = _allocate_header_receipts(act_rec_line, act_rec_jo, lines_by_jo)
+        opening_iss_line = _allocate_header_receipts(opening_iss_line, opening_iss_jo, lines_by_jo)
+        # Do NOT independently allocate same-day JO-level receipts onto lines —
+        # that mis-assigns cut-today across multi-size lines and breaks
+        # opening − cut_today = closing. Derive day qty as closing − opening.
+        act_rec_line: dict[int, int] = {}
+        act_iss_line: dict[int, int] = {}
+        if activity:
+            for _jid, lines in lines_by_jo.items():
+                for ln in lines:
+                    lid = int(ln["id"])
+                    act_rec_line[lid] = max(
+                        0, int(rec_line.get(lid, 0) or 0) - int(opening_rec_line.get(lid, 0) or 0)
+                    )
+                    act_iss_line[lid] = max(
+                        0, int(iss_line.get(lid, 0) or 0) - int(opening_iss_line.get(lid, 0) or 0)
+                    )
     finally:
         conn.close()
 
@@ -353,9 +366,10 @@ def build_cutting_report(
                 line_planned = header_planned
                 line_received = header_received
                 line_issued = header_issued
-                opening_received = int(opening_rec_jo.get(jid, 0))
-                received_on_day = int(act_rec_jo.get(jid, 0))
-                issued_on_day = int(act_iss_jo.get(jid, 0))
+                opening_received = int(opening_rec_jo.get(jid, 0)) if activity else 0
+                received_on_day = max(0, line_received - opening_received) if activity else 0
+                opening_issued = int(opening_iss_jo.get(jid, 0)) if activity else 0
+                issued_on_day = max(0, line_issued - opening_issued) if activity else 0
                 line_sku = str(jo.get("sku") or "")
                 style = ""
                 line_comp = str(jo.get("component_code") or "")
@@ -365,9 +379,9 @@ def build_cutting_report(
                 line_planned = int(ln.get("planned_qty") or 0)
                 line_received = int(rec_line.get(lid, ln.get("received_qty") or 0))
                 line_issued = int(iss_line.get(lid, ln.get("issued_qty") or 0))
-                opening_received = int(opening_rec_line.get(lid, 0))
-                received_on_day = int(act_rec_line.get(lid, 0))
-                issued_on_day = int(act_iss_line.get(lid, 0))
+                opening_received = int(opening_rec_line.get(lid, 0)) if activity else 0
+                received_on_day = int(act_rec_line.get(lid, 0)) if activity else 0
+                issued_on_day = int(act_iss_line.get(lid, 0)) if activity else 0
                 line_sku = str(ln.get("sku") or jo.get("sku") or "")
                 style = str(ln.get("style") or "")
                 line_comp = str(ln.get("component_code") or jo.get("component_code") or "")
@@ -382,7 +396,7 @@ def build_cutting_report(
                 parent = str(get_parent_sku(parent) or parent)
             except Exception:
                 pass
-            size = _size_from_sku(line_sku, style)
+            size_label = _size_from_sku(line_sku, style)
             planned_fab_line = round(planned_fab * share, 4)
             actual_fab_line = round(actual_fab * share, 4)
             bom_avg = _safe_div(planned_fab_line, line_planned) if line_planned else None
@@ -416,7 +430,7 @@ def build_cutting_report(
                 "jo_date": jo_date,
                 "parent_style": parent,
                 "sku": line_sku,
-                "size": size,
+                "size": size_label,
                 "component": line_comp,
                 "fabric_code": jo.get("fabric_code") or "",
                 "planned_qty": line_planned,

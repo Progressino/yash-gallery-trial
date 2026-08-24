@@ -424,6 +424,14 @@ jobs:
             });
 
       # Post-health steps must never block deploy indefinitely (Actions UI looks "stuck").
+      - name: Diagnose Cut-to-Pack Cutting JOs
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          set -eu
+          cd /root/app
+          python3 backend/scripts/probe_cut_to_pack_jos_prod.py || true
+
       - name: Reconcile latest Existing PO on disk
         continue-on-error: true
         timeout-minutes: 5

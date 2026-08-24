@@ -1431,25 +1431,64 @@ def _get_ready_for_process(process: str) -> list:
 
 # ── Job Order CRUD ─────────────────────────────────────────────────────────────
 
-def list_jos(status=None, so_number=None, process=None, *, light: bool = False, limit: int | None = None, offset: int = 0):
+def list_jos(
+    status=None,
+    so_number=None,
+    process=None,
+    *,
+    light: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
+    q: str | None = None,
+    sku: str | None = None,
+    vendor: str | None = None,
+):
     """List job orders with batched child loads (no per-row N+1).
 
     ``light=True`` skips fabric issues/returns/cost entries (list UI); detail
     endpoints still load the full payload via ``get_jo``.
+
+    ``q`` / ``sku`` filter at the database (including ``jo_lines.sku``) so search
+    and export are not limited to the first page of unfiltered rows.
     """
     conn = _connect()
     conditions, params = [], []
     if status:
-        conditions.append("status=?")
+        conditions.append("j.status=?")
         params.append(status)
     if so_number:
-        conditions.append("so_number=?")
+        conditions.append("j.so_number=?")
         params.append(so_number)
     if process:
-        conditions.append("process=?")
+        conditions.append("j.process=?")
         params.append(process)
+    sku_f = str(sku or "").strip()
+    if sku_f:
+        conditions.append(
+            "(UPPER(TRIM(j.sku))=UPPER(TRIM(?)) OR EXISTS ("
+            "SELECT 1 FROM jo_lines jl0 WHERE jl0.jo_id=j.id AND UPPER(TRIM(jl0.sku))=UPPER(TRIM(?))"
+            "))"
+        )
+        params.extend([sku_f, sku_f])
+    vendor_f = str(vendor or "").strip()
+    if vendor_f:
+        conditions.append("IFNULL(j.vendor_name,'') LIKE ? COLLATE NOCASE")
+        params.append(f"%{vendor_f}%")
+    q_f = str(q or "").strip()
+    if q_f:
+        like = f"%{q_f}%"
+        conditions.append(
+            "("
+            "j.jo_number LIKE ? COLLATE NOCASE OR j.so_number LIKE ? COLLATE NOCASE "
+            "OR j.sku LIKE ? COLLATE NOCASE OR IFNULL(j.sku_name,'') LIKE ? COLLATE NOCASE "
+            "OR IFNULL(j.vendor_name,'') LIKE ? COLLATE NOCASE OR EXISTS ("
+            "SELECT 1 FROM jo_lines jlq WHERE jlq.jo_id=j.id AND ("
+            "jlq.sku LIKE ? COLLATE NOCASE OR IFNULL(jlq.sku_name,'') LIKE ? COLLATE NOCASE"
+            ")))"
+        )
+        params.extend([like, like, like, like, like, like, like])
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    sql = f"SELECT * FROM job_orders {where} ORDER BY id DESC"
+    sql = f"SELECT j.* FROM job_orders j {where} ORDER BY j.id DESC"
     if limit is not None and int(limit) > 0:
         sql += " LIMIT ? OFFSET ?"
         params.extend([int(limit), max(0, int(offset or 0))])
@@ -1480,6 +1519,8 @@ def list_jos(status=None, so_number=None, process=None, *, light: bool = False, 
     issued_map: dict[int, int] = {}
     received_map: dict[int, int] = {}
     rejected_map: dict[int, int] = {}
+    header_rec: dict[int, int] = {}
+    header_iss: dict[int, int] = {}
     if line_ids:
         lp = ",".join("?" * len(line_ids))
         for lid, qty in conn.execute(
@@ -1500,6 +1541,27 @@ def list_jos(status=None, so_number=None, process=None, *, light: bool = False, 
             line_ids,
         ):
             rejected_map[int(lid)] = int(qty)
+    for jid, qty in conn.execute(
+        f"SELECT jo_id, COALESCE(SUM(received_qty),0) FROM jo_piece_receipts "
+        f"WHERE jo_id IN ({placeholders}) GROUP BY jo_id",
+        jo_ids,
+    ):
+        header_rec[int(jid)] = int(qty)
+    for jid, qty in conn.execute(
+        f"SELECT jo_id, COALESCE(SUM(issued_qty),0) FROM jo_piece_issues "
+        f"WHERE jo_id IN ({placeholders}) GROUP BY jo_id",
+        jo_ids,
+    ):
+        header_iss[int(jid)] = int(qty)
+
+    # Allocate JO-level (null line_id) receipts onto lines so balance is correct
+    # for legacy receives and list UI (same algorithm as Cutting Report).
+    try:
+        from ..services.cutting_reports import _allocate_header_receipts
+        received_map = _allocate_header_receipts(received_map, header_rec, lines_by_jo)
+        issued_map = _allocate_header_receipts(issued_map, header_iss, lines_by_jo)
+    except Exception:
+        _log.exception("allocate header receipts for JO list failed")
 
     for jid, lines in lines_by_jo.items():
         for ln in lines:
@@ -1508,6 +1570,16 @@ def list_jos(status=None, so_number=None, process=None, *, light: bool = False, 
             ln["received_qty"] = received_map.get(lid, 0)
             ln["rejected_qty"] = rejected_map.get(lid, 0)
             ln["balance_qty"] = int(ln.get("planned_qty") or 0) - int(ln["received_qty"])
+        # Keep header qty fields aligned with line sums when lines exist
+        if lines:
+            jo_row = next((j for j in result if int(j["id"]) == jid), None)
+            if jo_row is not None:
+                sum_planned = sum(int(l.get("planned_qty") or 0) for l in lines)
+                sum_rec = sum(int(l.get("received_qty") or 0) for l in lines)
+                if sum_planned > 0:
+                    jo_row["planned_qty"] = sum_planned
+                jo_row["received_qty"] = sum_rec
+                jo_row["balance_qty"] = sum_planned - sum_rec
 
     fabric_issues_by_jo: dict[int, list] = {jid: [] for jid in jo_ids}
     fabric_returns_by_jo: dict[int, list] = {jid: [] for jid in jo_ids}
@@ -1625,21 +1697,61 @@ def list_jos(status=None, so_number=None, process=None, *, light: bool = False, 
 
 def _get_jo_lines_with_stats(conn, jo_id: int) -> list:
     lines = [dict(l) for l in conn.execute("SELECT * FROM jo_lines WHERE jo_id=?", (jo_id,)).fetchall()]
+    if not lines:
+        return lines
+    line_ids = [int(ln["id"]) for ln in lines]
+    lp = ",".join("?" * len(line_ids))
+    issued_map = {
+        int(lid): int(qty)
+        for lid, qty in conn.execute(
+            f"SELECT jo_line_id, COALESCE(SUM(issued_qty),0) FROM jo_piece_issues "
+            f"WHERE jo_line_id IN ({lp}) GROUP BY jo_line_id",
+            line_ids,
+        )
+    }
+    received_map = {
+        int(lid): int(qty)
+        for lid, qty in conn.execute(
+            f"SELECT jo_line_id, COALESCE(SUM(received_qty),0) FROM jo_piece_receipts "
+            f"WHERE jo_line_id IN ({lp}) GROUP BY jo_line_id",
+            line_ids,
+        )
+    }
+    rejected_map = {
+        int(lid): int(qty)
+        for lid, qty in conn.execute(
+            f"SELECT jo_line_id, COALESCE(SUM(rejected_qty),0) FROM jo_piece_receipts "
+            f"WHERE jo_line_id IN ({lp}) GROUP BY jo_line_id",
+            line_ids,
+        )
+    }
+    header_rec = int(
+        conn.execute(
+            "SELECT COALESCE(SUM(received_qty),0) FROM jo_piece_receipts WHERE jo_id=?",
+            (jo_id,),
+        ).fetchone()[0]
+        or 0
+    )
+    header_iss = int(
+        conn.execute(
+            "SELECT COALESCE(SUM(issued_qty),0) FROM jo_piece_issues WHERE jo_id=?",
+            (jo_id,),
+        ).fetchone()[0]
+        or 0
+    )
+    try:
+        from ..services.cutting_reports import _allocate_header_receipts
+
+        received_map = _allocate_header_receipts(received_map, {int(jo_id): header_rec}, {int(jo_id): lines})
+        issued_map = _allocate_header_receipts(issued_map, {int(jo_id): header_iss}, {int(jo_id): lines})
+    except Exception:
+        pass
     for ln in lines:
-        # Get issue/receipt totals per line
-        issued = conn.execute(
-            "SELECT COALESCE(SUM(issued_qty),0) FROM jo_piece_issues WHERE jo_line_id=?", (ln['id'],)
-        ).fetchone()[0]
-        received = conn.execute(
-            "SELECT COALESCE(SUM(received_qty),0) FROM jo_piece_receipts WHERE jo_line_id=?", (ln['id'],)
-        ).fetchone()[0]
-        rejected = conn.execute(
-            "SELECT COALESCE(SUM(rejected_qty),0) FROM jo_piece_receipts WHERE jo_line_id=?", (ln['id'],)
-        ).fetchone()[0]
-        ln['issued_qty'] = int(issued)
-        ln['received_qty'] = int(received)
-        ln['rejected_qty'] = int(rejected)
-        ln['balance_qty'] = int(ln.get('planned_qty', 0)) - int(received)
+        lid = int(ln["id"])
+        ln["issued_qty"] = issued_map.get(lid, 0)
+        ln["received_qty"] = received_map.get(lid, 0)
+        ln["rejected_qty"] = rejected_map.get(lid, 0)
+        ln["balance_qty"] = int(ln.get("planned_qty", 0)) - int(ln["received_qty"])
     return lines
 
 
@@ -1651,6 +1763,13 @@ def get_jo(joid: int):
         return None
     jo = dict(row)
     jo['lines'] = _get_jo_lines_with_stats(conn, jo['id'])
+    if jo['lines']:
+        sum_planned = sum(int(l.get('planned_qty') or 0) for l in jo['lines'])
+        sum_rec = sum(int(l.get('received_qty') or 0) for l in jo['lines'])
+        if sum_planned > 0:
+            jo['planned_qty'] = sum_planned
+        jo['received_qty'] = sum_rec
+        jo['balance_qty'] = sum_planned - sum_rec
     jo['fabric_issues'] = [dict(l) for l in conn.execute("SELECT * FROM jo_fabric_issues WHERE jo_id=?", (jo['id'],)).fetchall()]
     jo['fabric_returns'] = [dict(l) for l in conn.execute("SELECT * FROM jo_fabric_returns WHERE jo_id=?", (jo['id'],)).fetchall()]
     jo['piece_issues'] = [dict(l) for l in conn.execute("SELECT * FROM jo_piece_issues WHERE jo_id=?", (jo['id'],)).fetchall()]

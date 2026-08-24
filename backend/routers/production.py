@@ -739,8 +739,15 @@ def get_jos(
     light: Optional[int] = 0,
     limit: Optional[int] = None,
     offset: Optional[int] = 0,
+    q: Optional[str] = None,
+    sku: Optional[str] = None,
+    vendor: Optional[str] = None,
 ):
-    """List job orders. ``light=1`` omits fabric/cost child rows for faster list loads."""
+    """List job orders. ``light=1`` omits fabric/cost child rows for faster list loads.
+
+    Pass ``q`` / ``sku`` / ``vendor`` to search the full JO set (including line SKUs), not only
+    the first page of unfiltered rows.
+    """
     return list_jos(
         status,
         so_number,
@@ -748,6 +755,9 @@ def get_jos(
         light=bool(light),
         limit=limit,
         offset=offset or 0,
+        q=q,
+        sku=sku,
+        vendor=vendor,
     )
 
 @router.get("/path-commitment")
@@ -900,10 +910,27 @@ def post_jo(body: JOIn):
         )
     sku = data.get('sku','')
     planned_qty = int(data.get('planned_qty') or 0)
-    if process != 'Cutting' and so_number and sku and planned_qty:
-        v = validate_jo_creation(process, so_number, sku, planned_qty)
-        if not v['ok']:
-            raise HTTPException(400, v['message'])
+    active_lines = [
+        ln for ln in (data.get("lines") or [])
+        if int(ln.get("planned_qty") or 0) > 0 and str(ln.get("sku") or "").strip()
+    ]
+    # Validate each size/SKU against its own Ready / feeder stock — never compare
+    # the summed multi-line planned qty to a single (header) SKU's availability.
+    if process != 'Cutting' and so_number:
+        if active_lines:
+            for ln in active_lines:
+                v = validate_jo_creation(
+                    process,
+                    so_number,
+                    str(ln.get("sku") or "").strip(),
+                    int(ln.get("planned_qty") or 0),
+                )
+                if not v['ok']:
+                    raise HTTPException(400, v['message'])
+        elif sku and planned_qty:
+            v = validate_jo_creation(process, so_number, sku, planned_qty)
+            if not v['ok']:
+                raise HTTPException(400, v['message'])
     fabric_code = (data.get("fabric_code") or "").strip()
     fabric_qty = float(data.get("fabric_qty") or 0)
     # Manual SO references skip MRP commitment hard-gate (no system SO for commitment key).
