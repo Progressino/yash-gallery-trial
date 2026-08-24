@@ -408,9 +408,22 @@ jobs:
               joined = " > ".join(names).lower()
               if "kaj" in joined:
                   kaj_checked += 1
-                  if mode == "inhouse" and nxt.lower() in ("finishing", "finish"):
+                  # Only fail when Kaj is sequenced *after* Stitching but next skips to Finishing.
+                  # Styles like Cutting → Kaj → Stitching → Finishing correctly next to Finishing.
+                  names_l = [str(n).lower() for n in names]
+                  try:
+                      stitch_i = next(i for i, n in enumerate(names_l) if "stitch" in n)
+                      kaj_i = next(i for i, n in enumerate(names_l) if "kaj" in n)
+                  except StopIteration:
+                      stitch_i = kaj_i = -1
+                  if (
+                      mode == "inhouse"
+                      and stitch_i >= 0
+                      and kaj_i > stitch_i
+                      and nxt.lower() in ("finishing", "finish")
+                  ):
                       raise SystemExit(
-                          f"{sku} in-house Stitching next_process={nxt} but Style routing has Kaj: {names}"
+                          f"{sku} in-house Stitching next_process={nxt} but Style routing has Kaj after Stitching: {names}"
                       )
           ready = s.get(f"{base}/api/production/ready-to-process/Cutting", timeout=120)
           print("ready_to_cutting", ready.status_code, (ready.text or "")[:180])
