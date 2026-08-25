@@ -1464,17 +1464,29 @@ def update_responsibility(rid: int, data: dict):
             payload["linked_to_employee_id"] = int(v) if v not in (None, "", 0, "0") else None
         except (TypeError, ValueError):
             payload["linked_to_employee_id"] = None
-    # Validate backup whenever any backup field or assignee changes
-    if any(
+    # Backup is mandatory on create and when assignee/backup fields change.
+    # Sending an unchanged employee_id (common on full-form edits) must not
+    # force backup validation on legacy rows that predate the backup requirement.
+    backup_touched = any(
         k in payload
         for k in (
             "backup_employee_id",
             "backup_allocation_value",
             "backup_allocation_unit",
-            "employee_id",
         )
-    ):
+    )
+    emp_changed = False
+    row0 = None
+    if "employee_id" in payload or backup_touched:
         row0 = conn.execute("SELECT * FROM responsibilities WHERE id=?", (rid,)).fetchone()
+        if row0 and "employee_id" in payload:
+            try:
+                emp_changed = int(payload["employee_id"]) != int(row0["employee_id"])
+            except (TypeError, ValueError):
+                emp_changed = True
+    if backup_touched or emp_changed:
+        if row0 is None:
+            row0 = conn.execute("SELECT * FROM responsibilities WHERE id=?", (rid,)).fetchone()
         if row0:
             merged = dict(row0)
             merged.update(payload)

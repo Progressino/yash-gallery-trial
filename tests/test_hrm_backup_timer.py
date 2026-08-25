@@ -268,3 +268,38 @@ def test_cancel_also_self_forbidden(hrm, monkeypatch):
     assert log_id
     assert approve_task_log(log_id, linked_employee_id=a, action="Cancelled") == "self_forbidden"
     assert approve_task_log(log_id, linked_employee_id=boss, action="Cancelled") is True
+
+
+def test_update_legacy_without_backup_allows_schedule_edit(hrm):
+    """PATCH with unchanged employee_id must not force backup on pre-backup rows."""
+    a, b, _ = _two_emps(hrm)
+    rid = create_responsibility(
+        {
+            "employee_id": a,
+            "title": "Legacy no backup",
+            "frequency": "Daily",
+            "require_backup": False,
+        }
+    )
+    hrm.update_responsibility(
+        rid,
+        {
+            "employee_id": a,
+            "title": "Legacy no backup",
+            "frequency": "Weekly",
+            "schedule_weekday": "Wednesday",
+            "mandatory": True,
+            "priority": "High",
+            "time_period": "Morning",
+            "linked_to_employee_id": b,
+        },
+    )
+    row = hrm.list_responsibilities(employee_id=a)[0]
+    assert row["frequency"] == "Weekly"
+    assert row["schedule_weekday"] == "Wednesday"
+    assert bool(row["mandatory"]) is True
+    # Changing assignee without backup still blocked
+    import pytest
+
+    with pytest.raises(ValueError, match="Backup"):
+        hrm.update_responsibility(rid, {"employee_id": b})

@@ -77,6 +77,7 @@ def main() -> int:
             "Anchor month",
             "Day of month",
             "Select a weekday for Weekly",
+            "Backup person",
         ):
             if needle not in hrm_js:
                 raise SystemExit(f"HRM bundle missing edit UI string: {needle}")
@@ -105,16 +106,29 @@ def main() -> int:
         "schedule_month_day": int(row.get("schedule_month_day") or 0),
         "schedule_month": int(row.get("schedule_month") or 0),
         "time_period": row.get("time_period") or "",
+        "backup_employee_id": row.get("backup_employee_id"),
+        "backup_allocation_value": row.get("backup_allocation_value"),
+        "backup_allocation_unit": row.get("backup_allocation_unit") or "days",
     }
 
     emps = s.get(f"{BASE}/api/hrm/employees", timeout=30)
     emps.raise_for_status()
     emp_list = emps.json() if isinstance(emps.json(), list) else []
     link_id = None
+    backup_id = None
     for e in emp_list:
-        if int(e["id"]) != int(original["employee_id"] or 0):
-            link_id = int(e["id"])
-            break
+        eid = int(e["id"])
+        if eid != int(original["employee_id"] or 0):
+            if link_id is None:
+                link_id = eid
+            if backup_id is None:
+                backup_id = eid
+            if link_id and backup_id and link_id != backup_id:
+                break
+            if link_id and backup_id is None:
+                continue
+    if backup_id is None:
+        backup_id = link_id
 
     probe_payload = {
         **original,
@@ -127,6 +141,19 @@ def main() -> int:
         "time_period": "Morning",
         "linked_to_employee_id": link_id,
     }
+    # Prefer keeping existing backup; otherwise assign one so assignee change / backup
+    # validation paths stay green for legacy rows.
+    if original.get("backup_employee_id"):
+        probe_payload["backup_employee_id"] = int(original["backup_employee_id"])
+        probe_payload["backup_allocation_value"] = float(
+            original.get("backup_allocation_value") or 1
+        )
+        probe_payload["backup_allocation_unit"] = original.get("backup_allocation_unit") or "days"
+    elif backup_id:
+        probe_payload["backup_employee_id"] = backup_id
+        probe_payload["backup_allocation_value"] = 1
+        probe_payload["backup_allocation_unit"] = "days"
+
     patch = s.patch(f"{BASE}/api/hrm/responsibilities/{rid}", json=probe_payload, timeout=60)
     print("PATCH", patch.status_code, (patch.text or "")[:200])
     patch.raise_for_status()
@@ -146,18 +173,34 @@ def main() -> int:
             or int(updated.get("linked_to_employee_id") or 0) == int(link_id)
         ),
     }
+    if probe_payload.get("backup_employee_id"):
+        checks["backup"] = int(updated.get("backup_employee_id") or 0) == int(
+            probe_payload["backup_employee_id"]
+        )
     print("VERIFY", json.dumps(checks), "linked", updated.get("linked_to_employee_id"), updated.get("linked_to_employee_name"))
     if not all(checks.values()):
         # restore then fail
-        s.patch(f"{BASE}/api/hrm/responsibilities/{rid}", json=original, timeout=60)
+        s.patch(f"{BASE}/api/hrm/responsibilities/{rid}", json=_restore_payload(original), timeout=60)
         raise SystemExit(f"Edit fields did not persist: {checks}")
 
     # Restore original so we don't leave probe mutations
-    restore = s.patch(f"{BASE}/api/hrm/responsibilities/{rid}", json=original, timeout=60)
+    restore = s.patch(
+        f"{BASE}/api/hrm/responsibilities/{rid}", json=_restore_payload(original), timeout=60
+    )
     print("RESTORE", restore.status_code)
     restore.raise_for_status()
     print("HRM_EDIT_PROBE_OK", json.dumps({"id": rid, "checks": checks}))
     return 0
+
+
+def _restore_payload(original: dict) -> dict:
+    """Omit null backup fields so legacy rows without backup can be restored."""
+    data = dict(original)
+    if not data.get("backup_employee_id"):
+        data.pop("backup_employee_id", None)
+        data.pop("backup_allocation_value", None)
+        data.pop("backup_allocation_unit", None)
+    return data
 
 
 if __name__ == "__main__":
