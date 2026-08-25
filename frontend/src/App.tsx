@@ -157,7 +157,10 @@ function ProtectedRoute() {
   const coverageEmpty = (c: Awaited<ReturnType<typeof getCoverage>>) =>
     !c.mtr && !c.sales && !c.myntra && !c.meesho && !c.flipkart && !c.snapdeal
 
-  const { isPending: isRestoring } = useQuery({
+  // Only show "Syncing" while this query is actually fetching — never when disabled
+  // (React Query v5 leaves disabled queries isPending=true, which stuck HRM on Syncing).
+  const sessionRestoreEnabled = authVerified && !isKarigar && !hrmOnly && !erpModuleRoute
+  const { isFetching: isSessionRestoring } = useQuery({
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
       try {
@@ -228,11 +231,12 @@ function ProtectedRoute() {
       }
       return true
     },
-    enabled: authVerified && !isKarigar && !hrmOnly && !erpModuleRoute,
+    enabled: sessionRestoreEnabled,
     retry: 1,
     retryDelay: 5_000,
     staleTime: Infinity,
   })
+  const isRestoring = sessionRestoreEnabled && isSessionRestoring
 
   const pollCoverage = authVerified && !isKarigar && !hrmOnly && !erpModuleRoute
   const dataStillLoading = useSession(s => {
@@ -276,7 +280,7 @@ function ProtectedRoute() {
           </button>
         </div>
       )}
-      {isRestoring && !isKarigar && !invUploadRunning && !erpModuleRoute && (
+      {isRestoring && !isKarigar && !hrmOnly && !invUploadRunning && !erpModuleRoute && (
         <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
           <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -285,7 +289,7 @@ function ProtectedRoute() {
           Syncing your data…
         </div>
       )}
-      {!isRestoring && dataStillLoading && !isKarigar && !invUploadRunning && !erpModuleRoute && (
+      {!isRestoring && dataStillLoading && !isKarigar && !hrmOnly && !invUploadRunning && !erpModuleRoute && (
         <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
           <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />

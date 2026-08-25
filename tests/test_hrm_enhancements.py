@@ -213,7 +213,7 @@ def test_responsibility_timer_dwr_and_linked_person(hrm):
     items = snap["worked_on"] + snap["not_worked"] + snap["other"]
     i1 = next(i for i in items if i["responsibility_id"] == r1)
     i2 = next(i for i in items if i["responsibility_id"] == r2)
-    assert i1["timer_status"] == "In Progress"
+    assert i1["timer_status"] == "Active"
     assert i1["started_at"]
     assert i1["linked_to_employee_name"] == "Supervisor S"
     assert i2["timer_status"] == "Not Started"

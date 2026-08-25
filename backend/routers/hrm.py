@@ -63,7 +63,10 @@ from ..db.hrm_db import (
     set_manual_task_duration,
     start_responsibility_timer,
     end_responsibility_timer,
+    pause_responsibility_timer,
+    resume_responsibility_timer,
     set_responsibility_manual_time,
+    get_responsibility_timer_detail,
     FREQUENCIES,
     PRIORITIES,
     TIME_PERIODS,
@@ -205,6 +208,9 @@ class ResponsibilityIn(BaseModel):
     schedule_month: Optional[int] = 0
     time_period: Optional[str] = ""
     linked_to_employee_id: Optional[int] = None
+    backup_employee_id: int
+    backup_allocation_value: float
+    backup_allocation_unit: Optional[str] = "days"
 
 
 class ResponsibilityUpdate(BaseModel):
@@ -222,6 +228,9 @@ class ResponsibilityUpdate(BaseModel):
     schedule_month: Optional[int] = None
     time_period: Optional[str] = None
     linked_to_employee_id: Optional[int] = None
+    backup_employee_id: Optional[int] = None
+    backup_allocation_value: Optional[float] = None
+    backup_allocation_unit: Optional[str] = None
 
 
 class TaskApproveIn(BaseModel):
@@ -347,6 +356,10 @@ class OneTimeTaskIn(BaseModel):
     due_date: Optional[str] = ""
     assigned_by: Optional[str] = ""
     priority: Optional[str] = "Medium"
+    linked_to_employee_id: Optional[int] = None
+    backup_employee_id: int
+    backup_allocation_value: float
+    backup_allocation_unit: Optional[str] = "days"
 
 
 class OneTimeTaskUpdate(BaseModel):
@@ -358,6 +371,10 @@ class OneTimeTaskUpdate(BaseModel):
     priority: Optional[str] = None
     duration_minutes: Optional[int] = None
     manual_duration_minutes: Optional[int] = None
+    linked_to_employee_id: Optional[int] = None
+    backup_employee_id: Optional[int] = None
+    backup_allocation_value: Optional[float] = None
+    backup_allocation_unit: Optional[str] = None
 
 
 class OneTimeTaskNotesIn(BaseModel):
@@ -564,9 +581,15 @@ def get_responsibilities(
 def post_responsibility(body: ResponsibilityIn, request: Request):
     scope = _scope_from_request(request)
     assert_employee_in_scope(scope, body.employee_id)
+    assert_employee_in_scope(scope, body.backup_employee_id)
     if scope.is_employee and scope.employee_id != body.employee_id:
         raise HTTPException(403, "Cannot assign responsibilities for other employees")
+    if int(body.backup_employee_id) == int(body.employee_id):
+        raise HTTPException(400, "Backup person must be different from the assigned employee")
+    if float(body.backup_allocation_value or 0) <= 0:
+        raise HTTPException(400, "Backup allocation duration must be greater than zero")
     data = body.model_dump()
+    data["require_backup"] = True
     if not (data.get("added_by") or "").strip():
         _, name = _recorder_from_request(request)
         data["added_by"] = name
@@ -662,6 +685,13 @@ def _timer_http_result(ok):
         raise HTTPException(400, "End time cannot be earlier than start time")
     if ok == "invalid_time":
         raise HTTPException(400, "Invalid time. Use YYYY-MM-DD HH:MM")
+    if ok == "already_active":
+        raise HTTPException(
+            409,
+            "You already have an Active timer on another responsibility — pause or end it first",
+        )
+    if ok == "paused":
+        raise HTTPException(400, "Timer is paused — use Resume")
     raise HTTPException(400, str(ok))
 
 
@@ -669,11 +699,43 @@ def _timer_http_result(ok):
 def post_start_responsibility_timer(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
     scope = _scope_from_request(request)
     assert_responsibility_in_scope(scope, responsibility_id)
+    _, name = _recorder_from_request(request)
     return _timer_http_result(
         start_responsibility_timer(
             responsibility_id,
             body.log_date,
             allow_override=scope.can_edit_assignments,
+            actor=name,
+        )
+    )
+
+
+@router.post("/tasks/{responsibility_id}/pause")
+def post_pause_responsibility_timer(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
+    scope = _scope_from_request(request)
+    assert_responsibility_in_scope(scope, responsibility_id)
+    _, name = _recorder_from_request(request)
+    return _timer_http_result(
+        pause_responsibility_timer(
+            responsibility_id,
+            body.log_date,
+            allow_override=scope.can_edit_assignments,
+            actor=name,
+        )
+    )
+
+
+@router.post("/tasks/{responsibility_id}/resume")
+def post_resume_responsibility_timer(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
+    scope = _scope_from_request(request)
+    assert_responsibility_in_scope(scope, responsibility_id)
+    _, name = _recorder_from_request(request)
+    return _timer_http_result(
+        resume_responsibility_timer(
+            responsibility_id,
+            body.log_date,
+            allow_override=scope.can_edit_assignments,
+            actor=name,
         )
     )
 
@@ -682,19 +744,42 @@ def post_start_responsibility_timer(responsibility_id: int, body: Responsibility
 def post_end_responsibility_timer(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
     scope = _scope_from_request(request)
     assert_responsibility_in_scope(scope, responsibility_id)
+    _, name = _recorder_from_request(request)
     return _timer_http_result(
         end_responsibility_timer(
             responsibility_id,
             body.log_date,
             allow_override=scope.can_edit_assignments,
+            actor=name,
         )
     )
+
+
+@router.get("/tasks/{responsibility_id}/timer")
+def get_timer_detail(responsibility_id: int, log_date: str, request: Request):
+    scope = _scope_from_request(request)
+    assert_responsibility_in_scope(scope, responsibility_id)
+    detail = get_responsibility_timer_detail(responsibility_id, log_date)
+    if not detail:
+        return {
+            "timer_status": "Not Started",
+            "started_at": "",
+            "ended_at": "",
+            "paused_at": "",
+            "active_seconds": 0,
+            "paused_seconds": 0,
+            "timer_events": [],
+            "daily_time": [],
+        }
+    return detail
 
 
 @router.post("/tasks/{responsibility_id}/manual-time")
 def post_responsibility_manual_time(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
     scope = _scope_from_request(request)
     assert_responsibility_in_scope(scope, responsibility_id)
+    # Employees may only adjust their own window times; HOD/Admin override allowed
+    _, name = _recorder_from_request(request)
     return _timer_http_result(
         set_responsibility_manual_time(
             responsibility_id,
@@ -702,6 +787,7 @@ def post_responsibility_manual_time(responsibility_id: int, body: Responsibility
             body.started_at,
             body.ended_at,
             allow_override=scope.can_edit_assignments,
+            actor=name,
         )
     )
 
@@ -721,6 +807,8 @@ def post_approve_task_log(log_id: int, body: TaskApproveIn, request: Request):
     )
     if ok is True:
         return {"ok": True}
+    if ok == "self_forbidden":
+        raise HTTPException(403, "You cannot approve or cancel your own responsibility")
     if ok == "forbidden":
         raise HTTPException(403, "Only the Linked To person (or HOD/Admin) can approve")
     if ok == "not_pending":
@@ -1230,13 +1318,22 @@ def get_one_time_tasks(
 def post_one_time_task(body: OneTimeTaskIn, request: Request):
     scope = _scope_from_request(request)
     assert_employee_in_scope(scope, body.employee_id)
+    assert_employee_in_scope(scope, body.backup_employee_id)
     if scope.is_employee:
         raise HTTPException(403, "Employees cannot assign one-time tasks")
+    if int(body.backup_employee_id) == int(body.employee_id):
+        raise HTTPException(400, "Backup person must be different from the assigned employee")
+    if float(body.backup_allocation_value or 0) <= 0:
+        raise HTTPException(400, "Backup allocation duration must be greater than zero")
     data = body.model_dump()
+    data["require_backup"] = True
     if not (data.get("assigned_by") or "").strip():
         _, name = _recorder_from_request(request)
         data["assigned_by"] = name
-    tid = create_one_time_task(data)
+    try:
+        tid = create_one_time_task(data)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     return {"ok": True, "id": tid}
 
 

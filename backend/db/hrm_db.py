@@ -96,32 +96,164 @@ def _parse_clock(value: str | None) -> str:
     raise ValueError("Invalid time. Use YYYY-MM-DD HH:MM")
 
 
-def timer_status(started_at: str | None, ended_at: str | None) -> str:
+BACKUP_ALLOCATION_UNITS = frozenset({"hours", "days"})
+
+
+def timer_status(
+    started_at: str | None,
+    ended_at: str | None,
+    paused_at: str | None = None,
+) -> str:
     st = str(started_at or "").strip()
     en = str(ended_at or "").strip()
+    pa = str(paused_at or "").strip()
     if st and en:
         return "Completed"
+    if st and pa:
+        return "Paused"
     if st:
-        return "In Progress"
+        return "Active"
     return "Not Started"
 
 
-def _timer_payload(log: dict | None) -> dict:
+def _seconds_between(start: str, end: str) -> int:
+    if not start or not end:
+        return 0
+    try:
+        fmt = "%Y-%m-%d %H:%M:%S"
+        a = datetime.strptime(str(start)[:19], fmt)
+        b = datetime.strptime(str(end)[:19], fmt)
+        return max(0, int((b - a).total_seconds()))
+    except ValueError:
+        return 0
+
+
+def _parse_backup_fields(data: dict, assignee_id: int, *, require: bool = True) -> tuple[int | None, float, str]:
+    """Return (backup_employee_id, value, unit). Raises ValueError when require and missing/invalid."""
+    raw = data.get("backup_employee_id")
+    try:
+        backup_id = int(raw) if raw not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        backup_id = None
+    try:
+        value = float(data.get("backup_allocation_value") or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    unit = str(data.get("backup_allocation_unit") or "days").strip().lower()
+    if unit in ("hour", "hr", "hrs"):
+        unit = "hours"
+    if unit in ("day", "d"):
+        unit = "days"
+    if unit not in BACKUP_ALLOCATION_UNITS:
+        unit = "days"
+    if require:
+        if not backup_id:
+            raise ValueError("Backup person is required")
+        if int(backup_id) == int(assignee_id):
+            raise ValueError("Backup person must be different from the assigned employee")
+        if value <= 0:
+            raise ValueError("Backup allocation duration must be greater than zero")
+    return backup_id, value, unit
+
+
+def _timer_payload(log: dict | None, *, events: list | None = None) -> dict:
     log = log or {}
     started = str(log.get("started_at") or "").strip()
     ended = str(log.get("ended_at") or "").strip()
+    paused = str(log.get("paused_at") or "").strip()
+    try:
+        active_sec = int(log.get("active_seconds") or 0)
+    except (TypeError, ValueError):
+        active_sec = 0
+    try:
+        paused_sec = int(log.get("paused_seconds") or 0)
+    except (TypeError, ValueError):
+        paused_sec = 0
+    ev = list(events or [])
+    now = _now_iso()
+    if started and not ended:
+        if paused:
+            paused_sec = paused_sec + _seconds_between(paused, now)
+        else:
+            seg = _last_active_segment_start(log, ev) if ev else started
+            active_sec = active_sec + _seconds_between(seg, now)
     try:
         mins = int(log.get("duration_minutes") or 0)
     except (TypeError, ValueError):
         mins = 0
-    if not mins and started and ended:
+    if started and not ended:
+        mins = active_sec // 60
+    elif not mins and active_sec:
+        mins = active_sec // 60
+    elif not mins and started and ended:
         mins = _duration_minutes(started, ended)
+    daily = _daily_active_breakdown(ev)
+    if started and not ended and not paused:
+        # include live open segment in daily breakdown
+        seg = _last_active_segment_start(log, ev) if ev else started
+        tmp: dict[str, int] = {d["date"]: d["active_seconds"] for d in daily}
+        _add_span_to_days(tmp, seg, now)
+        daily = [
+            {"date": d, "active_seconds": sec, "active_minutes": sec // 60}
+            for d, sec in sorted(tmp.items())
+        ]
     return {
         "started_at": started,
         "ended_at": ended,
+        "paused_at": paused,
         "duration_minutes": mins,
-        "timer_status": timer_status(started, ended),
+        "active_seconds": active_sec,
+        "paused_seconds": paused_sec,
+        "active_minutes": active_sec // 60,
+        "paused_minutes": paused_sec // 60,
+        "timer_status": timer_status(started, ended, paused),
+        "timer_events": ev,
+        "daily_time": daily,
     }
+
+
+def _daily_active_breakdown(events: list, live_extra_from_now: int | None = None) -> list[dict]:
+    """Build per-day active seconds from start/resume→pause/end segments."""
+    by_day: dict[str, int] = {}
+    open_at: str | None = None
+    for ev in events:
+        et = str(ev.get("event_type") or "")
+        at = str(ev.get("event_at") or "").strip()
+        if et in ("start", "resume"):
+            open_at = at
+        elif et in ("pause", "end") and open_at and at:
+            _add_span_to_days(by_day, open_at, at)
+            open_at = None
+    if open_at and live_extra_from_now is None:
+        _add_span_to_days(by_day, open_at, _now_iso())
+    rows = [
+        {"date": d, "active_seconds": sec, "active_minutes": sec // 60}
+        for d, sec in sorted(by_day.items())
+    ]
+    return rows
+
+
+def _add_span_to_days(by_day: dict[str, int], start: str, end: str) -> None:
+    try:
+        fmt = "%Y-%m-%d %H:%M:%S"
+        a = datetime.strptime(str(start)[:19], fmt)
+        b = datetime.strptime(str(end)[:19], fmt)
+    except ValueError:
+        return
+    if b <= a:
+        return
+    cur = a
+    while cur.date() < b.date():
+        day_end = datetime.combine(cur.date(), datetime.max.time()).replace(microsecond=0)
+        # use next midnight
+        next_mid = datetime.combine(cur.date() + timedelta(days=1), datetime.min.time())
+        sec = int((next_mid - cur).total_seconds())
+        key = cur.date().isoformat()
+        by_day[key] = by_day.get(key, 0) + max(0, sec)
+        cur = next_mid
+    sec = int((b - cur).total_seconds())
+    key = cur.date().isoformat()
+    by_day[key] = by_day.get(key, 0) + max(0, sec)
 
 
 def in_task_action_window(task_date: str, *, as_of: date | None = None) -> bool:
@@ -347,6 +479,17 @@ def init_db():
         "ALTER TABLE task_logs ADD COLUMN started_at TEXT DEFAULT ''",
         "ALTER TABLE task_logs ADD COLUMN ended_at TEXT DEFAULT ''",
         "ALTER TABLE task_logs ADD COLUMN duration_minutes INTEGER DEFAULT 0",
+        # Pause/resume + accumulated active/paused seconds
+        "ALTER TABLE task_logs ADD COLUMN paused_at TEXT DEFAULT ''",
+        "ALTER TABLE task_logs ADD COLUMN active_seconds INTEGER DEFAULT 0",
+        "ALTER TABLE task_logs ADD COLUMN paused_seconds INTEGER DEFAULT 0",
+        # Mandatory backup person + allocation duration on responsibilities / one-time tasks
+        "ALTER TABLE responsibilities ADD COLUMN backup_employee_id INTEGER",
+        "ALTER TABLE responsibilities ADD COLUMN backup_allocation_value REAL DEFAULT 0",
+        "ALTER TABLE responsibilities ADD COLUMN backup_allocation_unit TEXT DEFAULT 'days'",
+        "ALTER TABLE one_time_tasks ADD COLUMN backup_employee_id INTEGER",
+        "ALTER TABLE one_time_tasks ADD COLUMN backup_allocation_value REAL DEFAULT 0",
+        "ALTER TABLE one_time_tasks ADD COLUMN backup_allocation_unit TEXT DEFAULT 'days'",
     ):
         try:
             conn.execute(sql)
@@ -381,6 +524,20 @@ def init_db():
             created_at                  TEXT DEFAULT (datetime('now')),
             UNIQUE(original_responsibility_id, reassignment_date)
         );
+        CREATE TABLE IF NOT EXISTS task_timer_events (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_log_id         INTEGER NOT NULL REFERENCES task_logs(id),
+            responsibility_id   INTEGER NOT NULL,
+            employee_id         INTEGER NOT NULL,
+            log_date            TEXT NOT NULL,
+            event_type          TEXT NOT NULL,
+            event_at            TEXT NOT NULL,
+            actor               TEXT DEFAULT '',
+            notes               TEXT DEFAULT '',
+            created_at          TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_timer_events_log ON task_timer_events(task_log_id, id);
+        CREATE INDEX IF NOT EXISTS idx_timer_events_emp_date ON task_timer_events(employee_id, log_date);
         """
     )
 
@@ -1176,11 +1333,13 @@ def list_responsibilities(employee_id=None, department_id=None, active_only=True
     rows = conn.execute(
         f"""
         SELECT r.*, e.name as employee_name, d.name as department_name,
-               le.name as linked_to_employee_name
+               le.name as linked_to_employee_name,
+               be.name as backup_employee_name
         FROM responsibilities r
         LEFT JOIN employees e ON e.id=r.employee_id
         LEFT JOIN departments d ON d.id=r.department_id
         LEFT JOIN employees le ON le.id=r.linked_to_employee_id
+        LEFT JOIN employees be ON be.id=r.backup_employee_id
         {where}
         ORDER BY d.name, e.name, r.frequency, r.title
     """,
@@ -1232,13 +1391,22 @@ def create_responsibility(data: dict):
         linked_id = int(linked) if linked not in (None, "", 0, "0") else None
     except (TypeError, ValueError):
         linked_id = None
+    require_backup = bool(data.get("require_backup", False))
+    try:
+        backup_id, backup_val, backup_unit = _parse_backup_fields(
+            data, int(data["employee_id"]), require=require_backup
+        )
+    except ValueError:
+        conn.close()
+        raise
     conn.execute(
         """INSERT INTO responsibilities(
             employee_id,department_id,title,description,frequency,category,added_by,active,
             priority,mandatory,schedule_weekday,schedule_month_day,time_period,
-            schedule_month,linked_to_employee_id
+            schedule_month,linked_to_employee_id,
+            backup_employee_id,backup_allocation_value,backup_allocation_unit
         )
-        VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,?)""",
+        VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?)""",
         (
             data["employee_id"],
             dept_id,
@@ -1254,6 +1422,9 @@ def create_responsibility(data: dict):
             data.get("time_period", "") or "",
             schedule_month or 0,
             linked_id,
+            backup_id,
+            backup_val,
+            backup_unit,
         ),
     )
     conn.commit()
@@ -1280,6 +1451,9 @@ def update_responsibility(rid: int, data: dict):
         "department_id",
         "schedule_month",
         "linked_to_employee_id",
+        "backup_employee_id",
+        "backup_allocation_value",
+        "backup_allocation_unit",
     ]
     payload = {k: data[k] for k in data if k in allowed}
     if "mandatory" in payload:
@@ -1290,6 +1464,36 @@ def update_responsibility(rid: int, data: dict):
             payload["linked_to_employee_id"] = int(v) if v not in (None, "", 0, "0") else None
         except (TypeError, ValueError):
             payload["linked_to_employee_id"] = None
+    # Validate backup whenever any backup field or assignee changes
+    if any(
+        k in payload
+        for k in (
+            "backup_employee_id",
+            "backup_allocation_value",
+            "backup_allocation_unit",
+            "employee_id",
+        )
+    ):
+        row0 = conn.execute("SELECT * FROM responsibilities WHERE id=?", (rid,)).fetchone()
+        if row0:
+            merged = dict(row0)
+            merged.update(payload)
+            try:
+                bid, bval, bunit = _parse_backup_fields(
+                    merged, int(merged["employee_id"]), require=True
+                )
+            except ValueError:
+                conn.close()
+                raise
+            payload["backup_employee_id"] = bid
+            payload["backup_allocation_value"] = bval
+            payload["backup_allocation_unit"] = bunit
+    if "backup_employee_id" in payload:
+        v = payload["backup_employee_id"]
+        try:
+            payload["backup_employee_id"] = int(v) if v not in (None, "", 0, "0") else None
+        except (TypeError, ValueError):
+            payload["backup_employee_id"] = None
     if any(
         k in payload
         for k in (
@@ -1535,11 +1739,64 @@ def _ensure_task_log_row(conn, responsibility_id: int, employee_id: int, log_dat
     return dict(row)
 
 
+def _list_timer_events(conn, task_log_id: int) -> list[dict]:
+    rows = conn.execute(
+        """SELECT id, task_log_id, responsibility_id, employee_id, log_date,
+                  event_type, event_at, actor, notes
+           FROM task_timer_events WHERE task_log_id=? ORDER BY id""",
+        (task_log_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _append_timer_event(
+    conn,
+    *,
+    task_log_id: int,
+    responsibility_id: int,
+    employee_id: int,
+    log_date: str,
+    event_type: str,
+    event_at: str,
+    actor: str = "",
+) -> None:
+    conn.execute(
+        """INSERT INTO task_timer_events(
+            task_log_id, responsibility_id, employee_id, log_date, event_type, event_at, actor
+        ) VALUES(?,?,?,?,?,?,?)""",
+        (task_log_id, responsibility_id, employee_id, log_date, event_type, event_at, actor or ""),
+    )
+
+
+def _employee_has_active_timer(conn, employee_id: int, *, exclude_log_id: int | None = None) -> bool:
+    """True if this employee already has an Active (started, not ended, not paused) timer."""
+    q = """
+        SELECT id FROM task_logs
+        WHERE employee_id=?
+          AND IFNULL(started_at,'') != ''
+          AND IFNULL(ended_at,'') = ''
+          AND IFNULL(paused_at,'') = ''
+    """
+    params: list = [employee_id]
+    if exclude_log_id:
+        q += " AND id!=?"
+        params.append(exclude_log_id)
+    return conn.execute(q, params).fetchone() is not None
+
+
+def _last_active_segment_start(log: dict, events: list[dict]) -> str:
+    for ev in reversed(events):
+        if ev.get("event_type") in ("start", "resume"):
+            return str(ev.get("event_at") or "")
+    return str(log.get("started_at") or "")
+
+
 def start_responsibility_timer(
     responsibility_id: int,
     log_date: str,
     *,
     allow_override: bool = False,
+    actor: str = "",
 ):
     """Record start time on the day's DWR row. Does not overwrite other responsibilities."""
     if not allow_override and not in_task_action_window(log_date):
@@ -1549,31 +1806,52 @@ def start_responsibility_timer(
     if not resp:
         conn.close()
         return "not_found"
-    row = _ensure_task_log_row(conn, responsibility_id, int(resp["employee_id"]), log_date)
+    emp_id = int(resp["employee_id"])
+    row = _ensure_task_log_row(conn, responsibility_id, emp_id, log_date)
     started = str(row.get("started_at") or "").strip()
     ended = str(row.get("ended_at") or "").strip()
+    paused = str(row.get("paused_at") or "").strip()
     if ended:
         conn.close()
         return "already_ended"
-    if started:
+    if started and not paused:
         conn.commit()
         conn.close()
-        return True
+        return True  # already Active — idempotent
+    if started and paused:
+        conn.close()
+        return "paused"  # must resume, not start again
+    if _employee_has_active_timer(conn, emp_id, exclude_log_id=int(row["id"])):
+        conn.close()
+        return "already_active"
     now = _now_iso()
     conn.execute(
-        "UPDATE task_logs SET started_at=? WHERE responsibility_id=? AND log_date=?",
+        """UPDATE task_logs SET started_at=?, paused_at='', active_seconds=0, paused_seconds=0,
+               duration_minutes=0
+           WHERE responsibility_id=? AND log_date=?""",
         (now, responsibility_id, log_date),
+    )
+    _append_timer_event(
+        conn,
+        task_log_id=int(row["id"]),
+        responsibility_id=responsibility_id,
+        employee_id=emp_id,
+        log_date=log_date,
+        event_type="start",
+        event_at=now,
+        actor=actor,
     )
     conn.commit()
     conn.close()
     return True
 
 
-def end_responsibility_timer(
+def pause_responsibility_timer(
     responsibility_id: int,
     log_date: str,
     *,
     allow_override: bool = False,
+    actor: str = "",
 ):
     if not allow_override and not in_task_action_window(log_date):
         return "window_closed"
@@ -1592,6 +1870,128 @@ def end_responsibility_timer(
     row = dict(row)
     started = str(row.get("started_at") or "").strip()
     ended = str(row.get("ended_at") or "").strip()
+    paused = str(row.get("paused_at") or "").strip()
+    if not started:
+        conn.close()
+        return "not_started"
+    if ended:
+        conn.close()
+        return "already_ended"
+    if paused:
+        conn.commit()
+        conn.close()
+        return True  # already paused
+    events = _list_timer_events(conn, int(row["id"]))
+    now = _now_iso()
+    seg = _last_active_segment_start(row, events)
+    add = _seconds_between(seg, now)
+    active = int(row.get("active_seconds") or 0) + add
+    conn.execute(
+        """UPDATE task_logs SET paused_at=?, active_seconds=?, duration_minutes=?
+           WHERE id=?""",
+        (now, active, active // 60, int(row["id"])),
+    )
+    _append_timer_event(
+        conn,
+        task_log_id=int(row["id"]),
+        responsibility_id=responsibility_id,
+        employee_id=int(resp["employee_id"]),
+        log_date=log_date,
+        event_type="pause",
+        event_at=now,
+        actor=actor,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def resume_responsibility_timer(
+    responsibility_id: int,
+    log_date: str,
+    *,
+    allow_override: bool = False,
+    actor: str = "",
+):
+    if not allow_override and not in_task_action_window(log_date):
+        return "window_closed"
+    conn = _connect()
+    resp = _responsibility_owner(conn, responsibility_id)
+    if not resp:
+        conn.close()
+        return "not_found"
+    emp_id = int(resp["employee_id"])
+    row = conn.execute(
+        "SELECT * FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        (responsibility_id, log_date),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return "not_started"
+    row = dict(row)
+    started = str(row.get("started_at") or "").strip()
+    ended = str(row.get("ended_at") or "").strip()
+    paused = str(row.get("paused_at") or "").strip()
+    if not started:
+        conn.close()
+        return "not_started"
+    if ended:
+        conn.close()
+        return "already_ended"
+    if not paused:
+        conn.commit()
+        conn.close()
+        return True  # already active
+    if _employee_has_active_timer(conn, emp_id, exclude_log_id=int(row["id"])):
+        conn.close()
+        return "already_active"
+    now = _now_iso()
+    add_pause = _seconds_between(paused, now)
+    paused_sec = int(row.get("paused_seconds") or 0) + add_pause
+    conn.execute(
+        """UPDATE task_logs SET paused_at='', paused_seconds=? WHERE id=?""",
+        (paused_sec, int(row["id"])),
+    )
+    _append_timer_event(
+        conn,
+        task_log_id=int(row["id"]),
+        responsibility_id=responsibility_id,
+        employee_id=emp_id,
+        log_date=log_date,
+        event_type="resume",
+        event_at=now,
+        actor=actor,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def end_responsibility_timer(
+    responsibility_id: int,
+    log_date: str,
+    *,
+    allow_override: bool = False,
+    actor: str = "",
+):
+    if not allow_override and not in_task_action_window(log_date):
+        return "window_closed"
+    conn = _connect()
+    resp = _responsibility_owner(conn, responsibility_id)
+    if not resp:
+        conn.close()
+        return "not_found"
+    row = conn.execute(
+        "SELECT * FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        (responsibility_id, log_date),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return "not_started"
+    row = dict(row)
+    started = str(row.get("started_at") or "").strip()
+    ended = str(row.get("ended_at") or "").strip()
+    paused = str(row.get("paused_at") or "").strip()
     if not started:
         conn.close()
         return "not_started"
@@ -1599,12 +1999,31 @@ def end_responsibility_timer(
         conn.commit()
         conn.close()
         return True
+    events = _list_timer_events(conn, int(row["id"]))
     now = _now_iso()
-    mins = _duration_minutes(started, now)
+    active = int(row.get("active_seconds") or 0)
+    paused_sec = int(row.get("paused_seconds") or 0)
+    if paused:
+        paused_sec += _seconds_between(paused, now)
+    else:
+        seg = _last_active_segment_start(row, events)
+        active += _seconds_between(seg, now)
+    mins = active // 60
     conn.execute(
-        """UPDATE task_logs SET ended_at=?, duration_minutes=?
-           WHERE responsibility_id=? AND log_date=?""",
-        (now, mins, responsibility_id, log_date),
+        """UPDATE task_logs SET ended_at=?, paused_at='', active_seconds=?, paused_seconds=?,
+               duration_minutes=?
+           WHERE id=?""",
+        (now, active, paused_sec, mins, int(row["id"])),
+    )
+    _append_timer_event(
+        conn,
+        task_log_id=int(row["id"]),
+        responsibility_id=responsibility_id,
+        employee_id=int(resp["employee_id"]),
+        log_date=log_date,
+        event_type="end",
+        event_at=now,
+        actor=actor,
     )
     conn.commit()
     conn.close()
@@ -1618,8 +2037,9 @@ def set_responsibility_manual_time(
     ended_at: str | None,
     *,
     allow_override: bool = False,
+    actor: str = "",
 ):
-    """Set or edit DWR start/end times. End cannot be earlier than start."""
+    """Set or edit DWR start/end times. End cannot be earlier than start. Clears pause state."""
     if not allow_override and not in_task_action_window(log_date):
         return "window_closed"
     try:
@@ -1638,16 +2058,64 @@ def set_responsibility_manual_time(
     if not resp:
         conn.close()
         return "not_found"
-    _ensure_task_log_row(conn, responsibility_id, int(resp["employee_id"]), log_date)
+    row = _ensure_task_log_row(conn, responsibility_id, int(resp["employee_id"]), log_date)
     mins = _duration_minutes(start, end) if start and end else 0
+    active = mins * 60
     conn.execute(
-        """UPDATE task_logs SET started_at=?, ended_at=?, duration_minutes=?
+        """UPDATE task_logs SET started_at=?, ended_at=?, paused_at='',
+               active_seconds=?, paused_seconds=0, duration_minutes=?
            WHERE responsibility_id=? AND log_date=?""",
-        (start, end, mins, responsibility_id, log_date),
+        (start, end, active, mins, responsibility_id, log_date),
     )
+    # Manual edit: replace event history with a clean start/(end) pair
+    conn.execute("DELETE FROM task_timer_events WHERE task_log_id=?", (int(row["id"]),))
+    if start:
+        _append_timer_event(
+            conn,
+            task_log_id=int(row["id"]),
+            responsibility_id=responsibility_id,
+            employee_id=int(resp["employee_id"]),
+            log_date=log_date,
+            event_type="start",
+            event_at=start,
+            actor=actor or "manual",
+        )
+    if end:
+        _append_timer_event(
+            conn,
+            task_log_id=int(row["id"]),
+            responsibility_id=responsibility_id,
+            employee_id=int(resp["employee_id"]),
+            log_date=log_date,
+            event_type="end",
+            event_at=end,
+            actor=actor or "manual",
+        )
     conn.commit()
     conn.close()
     return True
+
+
+def get_responsibility_timer_detail(responsibility_id: int, log_date: str) -> dict | None:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        (responsibility_id, log_date),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+    row = dict(row)
+    events = _list_timer_events(conn, int(row["id"]))
+    conn.close()
+    return {"task_log_id": row["id"], **_timer_payload(row, events=events)}
+
+
+def list_timer_events_for_log(task_log_id: int) -> list[dict]:
+    conn = _connect()
+    ev = _list_timer_events(conn, task_log_id)
+    conn.close()
+    return ev
 
 
 def approve_task_log(
@@ -1676,6 +2144,15 @@ def approve_task_log(
         conn.close()
         return False
     linked = row["linked_to_employee_id"] if "linked_to_employee_id" in row.keys() else None
+    assignee_id = int(row["employee_id"])
+    # Assigned employee cannot approve/cancel their own responsibility mark
+    if (
+        linked_employee_id is not None
+        and int(linked_employee_id) == assignee_id
+        and not allow_override
+    ):
+        conn.close()
+        return "self_forbidden"
     if linked and linked_employee_id is not None and int(linked) != int(linked_employee_id) and not allow_override:
         conn.close()
         return "forbidden"
@@ -2871,9 +3348,13 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         SELECT r.id, r.title, r.description, r.frequency, r.category,
                r.priority, r.mandatory, r.schedule_weekday, r.schedule_month_day, r.time_period,
                COALESCE(r.schedule_month, 0) as schedule_month,
-               r.linked_to_employee_id, le.name as linked_to_employee_name
+               r.linked_to_employee_id, le.name as linked_to_employee_name,
+               r.backup_employee_id, be.name as backup_employee_name,
+               COALESCE(r.backup_allocation_value, 0) as backup_allocation_value,
+               COALESCE(r.backup_allocation_unit, 'days') as backup_allocation_unit
         FROM responsibilities r
         LEFT JOIN employees le ON le.id=r.linked_to_employee_id
+        LEFT JOIN employees be ON be.id=r.backup_employee_id
         WHERE r.employee_id=? AND r.active=1
         ORDER BY
           CASE r.frequency
@@ -2899,7 +3380,10 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
                COALESCE(approved_by,'') as approved_by,
                COALESCE(started_at,'') as started_at,
                COALESCE(ended_at,'') as ended_at,
-               COALESCE(duration_minutes,0) as duration_minutes
+               COALESCE(paused_at,'') as paused_at,
+               COALESCE(duration_minutes,0) as duration_minutes,
+               COALESCE(active_seconds,0) as active_seconds,
+               COALESCE(paused_seconds,0) as paused_seconds
         FROM task_logs
         WHERE employee_id=? AND log_date=?
         """,
@@ -2950,6 +3434,13 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         """,
         (employee_id,),
     ).fetchall()
+
+    # Preload timer events while connection is open (conn closed before item build below).
+    timer_events_by_log: dict[int, list[dict]] = {}
+    for log in log_map.values():
+        lid = log.get("id")
+        if lid:
+            timer_events_by_log[int(lid)] = _list_timer_events(conn, int(lid))
     conn.close()
 
     worked_on: list[dict] = []
@@ -2994,6 +3485,8 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         status = (log or {}).get("status") or "Pending"
         re_out = reassign_out_map.get(rid)
         quality_marked = status not in ("Pending", "")
+        lid = int(log["id"]) if log and log.get("id") else None
+        events = timer_events_by_log.get(lid, []) if lid else []
         item = {
             "responsibility_id": rid,
             "task_log_id": (log or {}).get("id"),
@@ -3006,6 +3499,10 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             "time_period": rdict.get("time_period") or "",
             "linked_to_employee_id": rdict.get("linked_to_employee_id"),
             "linked_to_employee_name": rdict.get("linked_to_employee_name") or "",
+            "backup_employee_id": rdict.get("backup_employee_id"),
+            "backup_employee_name": rdict.get("backup_employee_name") or "",
+            "backup_allocation_value": float(rdict.get("backup_allocation_value") or 0),
+            "backup_allocation_unit": rdict.get("backup_allocation_unit") or "days",
             "approval_status": (log or {}).get("approval_status") or "",
             "status": status,
             "marked": quality_marked,
@@ -3017,7 +3514,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             "in_action_window": in_task_action_window(day),
             "reassigned_out": bool(re_out),
             "reassigned_to_name": (re_out or {}).get("assignee_name") or "",
-            **_timer_payload(log),
+            **_timer_payload(log, events=events),
         }
         # Original still holds master — if reassigned for the day, don't force pending scoreboard
         if re_out and not log:
@@ -3555,10 +4052,12 @@ def list_one_time_tasks(
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     rows = conn.execute(
         f"""
-        SELECT t.*, e.name as employee_name, d.name as department_name
+        SELECT t.*, e.name as employee_name, d.name as department_name,
+               be.name as backup_employee_name
         FROM one_time_tasks t
         LEFT JOIN employees e ON e.id=t.employee_id
         LEFT JOIN departments d ON d.id=t.department_id
+        LEFT JOIN employees be ON be.id=t.backup_employee_id
         {where}
         ORDER BY
             CASE t.status
@@ -3592,10 +4091,24 @@ def create_one_time_task(data: dict) -> int:
     priority = data.get("priority") or "Medium"
     if priority not in PRIORITIES:
         priority = "Medium"
+    require_backup = bool(data.get("require_backup", False))
+    try:
+        backup_id, backup_val, backup_unit = _parse_backup_fields(
+            data, int(data["employee_id"]), require=require_backup
+        )
+    except ValueError:
+        conn.close()
+        raise
+    linked = data.get("linked_to_employee_id")
+    try:
+        linked_id = int(linked) if linked not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        linked_id = None
     cur = conn.execute(
         """INSERT INTO one_time_tasks(
-            employee_id, department_id, title, description, due_date, assigned_by, status, active, priority
-        ) VALUES(?,?,?,?,?,?,?,1,?)""",
+            employee_id, department_id, title, description, due_date, assigned_by, status, active, priority,
+            linked_to_employee_id, backup_employee_id, backup_allocation_value, backup_allocation_unit
+        ) VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?)""",
         (
             data["employee_id"],
             dept_id,
@@ -3605,6 +4118,10 @@ def create_one_time_task(data: dict) -> int:
             data.get("assigned_by", ""),
             "Pending",
             priority,
+            linked_id,
+            backup_id,
+            backup_val,
+            backup_unit,
         ),
     )
     tid = int(cur.lastrowid)
@@ -3626,6 +4143,10 @@ def update_one_time_task(task_id: int, data: dict):
         "priority",
         "duration_minutes",
         "manual_duration_minutes",
+        "linked_to_employee_id",
+        "backup_employee_id",
+        "backup_allocation_value",
+        "backup_allocation_unit",
     ]
     payload = {k: data[k] for k in data if k in allowed}
     if "manual_duration_minutes" in payload and "duration_minutes" not in payload:
@@ -3633,6 +4154,29 @@ def update_one_time_task(task_id: int, data: dict):
             payload["duration_minutes"] = parse_duration_to_minutes(payload["manual_duration_minutes"])
         except ValueError:
             pass
+    if any(
+        k in payload
+        for k in (
+            "backup_employee_id",
+            "backup_allocation_value",
+            "backup_allocation_unit",
+            "employee_id",
+        )
+    ):
+        row0 = conn.execute("SELECT * FROM one_time_tasks WHERE id=?", (task_id,)).fetchone()
+        if row0:
+            merged = dict(row0)
+            merged.update(payload)
+            try:
+                bid, bval, bunit = _parse_backup_fields(
+                    merged, int(merged["employee_id"]), require=True
+                )
+            except ValueError:
+                conn.close()
+                raise
+            payload["backup_employee_id"] = bid
+            payload["backup_allocation_value"] = bval
+            payload["backup_allocation_unit"] = bunit
     sets = ", ".join(f"{k}=?" for k in payload)
     vals = list(payload.values())
     if sets:

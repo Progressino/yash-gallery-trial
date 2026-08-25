@@ -95,7 +95,8 @@ function toDatetimeLocal(s?: string) {
 
 function timerBadgeClass(st: string) {
   if (st === 'Completed') return 'bg-green-100 text-green-800'
-  if (st === 'In Progress') return 'bg-amber-100 text-amber-800'
+  if (st === 'Active' || st === 'In Progress') return 'bg-blue-100 text-blue-800'
+  if (st === 'Paused') return 'bg-amber-100 text-amber-900'
   return 'bg-gray-100 text-gray-600'
 }
 
@@ -104,6 +105,19 @@ function LinkedPersonLine({ item }: { item: any }) {
   return (
     <p className="text-xs text-indigo-800 mt-0.5">
       Supervisor / Approver: {name ? <b>{name}</b> : <span className="text-gray-500">Self-complete</span>}
+    </p>
+  )
+}
+
+function BackupPersonLine({ item }: { item: any }) {
+  const name = item?.backup_employee_name
+  const val = Number(item?.backup_allocation_value || 0)
+  const unit = item?.backup_allocation_unit || 'days'
+  if (!name && !val) return null
+  return (
+    <p className="text-xs text-violet-800 mt-0.5">
+      Backup: {name ? <b>{name}</b> : '—'}
+      {val > 0 ? <> · allocated {val} {unit}</> : null}
     </p>
   )
 }
@@ -190,9 +204,11 @@ export default function HRM() {
     employee_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General',
     added_by: '', priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
     schedule_month: 0, time_period: '', linked_to_employee_id: '' as any,
+    backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
   })
   const [taskForm, setTaskForm] = useState({
     employee_id: '' as any, title: '', description: '', due_date: '', assigned_by: '', priority: 'Medium',
+    backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
   })
   const [reassignForm, setReassignForm] = useState({
     original_responsibility_id: '' as any, to_employee_id: '' as any, reassignment_date: today(),
@@ -231,6 +247,7 @@ export default function HRM() {
     frequency: 'Daily', category: 'General', added_by: '', due_date: '',
     priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
     schedule_month: 0, time_period: '', linked_to_employee_id: '' as any,
+    backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
   })
   const [showQuickResp, setShowQuickResp] = useState(false)
   const [voiceText, setVoiceText] = useState('')
@@ -486,6 +503,18 @@ export default function HRM() {
     onSuccess: invalidateDwr,
     onError: (err: any) => alert(err?.response?.data?.detail || 'Could not start timer'),
   })
+  const pauseRespMut = useMutation({
+    mutationFn: ({ id, log_date }: { id: number; log_date: string }) =>
+      api.post(`/hrm/tasks/${id}/pause`, { log_date }),
+    onSuccess: invalidateDwr,
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not pause timer'),
+  })
+  const resumeRespMut = useMutation({
+    mutationFn: ({ id, log_date }: { id: number; log_date: string }) =>
+      api.post(`/hrm/tasks/${id}/resume`, { log_date }),
+    onSuccess: invalidateDwr,
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not resume timer'),
+  })
   const endRespMut = useMutation({
     mutationFn: ({ id, log_date }: { id: number; log_date: string }) =>
       api.post(`/hrm/tasks/${id}/end`, { log_date }),
@@ -730,6 +759,23 @@ export default function HRM() {
   })
   const submitAssign = (form: typeof quickResp) => {
     if (!form.employee_id || !form.title) return
+    if (!form.backup_employee_id) {
+      alert('Backup person is required')
+      return
+    }
+    if (+form.backup_employee_id === +form.employee_id) {
+      alert('Backup person must be different from the assigned employee')
+      return
+    }
+    if (!(Number(form.backup_allocation_value) > 0)) {
+      alert('Backup allocation duration must be greater than zero')
+      return
+    }
+    const backupPayload = {
+      backup_employee_id: +form.backup_employee_id,
+      backup_allocation_value: Number(form.backup_allocation_value) || 1,
+      backup_allocation_unit: form.backup_allocation_unit || 'days',
+    }
     if (form.mode === 'task') {
       createOneTimeTaskMut.mutate({
         employee_id: +form.employee_id,
@@ -738,6 +784,7 @@ export default function HRM() {
         due_date: form.due_date || '',
         assigned_by: form.added_by || '',
         priority: form.priority || 'Medium',
+        ...backupPayload,
       })
     } else {
       if ((form.frequency === 'Weekly' || form.frequency === 'Fortnightly') && !form.schedule_weekday) {
@@ -767,6 +814,7 @@ export default function HRM() {
         schedule_month: form.schedule_month || 0,
         time_period: form.time_period || '',
         linked_to_employee_id: form.linked_to_employee_id ? +form.linked_to_employee_id : null,
+        ...backupPayload,
       })
     }
   }
@@ -854,11 +902,20 @@ export default function HRM() {
     const ts = i.timer_status || 'Not Started'
     const canTime = i.in_action_window !== false || canEditAssignments
     const canMark = showMark && (!i.marked || i.status === 'Pending' || canEditAssignments)
+    const isAssignee = Number(scope?.employee_id) > 0 && Number(checkEmpId) === Number(scope?.employee_id)
+    const canApproveCancel = Boolean(
+      i.task_log_id
+      && i.approval_status === 'Pending'
+      && !isAssignee
+      && (canEditAssignments || Number(scope?.employee_id) === Number(i.linked_to_employee_id)),
+    )
     const openManual = () => {
       setDwrManualId(i.responsibility_id)
       setDwrManualStart(toDatetimeLocal(i.started_at))
       setDwrManualEnd(toDatetimeLocal(i.ended_at))
     }
+    const activeMin = i.active_minutes ?? Math.floor(Number(i.active_seconds || 0) / 60)
+    const pausedMin = i.paused_minutes ?? Math.floor(Number(i.paused_seconds || 0) / 60)
     return (
       <div className="flex-1 min-w-0">
         <p className="font-medium text-sm text-gray-800">{i.title}</p>
@@ -866,19 +923,36 @@ export default function HRM() {
           {i.frequency} · {i.status}{i.approval_status ? ` · ${i.approval_status}` : ''}{i.marked_by ? ` · ${i.marked_by}` : ''}{i.blocker_reason ? ` — ${i.blocker_reason}` : ''}
         </p>
         <LinkedPersonLine item={i} />
+        <BackupPersonLine item={i} />
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${timerBadgeClass(ts)}`}>{ts}</span>
           <span className="text-[11px] text-gray-500">Start: {fmtDateTime(i.started_at)}</span>
+          {i.paused_at && <span className="text-[11px] text-amber-700">Paused: {fmtDateTime(i.paused_at)}</span>}
           <span className="text-[11px] text-gray-500">End: {fmtDateTime(i.ended_at)}</span>
-          <span className="text-[11px] font-semibold text-[#002B5B]">{fmtDuration(i.duration_minutes)}</span>
+          <span className="text-[11px] font-semibold text-[#002B5B]">Active {fmtDuration(activeMin || i.duration_minutes)}</span>
+          {pausedMin > 0 && <span className="text-[11px] text-amber-800">Paused {fmtDuration(pausedMin)}</span>}
         </div>
+        {Array.isArray(i.daily_time) && i.daily_time.length > 0 && (
+          <p className="text-[10px] text-gray-500 mt-0.5">
+            Daily: {i.daily_time.map((d: any) => `${d.date} ${d.active_minutes || 0}m`).join(' · ')}
+          </p>
+        )}
         {canTime && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {ts === 'Not Started' && (
               <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" onClick={() => startRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Start</button>
             )}
-            {ts === 'In Progress' && (
-              <button type="button" className="text-xs px-2 py-0.5 bg-amber-600 text-white rounded" onClick={() => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>■ End</button>
+            {(ts === 'Active' || ts === 'In Progress') && (
+              <>
+                <button type="button" className="text-xs px-2 py-0.5 bg-amber-500 text-white rounded" onClick={() => pauseRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>⏸ Pause</button>
+                <button type="button" className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded" onClick={() => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>■ End</button>
+              </>
+            )}
+            {ts === 'Paused' && (
+              <>
+                <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" onClick={() => resumeRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Resume</button>
+                <button type="button" className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded" onClick={() => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>■ End</button>
+              </>
             )}
             {dwrManualId === i.responsibility_id ? (
               <div className="flex flex-wrap items-center gap-1 w-full">
@@ -903,7 +977,9 @@ export default function HRM() {
                 <button type="button" className="text-xs text-gray-500" onClick={() => setDwrManualId(null)}>Cancel</button>
               </div>
             ) : (
-              <button type="button" className="text-[10px] text-blue-600 underline" onClick={openManual}>Manual time</button>
+              canEditAssignments && (
+                <button type="button" className="text-[10px] text-blue-600 underline" onClick={openManual}>Manual time</button>
+              )
             )}
           </div>
         )}
@@ -922,7 +998,7 @@ export default function HRM() {
             {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
           </select>
         )}
-        {i.task_log_id && i.approval_status === 'Pending' && (canEditAssignments || Number(scope?.employee_id) === Number(i.linked_to_employee_id)) && (
+        {canApproveCancel && (
           <div className="flex gap-1 mt-1">
             <button type="button" className="text-xs px-2 py-0.5 bg-green-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: i.task_log_id, action: 'Approved' })}>Approve</button>
             <button type="button" className="text-xs px-2 py-0.5 bg-red-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: i.task_log_id, action: 'Cancelled' })}>Cancel</button>
@@ -1271,6 +1347,29 @@ export default function HRM() {
                         <option value="">Self-complete</option>
                         {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                       </select>
+                    </div>
+                    <div><label className="text-xs text-gray-500">Backup person *</label>
+                      <select value={quickResp.backup_employee_id} onChange={e => setQuickResp(f => ({ ...f, backup_employee_id: e.target.value }))}
+                        className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="">Select backup…</option>
+                        {(allEmps as any[]).filter((e: any) => String(e.id) !== String(quickResp.employee_id)).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-xs text-gray-500">Backup duration *</label>
+                        <input type="number" min={0.5} step={0.5} value={quickResp.backup_allocation_value}
+                          onChange={e => setQuickResp(f => ({ ...f, backup_allocation_value: +e.target.value }))}
+                          className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-500">Unit</label>
+                        <select value={quickResp.backup_allocation_unit} onChange={e => setQuickResp(f => ({ ...f, backup_allocation_unit: e.target.value }))}
+                          className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                          <option value="days">Days</option>
+                          <option value="hours">Hours</option>
+                        </select>
+                      </div>
                     </div>
                     <div><label className="text-xs text-gray-500">{t(lang, 'mandatory')}</label>
                       <select value={quickResp.mandatory ? 'yes' : 'no'} onChange={e => setQuickResp(f => ({ ...f, mandatory: e.target.value === 'yes' }))}
@@ -1817,6 +1916,24 @@ export default function HRM() {
                   </select>
                   <p className="text-[10px] text-gray-400 mt-0.5">Shown on Employee Check so the employee knows who supervises or approves this task.</p>
                 </div>
+                <div><label className="text-xs text-gray-500">Backup person *</label>
+                  <select value={respForm.backup_employee_id} onChange={e => setRespForm(f => ({ ...f, backup_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">Select backup…</option>
+                    {pickerEmps.filter((e: any) => String(e.id) !== String(respForm.employee_id)).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">Backup duration *</label>
+                  <div className="flex gap-2 mt-1">
+                    <input type="number" min={0.5} step={0.5} value={respForm.backup_allocation_value}
+                      onChange={e => setRespForm(f => ({ ...f, backup_allocation_value: +e.target.value }))}
+                      className="w-full border rounded px-2 py-1.5 text-sm" />
+                    <select value={respForm.backup_allocation_unit} onChange={e => setRespForm(f => ({ ...f, backup_allocation_unit: e.target.value }))}
+                      className="border rounded px-2 py-1.5 text-sm">
+                      <option value="days">Days</option>
+                      <option value="hours">Hours</option>
+                    </select>
+                  </div>
+                </div>
                 <div><label className="text-xs text-gray-500">Category</label>
                   <select value={respForm.category} onChange={e => setRespForm(f => ({ ...f, category: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     {CATEGORIES.map(c => <option key={c}>{c}</option>)}
@@ -1847,7 +1964,7 @@ export default function HRM() {
                 </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => submitAssign({ ...respForm, mode: 'responsibility' as const, department_id: '', due_date: '' })} disabled={!respForm.employee_id || !respForm.title || createRespMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Assign</button>
+                <button onClick={() => submitAssign({ ...respForm, mode: 'responsibility' as const, department_id: '', due_date: '' })} disabled={!respForm.employee_id || !respForm.title || !respForm.backup_employee_id || createRespMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Assign</button>
                 <button onClick={() => setShowRespForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               </div>
             </div>
@@ -1878,13 +1995,13 @@ export default function HRM() {
                 </div>
                 <table className="w-full text-sm">
                   <thead className="text-gray-400 text-xs uppercase bg-gray-50">
-                    <tr><th className="text-left px-4 py-2">Task</th><th className="text-left px-4 py-2">Description</th><th className="text-left px-4 py-2">Frequency</th><th className="text-left px-4 py-2">Linked Person</th><th className="text-left px-4 py-2">Priority</th><th className="text-left px-4 py-2">Added By</th><th className="px-4 py-2"></th></tr>
+                    <tr><th className="text-left px-4 py-2">Task</th><th className="text-left px-4 py-2">Description</th><th className="text-left px-4 py-2">Frequency</th><th className="text-left px-4 py-2">Linked Person</th><th className="text-left px-4 py-2">Backup</th><th className="text-left px-4 py-2">Priority</th><th className="text-left px-4 py-2">Added By</th><th className="px-4 py-2"></th></tr>
                   </thead>
                   <tbody>
                     {resps.map((r: any) => (
                       <tr key={r.id} className="border-t hover:bg-gray-50">
                         {editResp?.id === r.id ? (
-                          <td colSpan={7} className="px-4 py-3">
+                          <td colSpan={8} className="px-4 py-3">
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                               <input value={editResp.title} onChange={e => setEditResp((x: any) => ({ ...x, title: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Title" />
                               <input value={editResp.description || ''} onChange={e => setEditResp((x: any) => ({ ...x, description: e.target.value }))} className="border rounded px-2 py-1 text-sm col-span-2" placeholder="Description" />
@@ -1957,12 +2074,34 @@ export default function HRM() {
                                   {(canEditAssignments ? pickerEmps : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                                 </select>
                               </div>
+                              <div>
+                                <label className="text-[10px] text-gray-400">Backup person *</label>
+                                <select value={editResp.backup_employee_id || ''} onChange={e => setEditResp((x: any) => ({ ...x, backup_employee_id: e.target.value ? +e.target.value : '' }))} className="w-full border rounded px-2 py-1 text-sm">
+                                  <option value="">Select…</option>
+                                  {(canEditAssignments ? pickerEmps : allEmps as any[]).filter((e: any) => e.id !== editResp.employee_id).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-gray-400">Backup allocation *</label>
+                                <div className="flex gap-1">
+                                  <input type="number" min={0.5} step={0.5} value={editResp.backup_allocation_value || 1}
+                                    onChange={e => setEditResp((x: any) => ({ ...x, backup_allocation_value: +e.target.value }))}
+                                    className="w-20 border rounded px-2 py-1 text-sm" />
+                                  <select value={editResp.backup_allocation_unit || 'days'} onChange={e => setEditResp((x: any) => ({ ...x, backup_allocation_unit: e.target.value }))} className="flex-1 border rounded px-2 py-1 text-sm">
+                                    <option value="hours">hours</option>
+                                    <option value="days">days</option>
+                                  </select>
+                                </div>
+                              </div>
                               <div className="flex gap-2 col-span-2">
                                 <button onClick={() => {
                                   if ((editResp.frequency === 'Weekly' || editResp.frequency === 'Fortnightly') && !editResp.schedule_weekday) { alert('Select a weekday for Weekly/Fortnightly'); return }
                                   if (editResp.frequency === 'Monthly' && !(editResp.schedule_month_day > 0)) { alert('Select calendar day for Monthly'); return }
                                   if (editResp.frequency === 'Quarterly' && !(editResp.schedule_month > 0)) { alert('Select anchor month for Quarterly'); return }
-                                  updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null, priority: editResp.priority || 'Medium', mandatory: !!editResp.mandatory, schedule_weekday: editResp.schedule_weekday || '', schedule_month_day: editResp.schedule_month_day || 0, schedule_month: editResp.schedule_month || 0, time_period: editResp.time_period || '' } })
+                                  if (!editResp.backup_employee_id) { alert('Backup person is required'); return }
+                                  if (+editResp.backup_employee_id === +editResp.employee_id) { alert('Backup must differ from assignee'); return }
+                                  if (!(Number(editResp.backup_allocation_value) > 0)) { alert('Backup allocation duration must be greater than zero'); return }
+                                  updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null, priority: editResp.priority || 'Medium', mandatory: !!editResp.mandatory, schedule_weekday: editResp.schedule_weekday || '', schedule_month_day: editResp.schedule_month_day || 0, schedule_month: editResp.schedule_month || 0, time_period: editResp.time_period || '', backup_employee_id: editResp.backup_employee_id || null, backup_allocation_value: Number(editResp.backup_allocation_value) || 1, backup_allocation_unit: editResp.backup_allocation_unit || 'days' } })
                                 }} disabled={!editResp.title || updateRespMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
                                 <button onClick={() => setEditResp(null)} className="px-3 py-1 border rounded text-xs">Cancel</button>
                               </div>
@@ -1974,12 +2113,17 @@ export default function HRM() {
                             <td className="px-4 py-2 text-xs text-gray-500">{r.description || '—'}</td>
                             <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.frequency === 'Daily' ? 'bg-blue-100 text-blue-700' : r.frequency === 'Weekly' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'}`}>{r.frequency}{r.schedule_weekday ? ` · ${r.schedule_weekday}` : ''}{r.schedule_month_day ? ` · D${r.schedule_month_day}` : ''}</span></td>
                             <td className="px-4 py-2 text-xs text-indigo-800">{r.linked_to_employee_name || 'Self-complete'}</td>
+                            <td className="px-4 py-2 text-xs text-violet-800">
+                              {r.backup_employee_name
+                                ? <>{r.backup_employee_name}{r.backup_allocation_value ? ` · ${r.backup_allocation_value} ${r.backup_allocation_unit || 'days'}` : ''}</>
+                                : '—'}
+                            </td>
                             <td className="px-4 py-2 text-xs"><span className={`px-1.5 py-0.5 rounded ${priorityStyle(r.priority || 'Medium')}`}>{r.priority || 'Medium'}</span></td>
                             <td className="px-4 py-2 text-xs text-gray-400">{r.added_by || '—'}</td>
                             <td className="px-4 py-2">
                               {canMutateRecords && (
                                 <div className="flex gap-2">
-                                  <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '', priority: r.priority || 'Medium', mandatory: !!r.mandatory, schedule_weekday: r.schedule_weekday || '', schedule_month_day: r.schedule_month_day || 0, schedule_month: r.schedule_month || 0, time_period: r.time_period || '' })} className="text-xs text-blue-600">✏️</button>
+                                  <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '', priority: r.priority || 'Medium', mandatory: !!r.mandatory, schedule_weekday: r.schedule_weekday || '', schedule_month_day: r.schedule_month_day || 0, schedule_month: r.schedule_month || 0, time_period: r.time_period || '', backup_employee_id: r.backup_employee_id || '', backup_allocation_value: r.backup_allocation_value || 1, backup_allocation_unit: r.backup_allocation_unit || 'days' })} className="text-xs text-blue-600">✏️</button>
                                   {canDeleteHrm && (
                                     <button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button>
                                   )}
@@ -2066,6 +2210,25 @@ export default function HRM() {
                     {assigneeOptions.map(n => <option key={n}>{n}</option>)}
                   </select>
                 </div>
+                <div><label className="text-xs text-gray-500">Backup person *</label>
+                  <select value={taskForm.backup_employee_id} onChange={e => setTaskForm(f => ({ ...f, backup_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">Select</option>
+                    {pickerEmps.filter((e: any) => String(e.id) !== String(taskForm.employee_id)).map((e: any) => (
+                      <option key={e.id} value={e.id}>{e.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div><label className="text-xs text-gray-500">Backup allocation *</label>
+                  <div className="flex gap-1 mt-1">
+                    <input type="number" min={0.25} step={0.25} value={taskForm.backup_allocation_value}
+                      onChange={e => setTaskForm(f => ({ ...f, backup_allocation_value: +e.target.value }))}
+                      className="w-20 border rounded px-2 py-1.5 text-sm" />
+                    <select value={taskForm.backup_allocation_unit} onChange={e => setTaskForm(f => ({ ...f, backup_allocation_unit: e.target.value }))} className="flex-1 border rounded px-2 py-1.5 text-sm">
+                      <option value="hours">hours</option>
+                      <option value="days">days</option>
+                    </select>
+                  </div>
+                </div>
               </div>
               <div className="flex gap-2">
                 <button
@@ -2086,8 +2249,11 @@ export default function HRM() {
                     schedule_month: 0,
                     time_period: '',
                     linked_to_employee_id: '',
+                    backup_employee_id: taskForm.backup_employee_id,
+                    backup_allocation_value: taskForm.backup_allocation_value,
+                    backup_allocation_unit: taskForm.backup_allocation_unit,
                   })}
-                  disabled={!taskForm.employee_id || !taskForm.title || createOneTimeTaskMut.isPending}
+                  disabled={!taskForm.employee_id || !taskForm.title || !taskForm.backup_employee_id || createOneTimeTaskMut.isPending}
                   className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
                   Assign
                 </button>
@@ -2141,6 +2307,7 @@ export default function HRM() {
                         <td className="px-4 py-3">
                           <p className="font-medium text-gray-800">{t.title}</p>
                           {t.description && <p className="text-xs text-gray-400 mt-0.5">{t.description}</p>}
+                          <BackupPersonLine item={t} />
                         </td>
                         <td className="px-4 py-3">
                           <p className="font-medium">{t.employee_name}</p>

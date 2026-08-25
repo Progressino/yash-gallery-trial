@@ -8,6 +8,7 @@ export const ERP_MODULE_PATH_PREFIXES = [
   '/grey',
   '/tna',
   '/stitching-costing',
+  '/hrm',
 ] as const
 
 export function isErpModulePath(pathname: string): boolean {
