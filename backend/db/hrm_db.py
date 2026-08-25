@@ -4166,16 +4166,26 @@ def update_one_time_task(task_id: int, data: dict):
             payload["duration_minutes"] = parse_duration_to_minutes(payload["manual_duration_minutes"])
         except ValueError:
             pass
-    if any(
+    backup_touched = any(
         k in payload
         for k in (
             "backup_employee_id",
             "backup_allocation_value",
             "backup_allocation_unit",
-            "employee_id",
         )
-    ):
+    )
+    emp_changed = False
+    row0 = None
+    if "employee_id" in payload or backup_touched:
         row0 = conn.execute("SELECT * FROM one_time_tasks WHERE id=?", (task_id,)).fetchone()
+        if row0 and "employee_id" in payload:
+            try:
+                emp_changed = int(payload["employee_id"]) != int(row0["employee_id"])
+            except (TypeError, ValueError):
+                emp_changed = True
+    if backup_touched or emp_changed:
+        if row0 is None:
+            row0 = conn.execute("SELECT * FROM one_time_tasks WHERE id=?", (task_id,)).fetchone()
         if row0:
             merged = dict(row0)
             merged.update(payload)
