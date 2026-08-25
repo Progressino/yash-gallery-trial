@@ -712,7 +712,10 @@ export default function HRM() {
       setShowRespForm(false)
       setAiParsed(null)
       setVoiceText('')
-      setTaskForm({ employee_id: '', title: '', description: '', due_date: '', assigned_by: '', priority: 'Medium' })
+      setTaskForm({
+        employee_id: '', title: '', description: '', due_date: '', assigned_by: '', priority: 'Medium',
+        backup_employee_id: '', backup_allocation_value: 1, backup_allocation_unit: 'days',
+      })
     },
   })
   const startOneTimeTaskMut = useMutation({
@@ -902,7 +905,7 @@ export default function HRM() {
     const ts = i.timer_status || 'Not Started'
     const canTime = i.in_action_window !== false || canEditAssignments
     const canMark = showMark && (!i.marked || i.status === 'Pending' || canEditAssignments)
-    const isAssignee = Number(scope?.employee_id) > 0 && Number(checkEmpId) === Number(scope?.employee_id)
+    const isAssignee = Number(scope?.employee_id) > 0 && Number(checkEmp) === Number(scope?.employee_id)
     const canApproveCancel = Boolean(
       i.task_log_id
       && i.approval_status === 'Pending'
