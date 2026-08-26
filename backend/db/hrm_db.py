@@ -538,6 +538,21 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_timer_events_log ON task_timer_events(task_log_id, id);
         CREATE INDEX IF NOT EXISTS idx_timer_events_emp_date ON task_timer_events(employee_id, log_date);
+        CREATE TABLE IF NOT EXISTS task_approval_notifications (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_log_id             INTEGER NOT NULL,
+            responsibility_id       INTEGER NOT NULL,
+            linked_to_employee_id   INTEGER NOT NULL,
+            assignee_employee_id    INTEGER NOT NULL,
+            log_date                TEXT NOT NULL,
+            title                   TEXT DEFAULT '',
+            assignee_name           TEXT DEFAULT '',
+            message                 TEXT DEFAULT '',
+            is_read                 INTEGER DEFAULT 0,
+            created_at              TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_approval_notif_linked
+            ON task_approval_notifications(linked_to_employee_id, is_read, id);
         """
     )
 
@@ -1720,9 +1735,116 @@ def mark_task(
                 ),
             )
 
+    # Notify Linked To person that approval is required (in-app inbox)
+    if approval_status == "Pending" and linked_id and task_log_id:
+        log_id = int(task_log_id["id"] if hasattr(task_log_id, "keys") else task_log_id["id"])
+        title_row = conn.execute(
+            """SELECT r.title, e.name as assignee_name
+               FROM responsibilities r JOIN employees e ON e.id=r.employee_id
+               WHERE r.id=?""",
+            (responsibility_id,),
+        ).fetchone()
+        title = (title_row["title"] if title_row else "") or ""
+        assignee_name = (title_row["assignee_name"] if title_row else "") or ""
+        msg = (
+            f"{assignee_name} marked '{title}' as {status} on {log_date}. "
+            f"Your approval is required (Linked To)."
+        )
+        conn.execute(
+            """DELETE FROM task_approval_notifications
+               WHERE task_log_id=? AND linked_to_employee_id=? AND is_read=0""",
+            (log_id, linked_id),
+        )
+        conn.execute(
+            """INSERT INTO task_approval_notifications(
+                task_log_id, responsibility_id, linked_to_employee_id, assignee_employee_id,
+                log_date, title, assignee_name, message, is_read, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,0,?)""",
+            (
+                log_id,
+                responsibility_id,
+                linked_id,
+                int(resp["employee_id"]),
+                log_date,
+                title,
+                assignee_name,
+                msg,
+                _now_iso(),
+            ),
+        )
+
     conn.commit()
     conn.close()
     return True
+
+
+def list_pending_linked_approvals(linked_employee_id: int) -> list[dict]:
+    """Tasks awaiting Approve/Cancel for this Linked To employee."""
+    conn = _connect()
+    rows = conn.execute(
+        """
+        SELECT tl.id as task_log_id, tl.responsibility_id, tl.employee_id as assignee_employee_id,
+               tl.log_date, tl.status, tl.approval_status, tl.remarks, tl.marked_by, tl.marked_at,
+               r.title, r.priority, r.frequency, r.backup_employee_id,
+               r.backup_allocation_value, r.backup_allocation_unit,
+               e.name as assignee_name, d.name as department_name,
+               be.name as backup_employee_name,
+               le.name as linked_to_employee_name,
+               r.linked_to_employee_id
+        FROM task_logs tl
+        JOIN responsibilities r ON r.id=tl.responsibility_id
+        JOIN employees e ON e.id=tl.employee_id
+        LEFT JOIN departments d ON d.id=e.department_id
+        LEFT JOIN employees be ON be.id=r.backup_employee_id
+        LEFT JOIN employees le ON le.id=r.linked_to_employee_id
+        WHERE r.linked_to_employee_id=?
+          AND tl.approval_status='Pending'
+          AND tl.status IN ('Done','Partial')
+          AND r.active=1
+        ORDER BY tl.log_date DESC, tl.id DESC
+        """,
+        (int(linked_employee_id),),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_approval_notifications(
+    linked_employee_id: int, *, unread_only: bool = False, limit: int = 50
+) -> list[dict]:
+    conn = _connect()
+    q = """SELECT * FROM task_approval_notifications
+           WHERE linked_to_employee_id=?"""
+    params: list = [int(linked_employee_id)]
+    if unread_only:
+        q += " AND is_read=0"
+    q += " ORDER BY id DESC LIMIT ?"
+    params.append(int(limit))
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_approval_notifications_read(
+    linked_employee_id: int, *, task_log_id: int | None = None
+) -> int:
+    conn = _connect()
+    if task_log_id is not None:
+        cur = conn.execute(
+            """UPDATE task_approval_notifications SET is_read=1
+               WHERE linked_to_employee_id=? AND task_log_id=? AND is_read=0""",
+            (int(linked_employee_id), int(task_log_id)),
+        )
+    else:
+        cur = conn.execute(
+            """UPDATE task_approval_notifications SET is_read=1
+               WHERE linked_to_employee_id=? AND is_read=0""",
+            (int(linked_employee_id),),
+        )
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    return int(n or 0)
 
 
 def _responsibility_owner(conn, responsibility_id: int):
@@ -2209,6 +2331,17 @@ def approve_task_log(
         notes=notes,
         conn=conn,
     )
+    # Clear inbox notifications for this approval
+    try:
+        linked_clear = int(row["linked_to_employee_id"]) if row["linked_to_employee_id"] else None
+    except (TypeError, ValueError, KeyError):
+        linked_clear = None
+    if linked_clear:
+        conn.execute(
+            """UPDATE task_approval_notifications SET is_read=1
+               WHERE task_log_id=? AND linked_to_employee_id=?""",
+            (task_log_id, linked_clear),
+        )
     conn.commit()
     conn.close()
     return True

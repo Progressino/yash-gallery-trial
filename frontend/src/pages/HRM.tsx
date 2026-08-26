@@ -346,6 +346,16 @@ export default function HRM() {
   const { data: depts = [] } = useQuery({ queryKey: ['hrm-depts'], queryFn: () => api.get('/hrm/departments').then(r => r.data) })
   const { data: employees = [] } = useQuery({ queryKey: ['hrm-emps', selDept], queryFn: () => api.get(`/hrm/employees${selDept ? `?department_id=${selDept}` : ''}`).then(r => r.data) })
   const { data: allEmps = [] } = useQuery({ queryKey: ['hrm-all-emps'], queryFn: () => api.get('/hrm/employees').then(r => r.data) })
+  const { data: pickersEmps = [] } = useQuery({
+    queryKey: ['hrm-pickers-emps', selDept],
+    queryFn: () => api.get(`/hrm/employees/for-pickers${selDept ? `?department_id=${selDept}` : ''}`).then(r => r.data),
+  })
+  const { data: pendingApprovals, refetch: refetchPendingApprovals } = useQuery({
+    queryKey: ['hrm-pending-approvals', scope?.employee_id],
+    queryFn: () => api.get('/hrm/approvals/pending').then(r => r.data),
+    enabled: !!scope?.employee_id,
+    refetchInterval: 60_000,
+  })
   const { data: responsibilities = [] } = useQuery({
     queryKey: ['hrm-resps', selDept, selEmp],
     queryFn: () => api.get(`/hrm/responsibilities${selDept ? `?department_id=${selDept}` : ''}${selEmp ? `${selDept ? '&' : '?'}employee_id=${selEmp}` : ''}`).then(r => r.data)
@@ -484,11 +494,15 @@ export default function HRM() {
   const approveLogMut = useMutation({
     mutationFn: ({ id, action }: { id: number; action: string }) =>
       api.post(`/hrm/tasks/logs/${id}/approve`, { action }),
-    onSuccess: () => {
+    onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
       qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
       qc.invalidateQueries({ queryKey: ['hrm-perf'] })
       qc.invalidateQueries({ queryKey: ['hrm-dwr'] })
+      qc.invalidateQueries({ queryKey: ['hrm-pending-approvals'] })
+      if (scope?.employee_id && vars?.id) {
+        api.post(`/hrm/approvals/notifications/read?task_log_id=${vars.id}`).catch(() => {})
+      }
     },
     onError: (err: any) => alert(err?.response?.data?.detail || 'Approval failed'),
   })
@@ -1060,12 +1074,19 @@ export default function HRM() {
         : null
 
   const pickerEmps = useMemo(() => {
-    const rows = allEmps as any[]
+    const rows = (pickersEmps as any[]).length ? (pickersEmps as any[]) : (allEmps as any[])
     if (isEmployeeScope && scope?.employee_id) {
+      // Keep self for "my check"; Linked To / Backup use pickersEmpsFull below
       return rows.filter((e: any) => e.id === scope.employee_id)
     }
     return rows
-  }, [allEmps, isEmployeeScope, scope?.employee_id])
+  }, [pickersEmps, allEmps, isEmployeeScope, scope?.employee_id])
+
+  /** Full peer list for Linked To + Backup Person (never limited to self-only). */
+  const assignPickers = useMemo(() => {
+    const rows = (pickersEmps as any[]).length ? (pickersEmps as any[]) : (allEmps as any[])
+    return rows
+  }, [pickersEmps, allEmps])
 
   const assigneeOptions = useMemo(() => {
     const names = new Set<string>()
@@ -1139,6 +1160,11 @@ export default function HRM() {
           <button key={key} onClick={() => setTab(key)}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${tab === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
             {label}
+            {key === 'check' && (pendingApprovals?.pending?.length || 0) > 0 && (
+              <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-indigo-600 text-white text-[10px]">
+                {pendingApprovals.pending.length}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -1355,7 +1381,7 @@ export default function HRM() {
                       <select value={quickResp.backup_employee_id} onChange={e => setQuickResp(f => ({ ...f, backup_employee_id: e.target.value }))}
                         className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                         <option value="">Select backup…</option>
-                        {(allEmps as any[]).filter((e: any) => String(e.id) !== String(quickResp.employee_id)).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                        {assignPickers.filter((e: any) => String(e.id) !== String(quickResp.employee_id)).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                       </select>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
@@ -1517,6 +1543,60 @@ export default function HRM() {
               {showDailyGuide ? 'Hide daily guide' : 'Daily guide (Harsh / Sanjay)'}
             </button>
           </div>
+
+          {!!scope?.employee_id && Array.isArray(pendingApprovals?.pending) && pendingApprovals.pending.length > 0 && (
+            <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div>
+                  <h3 className="font-semibold text-indigo-950 text-sm">Awaiting your approval (Linked To)</h3>
+                  <p className="text-xs text-indigo-800 mt-0.5">
+                    {(pendingApprovals.unread || 0) > 0
+                      ? `${pendingApprovals.unread} new notification(s). `
+                      : ''}
+                    Team members marked these Done/Partial — Approve or Cancel below.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="text-xs text-indigo-700 underline"
+                  onClick={() => {
+                    api.post('/hrm/approvals/notifications/read').then(() => refetchPendingApprovals())
+                  }}
+                >
+                  Mark notifications read
+                </button>
+              </div>
+              <div className="space-y-2">
+                {pendingApprovals.pending.map((p: any) => (
+                  <div key={p.task_log_id} className="bg-white border border-indigo-100 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-900">{p.title}</p>
+                      <p className="text-xs text-gray-500">
+                        {p.assignee_name} · {p.log_date} · {p.status} · Pending
+                        {p.backup_employee_name ? ` · Backup: ${p.backup_employee_name}` : ''}
+                      </p>
+                    </div>
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        className="text-xs px-2 py-1 bg-green-700 text-white rounded"
+                        onClick={() => approveLogMut.mutate({ id: p.task_log_id, action: 'Approved' })}
+                      >
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        className="text-xs px-2 py-1 bg-red-700 text-white rounded"
+                        onClick={() => approveLogMut.mutate({ id: p.task_log_id, action: 'Cancelled' })}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {showReassign && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2 text-sm">
@@ -1915,14 +1995,14 @@ export default function HRM() {
                 <div><label className="text-xs text-gray-500">Linked Person (supervisor / approver)</label>
                   <select value={respForm.linked_to_employee_id} onChange={e => setRespForm(f => ({ ...f, linked_to_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Self-complete (no approval)</option>
-                    {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                    {assignPickers.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                   </select>
                   <p className="text-[10px] text-gray-400 mt-0.5">Shown on Employee Check so the employee knows who supervises or approves this task.</p>
                 </div>
                 <div><label className="text-xs text-gray-500">Backup person *</label>
                   <select value={respForm.backup_employee_id} onChange={e => setRespForm(f => ({ ...f, backup_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select backup…</option>
-                    {pickerEmps.filter((e: any) => String(e.id) !== String(respForm.employee_id)).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                    {assignPickers.filter((e: any) => String(e.id) !== String(respForm.employee_id)).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                   </select>
                 </div>
                 <div><label className="text-xs text-gray-500">Backup duration *</label>
@@ -2074,14 +2154,14 @@ export default function HRM() {
                                 <label className="text-[10px] text-gray-400">Linked To (supervisor / approver)</label>
                                 <select value={editResp.linked_to_employee_id || ''} onChange={e => setEditResp((x: any) => ({ ...x, linked_to_employee_id: e.target.value ? +e.target.value : '' }))} className="w-full border rounded px-2 py-1 text-sm">
                                   <option value="">Self-complete (no Linked Person)</option>
-                                  {(canEditAssignments ? pickerEmps : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                                  {(canEditAssignments ? assignPickers : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                                 </select>
                               </div>
                               <div>
                                 <label className="text-[10px] text-gray-400">Backup person *</label>
                                 <select value={editResp.backup_employee_id || ''} onChange={e => setEditResp((x: any) => ({ ...x, backup_employee_id: e.target.value ? +e.target.value : '' }))} className="w-full border rounded px-2 py-1 text-sm">
                                   <option value="">Select…</option>
-                                  {(canEditAssignments ? pickerEmps : allEmps as any[]).filter((e: any) => e.id !== editResp.employee_id).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                                  {(canEditAssignments ? assignPickers : allEmps as any[]).filter((e: any) => e.id !== editResp.employee_id).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                                 </select>
                               </div>
                               <div>
@@ -2216,7 +2296,7 @@ export default function HRM() {
                 <div><label className="text-xs text-gray-500">Backup person *</label>
                   <select value={taskForm.backup_employee_id} onChange={e => setTaskForm(f => ({ ...f, backup_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
-                    {pickerEmps.filter((e: any) => String(e.id) !== String(taskForm.employee_id)).map((e: any) => (
+                    {assignPickers.filter((e: any) => String(e.id) !== String(taskForm.employee_id)).map((e: any) => (
                       <option key={e.id} value={e.id}>{e.name}</option>
                     ))}
                   </select>

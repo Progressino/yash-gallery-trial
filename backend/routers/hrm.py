@@ -67,6 +67,9 @@ from ..db.hrm_db import (
     resume_responsibility_timer,
     set_responsibility_manual_time,
     get_responsibility_timer_detail,
+    list_pending_linked_approvals,
+    list_approval_notifications,
+    mark_approval_notifications_read,
     FREQUENCIES,
     PRIORITIES,
     TIME_PERIODS,
@@ -612,6 +615,8 @@ def patch_responsibility(rid: int, body: ResponsibilityUpdate, request: Request)
     assert_employee_in_scope(scope, owner)
     if body.employee_id is not None:
         assert_employee_in_scope(scope, body.employee_id)
+    if body.backup_employee_id is not None:
+        assert_employee_in_scope(scope, body.backup_employee_id)
     try:
         # exclude_unset: only fields the client sent; keep False/0/"" so mandatory
         # and schedule clears persist (do not drop falsy values).
@@ -818,6 +823,49 @@ def post_approve_task_log(log_id: int, body: TaskApproveIn, request: Request):
     if ok == "invalid_action":
         raise HTTPException(400, "action must be Approved or Cancelled")
     raise HTTPException(404, "Task log not found")
+
+
+@router.get("/approvals/pending")
+def get_pending_approvals(request: Request):
+    """Inbox for the Linked To person: Done/Partial marks awaiting their Approve/Cancel."""
+    scope = _scope_from_request(request)
+    if not scope.employee_id:
+        return {"pending": [], "notifications": [], "unread": 0}
+    pending = list_pending_linked_approvals(int(scope.employee_id))
+    notes = list_approval_notifications(int(scope.employee_id), unread_only=False, limit=40)
+    unread = sum(1 for n in notes if not int(n.get("is_read") or 0))
+    return {"pending": pending, "notifications": notes, "unread": unread}
+
+
+@router.post("/approvals/notifications/read")
+def post_mark_approval_notifications_read(
+    request: Request, task_log_id: Optional[int] = None
+):
+    scope = _scope_from_request(request)
+    if not scope.employee_id:
+        raise HTTPException(400, "No employee linked to this login")
+    n = mark_approval_notifications_read(
+        int(scope.employee_id), task_log_id=task_log_id
+    )
+    return {"ok": True, "marked": n}
+
+
+@router.get("/employees/for-pickers")
+def get_employees_for_pickers(request: Request, department_id: Optional[int] = None):
+    """Employees for Linked To / Backup dropdowns (department peers for HOD/self)."""
+    scope = _scope_from_request(request)
+    if scope.can_view_employee_list or scope.can_manage_org:
+        return list_employees(department_id, "Active")
+    if scope.level == "department" and scope.department_id is not None:
+        return list_employees(int(scope.department_id), "Active")
+    if scope.level == "self" and scope.employee_id is not None:
+        # Peers in same department so Linked To / Backup can be chosen when assigning
+        # (HOD/Admin still preferred for create; keep list useful for display/edit).
+        dept = employee_department_id(int(scope.employee_id))
+        if dept:
+            return list_employees(int(dept), "Active")
+        return list_employees(None, "Active", employee_id=int(scope.employee_id))
+    raise HTTPException(403, "Not allowed")
 
 
 @router.post("/tasks/reassign-day")

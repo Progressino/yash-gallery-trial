@@ -303,3 +303,33 @@ def test_update_legacy_without_backup_allows_schedule_edit(hrm):
 
     with pytest.raises(ValueError, match="Backup"):
         hrm.update_responsibility(rid, {"employee_id": b})
+
+
+def test_linked_to_gets_pending_approval_notification(hrm, monkeypatch):
+    a, b, boss = _two_emps(hrm)
+    monkeypatch.setattr(hrm_db, "in_task_action_window", lambda *a, **k: True)
+    create_responsibility(
+        {
+            "employee_id": a,
+            "title": "Needs approve notify",
+            "frequency": "Daily",
+            "backup_employee_id": b,
+            "backup_allocation_value": 1,
+            "backup_allocation_unit": "days",
+            "linked_to_employee_id": boss,
+            "require_backup": True,
+        }
+    )
+    rid = hrm.list_responsibilities(employee_id=a)[0]["id"]
+    day = date.today().isoformat()
+    mark_task(rid, day, "Done", "Worker A", allow_override=True)
+    pending = hrm_db.list_pending_linked_approvals(boss)
+    assert len(pending) >= 1
+    assert pending[0]["responsibility_id"] == rid
+    assert pending[0]["approval_status"] == "Pending"
+    notes = hrm_db.list_approval_notifications(boss, unread_only=True)
+    assert any(n.get("responsibility_id") == rid for n in notes)
+    log_id = pending[0]["task_log_id"]
+    assert approve_task_log(log_id, linked_employee_id=boss, action="Approved") is True
+    assert hrm_db.list_pending_linked_approvals(boss) == []
+    assert hrm_db.list_approval_notifications(boss, unread_only=True) == []
