@@ -218,17 +218,61 @@ def persist_inventory_dataframe(
     conn = _require_conn()
     if conn is None:
         return None
-    rows = []
-    # Prefer vectorized column reads over iterrows for large snapshots.
+    rows: list[dict[str, Any]] = []
+    # Vectorized column reads — avoid iterrows on 10k+ SKU snapshots (upload hot path).
     if "OMS_SKU" in df.columns:
-        sku_series = df["OMS_SKU"].astype(str).str.strip()
+        sku_series = df["OMS_SKU"].astype(str).str.strip().str.upper()
         mask = sku_series != ""
         if mask.any():
             sub = df.loc[mask]
-            for _, r in sub.iterrows():
-                rows.append(_inventory_row_from_series(r))
+            skus = sku_series.loc[mask].to_numpy()
+            n = len(skus)
+            known_vals = {
+                db_col: np.zeros(n, dtype=float)
+                for db_col in _INVENTORY_KNOWN.values()
+                if db_col != "oms_sku"
+            }
+            used_cols = {"OMS_SKU"}
+            for src_col, db_col in _INVENTORY_KNOWN.items():
+                if src_col == "OMS_SKU" or src_col not in sub.columns:
+                    continue
+                used_cols.add(src_col)
+                known_vals[db_col] = (
+                    pd.to_numeric(sub[src_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+                )
+            extra_cols = [c for c in sub.columns if c not in used_cols and c != "Parent_SKU"]
+            if extra_cols:
+                extras = sub[extra_cols]
+                for i in range(n):
+                    extra: dict[str, Any] = {}
+                    for c in extra_cols:
+                        val = extras.iloc[i][c]
+                        try:
+                            if pd.isna(val):
+                                continue
+                            if isinstance(val, (int, float, np.integer, np.floating)):
+                                extra[str(c)] = float(val)
+                            else:
+                                extra[str(c)] = str(val)
+                        except Exception:
+                            extra[str(c)] = str(val)
+                    row = {db: float(arr[i]) for db, arr in known_vals.items()}
+                    row["oms_sku"] = skus[i]
+                    row["extra"] = json.dumps(extra)
+                    rows.append(row)
+            else:
+                empty_extra = json.dumps({})
+                for i in range(n):
+                    row = {db: float(arr[i]) for db, arr in known_vals.items()}
+                    row["oms_sku"] = skus[i]
+                    row["extra"] = empty_extra
+                    rows.append(row)
     else:
-        rows = [_inventory_row_from_series(r) for _, r in df.iterrows() if str(r.get("OMS_SKU", "")).strip()]
+        rows = [
+            _inventory_row_from_series(r)
+            for _, r in df.iterrows()
+            if str(r.get("OMS_SKU", "")).strip()
+        ]
     if not rows:
         return None
     try:

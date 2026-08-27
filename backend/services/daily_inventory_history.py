@@ -278,11 +278,9 @@ def align_history_day_to_variant(
         return hist_df
     incoming = pd.concat(parts, ignore_index=True)
     incoming["Qty"] = pd.to_numeric(incoming["Qty"], errors="coerce").fillna(0.0)
-    # Keep OMS zeros: explicit 0 on snapshot date prevents ffill from carrying
-    # a stale pre-snapshot value forward in the wide matrix display.
-    # Amazon zeros are still dropped (absence of Amazon FBA stock is ambiguous).
-    _is_oms = incoming["Channel"].astype(str).str.lower() == "oms"
-    incoming = incoming.loc[_is_oms | (incoming["Qty"].abs() > 1e-9)].copy()
+    # Keep OMS *and* Amazon zeros: explicit 0 on snapshot date prevents ffill from
+    # carrying a stale pre-snapshot value forward, and marks the Amazon FBA day as
+    # uploaded even when many MSKUs have Ending Warehouse Balance = 0.
     out = pd.concat([rest, incoming], ignore_index=True)
     clear_inventory_channel_view_cache()
     return scrub_absurd_inventory_history_rows(_coalesce_history_rows(out))

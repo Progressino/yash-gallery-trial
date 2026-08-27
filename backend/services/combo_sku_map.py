@@ -199,7 +199,10 @@ def parse_combo_sku_map(file_bytes: bytes) -> ComboBom:
             qty = 1.0
             if qty_col is not None:
                 try:
-                    qty = float(pd.to_numeric(row.get(qty_col), errors="coerce") or 1.0)
+                    raw_q = pd.to_numeric(row.get(qty_col), errors="coerce")
+                    # Missing qty → default 1; explicit 0 must stay 0 (then skipped).
+                    # Do not use ``or 1.0`` — that treats legitimate 0 as missing.
+                    qty = 1.0 if pd.isna(raw_q) else float(raw_q)
                 except Exception:
                     qty = 1.0
             if qty <= 0:

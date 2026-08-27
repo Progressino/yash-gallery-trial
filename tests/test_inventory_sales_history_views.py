@@ -135,6 +135,12 @@ def test_align_history_day_matches_variant_oms_total():
     # Prior day preserved
     prev = oms[pd.to_datetime(oms["Date"]).dt.normalize() == pd.Timestamp("2026-08-04")]
     assert float(prev["Qty"].sum()) == 70.0
+    # Amazon zeros are kept so the day counts as uploaded on Amazon FBA tab.
+    amz = filter_inventory_history_channel(out, "amazon")
+    amz_day = amz[pd.to_datetime(amz["Date"]).dt.normalize() == pd.Timestamp("2026-08-05")]
+    assert len(amz_day) == 3
+    assert float(amz_day.loc[amz_day["OMS_SKU"] == "SKU-A", "Qty"].iloc[0]) == 10.0
+    assert float(amz_day.loc[amz_day["OMS_SKU"] == "SKU-B", "Qty"].iloc[0]) == 0.0
 
 
 def test_inventory_history_wide_matrix_csv_includes_total_row():

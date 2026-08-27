@@ -4,6 +4,7 @@ Inventory loader — consolidated from all sources.
 import calendar
 import hashlib
 import io
+import logging
 import os
 import re
 import shutil
@@ -21,6 +22,8 @@ from .helpers import (
     get_parent_sku,
     read_csv_safe,
 )
+
+_log = logging.getLogger(__name__)
 
 # Use bsdtar (libarchive-tools) for RAR extraction — supports RAR5 natively
 try:
@@ -991,6 +994,10 @@ def _content_sniff_csv_kind(data: bytes) -> Optional[str]:
         return "combo"
     if "msku" in text and "ending warehouse balance" in text:
         return "amazon"
+    if "merchant sku" in text and (
+        "ending warehouse balance" in text or "ending warehouse quantity" in text
+    ):
+        return "amazon"
     return None
 
 
@@ -1161,10 +1168,33 @@ def _resolve_amz_sku(msku: str, mapping: Dict[str, str]) -> str:
 # (ZNNE = accounting node; TWWR = virtual transfer warehouse).
 _AMAZON_EXCLUDED_LOCATIONS = frozenset({"ZNNE", "TWWR"})
 
+# Exact headers from Amazon Inventory Ledger (Summary) — plus common aliases so
+# minor export variants still parse. Does not change the user's upload format.
+_AMZ_MSKU_ALIASES = (
+    "msku",
+    "merchant sku",
+    "seller sku",
+)
+_AMZ_BALANCE_ALIASES = (
+    "ending warehouse balance",
+    "ending warehouse quantity",
+    "ending balance",
+)
+
 
 def _amazon_location_excluded(series: pd.Series) -> pd.Series:
     """True where Location is a virtual FC we must not count as sellable stock."""
     return series.astype(str).str.strip().str.upper().isin(_AMAZON_EXCLUDED_LOCATIONS)
+
+
+def _resolve_amz_ledger_columns(df: pd.DataFrame) -> tuple[str | None, str | None]:
+    """Return (msku_col, balance_col) from ledger headers (case/space insensitive)."""
+    if df is None or getattr(df, "empty", True):
+        return None, None
+    by_lower = {str(c).strip().lower(): c for c in df.columns}
+    msku = next((by_lower[a] for a in _AMZ_MSKU_ALIASES if a in by_lower), None)
+    bal = next((by_lower[a] for a in _AMZ_BALANCE_ALIASES if a in by_lower), None)
+    return msku, bal
 
 
 def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
@@ -1176,7 +1206,13 @@ def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
     Returns OMS_SKU, Amazon_Inventory.
     """
     df = read_csv_safe(csv_bytes)
-    if df.empty or not {"MSKU", "Ending Warehouse Balance"}.issubset(df.columns):
+    msku_col, bal_col = _resolve_amz_ledger_columns(df)
+    if df.empty or msku_col is None or bal_col is None:
+        _log.warning(
+            "Amazon ledger parse skipped: missing MSKU / Ending Warehouse Balance "
+            "(cols=%s)",
+            list(df.columns) if df is not None and not getattr(df, "empty", True) else [],
+        )
         return pd.DataFrame()
 
     # ── Filter to SELLABLE only ──────────────────────────────────────────────────────
@@ -1194,19 +1230,28 @@ def _parse_amz_csv(csv_bytes: bytes, mapping: Dict[str, str]) -> pd.DataFrame:
         if _d.notna().any():
             df = df[_d == _d.max()]
 
-    df["OMS_SKU"]          = df["MSKU"].apply(lambda x: _resolve_amz_sku(x, mapping))
-    df["Amazon_Inventory"] = pd.to_numeric(df["Ending Warehouse Balance"], errors="coerce").fillna(0)
-    return df.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()
+    df["OMS_SKU"] = df[msku_col].apply(lambda x: _resolve_amz_sku(x, mapping))
+    df["Amazon_Inventory"] = pd.to_numeric(df[bal_col], errors="coerce").fillna(0)
+    out = df.groupby("OMS_SKU")["Amazon_Inventory"].sum().reset_index()
+    _log.info(
+        "Amazon ledger parsed: %d SKUs / %.0f sellable units (msku=%r bal=%r)",
+        len(out),
+        float(out["Amazon_Inventory"].sum()) if not out.empty else 0.0,
+        msku_col,
+        bal_col,
+    )
+    return out
 
 
 def _analyze_amz_ledger_filters(csv_bytes: bytes) -> dict:
     """Build disclaimer metrics for Amazon inventory row exclusions."""
     df = read_csv_safe(csv_bytes)
-    if df.empty or "Ending Warehouse Balance" not in df.columns:
+    _msku, bal_col = _resolve_amz_ledger_columns(df)
+    if df.empty or bal_col is None:
         return {}
 
     work = df.copy()
-    work["_bal"] = pd.to_numeric(work["Ending Warehouse Balance"], errors="coerce").fillna(0)
+    work["_bal"] = pd.to_numeric(work[bal_col], errors="coerce").fillna(0)
     out: dict = {
         "raw_total_units": float(work["_bal"].sum()),
         "raw_rows": int(len(work)),
@@ -1899,6 +1944,7 @@ def load_inventory_consolidated(
     """
     inv_dfs: List[pd.DataFrame] = []
     oms_parts: List[pd.DataFrame] = []   # accumulate OMS data before merging
+    combo_parts: List[pd.DataFrame] = []  # combo CSV packs (OMS_Inventory add-on)
     fk_parts: List[pd.DataFrame] = []    # Flipkart — standalone + inside RAR, one merge later
     myntra_other_parts: List[pd.DataFrame] = []  # Myntra PPMP — standalone + RAR (one layer)
     amz_rar_parts: List[pd.DataFrame] = []
@@ -1909,11 +1955,19 @@ def load_inventory_consolidated(
         oms_list = oms_bytes if isinstance(oms_bytes, list) else [oms_bytes]
         for ob in oms_list:
             if ob:
-                part = _parse_oms_or_combo(ob)
+                part = parse_actual_inventory_workbook(ob)
                 if not part.empty:
                     if bool(getattr(part, "attrs", {}).get("actual_inventory_workbook")):
                         debug["actual_inventory_workbook"] = True
                     oms_parts.append(part)
+                    continue
+                part = _parse_oms_csv(ob)
+                if not part.empty:
+                    oms_parts.append(part)
+                    continue
+                part = _parse_combo_csv(ob)
+                if not part.empty:
+                    combo_parts.append(part)
 
     # ── Flipkart (standalone uploads — RAR FK files appended into fk_parts below) ──
     if fk_bytes:
@@ -2077,7 +2131,7 @@ def load_inventory_consolidated(
             for cb in combo_blobs:
                 p = _parse_combo_csv(cb)
                 if not p.empty:
-                    oms_parts.append(p)
+                    combo_parts.append(p)
                     combo_units += int(pd.to_numeric(p["OMS_Inventory"], errors="coerce").fillna(0).sum())
             if combo_blobs:
                 debug["combo_rar"] = (
@@ -2161,36 +2215,66 @@ def load_inventory_consolidated(
         debug["flipkart"] = "0 SKUs (no valid FK data)"
 
     # ── Combine all OMS parts → single OMS_Inventory + Buffer_Stock (+ marketplace cols) ──
-    if oms_parts:
-        combined_oms = pd.concat(oms_parts, ignore_index=True)
+    # Standalone OMS/Combo uploads and RAR extracts: merge combo onto OMS without
+    # double-counting SKUs that already appear on the OMS inventory CSV.
+    if oms_parts or combo_parts:
         _all_src = [
             "OMS_Inventory", "Buffer_Stock", "Amazon_Inventory", "Flipkart_Inventory",
             "Myntra_Other_Inventory", "Meesho_Inventory",
             "Manual_InTransit", "Not_In_Inventory_Qty",
         ]
-        agg_cols = [c for c in _all_src if c in combined_oms.columns]
-        oms_part = combined_oms.groupby("OMS_SKU")[agg_cols].sum().reset_index()
-        inv_dfs.insert(0, oms_part)
-        debug["oms"] = f"{len(oms_part)} SKUs"
+        if oms_parts:
+            combined_oms = pd.concat(oms_parts, ignore_index=True)
+            agg_cols = [c for c in _all_src if c in combined_oms.columns]
+            oms_part = combined_oms.groupby("OMS_SKU")[agg_cols].sum().reset_index()
+        else:
+            oms_part = pd.DataFrame(columns=["OMS_SKU", "OMS_Inventory"])
 
-        # If OMS CSV provides marketplace columns, they are authoritative (same source as OMS UI).
-        # Remove those columns from separately parsed sources to avoid double-counting.
-        oms_mkt_cols = {
-            c for c in [
-                "Amazon_Inventory", "Flipkart_Inventory", "Myntra_Other_Inventory", "Meesho_Inventory",
-            ]
-            if c in oms_part.columns and oms_part[c].sum() > 0
-        }
-        if oms_mkt_cols:
-            # Amazon FC ledger (when parsed) must not be dropped — OMS "Other Warehouse" is often a subset.
-            if debug.get("amz") and not str(debug.get("amz", "")).startswith("0 SKUs"):
-                oms_mkt_cols.discard("Amazon_Inventory")
+        if combo_parts:
+            combo_cat = pd.concat(combo_parts, ignore_index=True)
+            combo_agg = (
+                combo_cat.groupby("OMS_SKU")["OMS_Inventory"].sum().reset_index()
+                if "OMS_Inventory" in combo_cat.columns
+                else pd.DataFrame(columns=["OMS_SKU", "OMS_Inventory"])
+            )
+            oms_skus = set(oms_part["OMS_SKU"].astype(str)) if not oms_part.empty else set()
+            if oms_skus and not combo_agg.empty:
+                overlap = combo_agg["OMS_SKU"].astype(str).isin(oms_skus)
+                n_overlap = int(overlap.sum())
+                if n_overlap:
+                    # OMS Unicommerce Inventory already includes these SKUs — keep OMS qty.
+                    debug["combo_oms_overlap_skipped"] = n_overlap
+                    combo_agg = combo_agg.loc[~overlap].copy()
+            if not combo_agg.empty:
+                if oms_part.empty:
+                    oms_part = combo_agg
+                else:
+                    oms_part = pd.concat([oms_part, combo_agg], ignore_index=True)
+                    agg_cols = [c for c in _all_src if c in oms_part.columns]
+                    oms_part = oms_part.groupby("OMS_SKU")[agg_cols].sum().reset_index()
+
+        if not oms_part.empty:
+            inv_dfs.insert(0, oms_part)
+            debug["oms"] = f"{len(oms_part)} SKUs"
+
+            # If OMS CSV provides marketplace columns, they are authoritative (same source as OMS UI).
+            # Remove those columns from separately parsed sources to avoid double-counting.
+            oms_mkt_cols = {
+                c for c in [
+                    "Amazon_Inventory", "Flipkart_Inventory", "Myntra_Other_Inventory", "Meesho_Inventory",
+                ]
+                if c in oms_part.columns and oms_part[c].sum() > 0
+            }
             if oms_mkt_cols:
-                debug["oms_provides_marketplace"] = sorted(oms_mkt_cols)
-            for i in range(1, len(inv_dfs)):
-                drop = [c for c in oms_mkt_cols if c in inv_dfs[i].columns]
-                if drop:
-                    inv_dfs[i] = inv_dfs[i].drop(columns=drop)
+                # Amazon FC ledger (when parsed) must not be dropped — OMS "Other Warehouse" is often a subset.
+                if debug.get("amz") and not str(debug.get("amz", "")).startswith("0 SKUs"):
+                    oms_mkt_cols.discard("Amazon_Inventory")
+                if oms_mkt_cols:
+                    debug["oms_provides_marketplace"] = sorted(oms_mkt_cols)
+                for i in range(1, len(inv_dfs)):
+                    drop = [c for c in oms_mkt_cols if c in inv_dfs[i].columns]
+                    if drop:
+                        inv_dfs[i] = inv_dfs[i].drop(columns=drop)
 
     if not inv_dfs:
         if return_debug:

@@ -70,3 +70,12 @@ def test_analyze_amz_ledger_reports_twwr_exclusion():
     assert metrics["latest_report_units"] == 9
     assert metrics["latest_report_date"] == "2026-07-16"
 
+
+def test_parse_amz_csv_accepts_merchant_sku_alias():
+    """Amazon exports sometimes use Merchant SKU instead of MSKU — same file structure."""
+    header = "Date,Merchant SKU,Disposition,Location,Ending Warehouse Balance\n"
+    body = "2026-08-26,1001YKBEIGE-M,SELLABLE,BLR7,12\n"
+    out = _parse_amz_csv((header + body).encode("utf-8"), mapping={})
+    assert int(out["Amazon_Inventory"].sum()) == 12
+    assert out.iloc[0]["OMS_SKU"] == "1001YKBEIGE-M"
+

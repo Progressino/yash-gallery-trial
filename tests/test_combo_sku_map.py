@@ -211,3 +211,39 @@ def test_merge_combo_sku_map_overlay():
     m = merge_combo_sku_map(a, b)
     assert len(m["X"]) == 2
     assert m["Y"] == [("C", 1.0)]
+
+
+def test_parse_combo_sku_map_explicit_zero_qty_skipped(tmp_path):
+    """Explicit component qty 0 must not default to 1 (``or 1.0`` bug)."""
+    raw = _combo_xlsx(
+        tmp_path,
+        [
+            {"DPT Sku": "COMBO-A", "Sku": "COMP-1", "Qty": 2},
+            {"DPT Sku": "COMBO-A", "Sku": "COMP-2", "Qty": 0},
+            {"DPT Sku": "COMBO-B", "Sku": "COMP-3"},  # missing qty → 1
+        ],
+    )
+    bom = parse_combo_sku_map(raw)
+    assert bom["COMBO-A"] == [("COMP-1", 2.0)]
+    assert bom["COMBO-B"] == [("COMP-3", 1.0)]
+
+
+def test_explode_multi_component_qty_and_insufficient_components():
+    from backend.services.combo_sku_map import explode_sku_qty_dataframe
+
+    df = pd.DataFrame({"SKU": ["BUNDLE-1", "REGULAR-1"], "Qty": [3.0, 5.0]})
+    combo = {"BUNDLE-1": [("PART-A", 2.0), ("PART-B", 1.0)]}
+    out = explode_sku_qty_dataframe(
+        df, sku_col="SKU", qty_col="Qty", sku_mapping={}, combo_map=combo
+    )
+    by_sku = out.groupby("SKU")["Qty"].sum().to_dict()
+    assert by_sku["PART-A"] == 6.0  # 3 sales × 2
+    assert by_sku["PART-B"] == 3.0
+    assert by_sku["REGULAR-1"] == 5.0
+
+
+def test_resolve_demand_components_normal_and_combo():
+    combo = {"LISTING-XL": [("YK-XL", 1.0), ("DPT-1", 1.0)]}
+    assert resolve_demand_components("PLAIN-M", {}, combo) == [("PLAIN-M", 1.0)]
+    comps = resolve_demand_components("LISTING-XL", {}, combo)
+    assert set(comps) == {("YK-XL", 1.0), ("DPT-1", 1.0)}

@@ -14,7 +14,7 @@ import { InventoryStalenessBanner } from '../components/InventoryStalenessBanner
 import { todayIsoIST } from '../lib/reportingDates'
 
 const PAGE_SIZE = 100
-const HISTORY_WINDOW_DAYS = 60
+const HISTORY_WINDOW_DAYS = 30
 
 function inventoryMatrixErrorMessage(err: unknown): string {
   const anyErr = err as { code?: string; message?: string } | null
