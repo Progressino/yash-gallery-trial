@@ -10,27 +10,87 @@ from backend.services.daily_inventory_history import (
 )
 
 
-def test_non_uploaded_dates_are_days_without_snapshot():
+def test_amazon_matrix_uses_amazon_source_not_oms_for_gaps():
+    """Amazon FBA uploaded/carried must follow amazon-channel Source, not OMS."""
     rows = []
-    for d, src, qty in [
-        ("2026-07-04", "snapshot", 10),
-        ("2026-07-05", "derived", 9),  # no file
-        ("2026-07-06", "snapshot", 8),
-        ("2026-07-07", "derived", 7),  # no file
+    for d, oms_src, amz_src, amz_qty in [
+        ("2026-08-10", "snapshot", "snapshot", 100),
+        ("2026-08-11", "snapshot", "derived", 95),  # OMS uploaded; Amazon carried
+        ("2026-08-12", "snapshot", "snapshot", 0),  # Amazon authentic zero census
     ]:
         rows.append(
             {
                 "OMS_SKU": "SKU-A",
                 "Date": pd.Timestamp(d),
-                "Qty": qty,
-                "Source": src,
+                "Qty": 200,
+                "Source": oms_src,
                 "Channel": "oms",
             }
         )
+        rows.append(
+            {
+                "OMS_SKU": "SKU-A",
+                "Date": pd.Timestamp(d),
+                "Qty": amz_qty,
+                "Source": amz_src,
+                "Channel": "amazon",
+            }
+        )
     df = pd.DataFrame(rows)
-    dates = list(pd.date_range("2026-07-04", "2026-07-07"))
-    carried = non_uploaded_inventory_dates(df, dates)
-    assert carried == ["2026-07-05", "2026-07-07"]
+    wide = inventory_history_wide_matrix(df, days=3, end_date="2026-08-12", channel="amazon")
+    assert "2026-08-11" in (wide.get("gap_dates") or [])
+    assert "2026-08-10" not in (wide.get("gap_dates") or [])
+    assert "2026-08-12" not in (wide.get("gap_dates") or []), wide
+    assert wide["date_totals"] == [100.0, 95.0, 0.0]
+
+
+def test_overlay_restores_amazon_when_oms_snapshot_already_present(tmp_path, monkeypatch):
+    from backend.services import daily_inventory_history as dih
+    from backend.session import AppSession
+
+    monkeypatch.setattr(dih, "_warm_cache_dir", lambda: tmp_path)
+    snap_dir = tmp_path / "inventory_day_snapshots"
+    snap_dir.mkdir(parents=True)
+    variant = pd.DataFrame(
+        {
+            "OMS_SKU": ["SKU-A", "SKU-B"],
+            "OMS_Inventory": [10.0, 5.0],
+            "Amazon_Inventory": [7.0, 3.0],
+            "Total_Inventory": [17.0, 8.0],
+        }
+    )
+    variant.to_parquet(snap_dir / "2026-08-24.parquet", index=False)
+
+    # History already has OMS snapshot for the day, but no amazon channel rows.
+    hist = pd.DataFrame(
+        [
+            {
+                "OMS_SKU": "SKU-A",
+                "Date": pd.Timestamp("2026-08-24"),
+                "Qty": 10.0,
+                "Source": "snapshot",
+                "Channel": "oms",
+            },
+            {
+                "OMS_SKU": "SKU-B",
+                "Date": pd.Timestamp("2026-08-24"),
+                "Qty": 5.0,
+                "Source": "snapshot",
+                "Channel": "oms",
+            },
+        ]
+    )
+    sess = AppSession()
+    sess.daily_inventory_history_df = hist
+    restored = dih.overlay_persisted_inventory_snapshots(sess)
+    assert restored >= 1
+    out = sess.daily_inventory_history_df
+    amz = out[out["Channel"].astype(str).str.lower() == "amazon"]
+    assert not amz.empty
+    assert float(amz["Qty"].sum()) == 10.0
+    wide = inventory_history_wide_matrix(out, days=1, end_date="2026-08-24", channel="amazon")
+    assert "2026-08-24" in (wide.get("uploaded_dates") or [])
+    assert "2026-08-24" not in (wide.get("gap_dates") or [])
 
 
 def test_uploaded_days_not_carried_even_when_snapshots_exist():

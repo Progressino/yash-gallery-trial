@@ -141,6 +141,11 @@ def test_align_history_day_matches_variant_oms_total():
     assert len(amz_day) == 3
     assert float(amz_day.loc[amz_day["OMS_SKU"] == "SKU-A", "Qty"].iloc[0]) == 10.0
     assert float(amz_day.loc[amz_day["OMS_SKU"] == "SKU-B", "Qty"].iloc[0]) == 0.0
+    # Matrix must not re-mark authentic amazon zero-total days as CARRIED.
+    wide_amz = inventory_history_wide_matrix(out, days=2, end_date="2026-08-05", channel="amazon")
+    assert "2026-08-05" not in (wide_amz.get("gap_dates") or [])
+    assert "2026-08-05" in (wide_amz.get("uploaded_dates") or [])
+    assert wide_amz["date_totals"][-1] == 10.0
 
 
 def test_inventory_history_wide_matrix_csv_includes_total_row():

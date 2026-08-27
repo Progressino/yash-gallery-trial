@@ -176,9 +176,12 @@ def _ensure_channel_column(df: pd.DataFrame | None, default: str = "") -> pd.Dat
     if "Channel" not in out.columns:
         out["Channel"] = default
     else:
-        out["Channel"] = (
-            out["Channel"].astype(str).str.strip().str.lower().replace({"nan": "", "none": ""})
-        )
+        # fillna BEFORE astype(str) — otherwise NaN→"nan" and groupby still drops
+        # float-NaN channels in some pandas paths, wiping OMS census days.
+        ch = out["Channel"].fillna(default)
+        ch = ch.astype(str).str.strip().str.lower()
+        ch = ch.replace({"nan": default, "none": default, "<na>": default, "nat": default})
+        out["Channel"] = ch
     return out
 
 
@@ -589,20 +592,41 @@ def _matrix_overlay_token() -> tuple:
     return (hist_mtime, snap_mtime, snap_n)
 
 
+def _header_may_restore_amazon(header: dict) -> bool:
+    """True when day-archive / snapshot likely has Amazon_Inventory to restore."""
+    df = header.get("df")
+    if df is not None and hasattr(df, "columns"):
+        return "Amazon_Inventory" in getattr(df, "columns", [])
+    path = str(header.get("path") or "").strip()
+    if not path:
+        return False
+    try:
+        import pyarrow.parquet as pq
+
+        return "Amazon_Inventory" in set(pq.read_schema(path).names)
+    except Exception:
+        return False
+
+
 def _pending_disk_snapshot_headers(hist: pd.DataFrame | None, headers: list[dict]) -> list[dict]:
     """Every on-disk daily census not already tagged Source=snapshot in history.
 
-    Do not limit this to a rolling 40-day window: July uploads must still overlay
-    when the live matrix ends in August.
+    Also re-queue days that have an OMS/any-channel snapshot but are still missing
+    an Amazon-channel snapshot when the day archive retains Amazon_Inventory.
     """
     if not headers:
         return []
     already = set(snapshot_dates_from_history(hist))
+    amazon_have = channel_snapshot_dates(hist, "amazon")
     pending = []
     seen: set[str] = set()
     for h in headers:
         day = str(h.get("snapshot_date") or "")[:10]
-        if len(day) != 10 or day in already or day in seen:
+        if len(day) != 10 or day in seen:
+            continue
+        needs_any = day not in already
+        needs_amazon = day not in amazon_have and _header_may_restore_amazon(h)
+        if not needs_any and not needs_amazon:
             continue
         seen.add(day)
         pending.append(h)
@@ -719,12 +743,25 @@ def overlay_persisted_inventory_snapshots(sess, snapshots: list[dict] | None = N
         if len(str(h.get("snapshot_date") or "")[:10]) == 10
         and str(h.get("snapshot_date") or "")[:10] > hist_max
     }
-    pending_files = {
+    already_any = set(snapshot_dates_from_history(work))
+    amazon_have = channel_snapshot_dates(work, "amazon")
+    archive_days = {
         str(h.get("snapshot_date") or "")[:10]
         for h in headers
         if len(str(h.get("snapshot_date") or "")[:10]) == 10
-    } - set(snapshot_dates_from_history(work))
-    allowed = gaps | extend_days | pending_files
+    }
+    pending_files = archive_days - already_any
+    # OMS snapshot already present but Amazon channel missing → still allow overlay
+    # so day-archive Amazon_Inventory can restore FBA census rows.
+    amazon_repair = {
+        d
+        for d in (archive_days - amazon_have)
+        if any(
+            str(h.get("snapshot_date") or "")[:10] == d and _header_may_restore_amazon(h)
+            for h in headers
+        )
+    }
+    allowed = gaps | extend_days | pending_files | amazon_repair
     if not allowed:
         return 0
 
@@ -789,6 +826,54 @@ def snapshot_dates_from_history(hist: pd.DataFrame | None) -> list[str]:
         return []
     days = pd.to_datetime(work.loc[mask, "Date"], errors="coerce").dt.normalize().dropna()
     return sorted({str(pd.Timestamp(d).date()) for d in days.unique()})
+
+
+def channel_snapshot_dates(hist: pd.DataFrame | None, channel: str) -> set[str]:
+    """Calendar days with Source snapshot/uploaded on a specific inventory channel."""
+    if hist is None or getattr(hist, "empty", True):
+        return set()
+    work = _ensure_source_column(_ensure_channel_column(hist))
+    ch = str(channel or "").strip().lower()
+    if not ch:
+        return set(snapshot_dates_from_history(work))
+    src = work["Source"].astype(str).str.strip().str.lower()
+    ch_s = work["Channel"].astype(str).str.strip().str.lower()
+    mask = src.isin(["snapshot", "uploaded"]) & ch_s.eq(ch)
+    if not bool(mask.any()):
+        return set()
+    days = pd.to_datetime(work.loc[mask, "Date"], errors="coerce").dt.normalize().dropna()
+    return {str(pd.Timestamp(d).date()) for d in days.unique()}
+
+
+def _fill_matrix_day_totals(
+    dates_sorted: list,
+    date_totals: list[float],
+    gap_set: set[str],
+) -> tuple[list[float], list[str]]:
+    """Ffill display totals on empty carried days; keep authentic totals on uploads.
+
+    - Uploaded days keep ``tot`` even when 0 (Amazon FBA zero census).
+    - Gap days with positive qty (sales-derived) keep that qty.
+    - Gap days with tot==0 ffill the last known total.
+    Never promote an uploaded day into ``gap_dates`` because qty is 0.
+    """
+    gap_dates = sorted(gap_set)
+    carried: float | None = None
+    filled: list[float] = []
+    for d, tot in zip(dates_sorted, date_totals):
+        d_s = str(pd.Timestamp(d).date())
+        tot_f = float(tot or 0.0)
+        if d_s not in gap_set:
+            carried = tot_f
+            filled.append(tot_f)
+        elif tot_f > 0:
+            carried = tot_f
+            filled.append(tot_f)
+        elif carried is not None:
+            filled.append(float(carried))
+        else:
+            filled.append(0.0)
+    return filled, gap_dates
 
 
 def last_authoritative_history_date(
@@ -3558,21 +3643,8 @@ def inventory_history_wide_matrix(
         # Days without a snapshot upload are "carried" even when derived qty > 0.
         gap_dates = non_uploaded_inventory_dates(work, dates_sorted)
         gap_set = set(gap_dates)
-        carried = 0.0
-        date_totals_filled: list[float] = []
-        for d, tot in zip(dates_sorted, date_totals):
-            d_s = str(pd.Timestamp(d).date())
-            if tot > 0:
-                carried = tot
-                date_totals_filled.append(tot)
-            elif carried > 0:
-                date_totals_filled.append(carried)
-                if d_s not in gap_set:
-                    gap_dates.append(d_s)
-                    gap_set.add(d_s)
-            else:
-                date_totals_filled.append(0.0)
-        uploaded_dates = [d for d in date_strs if d not in gap_set]
+        date_totals_filled, gap_dates = _fill_matrix_day_totals(dates_sorted, date_totals, gap_set)
+        uploaded_dates = [d for d in date_strs if d not in set(gap_dates)]
 
         if not page_skus:
             return {
@@ -3620,10 +3692,18 @@ def inventory_history_wide_matrix(
             "channel_split_available": split_available,
         }
 
-    source_probe = work  # window-trimmed tall history (all channels) for upload detection
+    source_probe = work  # window-trimmed tall history (all channels)
     channel_df = filter_inventory_history_channel(work, channel)
     if channel_df is None or channel_df.empty:
         return {**empty, "loaded": True, "dates": date_strs, "date_totals": [0.0] * len(date_strs)}
+
+    # For OMS/Amazon tabs, uploaded vs carried must use that channel's Source rows.
+    # All-channel probing made Amazon look uploaded whenever OMS had a snapshot, then
+    # the tot==0 loop re-marked those days CARRIED — hiding FBA census days.
+    if channel in ("oms", "amazon"):
+        gap_probe = channel_df
+    else:
+        gap_probe = source_probe
 
     # Window already applied above — skip second filter_inventory_history_window copy.
     trimmed = channel_df
@@ -3688,24 +3768,10 @@ def inventory_history_wide_matrix(
     page_skus = sku_list[start_i:end_i]
     totals = work.groupby("_d", sort=False)["Qty"].sum()
     date_totals = [float(totals.get(d, 0.0) or 0.0) for d in dates_sorted]
-    gap_dates = non_uploaded_inventory_dates(source_probe, dates_sorted)
+    gap_dates = non_uploaded_inventory_dates(gap_probe, dates_sorted)
     gap_set = set(gap_dates)
-    carried = 0.0
-    date_totals_filled = []
-    for d, tot in zip(dates_sorted, date_totals):
-        d_s = str(pd.Timestamp(d).date())
-        if tot > 0:
-            carried = tot
-            date_totals_filled.append(tot)
-        elif carried > 0:
-            date_totals_filled.append(carried)
-            if d_s not in gap_set:
-                gap_dates.append(d_s)
-                gap_set.add(d_s)
-        else:
-            date_totals_filled.append(0.0)
-    date_totals = date_totals_filled
-    uploaded_dates = [d for d in date_strs if d not in gap_set]
+    date_totals, gap_dates = _fill_matrix_day_totals(dates_sorted, date_totals, gap_set)
+    uploaded_dates = [d for d in date_strs if d not in set(gap_dates)]
 
     if sales_df is None or getattr(sales_df, "empty", True):
         if not page_skus:
