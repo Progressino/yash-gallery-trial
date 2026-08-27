@@ -1,8 +1,8 @@
-"""Master Production Status Report UI — quantity by stage for the same SKU."""
+/** Master Production Status Report — quantity by stage for the same SKU. */
 
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '../api'
+import api from '../api/client'
 
 type MasterLine = {
   so_number: string
@@ -65,7 +65,7 @@ export default function MasterProductionStatusPanel() {
 
   const reportQ = useQuery({
     queryKey: ['master-status-report', params],
-    queryFn: () => api.get('/production/master-status-report', { params }).then(r => r.data),
+    queryFn: () => api.get('/production/master-status-report', { params }).then((r: { data: unknown }) => r.data),
     staleTime: 30_000,
   })
 
