@@ -678,6 +678,49 @@ def process_report():
     return get_process_report()
 
 
+@router.get("/master-status-report")
+def master_status_report(
+    so_number: str = "",
+    sku: str = "",
+    main_sku: str = "",
+    component: str = "",
+    jo_number: str = "",
+    process: str = "",
+    q: str = "",
+    status: str = "",
+    min_available: int = 0,
+    limit: int = 200,
+    offset: int = 0,
+):
+    """
+    Master Production Status — quantity at each stage for the same SKU.
+    Reads process_stock + open job_orders; stages come from Item Master routing.
+    """
+    from ..services.production_master_report import query_master_production_status
+
+    return query_master_production_status(
+        so_number=so_number,
+        sku=sku,
+        main_sku=main_sku,
+        component=component,
+        jo_number=jo_number,
+        process=process,
+        q=q,
+        status=status,
+        min_available=min_available,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/stage-report-config")
+def stage_report_config_endpoint():
+    """Flexible column registry for stage-wise reports (KPIs finalized later)."""
+    from ..services.production_master_report import stage_report_config
+
+    return stage_report_config()
+
+
 @router.get("/cutting-report")
 def cutting_report(
     date_from: str = "",

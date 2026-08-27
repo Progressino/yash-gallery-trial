@@ -13,6 +13,7 @@ import {
 } from './joLineHelpers'
 import SetBomPanel from '../components/SetBomPanel'
 import CuttingReportsPanel from './CuttingReportsPanel'
+import MasterProductionStatusPanel from './MasterProductionStatusPanel'
 import { downloadCsv } from '../lib/exportCsv'
 
 type MasterSkuOption = {
@@ -1231,7 +1232,7 @@ export default function Production() {
   })
   const [editPlannedQty, setEditPlannedQty] = useState<Record<number, string>>({})
   const [editLineQty, setEditLineQty] = useState<Record<number, string>>({})
-  const [reportsView, setReportsView] = useState<'cutting' | 'process'>('cutting')
+  const [reportsView, setReportsView] = useState<'cutting' | 'process' | 'master'>('master')
   const [newLines, setNewLines] = useState<{ so_number: string; sku: string; sku_name: string; style: string; planned_qty: number; vendor_rate: number; remarks: string; so_qty?: number }[]>([])
   const [soLineSearch, setSOLineSearch] = useState('')
   const joImportRef = useRef<HTMLInputElement>(null)
@@ -2984,8 +2985,8 @@ export default function Production() {
       {/* REPORTS TAB */}
       {tab === 'reports' && (
         <div className="space-y-4">
-          <div className="flex gap-2">
-            {([['cutting', 'Cutting'], ['process', 'All processes']] as const).map(([key, label]) => (
+          <div className="flex gap-2 flex-wrap">
+            {([['master', 'Master status'], ['cutting', 'Cutting'], ['process', 'All processes (JO)']] as const).map(([key, label]) => (
               <button
                 key={key}
                 type="button"
@@ -2996,7 +2997,9 @@ export default function Production() {
               </button>
             ))}
           </div>
-          {reportsView === 'cutting' ? (
+          {reportsView === 'master' ? (
+            <MasterProductionStatusPanel />
+          ) : reportsView === 'cutting' ? (
             <CuttingReportsPanel />
           ) : (
         <div className="space-y-4">

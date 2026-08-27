@@ -425,6 +425,8 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_jo_fabric_returns_jo ON jo_fabric_returns(jo_id)",
         "CREATE INDEX IF NOT EXISTS idx_jo_cost_entries_jo ON jo_cost_entries(jo_id)",
         "CREATE INDEX IF NOT EXISTS idx_process_stock_so_sku ON process_stock(so_number, sku)",
+        "CREATE INDEX IF NOT EXISTS idx_process_stock_process ON process_stock(process)",
+        "CREATE INDEX IF NOT EXISTS idx_job_orders_so_sku_process ON job_orders(so_number, sku, process)",
     ):
         try:
             conn.execute(ddl)
