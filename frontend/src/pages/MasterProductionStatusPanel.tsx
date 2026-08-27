@@ -32,6 +32,14 @@ type OverviewRow = {
   jo_numbers: string
 }
 
+type MasterReport = {
+  stages?: string[]
+  lines?: MasterLine[]
+  overview?: OverviewRow[]
+  total?: number
+  overview_total?: number
+}
+
 function fmt(n: number | undefined) {
   return Number(n || 0).toLocaleString()
 }
@@ -65,15 +73,20 @@ export default function MasterProductionStatusPanel() {
 
   const reportQ = useQuery({
     queryKey: ['master-status-report', params],
-    queryFn: () => api.get('/production/master-status-report', { params }).then((r: { data: unknown }) => r.data),
+    queryFn: async () => {
+      const r = await api.get('/production/master-status-report', { params })
+      return r.data as MasterReport
+    },
     staleTime: 30_000,
   })
 
-  const stages: string[] = reportQ.data?.stages || []
-  const lines: MasterLine[] = reportQ.data?.lines || []
-  const overview: OverviewRow[] = reportQ.data?.overview || []
-  const total = Number(reportQ.data?.total || 0)
+  const data = reportQ.data
+  const stages: string[] = data?.stages || []
+  const lines: MasterLine[] = data?.lines || []
+  const overview: OverviewRow[] = data?.overview || []
+  const total = Number(data?.total || 0)
   const pages = Math.max(1, Math.ceil(total / pageSize))
+  const overviewTotal = Number(data?.overview_total || 0)
 
   return (
     <div className="space-y-4">
@@ -112,7 +125,7 @@ export default function MasterProductionStatusPanel() {
           </button>
         ))}
         <span className="text-xs text-gray-400 ml-auto">
-          {reportQ.isFetching ? 'Loading…' : `${fmt(total)} stage lines · ${fmt(reportQ.data?.overview_total)} SKUs`}
+          {reportQ.isFetching ? 'Loading…' : `${fmt(total)} stage lines · ${fmt(overviewTotal)} SKUs`}
         </span>
       </div>
 
