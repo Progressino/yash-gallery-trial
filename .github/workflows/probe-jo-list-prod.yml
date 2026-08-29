@@ -17,7 +17,9 @@ jobs:
     steps:
       - name: Wait for backend after deploy
         if: github.event_name == 'workflow_run'
-        run: sleep 90
+        # Deploy post-steps + parallel probes contend for READ/restore pools;
+        # probe script also waits for warm_cache before hydrate.
+        run: sleep 150
 
       - name: Checkout probe script
         uses: actions/checkout@v4

@@ -17,11 +17,12 @@ jobs:
       ${{ github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: self-hosted
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Wait for backend after deploy
         if: github.event_name == 'workflow_run'
-        run: sleep 120
+        # Stagger behind JO/HRM probes so hist_matrix is not contested right after recreate.
+        run: sleep 210
 
       - name: Checkout (for optional fixture paths)
         uses: actions/checkout@v4
@@ -55,13 +56,25 @@ jobs:
           s = requests.Session()
           headers = {"X-Device-Id": "gha-inv-aug11-probe"}
 
-          # Health / SHA
-          h = s.get(f"{base}/api/health", timeout=30)
-          h.raise_for_status()
-          health = h.json()
-          print("HEALTH", json.dumps({k: health.get(k) for k in (
-              "status", "git_sha", "label", "warm_cache", "built_at"
-          )}))
+          # Health / SHA — wait for warm_cache so matrix/export are not cold-contended.
+          health = {}
+          wait_deadline = time.time() + 12 * 60
+          while time.time() < wait_deadline:
+              h = s.get(f"{base}/api/health", timeout=30)
+              h.raise_for_status()
+              health = h.json() or {}
+              print("HEALTH", json.dumps({k: health.get(k) for k in (
+                  "status", "git_sha", "label", "warm_cache", "built_at",
+                  "upload_memory_lock_held",
+              )}))
+              if health.get("status") == "ok" and health.get("warm_cache"):
+                  break
+              time.sleep(10)
+          else:
+              raise SystemExit(
+                  "warm_cache still false after wait — "
+                  f"last={json.dumps({k: health.get(k) for k in ('git_sha', 'warm_cache')})}"
+              )
           sha = str(health.get("git_sha") or "")
           print("DEPLOY_SHA", sha)
 
@@ -255,8 +268,8 @@ jobs:
 
           # UI default is 30 days — probe that first (faster, matches product).
           # Then days=60 for Jul/Aug census coverage. Matrix can cold-start slowly
-          # right after deploy; retry with a longer read timeout.
-          def _matrix(days: int, attempts: int = 3, read_timeout: int = 300):
+          # right after deploy (overlay lock + concurrent probes); warm with 7d first.
+          def _matrix(days: int, attempts: int = 5, read_timeout: int = 480):
               last_err = None
               for attempt in range(1, attempts + 1):
                   try:
@@ -271,9 +284,10 @@ jobs:
                   except Exception as e:
                       last_err = e
                       print("hist_matrix retry", days, attempt, e)
-                      time.sleep(8 * attempt)
+                      time.sleep(10 * attempt)
               raise SystemExit(f"matrix days={days} failed after {attempts} attempts: {last_err}")
 
+          _matrix(7)  # warm overlay / READ pool before the 30d UI default
           mx30 = _matrix(30)
           mx30_dates = [str(x)[:10] for x in (mx30.get("dates") or [])]
           if len(mx30_dates) < 20:
