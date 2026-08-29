@@ -1943,7 +1943,7 @@ export default function Production() {
   }
 
   const allProcesses = (processes.length > 0 ? processes : ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Kajh Button', 'Finishing', 'Packing'])
-    .filter(p => p && p !== 'Kaj Button' && String(p).toLowerCase() !== 'nan')
+    .filter(p => p && p !== 'Kaj Button' && p !== 'Embroidary' && String(p).toLowerCase() !== 'nan')
 
   const renderJOCard = (baseJo: JO) => {
     const isExpanded = expanded === baseJo.id

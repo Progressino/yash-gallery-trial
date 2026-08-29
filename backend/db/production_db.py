@@ -722,21 +722,50 @@ def _wip_cell(raw: dict, *keys: str) -> str:
     return ""
 
 
-# Duplicate process tab: empty "Kaj Button" aliased onto "Kajh Button" (has JO data).
+# Duplicate process tabs → canonical spelling (keep one UI tab with the live data).
 _PROCESS_TAB_ALIASES = {
     "Kaj Button": "Kajh Button",
+    "Embroidary": "Embroidery",  # misspelling duplicate of Embroidery
 }
 _HIDDEN_PROCESS_TABS = frozenset(_PROCESS_TAB_ALIASES.keys())
 
 
 def coalesce_duplicate_process_tabs() -> dict:
-    """Merge Kaj Button stock/JOs into Kajh Button and drop the duplicate routing step."""
-    report = {"renamed_stock": 0, "renamed_jos": 0, "deleted_steps": 0, "errors": []}
+    """Merge alias process names into canonical tabs and drop duplicate routing steps."""
+    report = {"renamed_stock": 0, "renamed_jos": 0, "merged_stock": 0, "deleted_steps": 0, "errors": []}
     try:
         conn = _connect()
         try:
             for old, new in _PROCESS_TAB_ALIASES.items():
-                # No overlapping (so,sku) keys expected; UPDATE is enough.
+                # Merge process_stock when (so,sku) already exists under the canonical name.
+                overlap = conn.execute(
+                    """SELECT a.so_number, a.sku, a.available_qty, a.total_in, a.total_out
+                       FROM process_stock a
+                       JOIN process_stock b
+                         ON a.so_number=b.so_number AND a.sku=b.sku
+                       WHERE a.process=? AND b.process=?""",
+                    (old, new),
+                ).fetchall()
+                for r in overlap:
+                    so = r["so_number"] if hasattr(r, "keys") else r[0]
+                    sku = r["sku"] if hasattr(r, "keys") else r[1]
+                    aq = int((r["available_qty"] if hasattr(r, "keys") else r[2]) or 0)
+                    ti = int((r["total_in"] if hasattr(r, "keys") else r[3]) or 0)
+                    to = int((r["total_out"] if hasattr(r, "keys") else r[4]) or 0)
+                    conn.execute(
+                        """UPDATE process_stock SET
+                             available_qty = available_qty + ?,
+                             total_in = total_in + ?,
+                             total_out = total_out + ?,
+                             updated_at = datetime('now')
+                           WHERE so_number=? AND sku=? AND process=?""",
+                        (aq, ti, to, so, sku, new),
+                    )
+                    conn.execute(
+                        "DELETE FROM process_stock WHERE so_number=? AND sku=? AND process=?",
+                        (so, sku, old),
+                    )
+                    report["merged_stock"] += 1
                 cur = conn.execute(
                     "UPDATE process_stock SET process=? WHERE process=?",
                     (new, old),
@@ -747,7 +776,6 @@ def coalesce_duplicate_process_tabs() -> dict:
                     (new, new, old),
                 )
                 report["renamed_jos"] += int(cur.rowcount or 0)
-                # Piece issues / ready-to labels that stored the old name
                 for table, col in (
                     ("jo_piece_issues", "from_process"),
                     ("jo_piece_issues", "to_process"),
@@ -769,7 +797,6 @@ def coalesce_duplicate_process_tabs() -> dict:
         conn = _item_connect()
         try:
             for old, new in _PROCESS_TAB_ALIASES.items():
-                # Prefer existing Kajh Button id; remape item_routing then delete alias.
                 row_new = conn.execute(
                     "SELECT id FROM routing_steps WHERE name=? LIMIT 1", (new,)
                 ).fetchone()
@@ -777,9 +804,8 @@ def coalesce_duplicate_process_tabs() -> dict:
                     "SELECT id FROM routing_steps WHERE name=? LIMIT 1", (old,)
                 ).fetchone()
                 if row_old and row_new:
-                    oid, nid = int(row_old["id"] if hasattr(row_old, "keys") else row_old[0]), int(
-                        row_new["id"] if hasattr(row_new, "keys") else row_new[0]
-                    )
+                    oid = int(row_old["id"] if hasattr(row_old, "keys") else row_old[0])
+                    nid = int(row_new["id"] if hasattr(row_new, "keys") else row_new[0])
                     try:
                         conn.execute(
                             "UPDATE OR IGNORE item_routing SET step_id=? WHERE step_id=?",
@@ -803,6 +829,16 @@ def coalesce_duplicate_process_tabs() -> dict:
                         (new, old),
                     )
                     report["deleted_steps"] += 1
+            # Rewrite routing path strings that still use the misspelled stage.
+            try:
+                for old, new in _PROCESS_TAB_ALIASES.items():
+                    conn.execute(
+                        """UPDATE set_bom_lines SET routing = REPLACE(routing, ?, ?)
+                           WHERE routing LIKE ?""",
+                        (old, new, f"%{old}%"),
+                    )
+            except Exception:
+                pass
             conn.commit()
         finally:
             conn.close()
@@ -812,13 +848,15 @@ def coalesce_duplicate_process_tabs() -> dict:
 
 
 def get_all_routing_steps() -> list:
-    """Get all available routing steps (hides duplicate Kaj Button tab)."""
+    """Get all available routing steps (hides duplicate alias tabs)."""
     try:
-        # Idempotent: fold legacy "Kaj Button" into Kajh Button when present.
+        # Idempotent: fold legacy aliases (Embroidary, Kaj Button) when present.
         try:
             conn = _item_connect()
+            placeholders = ",".join("?" for _ in _PROCESS_TAB_ALIASES)
             has_alias = conn.execute(
-                "SELECT 1 FROM routing_steps WHERE name=? LIMIT 1", ("Kaj Button",)
+                f"SELECT 1 FROM routing_steps WHERE name IN ({placeholders}) LIMIT 1",
+                tuple(_PROCESS_TAB_ALIASES.keys()),
             ).fetchone()
             conn.close()
             if has_alias:

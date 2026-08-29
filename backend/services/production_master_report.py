@@ -51,9 +51,11 @@ def list_production_stage_names() -> list[str]:
             n = str(r["process"] if hasattr(r, "keys") else r[0]).strip()
             if not n or n.lower() in {"nan", "none", "null"}:
                 continue
-            # Hide duplicate Kaj Button tab alias
+            # Hide duplicate process-tab aliases
             if n == "Kaj Button":
                 n = "Kajh Button"
+            elif n == "Embroidary":
+                n = "Embroidery"
             if n and n not in seen:
                 seen.add(n)
                 names.append(n)
