@@ -1457,7 +1457,8 @@ def _clear_stuck_daily_ingest(sess: AppSession, *, force: bool = False) -> bool:
     age = time.time() - started if started > 0 else 999999
     # Auto-clear after 3 minutes by default — large RAR archives parse in < 2 min.
     # Override with DAILY_INGEST_STUCK_SEC env var if needed.
-    stuck_sec = int(os.environ.get("DAILY_INGEST_STUCK_SEC", "180"))
+    # Sales ZIPs + platform parse can exceed 3 minutes on busy days.
+    stuck_sec = int(os.environ.get("DAILY_INGEST_STUCK_SEC", "900"))
     if not force and age < stuck_sec:
         return False
     sess.daily_auto_ingest_status = "error"
@@ -2556,7 +2557,8 @@ def _clear_stuck_inventory_upload(sess: AppSession, *, force: bool = False) -> b
     if st == "running":
         started = float(getattr(sess, "inventory_upload_started", 0) or 0)
         age = time.time() - started if started > 0 else 999999
-        stuck_sec = int(os.environ.get("INVENTORY_UPLOAD_STUCK_SEC", "300"))
+        # Large daily Inventory*.rar bundles routinely take 5–15+ minutes.
+        stuck_sec = int(os.environ.get("INVENTORY_UPLOAD_STUCK_SEC", "900"))
         if not force and age < stuck_sec:
             return False
     if force:
@@ -2577,7 +2579,8 @@ def _clear_stuck_inventory_upload(sess: AppSession, *, force: bool = False) -> b
 
 def _acquire_inventory_memory_lock(sess: AppSession, session_id: str) -> bool:
     """Wait briefly for the global upload lock, then parse anyway (avoid infinite queue)."""
-    wait_sec = int(os.environ.get("INVENTORY_MEMORY_LOCK_WAIT_SEC", "120"))
+    # Prefer starting parse quickly; warm-cache/sales rebuild can share the host.
+    wait_sec = int(os.environ.get("INVENTORY_MEMORY_LOCK_WAIT_SEC", "30"))
     if _UPLOAD_MEMORY_LOCK.acquire(blocking=False):
         return True
     _set_inventory_upload_progress(
@@ -2934,6 +2937,10 @@ def _inventory_apply_parse_result(
                 "Daily snapshot history append skipped: %s",
                 hist.get("reason"),
             )
+            warnings.append(
+                f"Inv. History may not show this day yet ({hist.get('reason')}). "
+                "Re-upload if the date is still missing after refresh."
+            )
         # Always sync sidecar when we have history on the session (even if this
         # day's column was already present) so disk/warm match the upload.
         try:
@@ -2942,14 +2949,23 @@ def _inventory_apply_parse_result(
                 session_id=getattr(sess, "_persist_sid", None),
             )
             import backend.main as _main
+            from ..services.daily_inventory_history import persist_inventory_history_authoritative
 
             hist_df = getattr(sess, "daily_inventory_history_df", None)
             if hist_df is not None and not getattr(hist_df, "empty", True):
                 _main.sync_daily_inventory_history_sidecar(sess)
+                # Force disk write after RAR snapshot so Inv History / PO matrix
+                # (which reload parquet) always see the uploaded day.
+                if hist.get("appended") or hist.get("uploaded_at"):
+                    persist_inventory_history_authoritative(sess, hist_df, force=True)
         except Exception:
             _log.exception("sync_daily_inventory_history_sidecar failed")
     except Exception:
         _log.exception("append_snapshot_inventory_to_history failed")
+        warnings.append(
+            "Inv. History append failed — live Inventory was saved, but the day "
+            "may not appear in history until you re-upload."
+        )
     _set_inventory_upload_progress(
         sess, 99, "Refreshing inventory cache…",
         session_id=getattr(sess, "_persist_sid", None),

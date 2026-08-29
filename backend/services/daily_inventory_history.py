@@ -2161,6 +2161,27 @@ def append_snapshot_inventory_to_history(sess) -> dict:
     if not result.get("ok"):
         return {"appended": False, "reason": result.get("reason", "refresh_failed")}
     snap = str(getattr(sess, "inventory_snapshot_date", "") or "").strip()[:10]
+    # Critical: Excel Inv-History uploads stamp uploaded_at so disk/warm accept the
+    # frame. RAR snapshot appends used to skip this — Inv History / PO kept serving
+    # the previous parquet while live Inventory looked updated.
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        sess.daily_inventory_history_uploaded_at = datetime.now(
+            ZoneInfo("Asia/Kolkata")
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        from datetime import datetime, timezone
+
+        sess.daily_inventory_history_uploaded_at = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    if snap:
+        try:
+            promote_daily_inventory_matrix_max_date(sess, snap)
+        except Exception:
+            pass
     return {
         "appended": bool(result.get("snapshot_appended")),
         "rolled_forward": bool(result.get("rolled_forward")),
@@ -2169,6 +2190,7 @@ def append_snapshot_inventory_to_history(sess) -> dict:
         "skus": result.get("skus", 0),
         "days": result.get("days", 0),
         "max_date": result.get("max_date", ""),
+        "uploaded_at": str(getattr(sess, "daily_inventory_history_uploaded_at", "") or ""),
     }
 
 

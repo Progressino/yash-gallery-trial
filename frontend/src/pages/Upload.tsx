@@ -645,6 +645,12 @@ export default function Upload() {
           const invRes = await uploadInventoryAuto(invFiles)
           if (invRes.ok && invRes.ingest_async) {
             showToast('success', invRes.message || 'Inventory files queued on server…', 6000)
+            setBuildingMsg('Parsing inventory on server…')
+            await waitForInventoryUpload((msg) => setBuildingMsg(msg))
+          } else if (invRes.ok) {
+            showToast('success', invRes.message || 'Inventory uploaded', 8000)
+          } else {
+            showToast('error', invRes.message || 'Inventory upload failed', 12_000)
           }
         }
         if (!salesFiles.length) {

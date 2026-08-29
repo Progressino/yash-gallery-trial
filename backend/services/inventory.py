@@ -107,10 +107,13 @@ def infer_inventory_snapshot_date(
         if not base:
             continue
         low = base.lower()
-        pri = 2
-        if low.startswith("oms") or " oms" in low:
+        # Outer daily Inventory*.rar/zip wins over inner OMS CSV dates — operators
+        # name the bundle for the census day they intend (OMS files are often
+        # labeled a day earlier or with a generic export stamp).
+        pri = 3
+        if "inventory" in low and low.endswith((".rar", ".zip")):
             pri = 0
-        elif "inventory" in low and low.endswith((".rar", ".zip")):
+        elif low.startswith("oms") or " oms" in low or low.endswith(".csv") and "oms" in low:
             pri = 1
         for d in _dates_in_text(base):
             _add(d, base, pri)
@@ -120,11 +123,12 @@ def infer_inventory_snapshot_date(
             continue
         fn = str(entry.get("filename") or "")
         low = fn.lower()
-        pri = 3
-        if low.startswith("oms"):
-            pri = 0
+        # Inner files only — never override an outer Inventory*.rar date.
+        pri = 4
+        if low.startswith("oms") or " oms" in low:
+            pri = 2
         elif "seller_inventory_report" in low or "current inventory" in low:
-            pri = 4
+            pri = 5
         for d in _dates_in_text(fn):
             _add(d, fn, pri)
 
@@ -132,7 +136,7 @@ def infer_inventory_snapshot_date(
     amz_day = str(amz.get("latest_report_date") or "").strip()[:10]
     if amz_day:
         try:
-            _add(date.fromisoformat(amz_day), "Amazon ledger (latest report day)", 5)
+            _add(date.fromisoformat(amz_day), "Amazon ledger (latest report day)", 6)
         except ValueError:
             pass
 
