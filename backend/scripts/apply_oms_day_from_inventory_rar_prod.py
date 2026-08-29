@@ -105,6 +105,19 @@ def main(argv: list[str] | None = None) -> int:
     sess.daily_inventory_history_df = merged
     sess.inventory_df_variant = variant
     try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        sess.daily_inventory_history_uploaded_at = datetime.now(
+            ZoneInfo("Asia/Kolkata")
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        from datetime import datetime, timezone
+
+        sess.daily_inventory_history_uploaded_at = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    try:
         sess.inventory_snapshot_date = day
         sess.inventory_snapshot_date_label = day
     except Exception:
