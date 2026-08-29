@@ -207,3 +207,62 @@ def test_build_jo_payload_treats_pandas_nan_component_code_as_empty(isolated_mod
     assert payload["sku"] == "IMPNAN-M"
     assert payload.get("component_code", "") == ""
     assert payload.get("create_component_jos") is None
+
+
+def test_aggregate_jo_import_sums_duplicate_finishing_rows():
+    from backend.services.jo_import import (
+        aggregate_jo_import_payloads,
+        build_jo_payload_from_import_row,
+    )
+
+    rows = [
+        {"so_number": "SO-A", "sku": "SKU-1", "planned_qty": 10, "process": "Finishing"},
+        {"so_number": "SO-A", "sku": "SKU-1", "planned_qty": 7, "process": "Finishing"},
+        {"so_number": "SO-A", "sku": "SKU-2", "planned_qty": 3, "process": "Finishing"},
+    ]
+    payloads = [build_jo_payload_from_import_row(r, default_process="Finishing") for r in rows]
+    agg = aggregate_jo_import_payloads(payloads)
+    assert len(agg) == 2
+    by_sku = {p["sku"]: int(p["planned_qty"]) for p in agg}
+    assert by_sku["SKU-1"] == 17
+    assert by_sku["SKU-2"] == 3
+
+
+def test_finishing_import_aggregates_and_upserts(isolated_module_dbs, client):
+    csv = (
+        "so_number,sku,planned_qty,process\n"
+        "SO-FIN-1,FINSKU-M,10,Finishing\n"
+        "SO-FIN-1,FINSKU-M,5,Finishing\n"
+        "SO-FIN-1,FINSKU-L,3,Finishing\n"
+    )
+    res = client.post(
+        "/api/production/orders/import",
+        files={"file": ("fin.csv", io.BytesIO(csv.encode()), "text/csv")},
+        data={"process": "Finishing"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["rows_parsed"] == 3
+    assert body["rows_aggregated"] == 2
+    assert body["created"] == 2
+    assert not body["errors"], body
+
+    # Re-import same file → update, not duplicate
+    res2 = client.post(
+        "/api/production/orders/import",
+        files={"file": ("fin.csv", io.BytesIO(csv.encode()), "text/csv")},
+        data={"process": "Finishing"},
+    )
+    assert res2.status_code == 200, res2.text
+    body2 = res2.json()
+    assert body2["updated"] == 2
+    assert body2["created"] == 0
+
+    from backend.db import production_db
+
+    jos = production_db.list_jos(process="Finishing")
+    open_jos = [j for j in jos if j.get("status") not in ("Cancelled", "Closed")]
+    assert len(open_jos) == 2
+    by_sku = {j["sku"]: int(j["planned_qty"]) for j in open_jos}
+    assert by_sku["FINSKU-M"] == 15
+    assert by_sku["FINSKU-L"] == 3

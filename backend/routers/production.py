@@ -8,7 +8,7 @@ from typing import Optional, List
 import io
 import pandas as pd
 from ..db.production_db import (
-    list_jos, get_jo, get_jo_by_number, create_jo, update_jo,
+    list_jos, get_jo, get_jo_by_number, create_jo, update_jo, upsert_jo_from_import,
     issue_fabric, return_fabric, issue_pieces, receive_pieces, add_cost,
     create_next_process_jo, validate_jo_creation,
     get_process_stock, get_all_process_stocks, get_ready_to_process,
@@ -31,6 +31,7 @@ from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
 from ..services import jo_issue_notes
 from ..services.jo_import import (
+    aggregate_jo_import_payloads,
     build_jo_payload_from_import_row,
     jo_import_template_csv,
     looks_like_ready_to_wip_columns,
@@ -713,6 +714,22 @@ def master_status_report(
     )
 
 
+@router.get("/master-status-report/detail")
+def master_status_report_detail(
+    so_number: str = "",
+    sku: str = "",
+    process: str = "",
+):
+    """Drill-down: JO-wise / component-wise breakup for one overview qty cell."""
+    from ..services.production_master_report import query_master_status_cell_detail
+
+    return query_master_status_cell_detail(
+        so_number=so_number,
+        sku=sku,
+        process=process,
+    )
+
+
 @router.get("/stage-report-config")
 def stage_report_config_endpoint():
     """Flexible column registry for stage-wise reports (KPIs finalized later)."""
@@ -887,31 +904,55 @@ async def import_jos(
             ),
         }
     df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
-    created: list[str] = []
-    errors: list[str] = []
+    payloads: list[dict] = []
+    parse_errors: list[str] = []
     for i, row in df.iterrows():
         try:
-            data = build_jo_payload_from_import_row(
-                row.to_dict(),
-                default_process=process,
+            payloads.append(
+                build_jo_payload_from_import_row(
+                    row.to_dict(),
+                    default_process=process,
+                )
             )
-            result = create_jo(data)
-            if isinstance(result, list):
-                created.extend(result)
-            else:
-                created.append(result)
         except Exception as e:
             sku_hint = str(row.get("sku") or row.get("oms_sku") or "").strip() or "?"
-            errors.append(f"Row {int(i) + 2} ({sku_hint}): {e}")
+            parse_errors.append(f"Row {int(i) + 2} ({sku_hint}): {e}")
+
+    raw_count = len(payloads)
+    aggregated = aggregate_jo_import_payloads(payloads)
+    created: list[str] = []
+    updated: list[str] = []
+    errors: list[str] = list(parse_errors)
+    for data in aggregated:
+        try:
+            result = upsert_jo_from_import(data)
+            nums = [n for n in (result.get("jo_numbers") or []) if n]
+            if result.get("action") == "updated":
+                updated.extend(nums)
+            else:
+                created.extend(nums)
+        except Exception as e:
+            sku_hint = str(data.get("sku") or "").strip() or "?"
+            errors.append(f"{data.get('so_number') or '?'} / {sku_hint}: {e}")
     return {
         "ok": True,
         "kind": "job_order",
         "created": len(created),
-        "jo_numbers": created,
+        "updated": len(updated),
+        "rows_read": int(len(df)),
+        "rows_parsed": raw_count,
+        "rows_aggregated": len(aggregated),
+        "jo_numbers": created + updated,
         "errors": errors,
-        "message": f"Imported {len(created)} job order(s)"
-        + (f"; {len(errors)} failed" if errors else ""),
+        "message": (
+            f"Imported {len(created)} new + {len(updated)} updated job order(s) "
+            f"from {raw_count} row(s)"
+            + (f" (aggregated to {len(aggregated)} unique SO/SKU/process)" if len(aggregated) < raw_count else "")
+            + (f"; {len(errors)} failed" if errors else "")
+        ),
         "hint": (
+            "Duplicate SO+SKU+process rows are summed into one JO. "
+            "Re-import updates existing open JOs to the file total (does not stop mid-file). "
             "FRONT/BACK are panels inside the TOP Cutting JO after Receive — "
             "not separate import rows. Use one main size SKU row, or component_code=TOP/PANT/DUPATTA. "
             "For existing Ready-To stock, use ready_to_*_wip_template.csv + Import Ready-To WIP."

@@ -1942,7 +1942,8 @@ export default function Production() {
     } catch { /* keep prior fabric_qty */ }
   }
 
-  const allProcesses = processes.length > 0 ? processes : ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Finishing', 'Packing']
+  const allProcesses = (processes.length > 0 ? processes : ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Kajh Button', 'Finishing', 'Packing'])
+    .filter(p => p && p !== 'Kaj Button' && String(p).toLowerCase() !== 'nan')
 
   const renderJOCard = (baseJo: JO) => {
     const isExpanded = expanded === baseJo.id
@@ -2566,10 +2567,12 @@ export default function Production() {
                   try {
                     const res = await api.post('/production/orders/import', fd, {
                       headers: { 'Content-Type': 'multipart/form-data' },
+                      timeout: 600_000,
                     })
                     qc.invalidateQueries({ queryKey: ['jos-process'] })
                     qc.invalidateQueries({ queryKey: ['ready-to-process'] })
-                    const errs = (res.data?.errors || []).slice(0, 6).join('\n')
+                    qc.invalidateQueries({ queryKey: ['master-status-report'] })
+                    const errs = (res.data?.errors || []).slice(0, 8).join('\n')
                     alert(
                       (res.data?.message || `Imported ${res.data?.created ?? 0} job order(s).`)
                       + (errs ? `\n\n${errs}` : '')

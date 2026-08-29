@@ -38,7 +38,7 @@ def list_production_stage_names() -> list[str]:
             n = str(s.get("name") or "").strip()
         else:
             n = str(s or "").strip()
-        if n and n not in seen:
+        if n and n.lower() not in {"nan", "none", "null"} and n not in seen:
             seen.add(n)
             names.append(n)
     conn = _connect()
@@ -49,6 +49,11 @@ def list_production_stage_names() -> list[str]:
         ).fetchall()
         for r in rows:
             n = str(r["process"] if hasattr(r, "keys") else r[0]).strip()
+            if not n or n.lower() in {"nan", "none", "null"}:
+                continue
+            # Hide duplicate Kaj Button tab alias
+            if n == "Kaj Button":
+                n = "Kajh Button"
             if n and n not in seen:
                 seen.add(n)
                 names.append(n)
@@ -321,6 +326,93 @@ def query_master_production_status(
             "status": status,
             "min_available": min_available,
         },
+    }
+
+
+def query_master_status_cell_detail(
+    *,
+    so_number: str,
+    sku: str,
+    process: str = "",
+) -> dict[str, Any]:
+    """JO-wise / component-wise breakup for one overview cell (SO × SKU × optional stage)."""
+    so_number = str(so_number or "").strip()
+    sku = str(sku or "").strip().upper()
+    process = str(process or "").strip()
+    if not so_number or not sku:
+        return {"ok": False, "error": "so_number and sku are required", "jos": [], "stock": [], "components": []}
+
+    conn = _connect()
+    try:
+        jo_params: list[Any] = [so_number, sku]
+        jo_sql = """
+            SELECT id, jo_number, process, status, sku, main_sku, component_code, sku_role,
+                   planned_qty, issued_qty, received_qty,
+                   COALESCE(balance_qty, COALESCE(planned_qty,0) - COALESCE(received_qty,0)) AS balance_qty,
+                   vendor_name, production_mode, updated_at
+            FROM job_orders
+            WHERE so_number=? AND UPPER(TRIM(sku))=UPPER(TRIM(?))
+              AND status NOT IN ('Cancelled','Closed')
+        """
+        if process:
+            jo_sql += " AND process=?"
+            jo_params.append(process)
+        jo_sql += " ORDER BY process, id"
+        jos = [dict(r) for r in conn.execute(jo_sql, jo_params).fetchall()]
+
+        # Component / panel siblings under same SO + main size family
+        main, _comp = _parse_main_and_component(sku)
+        root = main or sku
+        stock_sql = """
+            SELECT so_number, sku, process, available_qty, total_in, total_out,
+                   COALESCE(jo_number,'') AS jo_number, updated_at
+            FROM process_stock
+            WHERE so_number=? AND (
+                UPPER(TRIM(sku))=UPPER(TRIM(?))
+                OR UPPER(TRIM(sku)) LIKE ?
+            )
+        """
+        stock_params: list[Any] = [so_number, sku, f"{root}-%"]
+        if process:
+            stock_sql += " AND process=?"
+            stock_params.append(process)
+        stock_sql += " ORDER BY sku, process"
+        stock = [dict(r) for r in conn.execute(stock_sql, stock_params).fetchall()]
+
+        # Open JOs for component SKUs of this size (…-TOP / …-FRONT)
+        comp_jos = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT id, jo_number, process, status, sku, main_sku, component_code,
+                       planned_qty, issued_qty, received_qty,
+                       COALESCE(balance_qty, COALESCE(planned_qty,0) - COALESCE(received_qty,0)) AS balance_qty
+                FROM job_orders
+                WHERE so_number=? AND status NOT IN ('Cancelled','Closed')
+                  AND (
+                    UPPER(TRIM(sku)) LIKE ?
+                    OR UPPER(TRIM(COALESCE(main_sku,'')))=UPPER(TRIM(?))
+                  )
+                  AND UPPER(TRIM(sku)) <> UPPER(TRIM(?))
+                ORDER BY sku, process, id
+                """,
+                (so_number, f"{root}-%", root, sku),
+            ).fetchall()
+        ]
+        if process:
+            comp_jos = [j for j in comp_jos if str(j.get("process") or "") == process]
+    finally:
+        conn.close()
+
+    return {
+        "ok": True,
+        "so_number": so_number,
+        "sku": sku,
+        "process": process,
+        "main_sku": main or sku,
+        "jos": jos,
+        "stock": stock,
+        "components": comp_jos,
     }
 
 

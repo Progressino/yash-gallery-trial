@@ -114,6 +114,51 @@ def looks_like_ready_to_wip_columns(columns: list[Any] | tuple[Any, ...] | None)
     return False
 
 
+def _import_row_dedupe_key(payload: dict[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(payload.get("so_number") or "").strip(),
+        str(payload.get("sku") or "").strip().upper(),
+        str(payload.get("process") or "").strip(),
+        str(payload.get("component_code") or "").strip().upper(),
+    )
+
+
+def aggregate_jo_import_payloads(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sum planned_qty for duplicate SO+SKU+process(+component) rows.
+
+    Finishing/WIP migration files often repeat the same key with split quantities;
+    importing row-by-row timed out after ~1900 creates and under-counted plan qty.
+    """
+    merged: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str, str, str]] = []
+    for raw in payloads:
+        data = dict(raw)
+        key = _import_row_dedupe_key(data)
+        qty = int(float(data.get("planned_qty") or 0))
+        if key not in merged:
+            merged[key] = data
+            order.append(key)
+            continue
+        dest = merged[key]
+        dest["planned_qty"] = int(float(dest.get("planned_qty") or 0)) + qty
+        # Keep non-empty vendor / remarks from later rows when earlier were blank.
+        for fld in ("vendor_name", "remarks", "sku_name", "expected_completion", "fabric_code"):
+            if not str(dest.get(fld) or "").strip() and str(data.get(fld) or "").strip():
+                dest[fld] = data.get(fld)
+        if not float(dest.get("vendor_rate") or 0) and float(data.get("vendor_rate") or 0):
+            dest["vendor_rate"] = data.get("vendor_rate")
+        if not float(dest.get("fabric_qty") or 0) and float(data.get("fabric_qty") or 0):
+            dest["fabric_qty"] = data.get("fabric_qty")
+        lines = list(dest.get("lines") or [])
+        if lines:
+            lines[0] = dict(lines[0])
+            lines[0]["planned_qty"] = int(dest["planned_qty"])
+            dest["lines"] = lines
+        elif data.get("lines"):
+            dest["lines"] = data["lines"]
+    return [merged[k] for k in order]
+
+
 def build_jo_payload_from_import_row(row: dict[str, Any], *, default_process: str = "Cutting") -> dict[str, Any]:
     """Map one CSV/XLSX row into create_jo payload. Raises ValueError on bad panel rows."""
     so_number = _import_cell_str(row.get("so_number") or row.get("so"))

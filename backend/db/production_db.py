@@ -722,15 +722,126 @@ def _wip_cell(raw: dict, *keys: str) -> str:
     return ""
 
 
-def get_all_routing_steps() -> list:
-    """Get all available routing steps."""
+# Duplicate process tab: empty "Kaj Button" aliased onto "Kajh Button" (has JO data).
+_PROCESS_TAB_ALIASES = {
+    "Kaj Button": "Kajh Button",
+}
+_HIDDEN_PROCESS_TABS = frozenset(_PROCESS_TAB_ALIASES.keys())
+
+
+def coalesce_duplicate_process_tabs() -> dict:
+    """Merge Kaj Button stock/JOs into Kajh Button and drop the duplicate routing step."""
+    report = {"renamed_stock": 0, "renamed_jos": 0, "deleted_steps": 0, "errors": []}
     try:
+        conn = _connect()
+        try:
+            for old, new in _PROCESS_TAB_ALIASES.items():
+                # No overlapping (so,sku) keys expected; UPDATE is enough.
+                cur = conn.execute(
+                    "UPDATE process_stock SET process=? WHERE process=?",
+                    (new, old),
+                )
+                report["renamed_stock"] += int(cur.rowcount or 0)
+                cur = conn.execute(
+                    "UPDATE job_orders SET process=?, stage=? WHERE process=?",
+                    (new, new, old),
+                )
+                report["renamed_jos"] += int(cur.rowcount or 0)
+                # Piece issues / ready-to labels that stored the old name
+                for table, col in (
+                    ("jo_piece_issues", "from_process"),
+                    ("jo_piece_issues", "to_process"),
+                ):
+                    try:
+                        conn.execute(
+                            f"UPDATE {table} SET {col}=? WHERE {col}=?",
+                            (new, old),
+                        )
+                    except Exception:
+                        pass
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        report["errors"].append(f"production: {e}")
+
+    try:
+        conn = _item_connect()
+        try:
+            for old, new in _PROCESS_TAB_ALIASES.items():
+                # Prefer existing Kajh Button id; remape item_routing then delete alias.
+                row_new = conn.execute(
+                    "SELECT id FROM routing_steps WHERE name=? LIMIT 1", (new,)
+                ).fetchone()
+                row_old = conn.execute(
+                    "SELECT id FROM routing_steps WHERE name=? LIMIT 1", (old,)
+                ).fetchone()
+                if row_old and row_new:
+                    oid, nid = int(row_old["id"] if hasattr(row_old, "keys") else row_old[0]), int(
+                        row_new["id"] if hasattr(row_new, "keys") else row_new[0]
+                    )
+                    try:
+                        conn.execute(
+                            "UPDATE OR IGNORE item_routing SET step_id=? WHERE step_id=?",
+                            (nid, oid),
+                        )
+                        conn.execute("DELETE FROM item_routing WHERE step_id=?", (oid,))
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(
+                            "UPDATE bom_lines SET process_id=? WHERE process_id=?",
+                            (nid, oid),
+                        )
+                    except Exception:
+                        pass
+                    cur = conn.execute("DELETE FROM routing_steps WHERE id=?", (oid,))
+                    report["deleted_steps"] += int(cur.rowcount or 0)
+                elif row_old and not row_new:
+                    conn.execute(
+                        "UPDATE routing_steps SET name=? WHERE name=?",
+                        (new, old),
+                    )
+                    report["deleted_steps"] += 1
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        report["errors"].append(f"items: {e}")
+    return report
+
+
+def get_all_routing_steps() -> list:
+    """Get all available routing steps (hides duplicate Kaj Button tab)."""
+    try:
+        # Idempotent: fold legacy "Kaj Button" into Kajh Button when present.
+        try:
+            conn = _item_connect()
+            has_alias = conn.execute(
+                "SELECT 1 FROM routing_steps WHERE name=? LIMIT 1", ("Kaj Button",)
+            ).fetchone()
+            conn.close()
+            if has_alias:
+                coalesce_duplicate_process_tabs()
+        except Exception:
+            pass
         conn = _item_connect()
         rows = conn.execute("SELECT name FROM routing_steps ORDER BY sort_order").fetchall()
         conn.close()
-        return [r['name'] for r in rows]
+        names = []
+        seen: set[str] = set()
+        for r in rows:
+            n = str(r["name"] if hasattr(r, "keys") else r[0]).strip()
+            if not n or n in _HIDDEN_PROCESS_TABS or n in seen:
+                continue
+            # Skip empty / NaN process labels that leaked into catalog
+            if n.lower() in {"nan", "none", "null"}:
+                continue
+            seen.add(n)
+            names.append(n)
+        return names
     except Exception:
-        return ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Kaj Button', 'Handwork', 'Finishing', 'Packing']
+        return ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Kajh Button', 'Handwork', 'Finishing', 'Packing']
 
 
 # ── Process Stock ──────────────────────────────────────────────────────────────
@@ -2009,6 +2120,86 @@ def create_component_cutting_jos(data: dict) -> list[str]:
             comp_data["fabric_unit"] = str(first.get("unit") or "MTR")
         jo_numbers.append(_create_single_jo(comp_data))
     return jo_numbers
+
+
+def upsert_jo_from_import(data: dict) -> dict:
+    """Create a JO, or set open JO planned_qty to the import total for same SO+SKU+process.
+
+    Duplicate CSV rows are expected to be aggregated first. When several open JOs
+    already exist for the key (partial re-import), keep the oldest, set its plan
+    to the import total, and cancel the extras so counts stay accurate.
+    """
+    data = dict(data)
+    so_number = str(data.get("so_number") or "").strip()
+    sku = str(data.get("sku") or "").strip().upper()
+    process = str(data.get("process") or data.get("stage") or "Cutting").strip() or "Cutting"
+    planned = int(float(data.get("planned_qty") or 0))
+    if planned <= 0:
+        raise ValueError("planned_qty must be > 0")
+    if not so_number or not sku:
+        raise ValueError("so_number and sku required")
+
+    # Cutting auto-explode stays on create_jo (component fan-out).
+    if process == "Cutting" and data.get("create_component_jos") is not False:
+        from ..services.component_bom import should_auto_create_component_jos
+
+        if should_auto_create_component_jos(data):
+            nums = create_jo(data)
+            if isinstance(nums, list):
+                return {"action": "created", "jo_numbers": nums, "created": len(nums), "updated": 0}
+            return {"action": "created", "jo_numbers": [nums], "created": 1, "updated": 0}
+
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT id, jo_number, planned_qty, received_qty, issued_qty, output_qty, status
+               FROM job_orders
+               WHERE so_number=? AND UPPER(TRIM(sku))=UPPER(TRIM(?)) AND process=?
+                 AND status NOT IN ('Closed','Cancelled')
+               ORDER BY id ASC""",
+            (so_number, sku, process),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        num = create_jo(data)
+        if isinstance(num, list):
+            return {"action": "created", "jo_numbers": num, "created": len(num), "updated": 0}
+        return {"action": "created", "jo_numbers": [num], "created": 1, "updated": 0}
+
+    primary = dict(rows[0])
+    floor = max(
+        int(primary.get("issued_qty") or 0),
+        int(primary.get("received_qty") or 0),
+        int(primary.get("output_qty") or 0),
+    )
+    target = max(planned, floor)
+    patch: dict = {"planned_qty": target, "qty_change_remarks": "JO import upsert"}
+    if str(data.get("vendor_name") or "").strip():
+        patch["vendor_name"] = str(data.get("vendor_name")).strip()
+    if data.get("vendor_rate") not in (None, "", 0, "0"):
+        patch["vendor_rate"] = float(data.get("vendor_rate") or 0)
+    if str(data.get("expected_completion") or "").strip():
+        patch["expected_completion"] = str(data.get("expected_completion")).strip()[:10]
+    if str(data.get("remarks") or "").strip():
+        patch["remarks"] = str(data.get("remarks")).strip()
+    update_jo(int(primary["id"]), patch)
+    cancelled = 0
+    for extra in rows[1:]:
+        try:
+            update_jo(int(extra["id"]), {"status": "Cancelled", "qty_change_remarks": "Duplicate collapsed by JO import"})
+            cancelled += 1
+        except Exception:
+            pass
+    return {
+        "action": "updated",
+        "jo_numbers": [str(primary.get("jo_number") or "")],
+        "created": 0,
+        "updated": 1,
+        "cancelled_duplicates": cancelled,
+        "planned_qty": target,
+    }
 
 
 def _create_single_jo(data: dict) -> str:

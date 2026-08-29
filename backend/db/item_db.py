@@ -31,7 +31,8 @@ _DEFAULT_ROUTING = [
     ("Printing",  "Screen / digital printing",     2),
     ("Embroidery","Partial panel / fabric embroidery", 3),
     ("Stitching", "Assembly and stitching",        4),
-    ("Kaj Button", "Kaj / button attaching",       5),
+    # Canonical spelling — "Kaj Button" was a duplicate empty tab; keep Kajh Button.
+    ("Kajh Button", "Kaj / button attaching",      5),
     ("Handwork",  "Hand embroidery / extra work",  6),
     ("Finishing", "Quality check and ironing",     7),
     ("Packing",   "Tagging and packing",           8),

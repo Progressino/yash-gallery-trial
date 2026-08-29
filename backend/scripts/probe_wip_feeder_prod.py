@@ -12,7 +12,8 @@ from pathlib import Path
 import requests
 
 BASE = os.environ.get("PROBE_BASE_URL", "http://127.0.0.1:8000")
-STAGES = ("Kaj Button", "Handwork", "Finishing")
+STAGES = ("Kajh Button", "Handwork", "Finishing")
+
 
 
 def _env_auth() -> tuple[str, str]:
