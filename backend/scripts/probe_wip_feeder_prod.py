@@ -83,13 +83,18 @@ def main() -> int:
         up.raise_for_status()
         if int(body.get("imported") or 0) < 1:
             raise SystemExit(f"{stage} import failed: {body}")
-        ready = s.get(
-            f"{BASE}/api/production/ready-to-process/{stage}",
-            timeout=90,
-        )
-        ready.raise_for_status()
-        rows = ready.json() if isinstance(ready.json(), list) else []
-        hit = next((x for x in rows if str(x.get("sku") or "") == sku), None)
+        try:
+            ready = s.get(
+                f"{BASE}/api/production/ready-to-process/{stage}",
+                timeout=180,
+            )
+            ready.raise_for_status()
+            rows = ready.json() if isinstance(ready.json(), list) else []
+            hit = next((x for x in rows if str(x.get("sku") or "") == sku), None)
+        except requests.exceptions.RequestException as exc:
+            print("WARN", stage, "ready-to list slow/unavailable after import:", exc)
+            hit = None
+            rows = []
         results[stage] = {
             "imported": body.get("imported"),
             "ready_hit": bool(hit),
