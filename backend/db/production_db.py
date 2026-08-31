@@ -2240,6 +2240,139 @@ def upsert_jo_from_import(data: dict) -> dict:
     }
 
 
+def reset_finishing_migration(*, dry_run: bool = True, actor: str = "migration-reset") -> dict:
+    """Cancel open Finishing JOs and reverse their receipts/issues/stock.
+
+    Preserves ready_to_wip_imports and feeder process_stock (Stitching/Kaj/etc.).
+    Use before a clean Finishing JO re-upload when duplicate migration JOs exist.
+    """
+    conn = _connect()
+    stats: dict = {
+        "dry_run": bool(dry_run),
+        "actor": actor,
+        "jos_found": 0,
+        "jos_cancelled": 0,
+        "receipts_removed": 0,
+        "receipt_qty_reversed": 0,
+        "issues_removed": 0,
+        "issue_qty_reversed": 0,
+        "stock_adjustments": 0,
+        "duplicate_keys_before": 0,
+        "planned_before": 0,
+        "received_before": 0,
+        "ready_to_wip_preserved": 0,
+    }
+    try:
+        jos = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT id, jo_number, so_number, sku, process, planned_qty, received_qty, status
+                   FROM job_orders
+                   WHERE process='Finishing' AND IFNULL(status,'') NOT IN ('Cancelled','Closed')"""
+            ).fetchall()
+        ]
+        stats["jos_found"] = len(jos)
+        stats["planned_before"] = int(sum(int(j.get("planned_qty") or 0) for j in jos))
+        stats["received_before"] = int(sum(int(j.get("received_qty") or 0) for j in jos))
+        stats["duplicate_keys_before"] = int(
+            conn.execute(
+                """SELECT COUNT(*) FROM (
+                     SELECT 1 FROM job_orders
+                     WHERE process='Finishing'
+                       AND IFNULL(status,'') NOT IN ('Cancelled','Closed')
+                     GROUP BY so_number, UPPER(TRIM(sku)) HAVING COUNT(*) > 1
+                   )"""
+            ).fetchone()[0]
+            or 0
+        )
+        stats["ready_to_wip_preserved"] = int(
+            conn.execute("SELECT COUNT(*) FROM ready_to_wip_imports").fetchone()[0] or 0
+        )
+        if not jos:
+            return stats
+
+        jo_ids = [int(j["id"]) for j in jos]
+        placeholders = ",".join("?" * len(jo_ids))
+
+        rec_rows = [
+            dict(r)
+            for r in conn.execute(
+                f"""SELECT id, jo_id, so_number, sku, process, received_qty, rejected_qty
+                    FROM jo_piece_receipts WHERE jo_id IN ({placeholders})""",
+                jo_ids,
+            ).fetchall()
+        ]
+        iss_rows = [
+            dict(r)
+            for r in conn.execute(
+                f"""SELECT id, jo_id, from_process, to_process, so_number, sku, issued_qty
+                    FROM jo_piece_issues WHERE jo_id IN ({placeholders})""",
+                jo_ids,
+            ).fetchall()
+        ]
+        stats["receipts_removed"] = len(rec_rows)
+        stats["receipt_qty_reversed"] = int(
+            sum(int(r.get("received_qty") or 0) + int(r.get("rejected_qty") or 0) for r in rec_rows)
+        )
+        stats["issues_removed"] = len(iss_rows)
+        stats["issue_qty_reversed"] = int(sum(int(r.get("issued_qty") or 0) for r in iss_rows))
+
+        if dry_run:
+            return stats
+
+        for r in rec_rows:
+            qty = int(r.get("received_qty") or 0)
+            rej = int(r.get("rejected_qty") or 0)
+            proc = str(r.get("process") or "Finishing").strip() or "Finishing"
+            so = str(r.get("so_number") or "")
+            sku = str(r.get("sku") or "")
+            if qty > 0:
+                _update_process_stock(conn, so, sku, proc, qty_out=qty)
+                stats["stock_adjustments"] += 1
+            if rej > 0:
+                _update_process_stock(conn, so, sku, proc, qty_out=rej)
+                stats["stock_adjustments"] += 1
+
+        conn.execute(f"DELETE FROM jo_piece_receipts WHERE jo_id IN ({placeholders})", jo_ids)
+
+        for r in iss_rows:
+            qty = int(r.get("issued_qty") or 0)
+            if qty <= 0:
+                continue
+            so = str(r.get("so_number") or "")
+            sku = str(r.get("sku") or "")
+            fp = str(r.get("from_process") or "").strip()
+            tp = str(r.get("to_process") or "").strip()
+            if fp:
+                _update_process_stock(conn, so, sku, fp, qty_in=qty)
+            if tp:
+                _update_process_stock(conn, so, sku, tp, qty_out=qty)
+            stats["stock_adjustments"] += 1
+
+        conn.execute(f"DELETE FROM jo_piece_issues WHERE jo_id IN ({placeholders})", jo_ids)
+        conn.execute(
+            f"""UPDATE jo_lines SET received_qty=0, issued_qty=0,
+                balance_qty=COALESCE(planned_qty,0)
+                WHERE jo_id IN ({placeholders})""",
+            jo_ids,
+        )
+        note = f"Finishing migration reset ({actor})"
+        conn.execute(
+            f"""UPDATE job_orders SET status='Cancelled', received_qty=0, issued_qty=0,
+                output_qty=0, balance_qty=0, remarks=?, updated_at=datetime('now')
+                WHERE id IN ({placeholders})""",
+            (note, *jo_ids),
+        )
+        stats["jos_cancelled"] = len(jo_ids)
+        conn.commit()
+        return stats
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def _create_single_jo(data: dict) -> str:
     so_number = (data.get("so_number") or "").strip()
     fabric_code = (data.get("fabric_code") or "").strip()

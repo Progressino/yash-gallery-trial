@@ -249,6 +249,160 @@ def _match(val: str, needle: str) -> bool:
     return needle.lower() in str(val or "").lower()
 
 
+def _parse_components_filter(raw: str) -> list[str]:
+    return [c.strip().upper() for c in str(raw or "").split(",") if c.strip()]
+
+
+def _production_mode_filter(raw: str) -> str:
+    from .so_production_path import normalize_production_mode
+
+    s = str(raw or "").strip().lower()
+    if s in {"", "all"}:
+        return ""
+    return normalize_production_mode(raw)
+
+
+def _is_panel_row(row: dict) -> bool:
+    from .component_bom import _looks_like_panel_code
+
+    comp = str(row.get("component") or "")
+    sku = str(row.get("sku") or "")
+    return _looks_like_panel_code(comp, sku)
+
+
+def _rollup_set_balance_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """SKU/set balance — min qty across TOP/PANT/DUPATTA for same SO+style+size."""
+    from collections import defaultdict
+
+    buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        if r.get("row_type") == "panel_wip":
+            continue
+        key = (
+            str(r.get("so_number") or ""),
+            str(r.get("parent_style") or ""),
+            str(r.get("size") or ""),
+        )
+        buckets[key].append(r)
+
+    out: list[dict[str, Any]] = []
+    for (_so, parent, size), items in sorted(buckets.items()):
+        base = dict(items[0])
+        base["component"] = ""
+        base["row_type"] = "set"
+        base["balance_level"] = "set"
+        base["sku"] = f"{parent}-{size}" if size else parent
+        qty_fields = (
+            "planned_qty",
+            "received_qty",
+            "issued_qty",
+            "balance_qty",
+            "opening_balance",
+            "closing_balance",
+        )
+        for field in qty_fields:
+            vals = [int(x.get(field) or 0) for x in items]
+            base[field] = min(vals) if vals else 0
+        day_fields = ("received_on_date", "issued_on_date")
+        for field in day_fields:
+            vals = [int(x.get(field) or 0) for x in items if x.get(field) is not None]
+            base[field] = min(vals) if vals else items[0].get(field)
+        base["qty_variance"] = int(base["received_qty"]) - int(base["planned_qty"])
+        base["status"] = _qty_status(
+            int(base["planned_qty"]),
+            int(base["received_qty"]),
+            str(base.get("jo_status") or ""),
+        )
+        if base["status"] != "pending":
+            base["aging_bucket"] = ""
+            base["aging_days"] = None
+        out.append(base)
+    return out
+
+
+def _panel_wip_balance_rows(*, production_mode: str = "") -> list[dict[str, Any]]:
+    """Panel WIP rows from process_stock (FRONT/BACK etc.) — not set/component balance."""
+    from .component_bom import _looks_like_panel_code
+    from .so_production_path import normalize_production_mode
+    from .set_components import parse_component_sku
+
+    mode_want = _production_mode_filter(production_mode)
+    conn = production_db._connect()
+    rows: list[dict[str, Any]] = []
+    try:
+        stock = conn.execute(
+            """SELECT ps.so_number, ps.sku, ps.process, ps.available_qty, ps.total_in
+               FROM process_stock ps
+               WHERE ps.available_qty > 0 AND ps.process IN ('Cutting','Embroidery')"""
+        ).fetchall()
+        jo_modes: dict[tuple[str, str], str] = {}
+        for r in conn.execute(
+            """SELECT so_number, sku, production_mode FROM job_orders
+               WHERE process='Cutting' AND IFNULL(status,'') NOT IN ('Cancelled','Closed')"""
+        ).fetchall():
+            key = (str(r["so_number"] or ""), str(r["sku"] or "").upper())
+            jo_modes[key] = normalize_production_mode(r["production_mode"])
+
+        for r in stock:
+            sku = str(r["sku"] or "").strip().upper()
+            _main, comp = parse_component_sku(sku)
+            if not _looks_like_panel_code(comp or sku, sku):
+                continue
+            so = str(r["so_number"] or "")
+            parent = _main or sku
+            mode = jo_modes.get((so, sku), "inhouse")
+            if mode_want and mode != mode_want:
+                continue
+            qty = int(r["available_qty"] or 0)
+            if qty <= 0:
+                continue
+            rows.append(
+                {
+                    "so_number": so,
+                    "so_date": "",
+                    "delivery_date": "",
+                    "brand": "",
+                    "jo_number": "",
+                    "jo_id": 0,
+                    "jo_date": "",
+                    "parent_style": parent,
+                    "sku": sku,
+                    "size": _size_from_sku(sku),
+                    "component": comp or "PANEL",
+                    "fabric_code": "",
+                    "planned_qty": qty,
+                    "issued_qty": 0,
+                    "received_qty": qty,
+                    "balance_qty": 0,
+                    "opening_balance": 0,
+                    "closing_balance": 0,
+                    "received_on_date": None,
+                    "issued_on_date": None,
+                    "production_mode": mode,
+                    "qty_variance": 0,
+                    "status": "exact",
+                    "jo_status": "",
+                    "last_activity_date": "",
+                    "aging_days": None,
+                    "aging_bucket": "",
+                    "planned_fabric": 0,
+                    "actual_fabric": 0,
+                    "bom_avg": None,
+                    "actual_avg": None,
+                    "avg_diff": None,
+                    "fabric_saving": None,
+                    "fabric_saving_pct": None,
+                    "line_id": None,
+                    "row_type": "panel_wip",
+                    "balance_level": "panel_wip",
+                    "panel_process": str(r["process"] or ""),
+                }
+            )
+    finally:
+        conn.close()
+    return rows
+
+
 def build_cutting_report(
     *,
     date_from: str = "",
@@ -272,11 +426,21 @@ def build_cutting_report(
     export: bool = False,
     as_of_date: str = "",
     activity_date: str = "",
+    production_mode: str = "",
+    components: str = "",
+    balance_level: str = "component",
 ) -> dict[str, Any]:
+    from .so_production_path import normalize_production_mode
+
     today = _today_ist()
     so_map = _so_lookup()
     as_of = _parse_day(as_of_date) or _parse_day(activity_date)
     activity = _parse_day(activity_date)
+    mode_want = _production_mode_filter(production_mode)
+    comp_want = _parse_components_filter(components)
+    level = str(balance_level or "component").strip().lower()
+    if level not in {"component", "set", "panel_wip"}:
+        level = "component"
     conn = production_db._connect()
     try:
         jos = [
@@ -292,6 +456,12 @@ def build_cutting_report(
                    WHERE process='Cutting' AND IFNULL(status,'') != 'Cancelled'"""
             ).fetchall()
         ]
+        if mode_want:
+            jos = [
+                j
+                for j in jos
+                if normalize_production_mode(j.get("production_mode")) == mode_want
+            ]
         lines_by_jo: dict[int, list[dict]] = {}
         for r in conn.execute(
             """SELECT id, jo_id, sku, sku_name, style, planned_qty, issued_qty, received_qty,
@@ -462,8 +632,17 @@ def build_cutting_report(
                 "fabric_saving": saving,
                 "fabric_saving_pct": saving_pct,
                 "line_id": None if ln is None else ln.get("id"),
+                "row_type": "component",
+                "balance_level": "component",
             }
             rows.append(row)
+
+    if level == "panel_wip":
+        rows = _panel_wip_balance_rows(production_mode=production_mode)
+    elif level == "set":
+        rows = _rollup_set_balance_rows(rows)
+    elif level == "component":
+        rows = [r for r in rows if not _is_panel_row(r)]
 
     q = str(search or "").strip()
     filtered = []
@@ -479,6 +658,8 @@ def build_cutting_report(
         if jo_number and not _match(r["jo_number"], jo_number):
             continue
         if component and str(r["component"]).upper() != component.strip().upper():
+            continue
+        if comp_want and str(r.get("component") or "").upper() not in comp_want:
             continue
         if fabric_code and not _match(r["fabric_code"], fabric_code):
             continue
@@ -575,6 +756,9 @@ def build_cutting_report(
     return {
         "ok": True,
         "aging_basis": basis_key,
+        "balance_level": level,
+        "production_mode_filter": mode_want or "all",
+        "components_filter": comp_want,
         "kpis": kpis,
         "groups": grouped,
         "total": total,

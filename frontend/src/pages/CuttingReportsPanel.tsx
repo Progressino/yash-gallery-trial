@@ -23,6 +23,9 @@ type CuttingRow = {
   received_on_date?: number | null
   issued_on_date?: number | null
   production_mode?: string
+  row_type?: string
+  balance_level?: string
+  panel_process?: string
   qty_variance: number
   status: string
   last_activity_date: string
@@ -66,6 +69,7 @@ export default function CuttingReportsPanel() {
     jo_number: '', component: '', fabric_code: '', status: '', aging_bucket: '',
     aging_basis: 'jo_date', variance: '', brand: '', search: '', group_by: 'so',
     as_of_date: '', activity_date: '',
+    production_mode: 'inhouse', components: '', balance_level: 'set',
   })
   const [page, setPage] = useState(1)
   const params = useMemo(() => ({ ...filters, page, page_size: 150 }), [filters, page])
@@ -125,8 +129,9 @@ export default function CuttingReportsPanel() {
           <h3 className="font-semibold text-gray-800">Cutting summary &amp; balance</h3>
           <p className="text-[11px] text-gray-500">
             Balance = Planned − Received (negative = over-receipt).
-            {' '}<b>Open / Close / Today</b> are meaningful when <b>Activity date</b> is set (daily opening → cut → closing).
-            Without Activity date, Open/Close mirror current Balance (not full Planned).
+            {' '}<b>Balance level</b> Set/SKU rolls TOP+PANT+DUPATTA to one set qty (min across components) for Excel reconciliation.
+            Panel WIP (FRONT/BACK) is separate and does not inflate Set/Component totals.
+            {' '}<b>Path</b> filters In-house vs Cut-to-Pack / Stitch-to-Pack.
             {filters.as_of_date ? ` As-of ${filters.as_of_date}.` : ''}
             {filters.activity_date ? ` Daily view: ${filters.activity_date}.` : ''}
           </p>
@@ -161,6 +166,28 @@ export default function CuttingReportsPanel() {
               className="mt-0.5 w-full border rounded px-2 py-1" />
           </label>
         ))}
+        <label className="block">
+          <span className="text-gray-500">Production mode</span>
+          <select value={filters.production_mode} onChange={e => set('production_mode', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
+            <option value="all">All</option>
+            <option value="inhouse">In-house</option>
+            <option value="cut_to_pack">Cut-to-Pack</option>
+            <option value="stitch_to_pack">Stitch-to-Pack</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-gray-500">Balance level</span>
+          <select value={filters.balance_level} onChange={e => set('balance_level', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
+            <option value="set">SKU / Set (Excel reconcile)</option>
+            <option value="component">Component (TOP/PANT/DUPATTA)</option>
+            <option value="panel_wip">Panel WIP (FRONT/BACK)</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-gray-500">Components (comma)</span>
+          <input type="text" value={filters.components} onChange={e => set('components', e.target.value)}
+            placeholder="TOP,PANT" className="mt-0.5 w-full border rounded px-2 py-1" />
+        </label>
         <label className="block">
           <span className="text-gray-500">Status</span>
           <select value={filters.status} onChange={e => set('status', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
