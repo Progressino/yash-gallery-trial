@@ -293,3 +293,39 @@ def test_cutting_report_daily_balance_multi_line_jo_level_receipt(iso):
         cut = float(r["received_on_date"] or 0)
         closing = float(r["closing_balance"])
         assert abs((opening - cut) - closing) < 0.01, r
+
+
+def test_cutting_report_style_search_expands_all_jo_lines(iso):
+    """Style/search on header SKU must return every line of a multi-size JO."""
+    num = production_db._create_single_jo(
+        {
+            "so_number": "SO-STYLE-MULTI",
+            "so_source": "manual",
+            "sku": "293YK393GREEN-XS",
+            "process": "Cutting",
+            "planned_qty": 510,
+            "create_component_jos": False,
+            "lines": [
+                {"sku": "293YK393GREEN-XS", "style": "XS", "planned_qty": 20},
+                {"sku": "293YK393GREEN-M", "style": "M", "planned_qty": 50},
+                {"sku": "293YK393GREEN-L", "style": "L", "planned_qty": 60},
+                {"sku": "293YK393GREEN-XL", "style": "XL", "planned_qty": 60},
+                {"sku": "293YK393GREEN-XXL", "style": "XXL", "planned_qty": 100},
+                {"sku": "293YK393GREEN-3XL", "style": "3XL", "planned_qty": 80},
+                {"sku": "293YK393GREEN-4XL", "style": "4XL", "planned_qty": 70},
+                {"sku": "293YK393GREEN-5XL", "style": "5XL", "planned_qty": 70},
+            ],
+        }
+    )
+    by_jo = build_cutting_report(jo_number=num.replace("PJO-", ""), export=True)
+    assert by_jo["total"] == 8
+    assert by_jo["kpis"]["planned_qty"] == 510
+
+    by_search = build_cutting_report(search="293YK393", export=True)
+    assert by_search["total"] == 8
+    assert by_search["kpis"]["planned_qty"] == 510
+    assert sum(int(r["planned_qty"]) for r in by_search["rows"]) == 510
+
+    by_style = build_cutting_report(parent_style="293YK393GREEN", export=True)
+    assert by_style["total"] == 8
+    assert by_style["kpis"]["planned_qty"] == 510

@@ -435,11 +435,13 @@ function VendorExecutionEditor({
   vendorSuggestions,
   saving,
   onSave,
+  disabled = false,
 }: {
   jo: JO
   vendorSuggestions: string[]
   saving: boolean
   onSave: (data: { exec_type: string; vendor_name: string }) => void
+  disabled?: boolean
 }) {
   const [execType, setExecType] = useState(jo.exec_type || 'Inhouse')
   const [vendorName, setVendorName] = useState(jo.vendor_name || '')
@@ -457,6 +459,7 @@ function VendorExecutionEditor({
           <label className="text-xs text-gray-500">Execution type</label>
           <select
             value={execType}
+            disabled={disabled}
             onChange={e => {
               const v = e.target.value
               setExecType(v)
@@ -475,6 +478,7 @@ function VendorExecutionEditor({
             <input
               list="jo-vendor-suggestions"
               value={vendorName}
+              disabled={disabled}
               onChange={e => setVendorName(e.target.value)}
               placeholder="Outsource vendor / party name"
               className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
@@ -490,7 +494,7 @@ function VendorExecutionEditor({
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          disabled={saving || (isOutsourceExec(execType) && !vendorName.trim())}
+          disabled={disabled || saving || (isOutsourceExec(execType) && !vendorName.trim())}
           onClick={() => onSave({
             exec_type: execType,
             vendor_name: isOutsourceExec(execType) ? vendorName.trim() : '',
@@ -1294,7 +1298,13 @@ export default function Production() {
   })
   const { data: allJOs = [], isLoading: allJosLoading } = useQuery<JO[]>({
     queryKey: ['jos-all', filterStatus],
-    queryFn: () => api.get(`/production/orders${filterStatus ? `?status=${filterStatus}` : ''}&light=1&limit=300`, { timeout: 60_000 }).then(r => r.data),
+    queryFn: () => {
+      const params = new URLSearchParams()
+      params.set('light', '1')
+      params.set('limit', '300')
+      if (filterStatus) params.set('status', filterStatus)
+      return api.get(`/production/orders?${params.toString()}`, { timeout: 60_000 }).then(r => r.data)
+    },
     enabled: tab === 'tracker',
     staleTime: 30_000,
     retry: 1,
@@ -1958,6 +1968,7 @@ export default function Production() {
     const totalReceived = jo.lines.reduce((s, l) => s + l.received_qty, 0) || jo.received_qty
     const totalBalance = totalPlanned - totalReceived
     const pct = totalPlanned > 0 ? Math.min(100, (totalReceived / totalPlanned) * 100) : 0
+    const joLocked = jo.status === 'Cancelled' || jo.status === 'Closed'
 
     return (
       <div key={jo.id} className="bg-white rounded-xl border shadow-sm overflow-hidden">
@@ -2085,7 +2096,7 @@ export default function Production() {
                 </p>
               </div>
             )}
-            {(jo.status === 'Created' || jo.status === 'In Progress') && jo.lines.length > 1 && (
+            {(jo.status === 'Created' || jo.status === 'In Progress') && jo.lines.length > 1 && !joLocked && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-[11px] text-amber-900">
                 Edit planned quantity per size in the lines table. JO total is the sum of sizes
                 ({fmt(jo.lines.reduce((s, l) => s + (Number(l.planned_qty) || 0), 0))} pcs).
@@ -2096,8 +2107,15 @@ export default function Production() {
               jo={jo}
               vendorSuggestions={vendorSuggestions}
               saving={updateJOMut.isPending}
+              disabled={joLocked}
               onSave={data => updateJOMut.mutate({ id: jo.id, data })}
             />
+
+            {joLocked && (
+              <div className="bg-gray-100 border border-gray-200 rounded-lg p-3 text-xs text-gray-600">
+                {jo.status} — historical record only. Receive, issue, and edits are disabled.
+              </div>
+            )}
 
             {/* Process stock visibility */}
             {jo.process_stocks && Object.keys(jo.process_stocks).length > 0 && (
@@ -2211,7 +2229,7 @@ export default function Production() {
                           )}
                         </td>
                         <td className="px-3 py-2 text-center">
-                          {panel.issueable_qty > 0 && panel.issue_to_process ? (
+                          {panel.issueable_qty > 0 && panel.issue_to_process && !joLocked ? (
                             <button
                               onClick={() => openModal('issue-pieces', jo, undefined, {
                                 sku: panel.component_sku,
@@ -2240,7 +2258,7 @@ export default function Production() {
                 <div className="px-3 py-2 bg-gray-50 text-xs font-semibold text-gray-600 flex justify-between items-center gap-2">
                   <span>Lines — Issue / Receive per SKU</span>
                   <span className="flex items-center gap-2">
-                    {(jo.status === 'Created' || jo.status === 'In Progress') && (
+                    {(jo.status === 'Created' || jo.status === 'In Progress') && !joLocked && (
                       <button
                         type="button"
                         disabled={updateJoQtyMut.isPending}
@@ -2303,6 +2321,7 @@ export default function Production() {
                         <td className="px-3 py-2 text-right">{fmtR(line.vendor_rate)}</td>
                         <td className="px-3 py-2 text-right font-semibold">{fmtR(line.planned_qty * line.vendor_rate)}</td>
                         <td className="px-3 py-2 text-center">
+                          {!joLocked ? (
                           <div className="flex gap-1 justify-center">
                             <button onClick={() => openModal('receive', jo, line.id)}
                               className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700">✅ Rec</button>
@@ -2313,6 +2332,9 @@ export default function Production() {
                               </button>
                             )}
                           </div>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -2351,12 +2373,14 @@ export default function Production() {
 
             {/* Action buttons */}
             <div className="flex flex-wrap gap-2">
-              {jo.process === 'Cutting' && (
+              {jo.process === 'Cutting' && !joLocked && (
                 <>
                   <button onClick={() => openModal('issue-fabric', jo)} className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700">📦 Issue Fabric</button>
                   <button onClick={() => openModal('return-fabric', jo)} className="px-3 py-1.5 text-xs bg-blue-100 text-blue-700 rounded-lg font-medium">↩️ Return Fabric</button>
                 </>
               )}
+              {!joLocked && (
+              <>
               <button onClick={() => openModal('receive', jo)} className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg font-medium hover:bg-green-700">✅ Receive (JO level)</button>
               {jo.next_process && !panelCtx && (
                 <button
@@ -2381,6 +2405,13 @@ export default function Production() {
                   className="px-3 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg font-medium hover:bg-blue-800 disabled:opacity-50">
                   🔄 Create {jo.next_process} JO →
                 </button>
+              )}
+              </>
+              )}
+              {joLocked && (
+                <span className="px-3 py-1.5 text-xs bg-gray-100 text-gray-600 rounded-lg border border-gray-200 font-medium">
+                  Status: {jo.status} (locked)
+                </span>
               )}
               {jo.next_stage_jo_id && (
                 <span className="px-3 py-1.5 text-xs bg-green-50 text-green-700 rounded-lg border border-green-200">✅ {jo.next_process} JO linked</span>
@@ -2515,8 +2546,8 @@ export default function Production() {
               <input type="date" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)}
                 className="border border-gray-200 rounded-lg px-2 py-1.5 text-sm" title="To date" />
               <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
-                <option value="">All Statuses</option>
-                {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
+                <option value="">Active only</option>
+                {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s} value={s}>{s === 'Cancelled' ? 'Cancelled (history)' : s}</option>)}
               </select>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -2875,8 +2906,8 @@ export default function Production() {
                 {vendorOptions.map(v => <option key={v} value={v}>{v}</option>)}
               </select>
               <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm">
-                <option value="">All Statuses</option>
-                {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
+                <option value="">Active only</option>
+                {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s} value={s}>{s === 'Cancelled' ? 'Cancelled (history)' : s}</option>)}
               </select>
             </div>
             <div className="flex flex-wrap items-center gap-2">

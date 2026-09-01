@@ -249,6 +249,57 @@ def _match(val: str, needle: str) -> bool:
     return needle.lower() in str(val or "").lower()
 
 
+def _row_search_blob(r: dict) -> str:
+    return " ".join(
+        str(r.get(k) or "")
+        for k in (
+            "so_number",
+            "jo_number",
+            "sku",
+            "jo_header_sku",
+            "parent_style",
+            "jo_header_parent_style",
+            "component",
+            "fabric_code",
+            "size",
+        )
+    )
+
+
+def _jo_ids_matching_style_search(
+    rows: list[dict],
+    *,
+    search: str = "",
+    parent_style: str = "",
+    sku: str = "",
+) -> set[int]:
+    """If any line/header of a JO matches style/search, include all lines for that JO."""
+    q = str(search or "").strip()
+    ps = str(parent_style or "").strip()
+    sk = str(sku or "").strip()
+    if not (q or ps or sk):
+        return set()
+    matched: set[int] = set()
+    for r in rows:
+        jid = int(r["jo_id"])
+        if q and q.lower() in _row_search_blob(r).lower():
+            matched.add(jid)
+        if ps and (
+            _match(r.get("parent_style") or "", ps)
+            or _match(r.get("jo_header_sku") or "", ps)
+            or _match(r.get("jo_header_parent_style") or "", ps)
+        ):
+            matched.add(jid)
+        if sk and (
+            _match(r.get("sku") or "", sk)
+            or _match(r.get("jo_header_sku") or "", sk)
+            or _match(r.get("parent_style") or "", sk)
+            or _match(r.get("jo_header_parent_style") or "", sk)
+        ):
+            matched.add(jid)
+    return matched
+
+
 def _parse_components_filter(raw: str) -> list[str]:
     return [c.strip().upper() for c in str(raw or "").split(",") if c.strip()]
 
@@ -528,6 +579,13 @@ def build_cutting_report(
         if actual_fab <= 0:
             actual_fab = max(0.0, fab_issued - fab_ret)
         planned_fab = float(jo.get("fabric_qty") or 0)
+        header_sku = str(jo.get("sku") or "")
+        header_main = str(jo.get("main_sku") or "") or header_sku
+        header_parent = style_key_for_set_bom(header_main or header_sku)
+        try:
+            header_parent = str(get_parent_sku(header_parent) or header_parent)
+        except Exception:
+            pass
         sources = lines if lines else [None]
         n_src = max(len(lines), 1)
 
@@ -604,6 +662,8 @@ def build_cutting_report(
                 "jo_number": jo.get("jo_number") or "",
                 "jo_id": jid,
                 "jo_date": jo_date,
+                "jo_header_sku": header_sku,
+                "jo_header_parent_style": header_parent,
                 "parent_style": parent,
                 "sku": line_sku,
                 "size": size_label,
@@ -645,13 +705,25 @@ def build_cutting_report(
         rows = [r for r in rows if not _is_panel_row(r)]
 
     q = str(search or "").strip()
+    jo_style_hits = _jo_ids_matching_style_search(
+        rows, search=q, parent_style=parent_style, sku=sku
+    )
     filtered = []
     for r in rows:
+        jid = int(r["jo_id"])
         if so_number and str(r["so_number"]).lower() != so_number.strip().lower():
             continue
-        if parent_style and not _match(r["parent_style"], parent_style):
+        if parent_style and jid not in jo_style_hits and not (
+            _match(r["parent_style"], parent_style)
+            or _match(r.get("jo_header_sku") or "", parent_style)
+            or _match(r.get("jo_header_parent_style") or "", parent_style)
+        ):
             continue
-        if sku and not _match(r["sku"], sku):
+        if sku and jid not in jo_style_hits and not (
+            _match(r["sku"], sku)
+            or _match(r.get("jo_header_sku") or "", sku)
+            or _match(r.get("jo_header_parent_style") or "", sku)
+        ):
             continue
         if size and str(r["size"]).upper() != size.strip().upper():
             continue
@@ -680,10 +752,7 @@ def build_cutting_report(
         if brand and not _match(r["brand"], brand):
             continue
         if q:
-            blob = " ".join(str(r.get(k) or "") for k in (
-                "so_number", "jo_number", "sku", "parent_style", "component", "fabric_code", "size"
-            ))
-            if q.lower() not in blob.lower():
+            if jid not in jo_style_hits and q.lower() not in _row_search_blob(r).lower():
                 continue
         filtered.append(r)
 

@@ -809,11 +809,14 @@ def get_jos(
     sku: Optional[str] = None,
     vendor: Optional[str] = None,
     production_mode: Optional[str] = None,
+    include_inactive: Optional[int] = 0,
 ):
     """List job orders. ``light=1`` omits fabric/cost child rows for faster list loads.
 
     Pass ``q`` / ``sku`` / ``vendor`` / ``production_mode`` to search the full JO set
     (including line SKUs), not only the first page of unfiltered rows.
+
+    By default Cancelled/Closed JOs are hidden; pass ``include_inactive=1`` or ``status=Cancelled``.
     """
     return list_jos(
         status,
@@ -826,6 +829,7 @@ def get_jos(
         sku=sku,
         vendor=vendor,
         production_mode=production_mode,
+        include_inactive=bool(include_inactive),
     )
 
 @router.get("/path-commitment")

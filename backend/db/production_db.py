@@ -12,6 +12,18 @@ _DEFAULT_ITEM_ROUTING = ["Cutting", "Stitching", "Finishing"]
 _ITEM_ROUTING_CACHE: dict[str, tuple] = {}
 _SET_BOM_CACHE: dict[str, Optional[dict]] = {}
 
+_INACTIVE_JO_STATUSES = frozenset({"Cancelled", "Closed"})
+
+
+def _assert_jo_mutable(jo: dict, *, action: str = "modify") -> None:
+    """Cancelled/Closed JOs are audit-only — block production transactions."""
+    st = str(jo.get("status") or "").strip()
+    if st in _INACTIVE_JO_STATUSES:
+        raise ValueError(
+            f"Job order is {st.lower()} — {action} is not allowed (historical record only)"
+        )
+
+
 def _connect():
     conn = sqlite3.connect(_DB)
     conn.row_factory = sqlite3.Row
@@ -1594,6 +1606,7 @@ def list_jos(
     sku: str | None = None,
     vendor: str | None = None,
     production_mode: str | None = None,
+    include_inactive: bool = False,
 ):
     """List job orders with batched child loads (no per-row N+1).
 
@@ -1608,6 +1621,8 @@ def list_jos(
     if status:
         conditions.append("j.status=?")
         params.append(status)
+    elif not include_inactive:
+        conditions.append("j.status NOT IN ('Cancelled','Closed')")
     if so_number:
         conditions.append("j.so_number=?")
         params.append(so_number)
@@ -2499,6 +2514,7 @@ def update_jo(joid: int, data: dict):
         conn.close()
         raise ValueError("Job order not found")
     prev = dict(prev)
+    _assert_jo_mutable(prev, action="update")
     data = dict(data)
     changed_by = str(data.pop("changed_by", "") or "")
     remarks = str(data.pop("qty_change_remarks", "") or "")
@@ -2681,6 +2697,7 @@ def issue_fabric(joid: int, data: dict):
     if not jo:
         conn.close()
         raise ValueError("JO not found")
+    _assert_jo_mutable(jo, action="issue fabric")
     issued = float(data.get('issued_qty', 0))
     conn.execute("""INSERT INTO jo_fabric_issues(jo_id,jo_line_id,issue_date,fabric_code,fabric_name,issued_qty,unit,issued_by,remarks)
         VALUES(?,?,?,?,?,?,?,?,?)""",
@@ -2725,6 +2742,11 @@ def issue_fabric(joid: int, data: dict):
 
 def return_fabric(joid: int, data: dict):
     conn = _connect()
+    jo = dict(conn.execute("SELECT * FROM job_orders WHERE id=?", (joid,)).fetchone() or {})
+    if not jo:
+        conn.close()
+        raise ValueError("JO not found")
+    _assert_jo_mutable(jo, action="return fabric")
     returned = float(data.get('returned_qty', 0))
     conn.execute("""INSERT INTO jo_fabric_returns(jo_id,return_date,fabric_code,returned_qty,unit,returned_by,remarks)
         VALUES(?,?,?,?,?,?,?)""",
@@ -2756,6 +2778,7 @@ def issue_pieces(joid: int, data: dict):
     if not jo:
         conn.close()
         raise ValueError("JO not found")
+    _assert_jo_mutable(jo, action="issue pieces")
     issued = int(data.get('issued_qty', 0))
     if issued <= 0:
         conn.close()
@@ -3348,9 +3371,7 @@ def receive_pieces(joid: int, data: dict):
     if not jo:
         conn.close()
         raise ValueError("JO not found")
-    if (jo.get("status") or "") == "Closed":
-        conn.close()
-        raise ValueError("Job order is closed — further receive not allowed")
+    _assert_jo_mutable(jo, action="receive pieces")
     received = int(data.get('received_qty', 0))
     if received <= 0:
         conn.close()
@@ -3533,6 +3554,11 @@ def receive_pieces(joid: int, data: dict):
 
 def add_cost(joid: int, data: dict):
     conn = _connect()
+    jo = dict(conn.execute("SELECT * FROM job_orders WHERE id=?", (joid,)).fetchone() or {})
+    if not jo:
+        conn.close()
+        raise ValueError("JO not found")
+    _assert_jo_mutable(jo, action="add cost")
     amount = float(data.get('amount', 0))
     process = data.get('process', 'Cutting')
     conn.execute("""INSERT INTO jo_cost_entries(jo_id,cost_date,process,cost_type,amount,description)
@@ -3556,6 +3582,7 @@ def create_next_process_jo(parent_joid: int) -> dict:
         conn.close()
         return {'ok': False, 'message': 'JO not found'}
     parent = dict(parent)
+    _assert_jo_mutable(parent, action="create next process JO")
     sku = parent.get('sku','')
     so_number = parent.get('so_number','')
     current_process = parent.get('process','Cutting')
