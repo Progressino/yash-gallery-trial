@@ -816,7 +816,8 @@ def get_jos(
     Pass ``q`` / ``sku`` / ``vendor`` / ``production_mode`` to search the full JO set
     (including line SKUs), not only the first page of unfiltered rows.
 
-    By default Cancelled/Closed JOs are hidden; pass ``include_inactive=1`` or ``status=Cancelled``.
+    By default Cancelled JOs are hidden; pass ``include_inactive=1`` or ``status=Cancelled``.
+    Closed JOs (receive complete) remain visible so pieces can still be issued forward.
     """
     return list_jos(
         status,

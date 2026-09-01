@@ -12,15 +12,37 @@ _DEFAULT_ITEM_ROUTING = ["Cutting", "Stitching", "Finishing"]
 _ITEM_ROUTING_CACHE: dict[str, tuple] = {}
 _SET_BOM_CACHE: dict[str, Optional[dict]] = {}
 
-_INACTIVE_JO_STATUSES = frozenset({"Cancelled", "Closed"})
+_CANCELLED_JO_STATUS = "Cancelled"
+_IMMUTABLE_JO_STATUSES = frozenset({_CANCELLED_JO_STATUS})
+_RECEIVE_LOCKED_STATUSES = frozenset({"Cancelled", "Closed"})
+
+
+def _assert_jo_not_cancelled(jo: dict, *, action: str = "modify") -> None:
+    """Reset/cancelled JOs are audit-only."""
+    st = str(jo.get("status") or "").strip()
+    if st == _CANCELLED_JO_STATUS:
+        raise ValueError(
+            f"Job order is cancelled — {action} is not allowed (historical record only)"
+        )
 
 
 def _assert_jo_mutable(jo: dict, *, action: str = "modify") -> None:
-    """Cancelled/Closed JOs are audit-only — block production transactions."""
+    """Block receive/edits on cancelled JOs and fully-received (Closed) JOs."""
     st = str(jo.get("status") or "").strip()
-    if st in _INACTIVE_JO_STATUSES:
+    if st in _IMMUTABLE_JO_STATUSES:
         raise ValueError(
             f"Job order is {st.lower()} — {action} is not allowed (historical record only)"
+        )
+    if st == "Closed" and action in {
+        "receive pieces",
+        "receive",
+        "update",
+        "add cost",
+        "issue fabric",
+        "return fabric",
+    }:
+        raise ValueError(
+            f"Job order is closed — {action} is not allowed (receive complete; issue forward if stock remains)"
         )
 
 
@@ -1622,7 +1644,7 @@ def list_jos(
         conditions.append("j.status=?")
         params.append(status)
     elif not include_inactive:
-        conditions.append("j.status NOT IN ('Cancelled','Closed')")
+        conditions.append("j.status != 'Cancelled'")
     if so_number:
         conditions.append("j.so_number=?")
         params.append(so_number)
@@ -2778,7 +2800,7 @@ def issue_pieces(joid: int, data: dict):
     if not jo:
         conn.close()
         raise ValueError("JO not found")
-    _assert_jo_mutable(jo, action="issue pieces")
+    _assert_jo_not_cancelled(jo, action="issue pieces")
     issued = int(data.get('issued_qty', 0))
     if issued <= 0:
         conn.close()
@@ -3582,7 +3604,7 @@ def create_next_process_jo(parent_joid: int) -> dict:
         conn.close()
         return {'ok': False, 'message': 'JO not found'}
     parent = dict(parent)
-    _assert_jo_mutable(parent, action="create next process JO")
+    _assert_jo_not_cancelled(parent, action="create next process JO")
     sku = parent.get('sku','')
     so_number = parent.get('so_number','')
     current_process = parent.get('process','Cutting')

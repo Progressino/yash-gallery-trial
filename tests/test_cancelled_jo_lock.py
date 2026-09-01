@@ -41,7 +41,7 @@ def test_cancelled_jo_blocks_production_transactions(iso):
         production_db.add_cost(jo["id"], {"amount": 10})
 
 
-def test_list_jos_hides_cancelled_by_default(iso):
+def test_list_jos_hides_cancelled_but_shows_closed(iso):
     n1 = production_db.create_jo(
         {
             "so_number": "SO-HIDE",
@@ -62,10 +62,24 @@ def test_list_jos_hides_cancelled_by_default(iso):
     )
     j2 = next(j for j in production_db.list_jos(process="Finishing") if j["jo_number"] == n2)
     production_db.update_jo(j2["id"], {"status": "Cancelled"})
+    n3 = production_db.create_jo(
+        {
+            "so_number": "SO-HIDE",
+            "sku": "SKU-H-XL",
+            "process": "Cutting",
+            "planned_qty": 30,
+            "create_component_jos": False,
+        }
+    )
+    j3 = next(j for j in production_db.list_jos(process="Cutting") if j["jo_number"] == n3)
+    production_db.update_jo(j3["id"], {"status": "Closed"})
 
-    active = production_db.list_jos(process="Finishing")
-    assert len(active) == 1
-    assert active[0]["jo_number"] == n1
+    finishing = production_db.list_jos(process="Finishing")
+    assert len(finishing) == 1
+    assert finishing[0]["jo_number"] == n1
+
+    cutting = production_db.list_jos(process="Cutting")
+    assert any(j["jo_number"] == n3 for j in cutting)
 
     all_rows = production_db.list_jos(process="Finishing", include_inactive=True)
     assert len(all_rows) == 2
@@ -73,6 +87,36 @@ def test_list_jos_hides_cancelled_by_default(iso):
     cancelled_only = production_db.list_jos(process="Finishing", status="Cancelled")
     assert len(cancelled_only) == 1
     assert cancelled_only[0]["jo_number"] == n2
+
+
+def test_closed_jo_allows_issue_to_next_process(iso):
+    num = production_db.create_jo(
+        {
+            "so_number": "SO-CLOSED-ISSUE",
+            "sku": "SKU-CI-M",
+            "process": "Cutting",
+            "planned_qty": 100,
+            "create_component_jos": False,
+        }
+    )
+    jo = next(j for j in production_db.list_jos(process="Cutting") if j["jo_number"] == num)
+    production_db.receive_pieces(jo["id"], {"received_qty": 100, "process": "Cutting"})
+    jo_after = next(j for j in production_db.list_jos(process="Cutting") if j["id"] == jo["id"])
+    assert jo_after["status"] == "Closed"
+
+    with pytest.raises(ValueError, match="closed"):
+        production_db.receive_pieces(jo["id"], {"received_qty": 1, "process": "Cutting"})
+
+    result = production_db.issue_pieces(
+        jo["id"],
+        {
+            "issued_qty": 50,
+            "from_process": "Cutting",
+            "to_process": "Stitching",
+            "sku": "SKU-CI-M",
+        },
+    )
+    assert result["ok"] is True
 
 
 def test_import_after_cancel_creates_new_then_updates_active(iso):

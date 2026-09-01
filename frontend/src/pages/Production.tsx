@@ -1968,7 +1968,8 @@ export default function Production() {
     const totalReceived = jo.lines.reduce((s, l) => s + l.received_qty, 0) || jo.received_qty
     const totalBalance = totalPlanned - totalReceived
     const pct = totalPlanned > 0 ? Math.min(100, (totalReceived / totalPlanned) * 100) : 0
-    const joLocked = jo.status === 'Cancelled' || jo.status === 'Closed'
+    const joLocked = jo.status === 'Cancelled'
+    const joReceiveLocked = jo.status === 'Cancelled' || jo.status === 'Closed'
 
     return (
       <div key={jo.id} className="bg-white rounded-xl border shadow-sm overflow-hidden">
@@ -2321,7 +2322,7 @@ export default function Production() {
                         <td className="px-3 py-2 text-right">{fmtR(line.vendor_rate)}</td>
                         <td className="px-3 py-2 text-right font-semibold">{fmtR(line.planned_qty * line.vendor_rate)}</td>
                         <td className="px-3 py-2 text-center">
-                          {!joLocked ? (
+                          {!joReceiveLocked ? (
                           <div className="flex gap-1 justify-center">
                             <button onClick={() => openModal('receive', jo, line.id)}
                               className="px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700">✅ Rec</button>
@@ -2332,6 +2333,11 @@ export default function Production() {
                               </button>
                             )}
                           </div>
+                          ) : !joLocked && jo.next_process && !panelCtx ? (
+                            <button onClick={() => openModal('issue-pieces', jo, line.id, { toProcess: jo.next_process || undefined })}
+                              className="px-2 py-0.5 text-xs bg-purple-600 text-white rounded hover:bg-purple-700">
+                              → {jo.next_process}
+                            </button>
                           ) : (
                             <span className="text-gray-400">—</span>
                           )}
@@ -2373,16 +2379,16 @@ export default function Production() {
 
             {/* Action buttons */}
             <div className="flex flex-wrap gap-2">
-              {jo.process === 'Cutting' && !joLocked && (
+              {jo.process === 'Cutting' && !joLocked && jo.status !== 'Closed' && (
                 <>
                   <button onClick={() => openModal('issue-fabric', jo)} className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700">📦 Issue Fabric</button>
                   <button onClick={() => openModal('return-fabric', jo)} className="px-3 py-1.5 text-xs bg-blue-100 text-blue-700 rounded-lg font-medium">↩️ Return Fabric</button>
                 </>
               )}
-              {!joLocked && (
-              <>
-              <button onClick={() => openModal('receive', jo)} className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg font-medium hover:bg-green-700">✅ Receive (JO level)</button>
-              {jo.next_process && !panelCtx && (
+              {!joReceiveLocked && (
+                <button onClick={() => openModal('receive', jo)} className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg font-medium hover:bg-green-700">✅ Receive (JO level)</button>
+              )}
+              {!joLocked && jo.next_process && !panelCtx && (
                 <button
                   onClick={() => openModal('issue-pieces', jo, undefined, { toProcess: jo.next_process || undefined })}
                   className="px-3 py-1.5 text-xs bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700"
@@ -2390,27 +2396,34 @@ export default function Production() {
                   ➡️ Issue to {jo.next_process}
                 </button>
               )}
-              {!jo.next_process && !panelCtx && (
+              {!joLocked && !jo.next_process && !panelCtx && (
                 <span className="px-3 py-1.5 text-xs bg-gray-50 text-gray-600 rounded-lg border border-gray-200">
                   No next process configured for this routing
                 </span>
               )}
-              <button onClick={() => openModal('add-cost', jo)} className="px-3 py-1.5 text-xs bg-amber-600 text-white rounded-lg font-medium">💰 Add Cost</button>
+              {!joLocked && (
+                <button onClick={() => openModal('add-cost', jo)} className="px-3 py-1.5 text-xs bg-amber-600 text-white rounded-lg font-medium">💰 Add Cost</button>
+              )}
+              {!joLocked && (
               <select value={jo.status} onChange={e => updateJOMut.mutate({ id: jo.id, data: { status: e.target.value } })}
                 className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs">
                 {['Created','In Progress','Completed','Closed','Cancelled'].map(s => <option key={s}>{s}</option>)}
               </select>
-              {jo.status === 'Completed' && !jo.next_stage_jo_id && jo.next_process && (
+              )}
+              {jo.status === 'Completed' && !jo.next_stage_jo_id && jo.next_process && !joLocked && (
                 <button onClick={() => nextProcessMut.mutate(jo.id)} disabled={nextProcessMut.isPending}
                   className="px-3 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg font-medium hover:bg-blue-800 disabled:opacity-50">
                   🔄 Create {jo.next_process} JO →
                 </button>
               )}
-              </>
-              )}
               {joLocked && (
                 <span className="px-3 py-1.5 text-xs bg-gray-100 text-gray-600 rounded-lg border border-gray-200 font-medium">
-                  Status: {jo.status} (locked)
+                  Status: {jo.status} (cancelled — locked)
+                </span>
+              )}
+              {jo.status === 'Closed' && !joLocked && (
+                <span className="px-3 py-1.5 text-xs bg-blue-50 text-blue-800 rounded-lg border border-blue-200 font-medium">
+                  Receive complete — issue remaining stock to {jo.next_process || 'next process'}
                 </span>
               )}
               {jo.next_stage_jo_id && (
