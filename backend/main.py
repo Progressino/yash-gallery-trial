@@ -37,6 +37,7 @@ from .routers.stitching import router as stitching_router
 from .routers.hrm import router as hrm_router
 from .routers.erp_admin import router as erp_admin_router
 from .routers.marketplace_connect import router as marketplace_router
+from .routers.myntra_partner import router as myntra_partner_router
 from .routers.gate import router as gate_router
 from .db.finance_db import init_db
 from .db.item_db import init_db as init_item_db
@@ -3489,6 +3490,8 @@ _AUTH_EXEMPT = {
     "/api/auth/otp/resend",
     "/api/auth/otp/verify",
     "/api/health",
+    "/api/myntra/partner/webhook",
+    "/api/myntra/partner/webhook/health",
 }
 
 # Skip heavy session restore / warm-cache copy (login was blocked for minutes behind PG blobs).
@@ -3500,6 +3503,8 @@ _SESSION_LIGHTWEIGHT = frozenset({
     "/api/auth/me",
     "/api/health",
     "/api/data/job-status",
+    "/api/myntra/partner/webhook",
+    "/api/myntra/partner/webhook/health",
 })
 
 @app.middleware("http")
@@ -3739,6 +3744,7 @@ app.include_router(hrm_router,         prefix="/api/hrm",        tags=["hrm"])
 app.include_router(erp_admin_router,   prefix="/api/erp-admin",  tags=["erp-admin"])
 app.include_router(admin_performance_router, prefix="/api/admin", tags=["admin-performance"])
 app.include_router(marketplace_router, prefix="/api/marketplace", tags=["marketplace"])
+app.include_router(myntra_partner_router, prefix="/api/myntra/partner", tags=["myntra-partner"])
 app.include_router(gate_router,        prefix="/api/gate",       tags=["gate"])
 
 

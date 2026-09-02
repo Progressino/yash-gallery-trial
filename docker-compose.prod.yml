@@ -118,6 +118,10 @@ services:
       # seller DSR (Myntra Seller Hub reports are dispatch-date filtered).
       # The 60-day lag cap in the parser prevents future dispatch-date artifacts.
       - MYNTRA_USE_DISPATCH_DATE=1
+      - MYNTRA_PARTNER_DB_PATH=/data/myntra_partner.db
+      - MYNTRA_PARTNER_CODE=${MYNTRA_PARTNER_CODE:-PROGRESSINO}
+      - MYNTRA_PARTNER_WEBHOOK_API_KEY=${MYNTRA_PARTNER_WEBHOOK_API_KEY}
+      - MYNTRA_PARTNER_WEBHOOK_BASE_URL=${MYNTRA_PARTNER_WEBHOOK_BASE_URL:-https://app.progressino.com/api/myntra/partner/webhook}
       - PO_RESULT_SPILL_DIR=/data/po_results
     volumes:
       - ${APP_DATA_DIR:-/root/app-data}/finance:/data
