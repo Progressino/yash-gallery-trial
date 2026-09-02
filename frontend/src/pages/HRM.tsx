@@ -942,7 +942,6 @@ export default function HRM() {
     const canTime = i.in_action_window !== false || canEditAssignments
     const canMark = showMark && (!i.marked || i.status === 'Pending' || canEditAssignments)
     const isAssignee = Number(scope?.employee_id) > 0 && Number(checkEmp) === Number(scope?.employee_id)
-    const canApproveCancel = false
     const canPause = i.can_pause !== false && ts !== 'Completed'
     const canResume = i.can_resume !== false && ts === 'Paused'
     const canEnd = i.can_complete !== false && (ts === 'Active' || ts === 'In Progress' || ts === 'Paused')
