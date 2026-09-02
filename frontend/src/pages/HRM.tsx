@@ -5,7 +5,7 @@ import { useAuth } from '../store/auth'
 import { FREQUENCIES, PRIORITIES, TIME_PERIODS, WEEKDAYS, MONTHS, priorityStyle } from './hrmConstants'
 import { loadHrmLang, saveHrmLang, t, type HrmLang } from './hrmI18n'
 
-type Tab = 'dashboard' | 'check' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'hierarchy'
+type Tab = 'dashboard' | 'check' | 'approvals' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'hierarchy'
 
 const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected'] as const
 const TASK_LOG_STATUSES = ['Done', 'Partial', 'Missed', 'Blocked', 'Leave', 'N/A'] as const
@@ -212,7 +212,9 @@ export default function HRM() {
   })
   const [reassignForm, setReassignForm] = useState({
     original_responsibility_id: '' as any, to_employee_id: '' as any, reassignment_date: today(),
+    date_from: today(), date_to: today(),
   })
+  const [reassignTaskModal, setReassignTaskModal] = useState<any>(null)
   const [showReassign, setShowReassign] = useState(false)
   const [issueForm, setIssueForm] = useState({
     subject_user_id: '' as any,
@@ -412,16 +414,6 @@ export default function HRM() {
     enabled: !!checkEmp && (tab === 'check' || tab === 'hod' || (tab === 'dashboard' && isEmployeeScope)),
     refetchInterval: tab === 'check' ? 60_000 : false,
   })
-  const markMissedMut = useMutation({
-    mutationFn: () => api.post(`/hrm/employee-check/${checkEmp}/mark-unmarked-missed?check_date=${checkDate}`).then(r => r.data),
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
-      qc.invalidateQueries({ queryKey: ['hrm-hod'] })
-      qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
-      qc.invalidateQueries({ queryKey: ['hrm-performance'] })
-      window.alert(`Marked ${data?.marked ?? 0} unmarked daily item(s) as Missed.`)
-    },
-  })
   const { data: perfData = [] } = useQuery({
     queryKey: ['hrm-perf', selDept, selEmp, fromDate, toDate],
     queryFn: () => api.get(`/hrm/performance?from_date=${fromDate}&to_date=${toDate}${selDept ? `&department_id=${selDept}` : ''}${selEmp ? `&employee_id=${selEmp}` : ''}`).then(r => r.data),
@@ -478,10 +470,25 @@ export default function HRM() {
     },
   })
   const reassignMut = useMutation({
-    mutationFn: (b: object) => api.post('/hrm/tasks/reassign-day', b),
+    mutationFn: (b: { original_responsibility_id: number; to_employee_id: number; reassignment_date?: string; date_from?: string; date_to?: string }) => {
+      if (b.date_from && b.date_to && b.date_from !== b.date_to) {
+        return api.post('/hrm/tasks/reassign-range', {
+          original_responsibility_id: b.original_responsibility_id,
+          to_employee_id: b.to_employee_id,
+          date_from: b.date_from,
+          date_to: b.date_to,
+        })
+      }
+      return api.post('/hrm/tasks/reassign-day', {
+        original_responsibility_id: b.original_responsibility_id,
+        to_employee_id: b.to_employee_id,
+        reassignment_date: b.reassignment_date || b.date_from || today(),
+      })
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
       setShowReassign(false)
+      setReassignTaskModal(null)
     },
     onError: (err: any) => alert(err?.response?.data?.detail || 'Reassignment failed'),
   })
@@ -901,8 +908,23 @@ export default function HRM() {
       other: filterItems(dayCheck.other),
       whenever_required: filterItems(dayCheck.whenever_required || []),
       additional_work: dayCheck.additional_work || [],
+      submitted_for_approval: filterItems(dayCheck.submitted_for_approval || []),
     }
   }, [dayCheck, checkPeriod])
+
+  const openReassignModal = (task: { responsibility_id?: number; id?: number; title?: string; employee_id?: number }, date?: string) => {
+    const rid = task.responsibility_id ?? task.id
+    const d = date || checkDate || today()
+    setReassignTaskModal(task)
+    setShowReassign(false)
+    setReassignForm(f => ({
+      ...f,
+      original_responsibility_id: rid,
+      date_from: d,
+      date_to: d,
+      reassignment_date: d,
+    }))
+  }
 
   const handleStatusSelect = (respId: number, logDate: string, status: string) => {
     if (!status) return
@@ -920,12 +942,10 @@ export default function HRM() {
     const canTime = i.in_action_window !== false || canEditAssignments
     const canMark = showMark && (!i.marked || i.status === 'Pending' || canEditAssignments)
     const isAssignee = Number(scope?.employee_id) > 0 && Number(checkEmp) === Number(scope?.employee_id)
-    const canApproveCancel = Boolean(
-      i.task_log_id
-      && i.approval_status === 'Pending'
-      && !isAssignee
-      && (canEditAssignments || Number(scope?.employee_id) === Number(i.linked_to_employee_id)),
-    )
+    const canApproveCancel = false
+    const canPause = i.can_pause !== false && ts !== 'Completed'
+    const canResume = i.can_resume !== false && ts === 'Paused'
+    const canEnd = i.can_complete !== false && (ts === 'Active' || ts === 'In Progress' || ts === 'Paused')
     const openManual = () => {
       setDwrManualId(i.responsibility_id)
       setDwrManualStart(toDatetimeLocal(i.started_at))
@@ -949,7 +969,15 @@ export default function HRM() {
           <span className="text-[11px] font-semibold text-[#002B5B]">Active {fmtDuration(activeMin || i.duration_minutes)}</span>
           {pausedMin > 0 && <span className="text-[11px] text-amber-800">Paused {fmtDuration(pausedMin)}</span>}
         </div>
-        {Array.isArray(i.daily_time) && i.daily_time.length > 0 && (
+        {Array.isArray(i.work_sessions) && i.work_sessions.length > 0 && (
+          <div className="mt-1 text-[10px] text-gray-600 space-y-0.5">
+            {i.work_sessions.map((s: any) => (
+              <div key={s.index}>{s.index}{s.index === 1 ? 'st' : s.index === 2 ? 'nd' : s.index === 3 ? 'rd' : 'th'} Session: {fmtDateTime(s.started_at)} – {fmtDateTime(s.ended_at)}</div>
+            ))}
+            <div className="font-semibold text-[#002B5B]">Total Time: {i.total_work_label || fmtDuration(Math.floor((i.total_work_seconds || 0) / 60))}</div>
+          </div>
+        )}
+        {Array.isArray(i.daily_time) && i.daily_time.length > 0 && !i.work_sessions?.length && (
           <p className="text-[10px] text-gray-500 mt-0.5">
             Daily: {i.daily_time.map((d: any) => `${d.date} ${d.active_minutes || 0}m`).join(' · ')}
           </p>
@@ -961,14 +989,14 @@ export default function HRM() {
             )}
             {(ts === 'Active' || ts === 'In Progress') && (
               <>
-                <button type="button" className="text-xs px-2 py-0.5 bg-amber-500 text-white rounded" onClick={() => pauseRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>⏸ Pause</button>
-                <button type="button" className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded" onClick={() => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>■ End</button>
+                <button type="button" disabled={!canPause} title={!canPause ? 'Maximum 3 pauses reached' : ''} className="text-xs px-2 py-0.5 bg-amber-500 text-white rounded disabled:opacity-40" onClick={() => pauseRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>⏸ Pause</button>
+                <button type="button" disabled={!canEnd} title={!canEnd ? 'Task already completed' : ''} className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded disabled:opacity-40" onClick={() => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>■ Complete</button>
               </>
             )}
             {ts === 'Paused' && (
               <>
-                <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" onClick={() => resumeRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Resume</button>
-                <button type="button" className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded" onClick={() => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>■ End</button>
+                <button type="button" disabled={!canResume} title={!canResume ? 'Maximum 2 resumes reached' : ''} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded disabled:opacity-40" onClick={() => resumeRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Resume</button>
+                <button type="button" disabled={!canEnd} className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded disabled:opacity-40" onClick={() => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>■ Complete</button>
               </>
             )}
             {dwrManualId === i.responsibility_id ? (
@@ -1000,6 +1028,18 @@ export default function HRM() {
             )}
           </div>
         )}
+        {i.approval_status === 'Pending' && isAssignee && (
+          <p className="text-[10px] text-indigo-700 mt-1">Awaiting approval from {i.linked_to_employee_name || 'linked person'}</p>
+        )}
+        {i.mandatory && (canEditAssignments || isAssignee) && (
+          <button
+            type="button"
+            className="mt-1 text-[10px] px-2 py-0.5 border border-amber-700 text-amber-900 rounded"
+            onClick={() => openReassignModal(i, checkDate)}
+          >
+            Reassign
+          </button>
+        )}
         {canMark && (
           <select
             defaultValue=""
@@ -1015,21 +1055,41 @@ export default function HRM() {
             {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
           </select>
         )}
-        {canApproveCancel && (
-          <div className="flex gap-1 mt-1">
-            <button type="button" className="text-xs px-2 py-0.5 bg-green-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: i.task_log_id, action: 'Approved' })}>Approve</button>
-            <button type="button" className="text-xs px-2 py-0.5 bg-red-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: i.task_log_id, action: 'Cancelled' })}>Cancel</button>
-          </div>
-        )}
       </div>
     )
   }
+
+  const renderApprovalInbox = () => (
+    !!scope?.employee_id && Array.isArray(pendingApprovals?.pending) && pendingApprovals.pending.length > 0 ? (
+      <div className="space-y-3">
+        {pendingApprovals.pending.map((p: any) => (
+          <div key={p.task_log_id} className="bg-white border border-indigo-100 rounded-lg px-3 py-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-gray-900">{p.title}</p>
+              <p className="text-xs text-gray-500">
+                {p.assignee_name} · {p.log_date} · {p.status} · Awaiting approval
+                {p.frequency ? ` · ${p.frequency}` : ''}
+              </p>
+              {p.remarks && <p className="text-xs text-gray-600 mt-1">{p.remarks}</p>}
+            </div>
+            <div className="flex gap-1">
+              <button type="button" className="text-xs px-2 py-1 bg-green-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: p.task_log_id, action: 'Approved' })}>Approve</button>
+              <button type="button" className="text-xs px-2 py-1 bg-red-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: p.task_log_id, action: 'Cancelled' })}>Reject</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    ) : (
+      <p className="text-sm text-gray-400 py-8 text-center">No tasks awaiting your approval.</p>
+    )
+  )
 
   const deptName = (id: any) => (depts as any[]).find(d => d.id === id)?.name || '—'
 
   const ALL_TABS: [Tab, string][] = [
     ['dashboard', `📊 ${t(lang, 'dashboard')}`],
     ['check', `🔎 ${t(lang, 'check')}`],
+    ['approvals', `✅ Approvals`],
     ['employees', `👥 ${t(lang, 'employees')}`],
     ['responsibilities', `📋 ${t(lang, 'responsibilities')}`],
     ['tasks', `✅ ${t(lang, 'tasks')}`],
@@ -1055,12 +1115,16 @@ export default function HRM() {
       tabs = tabs.filter(([k]) => k !== 'hierarchy')
     }
     if (scopeLevel === 'self') {
-      tabs = tabs.filter(([k]) => ['check', 'responsibilities', 'issues', 'appraisal'].includes(k) || (canViewDashboard && k === 'dashboard'))
+      tabs = tabs.filter(([k]) => ['check', 'approvals', 'responsibilities', 'issues', 'appraisal'].includes(k) || (canViewDashboard && k === 'dashboard'))
       // Employees never see dashboard (canViewDashboard false for Employee)
       tabs = tabs.filter(([k]) => k !== 'dashboard')
     }
     return tabs
   }, [scopeLevel, canViewEmployeeList, canUseEmployeeCheck, canViewDashboard, canManageOrg, userRole, lang])
+
+  useEffect(() => {
+    if (isEmployeeScope) setCheckDate(today())
+  }, [isEmployeeScope])
 
   useEffect(() => {
     if (!TABS.some(([k]) => k === tab)) setTab(TABS[0]?.[0] || 'dashboard')
@@ -1160,7 +1224,7 @@ export default function HRM() {
           <button key={key} onClick={() => setTab(key)}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${tab === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
             {label}
-            {key === 'check' && (pendingApprovals?.pending?.length || 0) > 0 && (
+            {key === 'approvals' && (pendingApprovals?.pending?.length || 0) > 0 && (
               <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-indigo-600 text-white text-[10px]">
                 {pendingApprovals.pending.length}
               </span>
@@ -1510,33 +1574,24 @@ export default function HRM() {
                 ))}
               </select>
             ) : (
-              <span className="text-sm font-medium text-gray-700">Your daily check</span>
+              <span className="text-sm font-medium text-gray-700">Your daily check · {checkDate}</span>
             )}
-            <input type="date" value={checkDate} onChange={e => setCheckDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+            {!isEmployeeScope && (
+              <input type="date" value={checkDate} onChange={e => setCheckDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+            )}
             <select value={checkPeriod} onChange={e => setCheckPeriod(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm">
               <option value="">{t(lang, 'timePeriod')} — All</option>
               {TIME_PERIODS.map(tp => <option key={tp}>{tp}</option>)}
             </select>
-            <button onClick={() => setCheckDate(today())} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600">Today</button>
-            {canEditAssignments && checkEmp && (dayCheck?.summary?.unmarked_daily || 0) > 0 && (
-              <button
-                onClick={() => {
-                  if (window.confirm(`Mark ${dayCheck?.summary.unmarked_daily} unmarked Daily item(s) as Missed for ${checkDate}?`)) {
-                    markMissedMut.mutate()
-                  }
-                }}
-                disabled={markMissedMut.isPending}
-                className="text-xs px-3 py-1.5 bg-red-600 text-white rounded-lg disabled:opacity-50"
-              >
-                {markMissedMut.isPending ? 'Closing…' : `Auto-close unmarked as Missed (${dayCheck?.summary.unmarked_daily})`}
-              </button>
+            {!isEmployeeScope && (
+              <button onClick={() => setCheckDate(today())} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600">Today</button>
             )}
             {canEditAssignments && checkEmp && (
               <button
                 onClick={() => setShowReassign(true)}
                 className="text-xs px-3 py-1.5 border border-amber-700 text-amber-900 rounded-lg"
               >
-                Reassign mandatory (1 day)
+                Reassign mandatory
               </button>
             )}
             <button onClick={() => setShowDailyGuide(v => !v)} className="text-xs px-3 py-1.5 border border-teal-700 text-teal-800 rounded-lg ml-auto">
@@ -1544,107 +1599,11 @@ export default function HRM() {
             </button>
           </div>
 
-          {!!scope?.employee_id && Array.isArray(pendingApprovals?.pending) && pendingApprovals.pending.length > 0 && (
-            <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 space-y-3">
-              <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div>
-                  <h3 className="font-semibold text-indigo-950 text-sm">Awaiting your approval (Linked To)</h3>
-                  <p className="text-xs text-indigo-800 mt-0.5">
-                    {(pendingApprovals.unread || 0) > 0
-                      ? `${pendingApprovals.unread} new notification(s). `
-                      : ''}
-                    Team members marked these Done/Partial — Approve or Cancel below.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  className="text-xs text-indigo-700 underline"
-                  onClick={() => {
-                    api.post('/hrm/approvals/notifications/read').then(() => refetchPendingApprovals())
-                  }}
-                >
-                  Mark notifications read
-                </button>
-              </div>
-              <div className="space-y-2">
-                {pendingApprovals.pending.map((p: any) => (
-                  <div key={p.task_log_id} className="bg-white border border-indigo-100 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-gray-900">{p.title}</p>
-                      <p className="text-xs text-gray-500">
-                        {p.assignee_name} · {p.log_date} · {p.status} · Pending
-                        {p.backup_employee_name ? ` · Backup: ${p.backup_employee_name}` : ''}
-                      </p>
-                    </div>
-                    <div className="flex gap-1">
-                      <button
-                        type="button"
-                        className="text-xs px-2 py-1 bg-green-700 text-white rounded"
-                        onClick={() => approveLogMut.mutate({ id: p.task_log_id, action: 'Approved' })}
-                      >
-                        Approve
-                      </button>
-                      <button
-                        type="button"
-                        className="text-xs px-2 py-1 bg-red-700 text-white rounded"
-                        onClick={() => approveLogMut.mutate({ id: p.task_log_id, action: 'Cancelled' })}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {showReassign && (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2 text-sm">
-              <h4 className="font-semibold text-amber-900">One-day mandatory reassignment</h4>
-              <p className="text-xs text-amber-800">Creates a temporary clone for the selected day under Additional Work. Original responsibility is not transferred permanently.</p>
-              <div className="grid md:grid-cols-3 gap-2">
-                <div>
-                  <label className="text-xs text-gray-600">Responsibility ID</label>
-                  <input
-                    value={reassignForm.original_responsibility_id}
-                    onChange={e => setReassignForm(f => ({ ...f, original_responsibility_id: e.target.value }))}
-                    placeholder="From employee check list"
-                    className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600">Assign to</label>
-                  <select
-                    value={reassignForm.to_employee_id}
-                    onChange={e => setReassignForm(f => ({ ...f, to_employee_id: e.target.value }))}
-                    className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
-                  >
-                    <option value="">Select</option>
-                    {pickerEmps.map((e: any) => (
-                      <option key={e.id} value={e.id}>{e.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-600">Date</label>
-                  <input type="date" value={reassignForm.reassignment_date} onChange={e => setReassignForm(f => ({ ...f, reassignment_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-0.5" />
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  disabled={!reassignForm.original_responsibility_id || !reassignForm.to_employee_id || reassignMut.isPending}
-                  onClick={() => reassignMut.mutate({
-                    original_responsibility_id: +reassignForm.original_responsibility_id,
-                    to_employee_id: +reassignForm.to_employee_id,
-                    reassignment_date: reassignForm.reassignment_date,
-                  })}
-                  className="px-3 py-1.5 bg-amber-800 text-white rounded-lg text-xs disabled:opacity-50"
-                >
-                  Create one-day clone
-                </button>
-                <button type="button" onClick={() => setShowReassign(false)} className="px-3 py-1.5 border rounded-lg text-xs">Cancel</button>
-              </div>
+          {!!scope?.employee_id && Array.isArray(pendingApprovals?.notifications) && pendingApprovals.notifications.filter((n: any) => !n.is_read).length > 0 && isEmployeeScope && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900">
+              {(pendingApprovals.notifications as any[]).filter(n => !n.is_read).slice(0, 3).map((n: any) => (
+                <p key={n.id}>{n.message}</p>
+              ))}
             </div>
           )}
 
@@ -1671,7 +1630,7 @@ export default function HRM() {
                   <li>Before leaving: submit outcome DSR → mark DSR Done. Weekly: promotional initiative.</li>
                 </ol>
               </div>
-              <p className="text-xs text-gray-500">Manager: select employee + date here to see Worked on vs Not worked. Use Auto-close at day end for leftover Pending Dailies.</p>
+              <p className="text-xs text-gray-500">Manager: select employee + date here to see Worked on vs Not worked. Unmarked daily tasks auto-mark as Missed at IST day end.</p>
             </div>
           )}
 
@@ -1695,13 +1654,28 @@ export default function HRM() {
               </div>
 
               <div className="grid md:grid-cols-2 gap-4">
+                {(dayCheckFiltered?.submitted_for_approval?.length || 0) > 0 && (
+                  <div className="bg-white rounded-xl border overflow-hidden md:col-span-2">
+                    <div className="px-4 py-2.5 bg-indigo-600 text-white font-semibold text-sm">Submitted for approval ({dayCheckFiltered?.submitted_for_approval?.length || 0})</div>
+                    <ul className="divide-y">
+                      {(dayCheckFiltered?.submitted_for_approval || []).map((i: any) => (
+                        <li key={`sub-${i.responsibility_id}`} className="px-4 py-3">
+                          <div className="flex items-start gap-2">
+                            <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
+                            {renderRespCheck(i, { showMark: false })}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <div className="bg-white rounded-xl border overflow-hidden">
-                  <div className="px-4 py-2.5 bg-green-600 text-white font-semibold text-sm">Worked on ({dayCheckFiltered?.worked_on?.length || 0})</div>
-                  {(dayCheckFiltered?.worked_on || []).length === 0 ? (
-                    <p className="p-4 text-sm text-gray-400">No Done/Partial marks for this date yet.</p>
+                  <div className="px-4 py-2.5 bg-green-600 text-white font-semibold text-sm">Worked on ({(dayCheckFiltered?.worked_on || []).filter((i: any) => i.approval_status !== 'Pending').length || 0})</div>
+                  {(dayCheckFiltered?.worked_on || []).filter((i: any) => i.approval_status !== 'Pending').length === 0 ? (
+                    <p className="p-4 text-sm text-gray-400">No approved Done/Partial marks for this date yet.</p>
                   ) : (
                     <ul className="divide-y">
-                      {(dayCheckFiltered?.worked_on || []).map((i: any) => (
+                      {(dayCheckFiltered?.worked_on || []).filter((i: any) => i.approval_status !== 'Pending').map((i: any) => (
                         <li key={i.responsibility_id} className="px-4 py-3">
                           <div className="flex items-start gap-2">
                             <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
@@ -1806,6 +1780,28 @@ export default function HRM() {
               </p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ── APPROVALS (Linked Person inbox) ── */}
+      {tab === 'approvals' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <h3 className="font-semibold text-gray-800">Approval queue</h3>
+              <p className="text-xs text-gray-500">Tasks marked Done/Partial by your team awaiting your approval as Linked Person.</p>
+            </div>
+            {(pendingApprovals?.unread || 0) > 0 && (
+              <button
+                type="button"
+                className="text-xs text-indigo-700 underline"
+                onClick={() => api.post('/hrm/approvals/notifications/read').then(() => refetchPendingApprovals())}
+              >
+                Mark notifications read
+              </button>
+            )}
+          </div>
+          {renderApprovalInbox()}
         </div>
       )}
 
@@ -2204,11 +2200,24 @@ export default function HRM() {
                             <td className="px-4 py-2 text-xs"><span className={`px-1.5 py-0.5 rounded ${priorityStyle(r.priority || 'Medium')}`}>{r.priority || 'Medium'}</span></td>
                             <td className="px-4 py-2 text-xs text-gray-400">{r.added_by || '—'}</td>
                             <td className="px-4 py-2">
-                              {canMutateRecords && (
-                                <div className="flex gap-2">
-                                  <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '', priority: r.priority || 'Medium', mandatory: !!r.mandatory, schedule_weekday: r.schedule_weekday || '', schedule_month_day: r.schedule_month_day || 0, schedule_month: r.schedule_month || 0, time_period: r.time_period || '', backup_employee_id: r.backup_employee_id || '', backup_allocation_value: r.backup_allocation_value || 1, backup_allocation_unit: r.backup_allocation_unit || 'days' })} className="text-xs text-blue-600">✏️</button>
-                                  {canDeleteHrm && (
-                                    <button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button>
+                              {(canMutateRecords || (isEmployeeScope && Number(scope?.employee_id) === Number(r.employee_id))) && (
+                                <div className="flex gap-2 flex-wrap">
+                                  {!!r.mandatory && (
+                                    <button
+                                      type="button"
+                                      onClick={() => openReassignModal({ id: r.id, title: r.title, employee_id: r.employee_id })}
+                                      className="text-xs text-amber-800 border border-amber-700 px-1.5 py-0.5 rounded"
+                                    >
+                                      Reassign
+                                    </button>
+                                  )}
+                                  {canMutateRecords && (
+                                    <>
+                                      <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '', priority: r.priority || 'Medium', mandatory: !!r.mandatory, schedule_weekday: r.schedule_weekday || '', schedule_month_day: r.schedule_month_day || 0, schedule_month: r.schedule_month || 0, time_period: r.time_period || '', backup_employee_id: r.backup_employee_id || '', backup_allocation_value: r.backup_allocation_value || 1, backup_allocation_unit: r.backup_allocation_unit || 'days' })} className="text-xs text-blue-600">✏️</button>
+                                      {canDeleteHrm && (
+                                        <button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button>
+                                      )}
+                                    </>
                                   )}
                                 </div>
                               )}
@@ -3309,6 +3318,68 @@ export default function HRM() {
                 {approvalModal.action === 'approve' ? 'Approve & close' : 'Reject — send back'}
               </button>
               <button onClick={() => setApprovalModal(null)} className="px-4 border rounded-lg text-sm">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── REASSIGN MODAL ── */}
+      {(reassignTaskModal || showReassign) && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 text-sm">
+            <h4 className="font-semibold text-amber-900">
+              {reassignTaskModal ? `Reassign: ${reassignTaskModal.title}` : 'Mandatory reassignment'}
+            </h4>
+            <p className="text-xs text-amber-800">Temporary clone(s) under Additional Work — original recurring assignment unchanged outside the date range.</p>
+            <div className="grid md:grid-cols-2 gap-2">
+              {!reassignTaskModal && (
+                <div className="md:col-span-2">
+                  <label className="text-xs text-gray-600">Responsibility ID</label>
+                  <input
+                    value={reassignForm.original_responsibility_id}
+                    onChange={e => setReassignForm(f => ({ ...f, original_responsibility_id: e.target.value }))}
+                    className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
+                  />
+                </div>
+              )}
+              <div>
+                <label className="text-xs text-gray-600">Alternate assignee</label>
+                <select
+                  value={reassignForm.to_employee_id}
+                  onChange={e => setReassignForm(f => ({ ...f, to_employee_id: e.target.value }))}
+                  className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
+                >
+                  <option value="">Select</option>
+                  {assignPickers.map((e: any) => (
+                    <option key={e.id} value={e.id}>{e.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-600">Date from</label>
+                <input type="date" value={reassignForm.date_from} onChange={e => setReassignForm(f => ({ ...f, date_from: e.target.value, reassignment_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-0.5" />
+              </div>
+              <div>
+                <label className="text-xs text-gray-600">Date to</label>
+                <input type="date" value={reassignForm.date_to} onChange={e => setReassignForm(f => ({ ...f, date_to: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-0.5" />
+              </div>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                disabled={!reassignForm.original_responsibility_id || !reassignForm.to_employee_id || reassignMut.isPending}
+                onClick={() => reassignMut.mutate({
+                  original_responsibility_id: +reassignForm.original_responsibility_id,
+                  to_employee_id: +reassignForm.to_employee_id,
+                  date_from: reassignForm.date_from,
+                  date_to: reassignForm.date_to,
+                  reassignment_date: reassignForm.date_from,
+                })}
+                className="px-3 py-1.5 bg-amber-800 text-white rounded-lg text-xs disabled:opacity-50"
+              >
+                Save reassignment
+              </button>
+              <button type="button" onClick={() => { setShowReassign(false); setReassignTaskModal(null) }} className="px-3 py-1.5 border rounded-lg text-xs">Cancel</button>
             </div>
           </div>
         </div>

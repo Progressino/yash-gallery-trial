@@ -161,16 +161,28 @@ def _seed_resp_and_task():
     hrm_db.create_department({"name": dept_name})
     dept_id = hrm_db.list_departments()[-1]["id"]
     hrm_db.create_employee({"name": "Worker", "department_id": dept_id})
-    emp_id = hrm_db.list_employees(dept_id)[0]["id"]
-    hrm_db.create_responsibility({"employee_id": emp_id, "title": "Daily check", "frequency": "Daily"})
+    hrm_db.create_employee({"name": "Backup", "department_id": dept_id})
+    emps = hrm_db.list_employees(dept_id)
+    emp_id = emps[0]["id"]
+    backup_id = emps[1]["id"]
+    hrm_db.create_responsibility(
+        {
+            "employee_id": emp_id,
+            "title": "Daily check",
+            "frequency": "Daily",
+            "backup_employee_id": backup_id,
+            "backup_allocation_value": 1,
+            "backup_allocation_unit": "days",
+        }
+    )
     rid = hrm_db.list_responsibilities(employee_id=emp_id)[0]["id"]
     tid = hrm_db.create_one_time_task({"employee_id": emp_id, "title": "One-off audit"})
-    return dept_id, emp_id, rid, tid
+    return dept_id, emp_id, backup_id, rid, tid
 
 
 def test_hod_can_edit_responsibility_and_task(monkeypatch):
     """HOD may assign/mark; edit/delete of master records is Admin-only."""
-    dept_id, emp_id, rid, tid = _seed_resp_and_task()
+    dept_id, emp_id, backup_id, rid, tid = _seed_resp_and_task()
     client = _make_client(
         monkeypatch,
         "hod_edit",
@@ -181,12 +193,19 @@ def test_hod_can_edit_responsibility_and_task(monkeypatch):
     # Create still allowed via can_edit_assignments
     assert client.post(
         "/api/hrm/responsibilities",
-        json={"employee_id": emp_id, "title": "New daily", "frequency": "Daily"},
+        json={
+            "employee_id": emp_id,
+            "title": "New daily",
+            "frequency": "Daily",
+            "backup_employee_id": backup_id,
+            "backup_allocation_value": 1,
+            "backup_allocation_unit": "days",
+        },
     ).status_code == 200
 
 
 def test_employee_cannot_edit_responsibility_or_task(monkeypatch):
-    dept_id, emp_id, rid, tid = _seed_resp_and_task()
+    dept_id, emp_id, backup_id, rid, tid = _seed_resp_and_task()
     client = _make_client(
         monkeypatch,
         "emp_edit",
@@ -198,14 +217,14 @@ def test_employee_cannot_edit_responsibility_or_task(monkeypatch):
 
 
 def test_admin_can_edit_responsibility(monkeypatch):
-    _, emp_id, rid, _ = _seed_resp_and_task()
+    _, emp_id, _, rid, _ = _seed_resp_and_task()
     client = _make_client(monkeypatch, "admin_edit", _profile("Admin"))
     assert client.patch(f"/api/hrm/responsibilities/{rid}", json={"title": "Admin edit"}).status_code == 200
     assert hrm_db.list_responsibilities(employee_id=emp_id)[0]["title"] == "Admin edit"
 
 
 def test_employee_cannot_resolve_issue(monkeypatch):
-    dept_id, emp_id, _, _ = _seed_resp_and_task()
+    dept_id, emp_id, _, _, _ = _seed_resp_and_task()
     hrm_db.create_issue(
         {
             "employee_id": emp_id,
@@ -226,7 +245,7 @@ def test_employee_cannot_resolve_issue(monkeypatch):
 
 
 def test_hod_can_override_locked_task_status_via_api(monkeypatch):
-    dept_id, emp_id, rid, _ = _seed_resp_and_task()
+    dept_id, emp_id, _, rid, _ = _seed_resp_and_task()
     today = __import__("datetime").date.today().isoformat()
     hrm_db.mark_task(rid, today, "Done", marked_by="HOD")
     client = _make_client(
@@ -243,7 +262,7 @@ def test_hod_can_override_locked_task_status_via_api(monkeypatch):
 
 
 def test_employee_cannot_override_locked_task_status(monkeypatch):
-    dept_id, emp_id, rid, _ = _seed_resp_and_task()
+    dept_id, emp_id, _, rid, _ = _seed_resp_and_task()
     today = __import__("datetime").date.today().isoformat()
     hrm_db.mark_task(rid, today, "Done", marked_by="HOD")
     client = _make_client(

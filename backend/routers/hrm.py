@@ -23,8 +23,10 @@ from ..db.hrm_db import (
     mark_task,
     approve_task_log,
     reassign_mandatory_for_day,
+    reassign_mandatory_for_range,
     mark_reassignment_clone,
     process_auto_closures_ist,
+    process_end_of_day_missed_ist,
     get_task_logs,
     list_issues,
     create_issue,
@@ -70,6 +72,8 @@ from ..db.hrm_db import (
     list_pending_linked_approvals,
     list_approval_notifications,
     mark_approval_notifications_read,
+    self_check_today_only,
+    today_ist,
     FREQUENCIES,
     PRIORITIES,
     TIME_PERIODS,
@@ -122,6 +126,16 @@ def _recorder_from_request(request: Request) -> tuple[int | None, str]:
         return uid, name
     name = (payload.get("full_name") or payload.get("sub") or "Unknown").strip()
     return None, name
+
+
+def _enforce_self_check_today(scope: HrmScope, log_date: str) -> str:
+    """Employees may only act on today's tasks in Employee Check."""
+    if scope.level == "self" and not scope.can_edit_assignments:
+        try:
+            return self_check_today_only(log_date)
+        except ValueError as e:
+            raise HTTPException(403, str(e)) from e
+    return str(log_date or today_ist().isoformat())[:10]
 
 
 def _resolve_subject_from_user(subject_user_id: int | None, employee_id: int | None) -> dict:
@@ -246,6 +260,14 @@ class ReassignDayIn(BaseModel):
     original_responsibility_id: int
     to_employee_id: int
     reassignment_date: str
+    assigned_by: Optional[str] = ""
+
+
+class ReassignRangeIn(BaseModel):
+    original_responsibility_id: int
+    to_employee_id: int
+    date_from: str
+    date_to: str
     assigned_by: Optional[str] = ""
 
 
@@ -646,9 +668,10 @@ def post_mark_task(body: TaskMarkIn, request: Request):
     assert_responsibility_in_scope(scope, body.responsibility_id)
     if body.blocker_employee_id:
         assert_employee_in_scope(scope, body.blocker_employee_id)
+    log_date = _enforce_self_check_today(scope, body.log_date)
     ok = mark_task(
         body.responsibility_id,
-        body.log_date,
+        log_date,
         body.status,
         body.marked_by or "",
         body.remarks or "",
@@ -695,8 +718,16 @@ def _timer_http_result(ok):
             409,
             "You already have an Active timer on another responsibility — pause or end it first",
         )
-    if ok == "paused":
-        raise HTTPException(400, "Timer is paused — use Resume")
+    if ok == "already_paused":
+        raise HTTPException(400, "Timer is already paused")
+    if ok == "already_active":
+        raise HTTPException(400, "Timer is already running")
+    if ok == "pause_limit":
+        raise HTTPException(409, "Maximum 3 pauses reached for this task today")
+    if ok == "resume_limit":
+        raise HTTPException(409, "Maximum 2 resumes reached for this task today")
+    if ok == "complete_limit":
+        raise HTTPException(409, "Task already completed for today")
     raise HTTPException(400, str(ok))
 
 
@@ -705,10 +736,11 @@ def post_start_responsibility_timer(responsibility_id: int, body: Responsibility
     scope = _scope_from_request(request)
     assert_responsibility_in_scope(scope, responsibility_id)
     _, name = _recorder_from_request(request)
+    log_date = _enforce_self_check_today(scope, body.log_date)
     return _timer_http_result(
         start_responsibility_timer(
             responsibility_id,
-            body.log_date,
+            log_date,
             allow_override=scope.can_edit_assignments,
             actor=name,
         )
@@ -720,10 +752,11 @@ def post_pause_responsibility_timer(responsibility_id: int, body: Responsibility
     scope = _scope_from_request(request)
     assert_responsibility_in_scope(scope, responsibility_id)
     _, name = _recorder_from_request(request)
+    log_date = _enforce_self_check_today(scope, body.log_date)
     return _timer_http_result(
         pause_responsibility_timer(
             responsibility_id,
-            body.log_date,
+            log_date,
             allow_override=scope.can_edit_assignments,
             actor=name,
         )
@@ -735,10 +768,11 @@ def post_resume_responsibility_timer(responsibility_id: int, body: Responsibilit
     scope = _scope_from_request(request)
     assert_responsibility_in_scope(scope, responsibility_id)
     _, name = _recorder_from_request(request)
+    log_date = _enforce_self_check_today(scope, body.log_date)
     return _timer_http_result(
         resume_responsibility_timer(
             responsibility_id,
-            body.log_date,
+            log_date,
             allow_override=scope.can_edit_assignments,
             actor=name,
         )
@@ -750,10 +784,11 @@ def post_end_responsibility_timer(responsibility_id: int, body: ResponsibilityTi
     scope = _scope_from_request(request)
     assert_responsibility_in_scope(scope, responsibility_id)
     _, name = _recorder_from_request(request)
+    log_date = _enforce_self_check_today(scope, body.log_date)
     return _timer_http_result(
         end_responsibility_timer(
             responsibility_id,
-            body.log_date,
+            log_date,
             allow_override=scope.can_edit_assignments,
             actor=name,
         )
@@ -783,12 +818,12 @@ def get_timer_detail(responsibility_id: int, log_date: str, request: Request):
 def post_responsibility_manual_time(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
     scope = _scope_from_request(request)
     assert_responsibility_in_scope(scope, responsibility_id)
-    # Employees may only adjust their own window times; HOD/Admin override allowed
     _, name = _recorder_from_request(request)
+    log_date = _enforce_self_check_today(scope, body.log_date)
     return _timer_http_result(
         set_responsibility_manual_time(
             responsibility_id,
-            body.log_date,
+            log_date,
             body.started_at,
             body.ended_at,
             allow_override=scope.can_edit_assignments,
@@ -870,10 +905,15 @@ def get_employees_for_pickers(request: Request, department_id: Optional[int] = N
 
 @router.post("/tasks/reassign-day")
 def post_reassign_day(body: ReassignDayIn, request: Request):
-    """One-day mandatory reassignment clone (HOD/Admin). Master responsibility stays put."""
+    """One-day mandatory reassignment clone. Master responsibility stays put."""
     scope = _scope_from_request(request)
-    assert_hrm_hod_or_admin(scope)
+    from ..db.hrm_db import get_responsibility_owner
+
     assert_responsibility_in_scope(scope, body.original_responsibility_id)
+    if not scope.can_edit_assignments:
+        owner = get_responsibility_owner(body.original_responsibility_id)
+        if owner is None or int(scope.employee_id or 0) != int(owner):
+            raise HTTPException(403, "You can only reassign your own responsibilities")
     assert_employee_in_scope(scope, body.to_employee_id)
     _, name = _recorder_from_request(request)
     try:
@@ -886,6 +926,32 @@ def post_reassign_day(body: ReassignDayIn, request: Request):
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {"ok": True, "clone_id": cid}
+
+
+@router.post("/tasks/reassign-range")
+def post_reassign_range(body: ReassignRangeIn, request: Request):
+    """Mandatory reassignment clones for each day in [date_from, date_to]."""
+    scope = _scope_from_request(request)
+    from ..db.hrm_db import get_responsibility_owner
+
+    assert_responsibility_in_scope(scope, body.original_responsibility_id)
+    if not scope.can_edit_assignments:
+        owner = get_responsibility_owner(body.original_responsibility_id)
+        if owner is None or int(scope.employee_id or 0) != int(owner):
+            raise HTTPException(403, "You can only reassign your own responsibilities")
+    assert_employee_in_scope(scope, body.to_employee_id)
+    _, name = _recorder_from_request(request)
+    try:
+        ids = reassign_mandatory_for_range(
+            original_responsibility_id=body.original_responsibility_id,
+            to_employee_id=body.to_employee_id,
+            date_from=body.date_from,
+            date_to=body.date_to,
+            assigned_by=body.assigned_by or name,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "clone_ids": ids, "days": len(ids)}
 
 
 @router.post("/tasks/reassign-clones/{clone_id}/mark")
@@ -1284,6 +1350,10 @@ def employee_day_check(
     """What the employee worked on vs did not for a given day (default today)."""
     scope = _scope_from_request(request)
     assert_employee_in_scope(scope, employee_id)
+    if scope.level == "self" and not scope.can_edit_assignments:
+        if check_date and str(check_date)[:10] != today_ist().isoformat():
+            raise HTTPException(403, "Employee Check is limited to today's tasks only")
+        check_date = today_ist().isoformat()
     data = get_employee_day_check(employee_id, check_date)
     if not data:
         raise HTTPException(404, "Employee not found")

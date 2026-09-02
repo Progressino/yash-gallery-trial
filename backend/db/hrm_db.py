@@ -68,10 +68,22 @@ MONTH_NAMES = (
 HOD_STATUS_EDIT_GRACE_DAYS = 1
 # Employee may mark / Linked person may approve within task day + next 2 IST days.
 TASK_WINDOW_EXTRA_DAYS = 2
+MAX_TIMER_PAUSE_PER_DAY = 3
+MAX_TIMER_RESUME_PER_DAY = 2
+MAX_TIMER_COMPLETE_PER_DAY = 1
 
 
 def today_ist() -> date:
     return datetime.now(IST).date()
+
+
+def self_check_today_only(log_date: str | None) -> str:
+    """Employee Check must use today's IST date — raises ValueError if not."""
+    day = today_ist().isoformat()
+    got = str(log_date or day)[:10]
+    if got != day:
+        raise ValueError("Employee Check is limited to today's tasks only")
+    return day
 
 
 def now_ist() -> datetime:
@@ -209,6 +221,74 @@ def _timer_payload(log: dict | None, *, events: list | None = None) -> dict:
         "timer_status": timer_status(started, ended, paused),
         "timer_events": ev,
         "daily_time": daily,
+        **_timer_limits_and_sessions(ev, log_date=str(log.get("log_date") or "")),
+    }
+
+
+def _count_timer_events(events: list, *types: str) -> int:
+    want = {t.lower() for t in types}
+    return sum(1 for e in events if str(e.get("event_type") or "").lower() in want)
+
+
+def _work_sessions_for_day(events: list, log_date: str) -> list[dict]:
+    """Completed work sessions (start/resume → pause/end) for one calendar day."""
+    day = str(log_date)[:10]
+    sessions: list[dict] = []
+    open_at: str | None = None
+    idx = 0
+    for ev in events:
+        et = str(ev.get("event_type") or "").lower()
+        at = str(ev.get("event_at") or "").strip()
+        if et in ("start", "resume"):
+            open_at = at
+        elif et in ("pause", "end") and open_at and at:
+            if str(open_at)[:10] == day or str(at)[:10] == day:
+                sec = _seconds_between(open_at, at)
+                if sec > 0:
+                    idx += 1
+                    sessions.append(
+                        {
+                            "index": idx,
+                            "started_at": open_at,
+                            "ended_at": at,
+                            "duration_seconds": sec,
+                            "duration_minutes": sec // 60,
+                            "duration_label": _format_duration_hm(sec),
+                        }
+                    )
+            open_at = None
+    return sessions
+
+
+def _format_duration_hm(seconds: int) -> str:
+    s = max(0, int(seconds or 0))
+    h, rem = divmod(s, 3600)
+    m, _ = divmod(rem, 60)
+    if h:
+        return f"{h:02d}h {m:02d}m"
+    return f"{m:02d}m"
+
+
+def _timer_limits_and_sessions(events: list, *, log_date: str) -> dict:
+    ev = list(events or [])
+    pause_n = _count_timer_events(ev, "pause")
+    resume_n = _count_timer_events(ev, "resume")
+    complete_n = _count_timer_events(ev, "end")
+    sessions = _work_sessions_for_day(ev, log_date) if log_date else []
+    total_sec = sum(int(s.get("duration_seconds") or 0) for s in sessions)
+    return {
+        "work_sessions": sessions,
+        "total_work_seconds": total_sec,
+        "total_work_label": _format_duration_hm(total_sec),
+        "pause_count": pause_n,
+        "resume_count": resume_n,
+        "complete_count": complete_n,
+        "pause_limit": MAX_TIMER_PAUSE_PER_DAY,
+        "resume_limit": MAX_TIMER_RESUME_PER_DAY,
+        "complete_limit": MAX_TIMER_COMPLETE_PER_DAY,
+        "can_pause": pause_n < MAX_TIMER_PAUSE_PER_DAY,
+        "can_resume": resume_n < MAX_TIMER_RESUME_PER_DAY,
+        "can_complete": complete_n < MAX_TIMER_COMPLETE_PER_DAY,
     }
 
 
@@ -1406,6 +1486,9 @@ def create_responsibility(data: dict):
         linked_id = int(linked) if linked not in (None, "", 0, "0") else None
     except (TypeError, ValueError):
         linked_id = None
+    if linked_id and int(data.get("employee_id") or 0) and int(linked_id) == int(data["employee_id"]):
+        conn.close()
+        raise ValueError("Linked person must be different from the assigned employee")
     require_backup = bool(data.get("require_backup", False))
     try:
         backup_id, backup_val, backup_unit = _parse_backup_fields(
@@ -1521,6 +1604,28 @@ def update_responsibility(rid: int, data: dict):
             payload["backup_employee_id"] = int(v) if v not in (None, "", 0, "0") else None
         except (TypeError, ValueError):
             payload["backup_employee_id"] = None
+    if "linked_to_employee_id" in payload or "employee_id" in payload:
+        row_link = conn.execute(
+            "SELECT employee_id, linked_to_employee_id FROM responsibilities WHERE id=?",
+            (rid,),
+        ).fetchone()
+        if row_link:
+            try:
+                emp_id = int(payload.get("employee_id", row_link["employee_id"]))
+            except (TypeError, ValueError):
+                emp_id = int(row_link["employee_id"])
+            linked_raw = payload.get("linked_to_employee_id", row_link["linked_to_employee_id"])
+            try:
+                linked_id = (
+                    int(linked_raw) if linked_raw not in (None, "", 0, "0") else None
+                )
+            except (TypeError, ValueError):
+                linked_id = None
+            if linked_id and linked_id == emp_id:
+                conn.close()
+                raise ValueError(
+                    "Linked person must be different from the assigned employee"
+                )
     if any(
         k in payload
         for k in (
@@ -1801,6 +1906,7 @@ def list_pending_linked_approvals(linked_employee_id: int) -> list[dict]:
           AND tl.approval_status='Pending'
           AND tl.status IN ('Done','Partial')
           AND r.active=1
+          AND r.linked_to_employee_id != tl.employee_id
         ORDER BY tl.log_date DESC, tl.id DESC
         """,
         (int(linked_employee_id),),
@@ -2012,10 +2118,12 @@ def pause_responsibility_timer(
         conn.close()
         return "already_ended"
     if paused:
-        conn.commit()
         conn.close()
-        return True  # already paused
+        return "already_paused"
     events = _list_timer_events(conn, int(row["id"]))
+    if not allow_override and _count_timer_events(events, "pause") >= MAX_TIMER_PAUSE_PER_DAY:
+        conn.close()
+        return "pause_limit"
     now = _now_iso()
     seg = _last_active_segment_start(row, events)
     add = _seconds_between(seg, now)
@@ -2073,9 +2181,12 @@ def resume_responsibility_timer(
         conn.close()
         return "already_ended"
     if not paused:
-        conn.commit()
         conn.close()
-        return True  # already active
+        return "already_active"
+    events = _list_timer_events(conn, int(row["id"]))
+    if not allow_override and _count_timer_events(events, "resume") >= MAX_TIMER_RESUME_PER_DAY:
+        conn.close()
+        return "resume_limit"
     if _employee_has_active_timer(conn, emp_id, exclude_log_id=int(row["id"])):
         conn.close()
         return "already_active"
@@ -2132,8 +2243,11 @@ def end_responsibility_timer(
     if ended:
         conn.commit()
         conn.close()
-        return True
+        return "already_ended"
     events = _list_timer_events(conn, int(row["id"]))
+    if _count_timer_events(events, "end") >= MAX_TIMER_COMPLETE_PER_DAY:
+        conn.close()
+        return "complete_limit"
     now = _now_iso()
     active = int(row.get("active_seconds") or 0)
     paused_sec = int(row.get("paused_seconds") or 0)
@@ -2342,6 +2456,30 @@ def approve_task_log(
                WHERE task_log_id=? AND linked_to_employee_id=?""",
             (task_log_id, linked_clear),
         )
+    if action == "Cancelled":
+        assignee_id = int(row["employee_id"])
+        title = str(row["title"] if "title" in row.keys() and row["title"] else "Task")
+        msg = (
+            f"Your mark on '{title}' ({row['log_date']}) was rejected by {actor or 'linked approver'}. "
+            f"Please rework and update the task."
+        )
+        conn.execute(
+            """INSERT INTO task_approval_notifications(
+                task_log_id, responsibility_id, linked_to_employee_id, assignee_employee_id,
+                log_date, title, assignee_name, message, is_read, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,0,?)""",
+            (
+                task_log_id,
+                int(row["responsibility_id"]),
+                assignee_id,
+                assignee_id,
+                str(row["log_date"]),
+                title,
+                "",
+                msg,
+                _now_iso(),
+            ),
+        )
     conn.commit()
     conn.close()
     return True
@@ -2410,6 +2548,36 @@ def reassign_mandatory_for_day(
     conn.commit()
     conn.close()
     return cid
+
+
+def reassign_mandatory_for_range(
+    *,
+    original_responsibility_id: int,
+    to_employee_id: int,
+    date_from: str,
+    date_to: str,
+    assigned_by: str = "",
+) -> list[int]:
+    """One-day clones for each date in [date_from, date_to] inclusive."""
+    d0 = date.fromisoformat(str(date_from)[:10])
+    d1 = date.fromisoformat(str(date_to)[:10])
+    if d1 < d0:
+        raise ValueError("date_to must be on or after date_from")
+    if (d1 - d0).days > 366:
+        raise ValueError("Reassignment range cannot exceed 366 days")
+    clone_ids: list[int] = []
+    cur = d0
+    while cur <= d1:
+        clone_ids.append(
+            reassign_mandatory_for_day(
+                original_responsibility_id=original_responsibility_id,
+                to_employee_id=to_employee_id,
+                reassignment_date=cur.isoformat(),
+                assigned_by=assigned_by,
+            )
+        )
+        cur += timedelta(days=1)
+    return clone_ids
 
 
 def mark_reassignment_clone(
@@ -3593,12 +3761,15 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     other: list[dict] = []
     whenever_required: list[dict] = []
     skipped_schedule: list[dict] = []
+    submitted_for_approval: list[dict] = []
 
     def _bucket(item: dict, status: str):
         if item.get("frequency") == "Whenever Required":
             whenever_required.append(item)
             return
         if status in ("Done", "Partial"):
+            if item.get("approval_status") == "Pending":
+                submitted_for_approval.append(item)
             worked_on.append(item)
         elif status in ("Leave", "N/A"):
             other.append(item)
@@ -3659,7 +3830,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             "in_action_window": in_task_action_window(day),
             "reassigned_out": bool(re_out),
             "reassigned_to_name": (re_out or {}).get("assignee_name") or "",
-            **_timer_payload(log, events=events),
+            **_timer_payload({**(log or {}), "log_date": day}, events=events),
         }
         # Original still holds master — if reassigned for the day, don't force pending scoreboard
         if re_out and not log:
@@ -3706,6 +3877,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         "employee": dict(emp),
         "check_date": day,
         "worked_on": worked_on,
+        "submitted_for_approval": submitted_for_approval,
         "not_worked": not_worked,
         "other": other,
         "whenever_required": whenever_required,
@@ -3820,6 +3992,58 @@ def mark_unmarked_daily_as_missed(
         )
         marked += 1
     return {"ok": True, "marked": marked, "check_date": day, "employee_id": employee_id}
+
+
+def process_end_of_day_missed_ist(*, as_of: date | None = None, actor: str = "system-eod") -> dict:
+    """
+    At IST day rollover, mark yesterday's due unmarked tasks as Missed.
+    Does not overwrite Done/Partial/Missed/Leave/N/A/Blocked or Whenever Required.
+    """
+    as_of = as_of or today_ist()
+    target_day = (as_of - timedelta(days=1)).isoformat()
+    missed_n = 0
+    conn = _connect()
+    try:
+        resps = conn.execute(
+            """
+            SELECT id, employee_id, frequency, schedule_weekday, schedule_month_day,
+                   COALESCE(schedule_month, 0) as schedule_month
+            FROM responsibilities WHERE active=1
+            """
+        ).fetchall()
+        for r in resps:
+            freq = r["frequency"] or "Daily"
+            if freq == "Whenever Required":
+                continue
+            if not is_schedule_due(
+                freq,
+                target_day,
+                r["schedule_weekday"] or "",
+                int(r["schedule_month_day"] or 0),
+                int(r["schedule_month"] or 0),
+            ):
+                continue
+            row = conn.execute(
+                "SELECT id, status FROM task_logs WHERE responsibility_id=? AND log_date=?",
+                (r["id"], target_day),
+            ).fetchone()
+            if row:
+                st = str(row["status"] or "Pending").strip()
+                if st not in ("Pending",):
+                    continue
+            ok = mark_task(
+                int(r["id"]),
+                target_day,
+                "Missed",
+                marked_by=actor,
+                remarks="Auto-missed: not updated by end of day (IST)",
+                allow_override=True,
+            )
+            if ok is True:
+                missed_n += 1
+    finally:
+        conn.close()
+    return {"ok": True, "target_day": target_day, "marked_missed": missed_n, "as_of": as_of.isoformat()}
 
 
 def get_performance(department_id=None, from_date=None, to_date=None):

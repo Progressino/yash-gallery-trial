@@ -3245,6 +3245,25 @@ async def _session_eviction_loop() -> None:
             log.exception("session eviction failed")
 
 
+async def _hrm_end_of_day_scheduler() -> None:
+    """Mark yesterday's unmarked due HRM tasks as Missed shortly after IST midnight."""
+    from .db.hrm_db import process_end_of_day_missed_ist
+
+    while True:
+        now = datetime.now(IST)
+        target = now.replace(hour=0, minute=5, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        await asyncio.sleep(max(60, wait_seconds))
+        try:
+            result = await run_aux(process_end_of_day_missed_ist)
+            if result and int(result.get("marked_missed") or 0) > 0:
+                log.info("HRM end-of-day auto-missed: %s", result)
+        except Exception:
+            log.exception("HRM end-of-day auto-missed failed")
+
+
 async def _data_health_scheduler() -> None:
     """Run the automated data-health suite shortly after boot, then every 6h."""
     from .services.data_health import run_data_health_checks
@@ -3306,11 +3325,13 @@ async def lifespan(app: FastAPI):
     rollup_task = asyncio.create_task(_sku_sales_rollup_scheduler())
     evict_task = asyncio.create_task(_session_eviction_loop())
     health_task = asyncio.create_task(_data_health_scheduler())
+    hrm_eod_task = asyncio.create_task(_hrm_end_of_day_scheduler())
     yield
     task.cancel()
     rollup_task.cancel()
     evict_task.cancel()
     health_task.cancel()
+    hrm_eod_task.cancel()
     try:
         from .db.pg_pool import close_all_pools
 
