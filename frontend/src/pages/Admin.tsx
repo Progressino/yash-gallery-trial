@@ -149,6 +149,11 @@ export default function Admin() {
     mutationFn: (id: number) => api.delete(`/erp-admin/users/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['erp-users'] })
   })
+  const deleteUserMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/erp-admin/users/${id}?hard=true`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['erp-users'] }),
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Delete failed'),
+  })
   const createRoleMut = useMutation({
     mutationFn: (b: object) => api.post('/erp-admin/roles', b),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['erp-roles'] }); qc.invalidateQueries({ queryKey: ['admin-stats'] }); setShowRoleForm(false); setRoleForm({ role_name: '', description: '' }) }
@@ -565,10 +570,20 @@ export default function Admin() {
                       <span className={`ml-1.5 text-xs ${u.active ? 'text-green-700' : 'text-gray-400'}`}>{u.active ? 'Active' : 'Inactive'}</span>
                     </td>
                     <td className="px-4 py-2">
-                      <div className="flex gap-2">
+                      <div className="flex gap-2 flex-wrap">
                         <button onClick={() => { setEditUser(u); setEditData({}) }} className="text-xs text-blue-500 hover:text-blue-700">Edit</button>
                         {u.active ? (
-                          <button onClick={() => deactivateUserMut.mutate(u.id)} className="text-xs text-red-400 hover:text-red-600">Deactivate</button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (window.confirm(`Deactivate ${u.username}? They will not be able to sign in.`)) {
+                                deactivateUserMut.mutate(u.id)
+                              }
+                            }}
+                            className="text-xs text-amber-600 hover:text-amber-800"
+                          >
+                            Deactivate
+                          </button>
                         ) : (
                           <button
                             type="button"
@@ -578,6 +593,19 @@ export default function Admin() {
                             Reactivate
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (window.confirm(
+                              `Delete user ${u.username}? This permanently removes login access and frees the username. Historical records are kept.`,
+                            )) {
+                              deleteUserMut.mutate(u.id)
+                            }
+                          }}
+                          className="text-xs text-red-500 hover:text-red-700"
+                        >
+                          Delete
+                        </button>
                       </div>
                     </td>
                   </tr>

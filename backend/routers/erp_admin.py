@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from typing import Optional
 from ..db.users_db import (
     list_roles, create_role,
-    list_users, create_user, update_user, deactivate_user,
+    list_users, create_user, update_user, deactivate_user, soft_delete_user,
     list_activity, get_admin_stats, log_activity,
     list_erp_departments, create_erp_department,
 )
@@ -301,9 +301,14 @@ def patch_user(uid: int, body: UserUpdate):
     return {"ok": True}
 
 @router.delete("/users/{uid}")
-def delete_user(uid: int):
+def delete_user(uid: int, hard: bool = False):
+    """Soft-deactivate by default. hard=1 renames username and deactivates (safe delete)."""
+    if hard:
+        if not soft_delete_user(uid):
+            raise HTTPException(404, "User not found")
+        return {"ok": True, "deleted": True}
     deactivate_user(uid)
-    return {"ok": True}
+    return {"ok": True, "deactivated": True}
 
 # ── Activity Log ──────────────────────────────────────────────────────────────
 @router.get("/activity")

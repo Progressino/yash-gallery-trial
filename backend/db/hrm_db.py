@@ -141,7 +141,10 @@ def _seconds_between(start: str, end: str) -> int:
 
 
 def _parse_backup_fields(data: dict, assignee_id: int, *, require: bool = True) -> tuple[int | None, float, str]:
-    """Return (backup_employee_id, value, unit). Raises ValueError when require and missing/invalid."""
+    """Return (backup_employee_id, value, unit). When require=True, backup person is mandatory.
+
+    Backup allocation duration is optional legacy metadata (no longer required in UI).
+    """
     raw = data.get("backup_employee_id")
     try:
         backup_id = int(raw) if raw not in (None, "", 0, "0") else None
@@ -160,11 +163,13 @@ def _parse_backup_fields(data: dict, assignee_id: int, *, require: bool = True) 
         unit = "days"
     if require:
         if not backup_id:
-            raise ValueError("Backup person is required")
+            raise ValueError("Backup person is required for mandatory responsibilities")
         if int(backup_id) == int(assignee_id):
             raise ValueError("Backup person must be different from the assigned employee")
-        if value <= 0:
-            raise ValueError("Backup allocation duration must be greater than zero")
+    elif backup_id and int(backup_id) == int(assignee_id):
+        raise ValueError("Backup person must be different from the assigned employee")
+    if value < 0:
+        value = 0.0
     return backup_id, value, unit
 
 
@@ -570,6 +575,12 @@ def init_db():
         "ALTER TABLE one_time_tasks ADD COLUMN backup_employee_id INTEGER",
         "ALTER TABLE one_time_tasks ADD COLUMN backup_allocation_value REAL DEFAULT 0",
         "ALTER TABLE one_time_tasks ADD COLUMN backup_allocation_unit TEXT DEFAULT 'days'",
+        # One-time task pause / session tracking (3-hour auto-pause)
+        "ALTER TABLE one_time_tasks ADD COLUMN paused_at TEXT DEFAULT ''",
+        "ALTER TABLE one_time_tasks ADD COLUMN active_seconds INTEGER DEFAULT 0",
+        "ALTER TABLE one_time_tasks ADD COLUMN paused_seconds INTEGER DEFAULT 0",
+        "ALTER TABLE one_time_tasks ADD COLUMN session_started_at TEXT DEFAULT ''",
+        "ALTER TABLE one_time_tasks ADD COLUMN auto_paused INTEGER DEFAULT 0",
     ):
         try:
             conn.execute(sql)
@@ -1148,6 +1159,38 @@ def get_responsibility_owner(responsibility_id: int) -> int | None:
     return int(row["employee_id"]) if row else None
 
 
+def employee_reports_to_chain(employee_id: int) -> list[int]:
+    """Return ancestor employee IDs via reports_to_employee_id (closest first)."""
+    conn = _connect()
+    chain: list[int] = []
+    seen: set[int] = set()
+    cur = int(employee_id)
+    for _ in range(50):
+        row = conn.execute(
+            "SELECT reports_to_employee_id FROM employees WHERE id=?",
+            (cur,),
+        ).fetchone()
+        if not row or not row["reports_to_employee_id"]:
+            break
+        mid = int(row["reports_to_employee_id"])
+        if mid in seen:
+            break
+        seen.add(mid)
+        chain.append(mid)
+        cur = mid
+    conn.close()
+    return chain
+
+
+def employee_in_hod_hierarchy(hod_employee_id: int | None, target_employee_id: int) -> bool:
+    """True if target is the HOD themselves or reports (transitively) to the HOD."""
+    if hod_employee_id is None:
+        return False
+    if int(hod_employee_id) == int(target_employee_id):
+        return True
+    return int(hod_employee_id) in employee_reports_to_chain(int(target_employee_id))
+
+
 def list_departments(department_id: int | None = None):
     conn = _connect()
     if department_id is not None and int(department_id) < 0:
@@ -1489,7 +1532,9 @@ def create_responsibility(data: dict):
     if linked_id and int(data.get("employee_id") or 0) and int(linked_id) == int(data["employee_id"]):
         conn.close()
         raise ValueError("Linked person must be different from the assigned employee")
-    require_backup = bool(data.get("require_backup", False))
+    is_mandatory = bool(data.get("mandatory"))
+    # Backup person required only for mandatory responsibilities (allocation duration optional).
+    require_backup = is_mandatory or bool(data.get("require_backup", False))
     try:
         backup_id, backup_val, backup_unit = _parse_backup_fields(
             data, int(data["employee_id"]), require=require_backup
@@ -1514,7 +1559,7 @@ def create_responsibility(data: dict):
             data.get("category", "General"),
             data.get("added_by", ""),
             priority,
-            1 if data.get("mandatory") else 0,
+            1 if is_mandatory else 0,
             weekday,
             month_day,
             data.get("time_period", "") or "",
@@ -1999,12 +2044,22 @@ def _append_timer_event(
     event_type: str,
     event_at: str,
     actor: str = "",
+    notes: str = "",
 ) -> None:
     conn.execute(
         """INSERT INTO task_timer_events(
-            task_log_id, responsibility_id, employee_id, log_date, event_type, event_at, actor
-        ) VALUES(?,?,?,?,?,?,?)""",
-        (task_log_id, responsibility_id, employee_id, log_date, event_type, event_at, actor or ""),
+            task_log_id, responsibility_id, employee_id, log_date, event_type, event_at, actor, notes
+        ) VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            task_log_id,
+            responsibility_id,
+            employee_id,
+            log_date,
+            event_type,
+            event_at,
+            actor or "",
+            notes or "",
+        ),
     )
 
 
@@ -2022,6 +2077,121 @@ def _employee_has_active_timer(conn, employee_id: int, *, exclude_log_id: int | 
         q += " AND id!=?"
         params.append(exclude_log_id)
     return conn.execute(q, params).fetchone() is not None
+
+
+def _employee_has_active_one_time(conn, employee_id: int, *, exclude_task_id: int | None = None) -> bool:
+    q = """
+        SELECT id FROM one_time_tasks
+        WHERE employee_id=? AND active=1 AND status='In Progress'
+          AND IFNULL(paused_at,'') = ''
+    """
+    params: list = [employee_id]
+    if exclude_task_id:
+        q += " AND id!=?"
+        params.append(exclude_task_id)
+    return conn.execute(q, params).fetchone() is not None
+
+
+def _pause_task_log_row(conn, row: dict, *, actor: str = "", notes: str = "") -> None:
+    """Pause an active responsibility timer row (must already be loaded as dict)."""
+    started = str(row.get("started_at") or "").strip()
+    ended = str(row.get("ended_at") or "").strip()
+    paused = str(row.get("paused_at") or "").strip()
+    if not started or ended or paused:
+        return
+    events = _list_timer_events(conn, int(row["id"]))
+    now = _now_iso()
+    seg = _last_active_segment_start(row, events)
+    add = _seconds_between(seg, now)
+    active = int(row.get("active_seconds") or 0) + add
+    conn.execute(
+        """UPDATE task_logs SET paused_at=?, active_seconds=?, duration_minutes=?
+           WHERE id=?""",
+        (now, active, active // 60, int(row["id"])),
+    )
+    _append_timer_event(
+        conn,
+        task_log_id=int(row["id"]),
+        responsibility_id=int(row["responsibility_id"]),
+        employee_id=int(row["employee_id"]),
+        log_date=str(row["log_date"]),
+        event_type="pause",
+        event_at=now,
+        actor=actor,
+        notes=notes,
+    )
+
+
+def _pause_one_time_row(conn, row: dict, *, actor: str = "", auto: bool = False) -> None:
+    """Pause an active one-time task row."""
+    if str(row.get("status") or "") != "In Progress":
+        return
+    if str(row.get("paused_at") or "").strip():
+        return
+    now = _now_iso()
+    session_start = str(row.get("session_started_at") or row.get("started_at") or now).strip()
+    add = _seconds_between(session_start, now)
+    active = int(row.get("active_seconds") or 0) + add
+    conn.execute(
+        """UPDATE one_time_tasks
+           SET paused_at=?, active_seconds=?, duration_minutes=?, auto_paused=?,
+               session_started_at='', updated_at=?
+           WHERE id=?""",
+        (now, active, active // 60, 1 if auto else 0, now, int(row["id"])),
+    )
+    write_task_audit(
+        "one_time_task",
+        int(row["id"]),
+        "auto_pause" if auto else "pause",
+        old_value="In Progress",
+        new_value="Paused",
+        actor=actor or ("system-3h" if auto else ""),
+        notes="Auto-paused after 3 hours" if auto else "",
+        conn=conn,
+    )
+
+
+def auto_pause_other_active_work(
+    conn,
+    employee_id: int,
+    *,
+    exclude_log_id: int | None = None,
+    exclude_one_time_id: int | None = None,
+    actor: str = "",
+) -> int:
+    """Pause all other active responsibility timers and one-time tasks for this employee."""
+    n = 0
+    rows = conn.execute(
+        """
+        SELECT * FROM task_logs
+        WHERE employee_id=?
+          AND IFNULL(started_at,'') != ''
+          AND IFNULL(ended_at,'') = ''
+          AND IFNULL(paused_at,'') = ''
+        """,
+        (employee_id,),
+    ).fetchall()
+    for r in rows:
+        rd = dict(r)
+        if exclude_log_id and int(rd["id"]) == int(exclude_log_id):
+            continue
+        _pause_task_log_row(conn, rd, actor=actor, notes="Auto-paused: another activity started")
+        n += 1
+    ot_rows = conn.execute(
+        """
+        SELECT * FROM one_time_tasks
+        WHERE employee_id=? AND active=1 AND status='In Progress'
+          AND IFNULL(paused_at,'') = ''
+        """,
+        (employee_id,),
+    ).fetchall()
+    for r in ot_rows:
+        rd = dict(r)
+        if exclude_one_time_id and int(rd["id"]) == int(exclude_one_time_id):
+            continue
+        _pause_one_time_row(conn, rd, actor=actor, auto=False)
+        n += 1
+    return n
 
 
 def _last_active_segment_start(log: dict, events: list[dict]) -> str:
@@ -2061,9 +2231,10 @@ def start_responsibility_timer(
     if started and paused:
         conn.close()
         return "paused"  # must resume, not start again
-    if _employee_has_active_timer(conn, emp_id, exclude_log_id=int(row["id"])):
-        conn.close()
-        return "already_active"
+    # Only one active activity — auto-pause any other responsibility/task timers
+    auto_pause_other_active_work(
+        conn, emp_id, exclude_log_id=int(row["id"]), actor=actor or "auto"
+    )
     now = _now_iso()
     conn.execute(
         """UPDATE task_logs SET started_at=?, paused_at='', active_seconds=0, paused_seconds=0,
@@ -2187,9 +2358,9 @@ def resume_responsibility_timer(
     if not allow_override and _count_timer_events(events, "resume") >= MAX_TIMER_RESUME_PER_DAY:
         conn.close()
         return "resume_limit"
-    if _employee_has_active_timer(conn, emp_id, exclude_log_id=int(row["id"])):
-        conn.close()
-        return "already_active"
+    auto_pause_other_active_work(
+        conn, emp_id, exclude_log_id=int(row["id"]), actor=actor or "auto"
+    )
     now = _now_iso()
     add_pause = _seconds_between(paused, now)
     paused_sec = int(row.get("paused_seconds") or 0) + add_pause
@@ -2488,24 +2659,43 @@ def approve_task_log(
 def reassign_mandatory_for_day(
     *,
     original_responsibility_id: int,
-    to_employee_id: int,
+    to_employee_id: int | None = None,
     reassignment_date: str,
     assigned_by: str = "",
 ) -> int:
-    """One-day clone only — original responsibility is NOT permanently transferred."""
+    """One-day clone only — original responsibility is NOT permanently transferred.
+
+    When to_employee_id is omitted, the configured Backup Person is used.
+    """
     conn = _connect()
     orig = conn.execute(
-        """SELECT id, employee_id, title, mandatory FROM responsibilities WHERE id=? AND active=1""",
+        """SELECT id, employee_id, title, mandatory, backup_employee_id
+           FROM responsibilities WHERE id=? AND active=1""",
         (original_responsibility_id,),
     ).fetchone()
     if not orig:
         conn.close()
         raise ValueError("Responsibility not found")
-    if int(orig["employee_id"]) == int(to_employee_id):
+    if not int(orig["mandatory"] or 0):
+        conn.close()
+        raise ValueError("Only mandatory responsibilities can be reassigned")
+    backup_id = None
+    try:
+        backup_id = int(orig["backup_employee_id"]) if orig["backup_employee_id"] else None
+    except (TypeError, ValueError, KeyError):
+        backup_id = None
+    assignee = to_employee_id
+    if assignee is None or int(assignee or 0) <= 0:
+        if not backup_id:
+            conn.close()
+            raise ValueError("No Backup Person configured — cannot reassign")
+        assignee = backup_id
+    assignee = int(assignee)
+    if int(orig["employee_id"]) == assignee:
         conn.close()
         raise ValueError("Cannot reassign to the same employee")
     day = reassignment_date[:10]
-    title = f"{orig['title']} (HOD reassignment)"
+    title = f"{orig['title']} (reassigned to backup)"
     existing = conn.execute(
         """SELECT id FROM day_reassignment_clones
            WHERE original_responsibility_id=? AND reassignment_date=?""",
@@ -2516,7 +2706,7 @@ def reassign_mandatory_for_day(
             """UPDATE day_reassignment_clones
                SET assignee_employee_id=?, assigned_by=?, title=?, status='Pending'
                WHERE id=?""",
-            (to_employee_id, assigned_by, title, existing["id"]),
+            (assignee, assigned_by, title, existing["id"]),
         )
         cid = int(existing["id"])
     else:
@@ -2528,7 +2718,7 @@ def reassign_mandatory_for_day(
             (
                 original_responsibility_id,
                 orig["employee_id"],
-                to_employee_id,
+                assignee,
                 day,
                 title,
                 assigned_by,
@@ -2540,9 +2730,9 @@ def reassign_mandatory_for_day(
         cid,
         "created",
         old_value=str(orig["employee_id"]),
-        new_value=str(to_employee_id),
+        new_value=str(assignee),
         actor=assigned_by,
-        notes=f"day={day} resp={original_responsibility_id}",
+        notes=f"day={day} resp={original_responsibility_id} backup={backup_id}",
         conn=conn,
     )
     conn.commit()
@@ -2553,7 +2743,7 @@ def reassign_mandatory_for_day(
 def reassign_mandatory_for_range(
     *,
     original_responsibility_id: int,
-    to_employee_id: int,
+    to_employee_id: int | None = None,
     date_from: str,
     date_to: str,
     assigned_by: str = "",
@@ -3429,6 +3619,7 @@ def get_hod_dashboard(
         SELECT tl.responsibility_id, tl.log_date, tl.status, tl.remarks,
                tl.marked_by, tl.marked_at, tl.blocker_employee_id, tl.blocker_reason,
                be.name as blocker_name,
+               COALESCE(tl.approval_status,'') as approval_status,
                COALESCE(tl.started_at,'') as started_at,
                COALESCE(tl.ended_at,'') as ended_at,
                COALESCE(tl.duration_minutes,0) as duration_minutes
@@ -3447,9 +3638,15 @@ def get_hod_dashboard(
         mat = l["marked_at"] if "marked_at" in l.keys() else ""
         ld = dict(l)
         status = l["status"]
+        appr = str(l["approval_status"] or "").strip() if "approval_status" in l.keys() else ""
         quality_marked = str(status or "Pending").strip() not in ("Pending", "")
+        display_status = status
+        if appr == "Pending" and status in ("Done", "Partial"):
+            display_status = "Approval Pending"
         log_map[key] = {
-            "status": l["status"],
+            "status": display_status,
+            "raw_status": status,
+            "approval_status": appr,
             "remarks": l["remarks"],
             "marked_by": l["marked_by"],
             "marked_at": mat or "",
@@ -4548,7 +4745,7 @@ def update_one_time_task(task_id: int, data: dict):
             merged.update(payload)
             try:
                 bid, bval, bunit = _parse_backup_fields(
-                    merged, int(merged["employee_id"]), require=True
+                    merged, int(merged["employee_id"]), require=False
                 )
             except ValueError:
                 conn.close()
@@ -4592,22 +4789,119 @@ def cancel_one_time_task(task_id: int):
     update_one_time_task(task_id, {"active": 0})
 
 
-def start_one_time_task(task_id: int) -> bool:
+ONE_TIME_AUTO_PAUSE_SECONDS = 3 * 3600  # 3 hours per working session
+
+
+def start_one_time_task(task_id: int, *, actor: str = "") -> bool | str:
     conn = _connect()
     row = conn.execute(
-        "SELECT status FROM one_time_tasks WHERE id=? AND active=1",
+        "SELECT * FROM one_time_tasks WHERE id=? AND active=1",
         (task_id,),
     ).fetchone()
-    if not row or row["status"] not in ("Pending", "Rejected"):
+    if not row:
         conn.close()
         return False
+    row = dict(row)
+    status = _normalize_one_time_status(row.get("status"))
+    if status == "In Progress" and not str(row.get("paused_at") or "").strip():
+        conn.close()
+        return True  # already active
+    if status not in ("Pending", "Rejected") and not (
+        status == "In Progress" and str(row.get("paused_at") or "").strip()
+    ):
+        # Allow resume path via resume_one_time_task; start only from Pending/Rejected
+        if status == "In Progress" and str(row.get("paused_at") or "").strip():
+            conn.close()
+            return "paused"
+        conn.close()
+        return False
+    emp_id = int(row["employee_id"])
+    auto_pause_other_active_work(
+        conn, emp_id, exclude_one_time_id=task_id, actor=actor or "auto"
+    )
     now = _now_iso()
     conn.execute(
         """UPDATE one_time_tasks
            SET status='In Progress', started_at=?, completed_at='', approved_at='',
-               duration_minutes=0, updated_at=?
+               paused_at='', active_seconds=0, paused_seconds=0, duration_minutes=0,
+               session_started_at=?, auto_paused=0, updated_at=?
            WHERE id=?""",
-        (now, now, task_id),
+        (now, now, now, task_id),
+    )
+    write_task_audit(
+        "one_time_task",
+        task_id,
+        "start",
+        old_value=status,
+        new_value="In Progress",
+        actor=actor,
+        conn=conn,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def pause_one_time_task(task_id: int, *, actor: str = "", auto: bool = False) -> bool | str:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM one_time_tasks WHERE id=? AND active=1",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    row = dict(row)
+    if _normalize_one_time_status(row.get("status")) != "In Progress":
+        conn.close()
+        return "not_active"
+    if str(row.get("paused_at") or "").strip():
+        conn.close()
+        return True  # already paused
+    _pause_one_time_row(conn, row, actor=actor, auto=auto)
+    conn.commit()
+    conn.close()
+    return True
+
+
+def resume_one_time_task(task_id: int, *, actor: str = "") -> bool | str:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM one_time_tasks WHERE id=? AND active=1",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    row = dict(row)
+    if _normalize_one_time_status(row.get("status")) != "In Progress":
+        conn.close()
+        return "not_active"
+    paused = str(row.get("paused_at") or "").strip()
+    if not paused:
+        conn.close()
+        return True  # already active
+    emp_id = int(row["employee_id"])
+    auto_pause_other_active_work(
+        conn, emp_id, exclude_one_time_id=task_id, actor=actor or "auto"
+    )
+    now = _now_iso()
+    add_pause = _seconds_between(paused, now)
+    paused_sec = int(row.get("paused_seconds") or 0) + add_pause
+    conn.execute(
+        """UPDATE one_time_tasks
+           SET paused_at='', paused_seconds=?, session_started_at=?, auto_paused=0, updated_at=?
+           WHERE id=?""",
+        (paused_sec, now, now, task_id),
+    )
+    write_task_audit(
+        "one_time_task",
+        task_id,
+        "resume",
+        old_value="Paused",
+        new_value="In Progress",
+        actor=actor,
+        conn=conn,
     )
     conn.commit()
     conn.close()
@@ -4617,21 +4911,32 @@ def start_one_time_task(task_id: int) -> bool:
 def complete_one_time_task(task_id: int, completion_notes: str = "") -> bool:
     conn = _connect()
     row = conn.execute(
-        "SELECT status, started_at FROM one_time_tasks WHERE id=? AND active=1",
+        "SELECT * FROM one_time_tasks WHERE id=? AND active=1",
         (task_id,),
     ).fetchone()
-    if not row or row["status"] != "In Progress":
+    if not row or _normalize_one_time_status(row["status"]) != "In Progress":
         conn.close()
         return False
+    row = dict(row)
     now = _now_iso()
-    started = row["started_at"] or now
-    mins = _duration_minutes(started, now)
+    active = int(row.get("active_seconds") or 0)
+    paused_at = str(row.get("paused_at") or "").strip()
+    if paused_at:
+        # Already paused — use accumulated active_seconds
+        pass
+    else:
+        session_start = str(row.get("session_started_at") or row.get("started_at") or now).strip()
+        active += _seconds_between(session_start, now)
+    mins = active // 60
+    if mins <= 0 and row.get("started_at"):
+        mins = _duration_minutes(str(row["started_at"]), now)
     conn.execute(
         """UPDATE one_time_tasks
-           SET status='Done', completed_at=?, duration_minutes=?,
+           SET status='Done', completed_at=?, duration_minutes=?, active_seconds=?,
+               paused_at='', session_started_at='', auto_paused=0,
                completion_notes=?, updated_at=?
            WHERE id=?""",
-        (now, mins, completion_notes or "", now, task_id),
+        (now, mins, active, completion_notes or "", now, task_id),
     )
     conn.commit()
     conn.close()
@@ -4662,12 +4967,16 @@ def approve_one_time_task(task_id: int, approved_by: str = "", approval_notes: s
 def reject_one_time_task(task_id: int, approved_by: str = "", approval_notes: str = "") -> bool:
     conn = _connect()
     row = conn.execute(
-        "SELECT status FROM one_time_tasks WHERE id=? AND active=1",
+        """SELECT t.*, e.name as assignee_name
+           FROM one_time_tasks t
+           LEFT JOIN employees e ON e.id=t.employee_id
+           WHERE t.id=? AND t.active=1""",
         (task_id,),
     ).fetchone()
     if not row or _normalize_one_time_status(row["status"]) != "Done":
         conn.close()
         return False
+    row = dict(row)
     now = _now_iso()
     conn.execute(
         """UPDATE one_time_tasks
@@ -4675,6 +4984,70 @@ def reject_one_time_task(task_id: int, approved_by: str = "", approval_notes: st
            WHERE id=?""",
         (approved_by or "", approval_notes or "", now, task_id),
     )
+    # Rework notification to assignee (reuse approval notifications table)
+    assignee_id = int(row["employee_id"])
+    title = str(row.get("title") or "Task")
+    msg = (
+        f"Your one-time task '{title}' was rejected by {approved_by or 'approver'} "
+        f"and requires rework. Please update and resubmit."
+    )
+    try:
+        conn.execute(
+            """INSERT INTO task_approval_notifications(
+                task_log_id, responsibility_id, linked_to_employee_id, assignee_employee_id,
+                log_date, title, assignee_name, message, is_read, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,0,?)""",
+            (
+                0,
+                0,
+                assignee_id,
+                assignee_id,
+                today_ist().isoformat(),
+                title,
+                row.get("assignee_name") or "",
+                msg,
+                now,
+            ),
+        )
+    except Exception:
+        pass
+    write_task_audit(
+        "one_time_task",
+        task_id,
+        "reject_rework",
+        old_value="Done",
+        new_value="Rejected",
+        actor=approved_by,
+        notes=approval_notes or "Rework required",
+        conn=conn,
+    )
     conn.commit()
     conn.close()
     return True
+
+
+def process_one_time_auto_pause(*, actor: str = "system-3h") -> dict:
+    """Auto-pause one-time tasks whose current session exceeded 3 hours."""
+    conn = _connect()
+    now = _now_iso()
+    rows = conn.execute(
+        """
+        SELECT * FROM one_time_tasks
+        WHERE active=1 AND status='In Progress'
+          AND IFNULL(paused_at,'') = ''
+          AND IFNULL(session_started_at, IFNULL(started_at,'')) != ''
+        """
+    ).fetchall()
+    paused_n = 0
+    for r in rows:
+        rd = dict(r)
+        session_start = str(rd.get("session_started_at") or rd.get("started_at") or "").strip()
+        if not session_start:
+            continue
+        if _seconds_between(session_start, now) < ONE_TIME_AUTO_PAUSE_SECONDS:
+            continue
+        _pause_one_time_row(conn, rd, actor=actor, auto=True)
+        paused_n += 1
+    conn.commit()
+    conn.close()
+    return {"ok": True, "auto_paused": paused_n, "as_of": now}

@@ -55,9 +55,12 @@ from ..db.hrm_db import (
     cancel_one_time_task,
     get_one_time_task_owner,
     start_one_time_task,
+    pause_one_time_task,
+    resume_one_time_task,
     complete_one_time_task,
     approve_one_time_task,
     reject_one_time_task,
+    process_one_time_auto_pause,
     get_dashboard_stats,
     get_org_hierarchy,
     get_task_based_report,
@@ -90,6 +93,8 @@ from ..services.rbac import (
     assert_hrm_write_org,
     assert_hrm_hod_or_admin,
     assert_hrm_admin_mutate_records,
+    assert_hrm_mutate_responsibility,
+    assert_employee_check_access,
     assert_hrm_delete_allowed,
     assert_can_view_employee_list,
     assert_responsibility_in_scope,
@@ -225,8 +230,8 @@ class ResponsibilityIn(BaseModel):
     schedule_month: Optional[int] = 0
     time_period: Optional[str] = ""
     linked_to_employee_id: Optional[int] = None
-    backup_employee_id: int
-    backup_allocation_value: float
+    backup_employee_id: Optional[int] = None
+    backup_allocation_value: Optional[float] = None
     backup_allocation_unit: Optional[str] = "days"
 
 
@@ -258,14 +263,14 @@ class TaskApproveIn(BaseModel):
 
 class ReassignDayIn(BaseModel):
     original_responsibility_id: int
-    to_employee_id: int
+    to_employee_id: Optional[int] = None  # defaults to Backup Person
     reassignment_date: str
     assigned_by: Optional[str] = ""
 
 
 class ReassignRangeIn(BaseModel):
     original_responsibility_id: int
-    to_employee_id: int
+    to_employee_id: Optional[int] = None  # defaults to Backup Person
     date_from: str
     date_to: str
     assigned_by: Optional[str] = ""
@@ -382,8 +387,8 @@ class OneTimeTaskIn(BaseModel):
     assigned_by: Optional[str] = ""
     priority: Optional[str] = "Medium"
     linked_to_employee_id: Optional[int] = None
-    backup_employee_id: int
-    backup_allocation_value: float
+    backup_employee_id: Optional[int] = None
+    backup_allocation_value: Optional[float] = None
     backup_allocation_unit: Optional[str] = "days"
 
 
@@ -606,15 +611,22 @@ def get_responsibilities(
 def post_responsibility(body: ResponsibilityIn, request: Request):
     scope = _scope_from_request(request)
     assert_employee_in_scope(scope, body.employee_id)
-    assert_employee_in_scope(scope, body.backup_employee_id)
     if scope.is_employee and scope.employee_id != body.employee_id:
         raise HTTPException(403, "Cannot assign responsibilities for other employees")
-    if int(body.backup_employee_id) == int(body.employee_id):
-        raise HTTPException(400, "Backup person must be different from the assigned employee")
-    if float(body.backup_allocation_value or 0) <= 0:
-        raise HTTPException(400, "Backup allocation duration must be greater than zero")
     data = body.model_dump()
-    data["require_backup"] = True
+    is_mandatory = bool(data.get("mandatory"))
+    backup_id = data.get("backup_employee_id")
+    if is_mandatory:
+        if not backup_id:
+            raise HTTPException(400, "Backup person is required for mandatory responsibilities")
+        assert_employee_in_scope(scope, int(backup_id))
+        if int(backup_id) == int(body.employee_id):
+            raise HTTPException(400, "Backup person must be different from the assigned employee")
+    elif backup_id:
+        assert_employee_in_scope(scope, int(backup_id))
+        if int(backup_id) == int(body.employee_id):
+            raise HTTPException(400, "Backup person must be different from the assigned employee")
+    data["require_backup"] = is_mandatory
     if not (data.get("added_by") or "").strip():
         _, name = _recorder_from_request(request)
         data["added_by"] = name
@@ -628,13 +640,12 @@ def post_responsibility(body: ResponsibilityIn, request: Request):
 @router.patch("/responsibilities/{rid}")
 def patch_responsibility(rid: int, body: ResponsibilityUpdate, request: Request):
     scope = _scope_from_request(request)
-    assert_hrm_admin_mutate_records(scope)
     from ..db.hrm_db import get_responsibility_owner
 
     owner = get_responsibility_owner(rid)
     if owner is None:
         raise HTTPException(404, "Responsibility not found")
-    assert_employee_in_scope(scope, owner)
+    assert_hrm_mutate_responsibility(scope, owner)
     if body.employee_id is not None:
         assert_employee_in_scope(scope, body.employee_id)
     if body.backup_employee_id is not None:
@@ -905,7 +916,7 @@ def get_employees_for_pickers(request: Request, department_id: Optional[int] = N
 
 @router.post("/tasks/reassign-day")
 def post_reassign_day(body: ReassignDayIn, request: Request):
-    """One-day mandatory reassignment clone. Master responsibility stays put."""
+    """One-day mandatory reassignment clone to the Backup Person (or optional override)."""
     scope = _scope_from_request(request)
     from ..db.hrm_db import get_responsibility_owner
 
@@ -914,7 +925,8 @@ def post_reassign_day(body: ReassignDayIn, request: Request):
         owner = get_responsibility_owner(body.original_responsibility_id)
         if owner is None or int(scope.employee_id or 0) != int(owner):
             raise HTTPException(403, "You can only reassign your own responsibilities")
-    assert_employee_in_scope(scope, body.to_employee_id)
+    if body.to_employee_id:
+        assert_employee_in_scope(scope, body.to_employee_id)
     _, name = _recorder_from_request(request)
     try:
         cid = reassign_mandatory_for_day(
@@ -930,7 +942,7 @@ def post_reassign_day(body: ReassignDayIn, request: Request):
 
 @router.post("/tasks/reassign-range")
 def post_reassign_range(body: ReassignRangeIn, request: Request):
-    """Mandatory reassignment clones for each day in [date_from, date_to]."""
+    """Mandatory reassignment clones for each day in [date_from, date_to] → Backup Person."""
     scope = _scope_from_request(request)
     from ..db.hrm_db import get_responsibility_owner
 
@@ -939,7 +951,8 @@ def post_reassign_range(body: ReassignRangeIn, request: Request):
         owner = get_responsibility_owner(body.original_responsibility_id)
         if owner is None or int(scope.employee_id or 0) != int(owner):
             raise HTTPException(403, "You can only reassign your own responsibilities")
-    assert_employee_in_scope(scope, body.to_employee_id)
+    if body.to_employee_id:
+        assert_employee_in_scope(scope, body.to_employee_id)
     _, name = _recorder_from_request(request)
     try:
         ids = reassign_mandatory_for_range(
@@ -1349,8 +1362,9 @@ def employee_day_check(
 ):
     """What the employee worked on vs did not for a given day (default today)."""
     scope = _scope_from_request(request)
-    assert_employee_in_scope(scope, employee_id)
-    if scope.level == "self" and not scope.can_edit_assignments:
+    assert_employee_check_access(scope, employee_id)
+    # Employees and HOD (self-check) are limited to today
+    if (scope.level == "self" and not scope.can_edit_assignments) or scope.is_hod:
         if check_date and str(check_date)[:10] != today_ist().isoformat():
             raise HTTPException(403, "Employee Check is limited to today's tasks only")
         check_date = today_ist().isoformat()
@@ -1436,15 +1450,15 @@ def get_one_time_tasks(
 def post_one_time_task(body: OneTimeTaskIn, request: Request):
     scope = _scope_from_request(request)
     assert_employee_in_scope(scope, body.employee_id)
-    assert_employee_in_scope(scope, body.backup_employee_id)
     if scope.is_employee:
         raise HTTPException(403, "Employees cannot assign one-time tasks")
-    if int(body.backup_employee_id) == int(body.employee_id):
-        raise HTTPException(400, "Backup person must be different from the assigned employee")
-    if float(body.backup_allocation_value or 0) <= 0:
-        raise HTTPException(400, "Backup allocation duration must be greater than zero")
     data = body.model_dump()
-    data["require_backup"] = True
+    backup_id = data.get("backup_employee_id")
+    if backup_id:
+        assert_employee_in_scope(scope, int(backup_id))
+        if int(backup_id) == int(body.employee_id):
+            raise HTTPException(400, "Backup person must be different from the assigned employee")
+    data["require_backup"] = False
     if not (data.get("assigned_by") or "").strip():
         _, name = _recorder_from_request(request)
         data["assigned_by"] = name
@@ -1491,9 +1505,49 @@ def post_start_one_time_task(task_id: int, request: Request):
     assert_employee_in_scope(scope, owner)
     if scope.is_employee and scope.employee_id != owner:
         raise HTTPException(403, "You can only start your own tasks")
-    if not start_one_time_task(task_id):
-        raise HTTPException(400, "Task cannot be started (must be Pending or Rejected)")
-    return {"ok": True}
+    _, name = _recorder_from_request(request)
+    ok = start_one_time_task(task_id, actor=name)
+    if ok is True:
+        return {"ok": True}
+    if ok == "paused":
+        raise HTTPException(400, "Task is paused — use Resume")
+    raise HTTPException(400, "Task cannot be started (must be Pending or Rejected)")
+
+
+@router.post("/one-time-tasks/{task_id}/pause")
+def post_pause_one_time_task(task_id: int, request: Request):
+    scope = _scope_from_request(request)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    if scope.is_employee and scope.employee_id != owner:
+        raise HTTPException(403, "You can only pause your own tasks")
+    _, name = _recorder_from_request(request)
+    ok = pause_one_time_task(task_id, actor=name)
+    if ok is True:
+        return {"ok": True}
+    if ok == "not_active":
+        raise HTTPException(400, "Task must be In Progress to pause")
+    raise HTTPException(400, "Could not pause task")
+
+
+@router.post("/one-time-tasks/{task_id}/resume")
+def post_resume_one_time_task(task_id: int, request: Request):
+    scope = _scope_from_request(request)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    if scope.is_employee and scope.employee_id != owner:
+        raise HTTPException(403, "You can only resume your own tasks")
+    _, name = _recorder_from_request(request)
+    ok = resume_one_time_task(task_id, actor=name)
+    if ok is True:
+        return {"ok": True}
+    if ok == "not_active":
+        raise HTTPException(400, "Task must be In Progress (paused) to resume")
+    raise HTTPException(400, "Could not resume task")
 
 
 @router.post("/one-time-tasks/{task_id}/complete")

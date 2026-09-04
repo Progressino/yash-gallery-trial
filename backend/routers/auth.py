@@ -341,7 +341,14 @@ def me(request: Request):
 
     username = payload.get("sub")
     role = payload.get("role", "Admin")
+    from ..db.users_db import user_is_deactivated
+
+    if username and user_is_deactivated(username):
+        raise HTTPException(status_code=401, detail="Account deactivated")
     profile = get_user_auth_profile(username) if username else None
+
+    if profile is None and role not in ("Super Admin",):
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
     if profile:
         role = profile.get("role_name") or role
@@ -365,6 +372,7 @@ def me(request: Request):
                 "department_id": hrm_scope.department_id,
                 "employee_id": hrm_scope.employee_id,
                 "can_manage_org": hrm_scope.can_manage_org,
+                "is_hod": hrm_scope.is_hod,
             },
             "permissions": permissions_for_role(role),
             "is_karigar": role == KARIGAR_ROLE,

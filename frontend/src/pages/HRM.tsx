@@ -111,13 +111,10 @@ function LinkedPersonLine({ item }: { item: any }) {
 
 function BackupPersonLine({ item }: { item: any }) {
   const name = item?.backup_employee_name
-  const val = Number(item?.backup_allocation_value || 0)
-  const unit = item?.backup_allocation_unit || 'days'
-  if (!name && !val) return null
+  if (!name) return null
   return (
     <p className="text-xs text-violet-800 mt-0.5">
-      Backup: {name ? <b>{name}</b> : '—'}
-      {val > 0 ? <> · allocated {val} {unit}</> : null}
+      Backup: <b>{name}</b>
     </p>
   )
 }
@@ -135,10 +132,11 @@ export default function HRM() {
   const canViewEmployeeList = scope?.can_view_employee_list ?? (userRole === 'Super Admin' || userRole === 'Admin')
   const scopeLevel = scope?.level || 'all'
   const isEmployeeScope = scopeLevel === 'self'
+  const isHodSelfCheck = userRole === 'HOD' || !!scope?.is_hod
   const canAssignTasks = !isEmployeeScope
   const canEditAssignments = scope?.can_edit_assignments ?? (canManageOrg || userRole === 'HOD')
-  const canMutateRecords = scope?.can_mutate_assignment_records ?? canManageOrg
-  const canDeleteHrm = scope?.can_delete_hrm_records ?? canMutateRecords
+  const canMutateRecords = canManageOrg || userRole === 'HOD' || !!scope?.is_hod || (scope?.can_mutate_assignment_records ?? false)
+  const canDeleteHrm = scope?.can_delete_hrm_records ?? canManageOrg
   const canUseEmployeeCheck = scope?.can_use_employee_check ?? (userRole === 'HOD' || userRole === 'Employee' || !canViewEmployeeList)
   const canViewDashboard = scope?.can_view_dashboard ?? (canManageOrg || userRole === 'HOD')
 
@@ -215,7 +213,6 @@ export default function HRM() {
     date_from: today(), date_to: today(),
   })
   const [reassignTaskModal, setReassignTaskModal] = useState<any>(null)
-  const [showReassign, setShowReassign] = useState(false)
   const [issueForm, setIssueForm] = useState({
     subject_user_id: '' as any,
     employee_id: '' as any,
@@ -470,24 +467,24 @@ export default function HRM() {
     },
   })
   const reassignMut = useMutation({
-    mutationFn: (b: { original_responsibility_id: number; to_employee_id: number; reassignment_date?: string; date_from?: string; date_to?: string }) => {
+    mutationFn: (b: { original_responsibility_id: number; to_employee_id?: number; reassignment_date?: string; date_from?: string; date_to?: string }) => {
+      const payload: Record<string, unknown> = {
+        original_responsibility_id: b.original_responsibility_id,
+        date_from: b.date_from,
+        date_to: b.date_to,
+      }
+      if (b.to_employee_id) payload.to_employee_id = b.to_employee_id
       if (b.date_from && b.date_to && b.date_from !== b.date_to) {
-        return api.post('/hrm/tasks/reassign-range', {
-          original_responsibility_id: b.original_responsibility_id,
-          to_employee_id: b.to_employee_id,
-          date_from: b.date_from,
-          date_to: b.date_to,
-        })
+        return api.post('/hrm/tasks/reassign-range', payload)
       }
       return api.post('/hrm/tasks/reassign-day', {
         original_responsibility_id: b.original_responsibility_id,
-        to_employee_id: b.to_employee_id,
+        ...(b.to_employee_id ? { to_employee_id: b.to_employee_id } : {}),
         reassignment_date: b.reassignment_date || b.date_from || today(),
       })
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
-      setShowReassign(false)
       setReassignTaskModal(null)
     },
     onError: (err: any) => alert(err?.response?.data?.detail || 'Reassignment failed'),
@@ -742,6 +739,17 @@ export default function HRM() {
   const startOneTimeTaskMut = useMutation({
     mutationFn: (id: number) => api.post(`/hrm/one-time-tasks/${id}/start`),
     onSuccess: invalidateTaskMetrics,
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not start task'),
+  })
+  const pauseOneTimeTaskMut = useMutation({
+    mutationFn: (id: number) => api.post(`/hrm/one-time-tasks/${id}/pause`),
+    onSuccess: invalidateTaskMetrics,
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not pause task'),
+  })
+  const resumeOneTimeTaskMut = useMutation({
+    mutationFn: (id: number) => api.post(`/hrm/one-time-tasks/${id}/resume`),
+    onSuccess: invalidateTaskMetrics,
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not resume task'),
   })
   const completeOneTimeTaskMut = useMutation({
     mutationFn: ({ id, notes }: { id: number; notes: string }) => api.post(`/hrm/one-time-tasks/${id}/complete`, { notes }),
@@ -783,23 +791,17 @@ export default function HRM() {
   })
   const submitAssign = (form: typeof quickResp) => {
     if (!form.employee_id || !form.title) return
-    if (!form.backup_employee_id) {
-      alert('Backup person is required')
+    if (form.mandatory && !form.backup_employee_id) {
+      alert('Backup person is required for mandatory responsibilities')
       return
     }
-    if (+form.backup_employee_id === +form.employee_id) {
+    if (form.backup_employee_id && +form.backup_employee_id === +form.employee_id) {
       alert('Backup person must be different from the assigned employee')
       return
     }
-    if (!(Number(form.backup_allocation_value) > 0)) {
-      alert('Backup allocation duration must be greater than zero')
-      return
-    }
-    const backupPayload = {
-      backup_employee_id: +form.backup_employee_id,
-      backup_allocation_value: Number(form.backup_allocation_value) || 1,
-      backup_allocation_unit: form.backup_allocation_unit || 'days',
-    }
+    const backupPayload = form.backup_employee_id
+      ? { backup_employee_id: +form.backup_employee_id }
+      : {}
     if (form.mode === 'task') {
       createOneTimeTaskMut.mutate({
         employee_id: +form.employee_id,
@@ -916,7 +918,6 @@ export default function HRM() {
     const rid = task.responsibility_id ?? task.id
     const d = date || checkDate || today()
     setReassignTaskModal(task)
-    setShowReassign(false)
     setReassignForm(f => ({
       ...f,
       original_responsibility_id: rid,
@@ -1030,15 +1031,6 @@ export default function HRM() {
         {i.approval_status === 'Pending' && isAssignee && (
           <p className="text-[10px] text-indigo-700 mt-1">Awaiting approval from {i.linked_to_employee_name || 'linked person'}</p>
         )}
-        {i.mandatory && (canEditAssignments || isAssignee) && (
-          <button
-            type="button"
-            className="mt-1 text-[10px] px-2 py-0.5 border border-amber-700 text-amber-900 rounded"
-            onClick={() => openReassignModal(i, checkDate)}
-          >
-            Reassign
-          </button>
-        )}
         {canMark && (
           <select
             defaultValue=""
@@ -1123,7 +1115,11 @@ export default function HRM() {
 
   useEffect(() => {
     if (isEmployeeScope) setCheckDate(today())
-  }, [isEmployeeScope])
+    if (isHodSelfCheck && scope?.employee_id) {
+      setCheckEmp(scope.employee_id)
+      setCheckDate(today())
+    }
+  }, [isEmployeeScope, isHodSelfCheck, scope?.employee_id])
 
   useEffect(() => {
     if (!TABS.some(([k]) => k === tab)) setTab(TABS[0]?.[0] || 'dashboard')
@@ -1440,28 +1436,12 @@ export default function HRM() {
                         {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                       </select>
                     </div>
-                    <div><label className="text-xs text-gray-500">Backup person *</label>
+                    <div><label className="text-xs text-gray-500">Backup person{quickResp.mandatory ? ' *' : ''}</label>
                       <select value={quickResp.backup_employee_id} onChange={e => setQuickResp(f => ({ ...f, backup_employee_id: e.target.value }))}
                         className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                         <option value="">Select backup…</option>
                         {assignPickers.filter((e: any) => String(e.id) !== String(quickResp.employee_id)).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                       </select>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-xs text-gray-500">Backup duration *</label>
-                        <input type="number" min={0.5} step={0.5} value={quickResp.backup_allocation_value}
-                          onChange={e => setQuickResp(f => ({ ...f, backup_allocation_value: +e.target.value }))}
-                          className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
-                      </div>
-                      <div>
-                        <label className="text-xs text-gray-500">Unit</label>
-                        <select value={quickResp.backup_allocation_unit} onChange={e => setQuickResp(f => ({ ...f, backup_allocation_unit: e.target.value }))}
-                          className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                          <option value="days">Days</option>
-                          <option value="hours">Hours</option>
-                        </select>
-                      </div>
                     </div>
                     <div><label className="text-xs text-gray-500">{t(lang, 'mandatory')}</label>
                       <select value={quickResp.mandatory ? 'yes' : 'no'} onChange={e => setQuickResp(f => ({ ...f, mandatory: e.target.value === 'yes' }))}
@@ -1561,7 +1541,7 @@ export default function HRM() {
       {tab === 'check' && (
         <div className="space-y-4">
           <div className="flex items-center gap-3 flex-wrap">
-            {!isEmployeeScope ? (
+            {!(isEmployeeScope || isHodSelfCheck) ? (
               <select
                 value={checkEmp}
                 onChange={e => setCheckEmp(e.target.value ? +e.target.value : '')}
@@ -1575,23 +1555,15 @@ export default function HRM() {
             ) : (
               <span className="text-sm font-medium text-gray-700">Your daily check · {checkDate}</span>
             )}
-            {!isEmployeeScope && (
+            {!(isEmployeeScope || isHodSelfCheck) && (
               <input type="date" value={checkDate} onChange={e => setCheckDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
             )}
             <select value={checkPeriod} onChange={e => setCheckPeriod(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm">
               <option value="">{t(lang, 'timePeriod')} — All</option>
               {TIME_PERIODS.map(tp => <option key={tp}>{tp}</option>)}
             </select>
-            {!isEmployeeScope && (
+            {!(isEmployeeScope || isHodSelfCheck) && (
               <button onClick={() => setCheckDate(today())} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600">Today</button>
-            )}
-            {canEditAssignments && checkEmp && (
-              <button
-                onClick={() => setShowReassign(true)}
-                className="text-xs px-3 py-1.5 border border-amber-700 text-amber-900 rounded-lg"
-              >
-                Reassign mandatory
-              </button>
             )}
             <button onClick={() => setShowDailyGuide(v => !v)} className="text-xs px-3 py-1.5 border border-teal-700 text-teal-800 rounded-lg ml-auto">
               {showDailyGuide ? 'Hide daily guide' : 'Daily guide (Harsh / Sanjay)'}
@@ -1994,23 +1966,11 @@ export default function HRM() {
                   </select>
                   <p className="text-[10px] text-gray-400 mt-0.5">Shown on Employee Check so the employee knows who supervises or approves this task.</p>
                 </div>
-                <div><label className="text-xs text-gray-500">Backup person *</label>
+                <div><label className="text-xs text-gray-500">Backup person{respForm.mandatory ? ' *' : ''}</label>
                   <select value={respForm.backup_employee_id} onChange={e => setRespForm(f => ({ ...f, backup_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select backup…</option>
                     {assignPickers.filter((e: any) => String(e.id) !== String(respForm.employee_id)).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                   </select>
-                </div>
-                <div><label className="text-xs text-gray-500">Backup duration *</label>
-                  <div className="flex gap-2 mt-1">
-                    <input type="number" min={0.5} step={0.5} value={respForm.backup_allocation_value}
-                      onChange={e => setRespForm(f => ({ ...f, backup_allocation_value: +e.target.value }))}
-                      className="w-full border rounded px-2 py-1.5 text-sm" />
-                    <select value={respForm.backup_allocation_unit} onChange={e => setRespForm(f => ({ ...f, backup_allocation_unit: e.target.value }))}
-                      className="border rounded px-2 py-1.5 text-sm">
-                      <option value="days">Days</option>
-                      <option value="hours">Hours</option>
-                    </select>
-                  </div>
                 </div>
                 <div><label className="text-xs text-gray-500">Category</label>
                   <select value={respForm.category} onChange={e => setRespForm(f => ({ ...f, category: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
@@ -2042,7 +2002,7 @@ export default function HRM() {
                 </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => submitAssign({ ...respForm, mode: 'responsibility' as const, department_id: '', due_date: '' })} disabled={!respForm.employee_id || !respForm.title || !respForm.backup_employee_id || createRespMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Assign</button>
+                <button onClick={() => submitAssign({ ...respForm, mode: 'responsibility' as const, department_id: '', due_date: '' })} disabled={!respForm.employee_id || !respForm.title || (respForm.mandatory && !respForm.backup_employee_id) || createRespMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Assign</button>
                 <button onClick={() => setShowRespForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               </div>
             </div>
@@ -2153,33 +2113,20 @@ export default function HRM() {
                                 </select>
                               </div>
                               <div>
-                                <label className="text-[10px] text-gray-400">Backup person *</label>
+                                <label className="text-[10px] text-gray-400">Backup person{editResp.mandatory ? ' *' : ''}</label>
                                 <select value={editResp.backup_employee_id || ''} onChange={e => setEditResp((x: any) => ({ ...x, backup_employee_id: e.target.value ? +e.target.value : '' }))} className="w-full border rounded px-2 py-1 text-sm">
                                   <option value="">Select…</option>
                                   {(canEditAssignments ? assignPickers : allEmps as any[]).filter((e: any) => e.id !== editResp.employee_id).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                                 </select>
-                              </div>
-                              <div>
-                                <label className="text-[10px] text-gray-400">Backup allocation *</label>
-                                <div className="flex gap-1">
-                                  <input type="number" min={0.5} step={0.5} value={editResp.backup_allocation_value || 1}
-                                    onChange={e => setEditResp((x: any) => ({ ...x, backup_allocation_value: +e.target.value }))}
-                                    className="w-20 border rounded px-2 py-1 text-sm" />
-                                  <select value={editResp.backup_allocation_unit || 'days'} onChange={e => setEditResp((x: any) => ({ ...x, backup_allocation_unit: e.target.value }))} className="flex-1 border rounded px-2 py-1 text-sm">
-                                    <option value="hours">hours</option>
-                                    <option value="days">days</option>
-                                  </select>
-                                </div>
                               </div>
                               <div className="flex gap-2 col-span-2">
                                 <button onClick={() => {
                                   if ((editResp.frequency === 'Weekly' || editResp.frequency === 'Fortnightly') && !editResp.schedule_weekday) { alert('Select a weekday for Weekly/Fortnightly'); return }
                                   if (editResp.frequency === 'Monthly' && !(editResp.schedule_month_day > 0)) { alert('Select calendar day for Monthly'); return }
                                   if (editResp.frequency === 'Quarterly' && !(editResp.schedule_month > 0)) { alert('Select anchor month for Quarterly'); return }
-                                  if (!editResp.backup_employee_id) { alert('Backup person is required'); return }
-                                  if (+editResp.backup_employee_id === +editResp.employee_id) { alert('Backup must differ from assignee'); return }
-                                  if (!(Number(editResp.backup_allocation_value) > 0)) { alert('Backup allocation duration must be greater than zero'); return }
-                                  updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null, priority: editResp.priority || 'Medium', mandatory: !!editResp.mandatory, schedule_weekday: editResp.schedule_weekday || '', schedule_month_day: editResp.schedule_month_day || 0, schedule_month: editResp.schedule_month || 0, time_period: editResp.time_period || '', backup_employee_id: editResp.backup_employee_id || null, backup_allocation_value: Number(editResp.backup_allocation_value) || 1, backup_allocation_unit: editResp.backup_allocation_unit || 'days' } })
+                                  if (editResp.mandatory && !editResp.backup_employee_id) { alert('Backup person is required for mandatory responsibilities'); return }
+                                  if (editResp.backup_employee_id && +editResp.backup_employee_id === +editResp.employee_id) { alert('Backup must differ from assignee'); return }
+                                  updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null, priority: editResp.priority || 'Medium', mandatory: !!editResp.mandatory, schedule_weekday: editResp.schedule_weekday || '', schedule_month_day: editResp.schedule_month_day || 0, schedule_month: editResp.schedule_month || 0, time_period: editResp.time_period || '', backup_employee_id: editResp.backup_employee_id || null } })
                                 }} disabled={!editResp.title || updateRespMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
                                 <button onClick={() => setEditResp(null)} className="px-3 py-1 border rounded text-xs">Cancel</button>
                               </div>
@@ -2192,9 +2139,7 @@ export default function HRM() {
                             <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.frequency === 'Daily' ? 'bg-blue-100 text-blue-700' : r.frequency === 'Weekly' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'}`}>{r.frequency}{r.schedule_weekday ? ` · ${r.schedule_weekday}` : ''}{r.schedule_month_day ? ` · D${r.schedule_month_day}` : ''}</span></td>
                             <td className="px-4 py-2 text-xs text-indigo-800">{r.linked_to_employee_name || 'Self-complete'}</td>
                             <td className="px-4 py-2 text-xs text-violet-800">
-                              {r.backup_employee_name
-                                ? <>{r.backup_employee_name}{r.backup_allocation_value ? ` · ${r.backup_allocation_value} ${r.backup_allocation_unit || 'days'}` : ''}</>
-                                : '—'}
+                              {r.backup_employee_name || '—'}
                             </td>
                             <td className="px-4 py-2 text-xs"><span className={`px-1.5 py-0.5 rounded ${priorityStyle(r.priority || 'Medium')}`}>{r.priority || 'Medium'}</span></td>
                             <td className="px-4 py-2 text-xs text-gray-400">{r.added_by || '—'}</td>
@@ -2301,24 +2246,13 @@ export default function HRM() {
                     {assigneeOptions.map(n => <option key={n}>{n}</option>)}
                   </select>
                 </div>
-                <div><label className="text-xs text-gray-500">Backup person *</label>
+                <div><label className="text-xs text-gray-500">Backup person</label>
                   <select value={taskForm.backup_employee_id} onChange={e => setTaskForm(f => ({ ...f, backup_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
                     {assignPickers.filter((e: any) => String(e.id) !== String(taskForm.employee_id)).map((e: any) => (
                       <option key={e.id} value={e.id}>{e.name}</option>
                     ))}
                   </select>
-                </div>
-                <div><label className="text-xs text-gray-500">Backup allocation *</label>
-                  <div className="flex gap-1 mt-1">
-                    <input type="number" min={0.25} step={0.25} value={taskForm.backup_allocation_value}
-                      onChange={e => setTaskForm(f => ({ ...f, backup_allocation_value: +e.target.value }))}
-                      className="w-20 border rounded px-2 py-1.5 text-sm" />
-                    <select value={taskForm.backup_allocation_unit} onChange={e => setTaskForm(f => ({ ...f, backup_allocation_unit: e.target.value }))} className="flex-1 border rounded px-2 py-1.5 text-sm">
-                      <option value="hours">hours</option>
-                      <option value="days">days</option>
-                    </select>
-                  </div>
                 </div>
               </div>
               <div className="flex gap-2">
@@ -2344,7 +2278,7 @@ export default function HRM() {
                     backup_allocation_value: taskForm.backup_allocation_value,
                     backup_allocation_unit: taskForm.backup_allocation_unit,
                   })}
-                  disabled={!taskForm.employee_id || !taskForm.title || !taskForm.backup_employee_id || createOneTimeTaskMut.isPending}
+                  disabled={!taskForm.employee_id || !taskForm.title || createOneTimeTaskMut.isPending}
                   className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
                   Assign
                 </button>
@@ -2408,10 +2342,15 @@ export default function HRM() {
                         <td className="px-4 py-3"><span className={`text-xs px-1.5 py-0.5 rounded ${priorityStyle(t.priority || 'Medium')}`}>{t.priority || 'Medium'}</span></td>
                         <td className="px-4 py-3 text-gray-600">{t.due_date || '—'}</td>
                         <td className="px-4 py-3">
-                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${oneTimeStatusStyle(t.status)}`}>{t.status}</span>
+                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${oneTimeStatusStyle(t.status)}`}>
+                            {t.status === 'In Progress' && t.paused_at
+                              ? (Number(t.auto_paused) ? 'Auto-paused' : 'Paused')
+                              : t.status}
+                          </span>
                         </td>
                         <td className="px-4 py-3 text-xs text-gray-500">
                           <p>Start: {fmtDateTime(t.started_at)}</p>
+                          {t.paused_at && <p className="text-amber-700">Paused: {fmtDateTime(t.paused_at)}{Number(t.auto_paused) ? ' (auto)' : ''}</p>}
                           <p>End: {fmtDateTime(t.completed_at)}</p>
                           <p className="font-semibold text-[#002B5B] mt-0.5">{fmtDuration(t.duration_minutes)}</p>
                           {manualTimeOpen === t.id ? (
@@ -2433,9 +2372,21 @@ export default function HRM() {
                               <button onClick={() => startOneTimeTaskMut.mutate(t.id)} disabled={startOneTimeTaskMut.isPending}
                                 className="text-xs px-2 py-1 bg-blue-600 text-white rounded">▶ Start</button>
                             )}
-                            {t.status === 'In Progress' && (
-                              <button onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}
-                                className="text-xs px-2 py-1 bg-amber-500 text-white rounded">✓ Mark Done</button>
+                            {t.status === 'In Progress' && !t.paused_at && (
+                              <>
+                                <button onClick={() => pauseOneTimeTaskMut.mutate(t.id)} disabled={pauseOneTimeTaskMut.isPending}
+                                  className="text-xs px-2 py-1 bg-amber-500 text-white rounded">⏸ Pause</button>
+                                <button onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}
+                                  className="text-xs px-2 py-1 bg-amber-700 text-white rounded">✓ Mark Done</button>
+                              </>
+                            )}
+                            {t.status === 'In Progress' && !!t.paused_at && (
+                              <>
+                                <button onClick={() => resumeOneTimeTaskMut.mutate(t.id)} disabled={resumeOneTimeTaskMut.isPending}
+                                  className="text-xs px-2 py-1 bg-blue-600 text-white rounded">▶ Resume</button>
+                                <button onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}
+                                  className="text-xs px-2 py-1 bg-amber-700 text-white rounded">✓ Mark Done</button>
+                              </>
                             )}
                             {t.status === 'Done' && canAssignTasks && (
                               <>
@@ -3323,37 +3274,14 @@ export default function HRM() {
       )}
 
       {/* ── REASSIGN MODAL ── */}
-      {(reassignTaskModal || showReassign) && (
+      {reassignTaskModal && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 text-sm">
             <h4 className="font-semibold text-amber-900">
-              {reassignTaskModal ? `Reassign: ${reassignTaskModal.title}` : 'Mandatory reassignment'}
+              Reassign: {reassignTaskModal.title}
             </h4>
-            <p className="text-xs text-amber-800">Temporary clone(s) under Additional Work — original recurring assignment unchanged outside the date range.</p>
+            <p className="text-xs text-amber-800">Temporary clone(s) under Additional Work — uses the backup person. Original recurring assignment unchanged outside the date range.</p>
             <div className="grid md:grid-cols-2 gap-2">
-              {!reassignTaskModal && (
-                <div className="md:col-span-2">
-                  <label className="text-xs text-gray-600">Responsibility ID</label>
-                  <input
-                    value={reassignForm.original_responsibility_id}
-                    onChange={e => setReassignForm(f => ({ ...f, original_responsibility_id: e.target.value }))}
-                    className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
-                  />
-                </div>
-              )}
-              <div>
-                <label className="text-xs text-gray-600">Alternate assignee</label>
-                <select
-                  value={reassignForm.to_employee_id}
-                  onChange={e => setReassignForm(f => ({ ...f, to_employee_id: e.target.value }))}
-                  className="w-full border rounded px-2 py-1.5 text-sm mt-0.5"
-                >
-                  <option value="">Select</option>
-                  {assignPickers.map((e: any) => (
-                    <option key={e.id} value={e.id}>{e.name}</option>
-                  ))}
-                </select>
-              </div>
               <div>
                 <label className="text-xs text-gray-600">Date from</label>
                 <input type="date" value={reassignForm.date_from} onChange={e => setReassignForm(f => ({ ...f, date_from: e.target.value, reassignment_date: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-0.5" />
@@ -3366,19 +3294,18 @@ export default function HRM() {
             <div className="flex gap-2 pt-1">
               <button
                 type="button"
-                disabled={!reassignForm.original_responsibility_id || !reassignForm.to_employee_id || reassignMut.isPending}
+                disabled={!reassignForm.original_responsibility_id || !reassignForm.date_from || !reassignForm.date_to || reassignMut.isPending}
                 onClick={() => reassignMut.mutate({
                   original_responsibility_id: +reassignForm.original_responsibility_id,
-                  to_employee_id: +reassignForm.to_employee_id,
                   date_from: reassignForm.date_from,
                   date_to: reassignForm.date_to,
                   reassignment_date: reassignForm.date_from,
                 })}
                 className="px-3 py-1.5 bg-amber-800 text-white rounded-lg text-xs disabled:opacity-50"
               >
-                Save reassignment
+                Save
               </button>
-              <button type="button" onClick={() => { setShowReassign(false); setReassignTaskModal(null) }} className="px-3 py-1.5 border rounded-lg text-xs">Cancel</button>
+              <button type="button" onClick={() => setReassignTaskModal(null)} className="px-3 py-1.5 border rounded-lg text-xs">Cancel</button>
             </div>
           </div>
         </div>

@@ -69,7 +69,9 @@ def test_weekly_requires_weekday(hrm):
     create_department({"name": f"S-{uuid.uuid4().hex[:6]}"})
     did = hrm.list_departments()[0]["id"]
     create_employee({"name": "Worker W", "department_id": did})
+    create_employee({"name": "Backup W", "department_id": did})
     eid = list_employees(did)[0]["id"]
+    bid = list_employees(did)[1]["id"]
     with pytest.raises(ValueError, match="weekday"):
         create_responsibility(
             {"employee_id": eid, "title": "Weekly audit", "frequency": "Weekly"}
@@ -82,6 +84,7 @@ def test_weekly_requires_weekday(hrm):
             "schedule_weekday": "Wednesday",
             "priority": "High",
             "mandatory": True,
+            "backup_employee_id": bid,
         }
     )
     r = list_responsibilities(employee_id=eid)[0]

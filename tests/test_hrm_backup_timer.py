@@ -159,9 +159,12 @@ def test_no_overlapping_active_timers(hrm, monkeypatch):
     r1, r2 = hrm.list_responsibilities(employee_id=a)
     day = date.today().isoformat()
     assert start_responsibility_timer(r1["id"], day) is True
-    assert start_responsibility_timer(r2["id"], day) == "already_active"
-    assert pause_responsibility_timer(r1["id"], day) is True
+    # Starting another auto-pauses the first
     assert start_responsibility_timer(r2["id"], day) is True
+    d1 = hrm.get_responsibility_timer_detail(r1["id"], day)
+    d2 = hrm.get_responsibility_timer_detail(r2["id"], day)
+    assert d1["timer_status"] == "Paused"
+    assert d2["timer_status"] == "Active"
 
 
 def test_assignee_cannot_approve_own(hrm, monkeypatch):

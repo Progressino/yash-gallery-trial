@@ -145,6 +145,7 @@ def test_reassignment_is_one_day_clone(hrm):
             "title": "Mandatory openers",
             "frequency": "Daily",
             "mandatory": True,
+            "backup_employee_id": b,
         }
     )
     day = _today()

@@ -305,6 +305,39 @@ def assert_employee_in_scope(scope: HrmScope, employee_id: int, *, conn=None) ->
         raise HTTPException(403, "Access denied for this employee")
 
 
+def assert_employee_check_access(scope: HrmScope, employee_id: int) -> None:
+    """Employee Check: HOD may only view their own check (not subordinates)."""
+    from fastapi import HTTPException
+
+    if scope.level == "all":
+        # Org-wide managers (Admin viewing via DWR elsewhere) — allow if in scope
+        assert_employee_in_scope(scope, employee_id)
+        return
+    if scope.is_hod:
+        if scope.employee_id is None or int(employee_id) != int(scope.employee_id):
+            raise HTTPException(
+                403,
+                "HOD Employee Check is limited to your own records. Use HOD View for team oversight.",
+            )
+        return
+    assert_employee_in_scope(scope, employee_id)
+
+
+def assert_hrm_mutate_responsibility(scope: HrmScope, owner_employee_id: int) -> None:
+    """Admin: all. HOD: self + direct hierarchy subordinates. Employee: none for master edit."""
+    from fastapi import HTTPException
+    from ..db.hrm_db import employee_in_hod_hierarchy
+
+    if scope.can_mutate_assignment_records:
+        return
+    if scope.is_hod:
+        assert_employee_in_scope(scope, owner_employee_id)
+        if employee_in_hod_hierarchy(scope.employee_id, owner_employee_id):
+            return
+        raise HTTPException(403, "You can only edit responsibilities for yourself or direct reports")
+    raise HTTPException(403, "Only Admin or HOD can edit responsibilities")
+
+
 def assert_hrm_write_org(scope: HrmScope) -> None:
     from fastapi import HTTPException
 

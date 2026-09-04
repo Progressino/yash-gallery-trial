@@ -488,6 +488,42 @@ def get_user_auth_profile(username: str) -> dict | None:
     conn.close()
     return dict(row) if row else None
 
+
+def user_is_deactivated(username: str) -> bool:
+    """True if an erp_users row exists and active=0."""
+    uname = (username or "").strip()
+    if not uname:
+        return False
+    conn = _connect()
+    row = conn.execute(
+        """SELECT active FROM erp_users WHERE lower(username)=lower(?)
+           ORDER BY CASE WHEN username=? THEN 0 ELSE 1 END, id LIMIT 1""",
+        (uname, uname),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return False
+    return int(row["active"] or 0) != 1
+
+
+def soft_delete_user(uid: int) -> bool:
+    """Soft-delete: deactivate and rename username so it can be recreated."""
+    conn = _connect()
+    row = conn.execute("SELECT id, username FROM erp_users WHERE id=?", (uid,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    uname = row["username"]
+    retired = f"{uname}_deleted_{uid}"[:80]
+    conn.execute(
+        "UPDATE erp_users SET active=0, username=? WHERE id=?",
+        (retired, uid),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 # ── ERP user departments (Admin → Users dropdown) ─────────────────────────────
 def ensure_erp_departments_seeded(conn) -> None:
     conn.executescript("""

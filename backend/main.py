@@ -3265,6 +3265,20 @@ async def _hrm_end_of_day_scheduler() -> None:
             log.exception("HRM end-of-day auto-missed failed")
 
 
+async def _hrm_one_time_auto_pause_scheduler() -> None:
+    """Auto-pause one-time tasks whose active session exceeded 3 hours."""
+    from .db.hrm_db import process_one_time_auto_pause
+
+    while True:
+        await asyncio.sleep(60)
+        try:
+            result = await run_aux(process_one_time_auto_pause)
+            if result and int(result.get("auto_paused") or 0) > 0:
+                log.info("HRM one-time auto-pause: %s", result)
+        except Exception:
+            log.exception("HRM one-time auto-pause failed")
+
+
 async def _data_health_scheduler() -> None:
     """Run the automated data-health suite shortly after boot, then every 6h."""
     from .services.data_health import run_data_health_checks
@@ -3327,12 +3341,14 @@ async def lifespan(app: FastAPI):
     evict_task = asyncio.create_task(_session_eviction_loop())
     health_task = asyncio.create_task(_data_health_scheduler())
     hrm_eod_task = asyncio.create_task(_hrm_end_of_day_scheduler())
+    hrm_ot_pause_task = asyncio.create_task(_hrm_one_time_auto_pause_scheduler())
     yield
     task.cancel()
     rollup_task.cancel()
     evict_task.cancel()
     health_task.cancel()
     hrm_eod_task.cancel()
+    hrm_ot_pause_task.cancel()
     try:
         from .db.pg_pool import close_all_pools
 
@@ -3516,6 +3532,15 @@ async def auth_middleware(request: Request, call_next):
     if not payload or not payload.get("sub"):
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+
+    # Reject deactivated users even if JWT is still valid
+    from .db.users_db import user_is_deactivated
+
+    _uname = payload.get("sub") or ""
+    if _uname and user_is_deactivated(_uname):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=401, content={"detail": "Account deactivated"})
 
     request.state.auth = payload
     role = payload.get("role", "Admin")
