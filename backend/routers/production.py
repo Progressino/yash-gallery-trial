@@ -416,6 +416,95 @@ class PieceReceiptIn(BaseModel):
     leftover_measurement: Optional[float] = 0
 
 
+class QualityDefectIn(BaseModel):
+    defect_source_process: str
+    action: str = "Rework"  # Rework | Alteration | FinalReject
+    qty: int
+    reason: Optional[str] = ""
+    responsible_vendor: Optional[str] = ""
+    responsible_jo_id: Optional[int] = None
+    rework_by_type: Optional[str] = "SameVendor"  # SameVendor | OtherVendor | Inhouse
+    rework_by_vendor: Optional[str] = ""
+    chargeable: Optional[int] = 0
+    debit_required: Optional[int] = None
+    with_fabric: Optional[int] = 0
+    workmanship_rate: Optional[float] = None
+
+
+class QcReportIn(BaseModel):
+    found_at_process: str
+    checked_qty: int
+    pass_qty: Optional[int] = 0
+    rework_qty: Optional[int] = 0
+    reject_qty: Optional[int] = 0
+    original_jo_id: Optional[int] = None
+    so_number: Optional[str] = ""
+    sku: Optional[str] = ""
+    component_code: Optional[str] = ""
+    size_label: Optional[str] = ""
+    qc_date: Optional[str] = None
+    notes: Optional[str] = ""
+    created_by: Optional[str] = ""
+    defects: Optional[List[QualityDefectIn]] = None
+
+
+class ReworkOrderIn(BaseModel):
+    original_jo_id: int
+    planned_qty: int
+    process: Optional[str] = ""
+    defect_source_process: Optional[str] = ""
+    found_at_process: Optional[str] = ""
+    so_number: Optional[str] = ""
+    sku: Optional[str] = ""
+    component_code: Optional[str] = ""
+    rework_by_type: Optional[str] = "SameVendor"
+    rework_by_vendor: Optional[str] = ""
+    responsible_vendor: Optional[str] = ""
+    chargeable: Optional[int] = 0
+    notes: Optional[str] = ""
+    created_by: Optional[str] = ""
+    defect_id: Optional[int] = None
+    qc_report_id: Optional[int] = None
+
+
+class ReworkReceiveIn(BaseModel):
+    received_qty: int
+    pass_qty: Optional[int] = None
+    reject_qty: Optional[int] = 0
+    receipt_date: Optional[str] = None
+    remarks: Optional[str] = ""
+    created_by: Optional[str] = ""
+
+
+class DebitNoteIn(BaseModel):
+    responsible_vendor: str
+    qty: int
+    process: Optional[str] = ""
+    so_number: Optional[str] = ""
+    sku: Optional[str] = ""
+    component_code: Optional[str] = ""
+    original_jo_id: Optional[int] = None
+    defect_id: Optional[int] = None
+    qc_report_id: Optional[int] = None
+    rework_id: Optional[int] = None
+    with_fabric: Optional[int] = 0
+    workmanship_rate: Optional[float] = None
+    rate_basis: Optional[str] = "weighted_avg"
+    notes: Optional[str] = ""
+    created_by: Optional[str] = ""
+    debit_date: Optional[str] = None
+
+
+class DebitStatusIn(BaseModel):
+    status: str
+    notes: Optional[str] = ""
+
+
+class QcBillingConfigIn(BaseModel):
+    production_mode: str = "default"
+    qc_process: str = "Finishing"
+
+
 class SetBomMaterialIn(BaseModel):
     material_code: str
     material_name: Optional[str] = ''
@@ -894,6 +983,167 @@ def process_date_transactions(
         page_size=page_size,
         export=export,
     )
+
+
+# ── QC / Rework / Debit Notes ──────────────────────────────────────────────────
+
+@router.post("/qc-reports")
+def post_qc_report(body: QcReportIn):
+    from ..db.production_quality_db import create_qc_report
+
+    try:
+        return create_qc_report(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.get("/qc-reports")
+def get_qc_reports(
+    so_number: str = "",
+    process: str = "",
+    jo_id: Optional[int] = None,
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 200,
+):
+    from ..db.production_quality_db import list_qc_reports
+
+    return list_qc_reports(
+        so_number=so_number,
+        process=process,
+        jo_id=jo_id,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    )
+
+
+@router.get("/qc-reports/{report_id}")
+def get_qc_report_detail(report_id: int):
+    from ..db.production_quality_db import get_qc_report
+
+    try:
+        return get_qc_report(report_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.post("/rework-orders")
+def post_rework_order(body: ReworkOrderIn):
+    from ..db.production_quality_db import create_rework_order
+
+    try:
+        return create_rework_order(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.get("/rework-orders")
+def get_rework_orders(
+    status: str = "",
+    process: str = "",
+    original_jo_id: Optional[int] = None,
+    vendor: str = "",
+    limit: int = 200,
+):
+    from ..db.production_quality_db import list_rework_orders
+
+    return list_rework_orders(
+        status=status,
+        process=process,
+        original_jo_id=original_jo_id,
+        vendor=vendor,
+        limit=limit,
+    )
+
+
+@router.get("/rework-orders/{rework_id}")
+def get_rework_detail(rework_id: int):
+    from ..db.production_quality_db import get_rework_order
+
+    try:
+        return get_rework_order(rework_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.post("/rework-orders/{rework_id}/receive")
+def post_rework_receive(rework_id: int, body: ReworkReceiveIn):
+    from ..db.production_quality_db import receive_rework
+
+    payload = body.model_dump()
+    if payload.get("pass_qty") is None:
+        payload["pass_qty"] = payload.get("received_qty") or 0
+    try:
+        return receive_rework(rework_id, payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.get("/rework-wip")
+def get_rework_wip(so_number: str = "", sku: str = ""):
+    from ..db.production_quality_db import rework_wip_summary
+
+    return rework_wip_summary(so_number=so_number, sku=sku)
+
+
+@router.post("/debit-notes")
+def post_debit_note(body: DebitNoteIn):
+    from ..db.production_quality_db import create_debit_note
+
+    try:
+        return create_debit_note(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.get("/debit-notes")
+def get_debit_notes(
+    vendor: str = "",
+    jo_id: Optional[int] = None,
+    status: str = "",
+    limit: int = 200,
+):
+    from ..db.production_quality_db import list_debit_notes
+
+    return list_debit_notes(vendor=vendor, jo_id=jo_id, status=status, limit=limit)
+
+
+@router.patch("/debit-notes/{debit_id}/status")
+def patch_debit_status(debit_id: int, body: DebitStatusIn):
+    from ..db.production_quality_db import update_debit_note_status
+
+    try:
+        return update_debit_note_status(debit_id, body.status, body.notes or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.get("/orders/{joid}/billing-eligibility")
+def get_jo_billing_eligibility(joid: int):
+    from ..db.production_quality_db import jo_billing_eligibility
+
+    try:
+        return jo_billing_eligibility(joid)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.get("/qc-billing-config")
+def get_qc_billing_config(production_mode: str = "default"):
+    from ..db.production_quality_db import get_billing_qc_process
+
+    return {
+        "production_mode": production_mode or "default",
+        "qc_process": get_billing_qc_process(production_mode),
+    }
+
+
+@router.put("/qc-billing-config")
+def put_qc_billing_config(body: QcBillingConfigIn):
+    from ..db.production_quality_db import set_billing_qc_process
+
+    return set_billing_qc_process(body.production_mode, body.qc_process)
 
 
 # ── Job Orders ─────────────────────────────────────────────────────────────────

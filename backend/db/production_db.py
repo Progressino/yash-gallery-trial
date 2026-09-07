@@ -466,6 +466,12 @@ def init_db():
             conn.execute(ddl)
         except Exception:
             pass
+    try:
+        from .production_quality_db import init_quality_tables
+
+        init_quality_tables(conn)
+    except Exception:
+        _log.exception("production quality tables init failed")
     conn.commit()
     conn.close()
 

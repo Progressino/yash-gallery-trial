@@ -15,6 +15,7 @@ import SetBomPanel from '../components/SetBomPanel'
 import CuttingReportsPanel from './CuttingReportsPanel'
 import StitchingReportsPanel from './StitchingReportsPanel'
 import ProcessDateTransactionsPanel from './ProcessDateTransactionsPanel'
+import ProductionQualityPanel from './ProductionQualityPanel'
 import MasterProductionStatusPanel from './MasterProductionStatusPanel'
 import { downloadCsv } from '../lib/exportCsv'
 
@@ -1238,7 +1239,7 @@ export default function Production() {
   })
   const [editPlannedQty, setEditPlannedQty] = useState<Record<number, string>>({})
   const [editLineQty, setEditLineQty] = useState<Record<number, string>>({})
-  const [reportsView, setReportsView] = useState<'cutting' | 'stitching' | 'date_txns' | 'process' | 'master'>('master')
+  const [reportsView, setReportsView] = useState<'cutting' | 'stitching' | 'date_txns' | 'quality' | 'process' | 'master'>('master')
   const [newLines, setNewLines] = useState<{ so_number: string; sku: string; sku_name: string; style: string; planned_qty: number; vendor_rate: number; remarks: string; so_qty?: number }[]>([])
   const [soLineSearch, setSOLineSearch] = useState('')
   const joImportRef = useRef<HTMLInputElement>(null)
@@ -3035,7 +3036,7 @@ export default function Production() {
       {tab === 'reports' && (
         <div className="space-y-4">
           <div className="flex gap-2 flex-wrap">
-            {([['master', 'Master status'], ['cutting', 'Cutting'], ['stitching', 'Stitching'], ['date_txns', 'Date-wise txns'], ['process', 'All processes (JO)']] as const).map(([key, label]) => (
+            {([['master', 'Master status'], ['cutting', 'Cutting'], ['stitching', 'Stitching'], ['date_txns', 'Date-wise txns'], ['quality', 'QC / Rework / Debit'], ['process', 'All processes (JO)']] as const).map(([key, label]) => (
               <button
                 key={key}
                 type="button"
@@ -3054,6 +3055,8 @@ export default function Production() {
             <StitchingReportsPanel />
           ) : reportsView === 'date_txns' ? (
             <ProcessDateTransactionsPanel />
+          ) : reportsView === 'quality' ? (
+            <ProductionQualityPanel />
           ) : (
         <div className="space-y-4">
           <h3 className="font-semibold text-gray-700">Process-wise Issue / Receive / Balance Report</h3>
