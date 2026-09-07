@@ -3,8 +3,8 @@ import io
 
 import pandas as pd
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, field_validator
+from typing import Any, Optional
 
 from ..db.hrm_db import (
     list_departments,
@@ -192,6 +192,15 @@ class DepartmentUpdate(BaseModel):
     hod_name: Optional[str] = None
 
 
+def _empty_str_to_none(v: Any) -> Any:
+    """UI forms often send '' for unset optional ints — coerce before int parsing."""
+    if v is None:
+        return None
+    if isinstance(v, str) and not v.strip():
+        return None
+    return v
+
+
 class EmployeeIn(BaseModel):
     name: str
     department_id: Optional[int] = None
@@ -201,6 +210,11 @@ class EmployeeIn(BaseModel):
     join_date: Optional[str] = ""
     emp_code: Optional[str] = ""
     reports_to_employee_id: Optional[int] = None
+
+    @field_validator("department_id", "reports_to_employee_id", mode="before")
+    @classmethod
+    def _optional_int_empty(cls, v: Any) -> Any:
+        return _empty_str_to_none(v)
 
 
 class EmployeeUpdate(BaseModel):
@@ -213,6 +227,11 @@ class EmployeeUpdate(BaseModel):
     status: Optional[str] = None
     emp_code: Optional[str] = None
     reports_to_employee_id: Optional[int] = None
+
+    @field_validator("department_id", "reports_to_employee_id", mode="before")
+    @classmethod
+    def _optional_int_empty(cls, v: Any) -> Any:
+        return _empty_str_to_none(v)
 
 
 class ResponsibilityIn(BaseModel):

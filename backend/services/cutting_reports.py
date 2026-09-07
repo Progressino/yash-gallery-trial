@@ -262,6 +262,8 @@ def _row_search_blob(r: dict) -> str:
             "component",
             "fabric_code",
             "size",
+            "vendor_name",
+            "exec_type",
         )
     )
 
@@ -456,6 +458,7 @@ def _panel_wip_balance_rows(*, production_mode: str = "") -> list[dict[str, Any]
 
 def build_cutting_report(
     *,
+    process: str = "Cutting",
     date_from: str = "",
     date_to: str = "",
     so_number: str = "",
@@ -472,6 +475,8 @@ def build_cutting_report(
     brand: str = "",
     search: str = "",
     group_by: str = "",
+    vendor_name: str = "",
+    exec_type: str = "",
     page: int = 1,
     page_size: int = 200,
     export: bool = False,
@@ -483,6 +488,8 @@ def build_cutting_report(
 ) -> dict[str, Any]:
     from .so_production_path import normalize_production_mode
 
+    process_name = str(process or "Cutting").strip() or "Cutting"
+    is_cutting = process_name.lower() == "cutting"
     today = _today_ist()
     so_map = _so_lookup()
     as_of = _parse_day(as_of_date) or _parse_day(activity_date)
@@ -490,6 +497,9 @@ def build_cutting_report(
     mode_want = _production_mode_filter(production_mode)
     comp_want = _parse_components_filter(components)
     level = str(balance_level or "component").strip().lower()
+    if not is_cutting:
+        # Set/panel WIP rollups are Cutting-specific
+        level = "component"
     if level not in {"component", "set", "panel_wip"}:
         level = "component"
     conn = production_db._connect()
@@ -502,9 +512,10 @@ def build_cutting_report(
                           expected_completion, fabric_code, fabric_qty, fabric_unit,
                           fabric_issued_qty, fabric_received_qty, fabric_consumption,
                           main_sku, component_code, sku_role, created_at, updated_at,
-                          production_mode
+                          production_mode, vendor_name, exec_type, vendor_rate
                    FROM job_orders
-                   WHERE process='Cutting' AND IFNULL(status,'') != 'Cancelled'"""
+                   WHERE process=? AND IFNULL(status,'') != 'Cancelled'""",
+                (process_name,),
             ).fetchall()
         ]
         if mode_want:
@@ -662,6 +673,7 @@ def build_cutting_report(
                 "jo_number": jo.get("jo_number") or "",
                 "jo_id": jid,
                 "jo_date": jo_date,
+                "process": process_name,
                 "jo_header_sku": header_sku,
                 "jo_header_parent_style": header_parent,
                 "parent_style": parent,
@@ -669,6 +681,9 @@ def build_cutting_report(
                 "size": size_label,
                 "component": line_comp,
                 "fabric_code": jo.get("fabric_code") or "",
+                "vendor_name": jo.get("vendor_name") or "",
+                "exec_type": jo.get("exec_type") or "",
+                "vendor_rate": jo.get("vendor_rate") or 0,
                 "planned_qty": line_planned,
                 "issued_qty": line_issued,
                 "received_qty": line_received,
@@ -684,13 +699,17 @@ def build_cutting_report(
                 "last_activity_date": last,
                 "aging_days": days if st == "pending" else None,
                 "aging_bucket": bucket,
-                "planned_fabric": planned_fab_line,
-                "actual_fabric": actual_fab_line,
-                "bom_avg": bom_avg,
-                "actual_avg": actual_avg,
-                "avg_diff": None if bom_avg is None or actual_avg is None else round(actual_avg - bom_avg, 4),
-                "fabric_saving": saving,
-                "fabric_saving_pct": saving_pct,
+                "planned_fabric": planned_fab_line if is_cutting else 0,
+                "actual_fabric": actual_fab_line if is_cutting else 0,
+                "bom_avg": bom_avg if is_cutting else None,
+                "actual_avg": actual_avg if is_cutting else None,
+                "avg_diff": (
+                    None
+                    if (not is_cutting or bom_avg is None or actual_avg is None)
+                    else round(actual_avg - bom_avg, 4)
+                ),
+                "fabric_saving": saving if is_cutting else None,
+                "fabric_saving_pct": saving_pct if is_cutting else None,
                 "line_id": None if ln is None else ln.get("id"),
                 "row_type": "component",
                 "balance_level": "component",
@@ -751,6 +770,10 @@ def build_cutting_report(
             continue
         if brand and not _match(r["brand"], brand):
             continue
+        if vendor_name and not _match(r.get("vendor_name") or "", vendor_name):
+            continue
+        if exec_type and str(r.get("exec_type") or "").strip().lower() != exec_type.strip().lower():
+            continue
         if q:
             if jid not in jo_style_hits and q.lower() not in _row_search_blob(r).lower():
                 continue
@@ -792,6 +815,9 @@ def build_cutting_report(
         "component": "component",
         "size": "size",
         "jo": "jo_number",
+        "vendor": "vendor_name",
+        "vendor_name": "vendor_name",
+        "exec_type": "exec_type",
     }
     col = key_map.get(gkey)
     if col:
@@ -824,6 +850,7 @@ def build_cutting_report(
 
     return {
         "ok": True,
+        "process": process_name,
         "aging_basis": basis_key,
         "balance_level": level,
         "production_mode_filter": mode_want or "all",
@@ -834,6 +861,16 @@ def build_cutting_report(
         "page": page,
         "page_size": ps or total,
         "rows": page_rows,
+        "column_totals": {
+            "planned_qty": kpis["planned_qty"],
+            "issued_qty": kpis["issued_qty"],
+            "received_qty": kpis["received_qty"],
+            "balance_qty": kpis["balance_qty"],
+            "opening_balance": kpis["opening_balance"],
+            "closing_balance": kpis["closing_balance"],
+            "received_on_date": kpis.get("received_on_date"),
+            "issued_on_date": kpis.get("issued_on_date"),
+        },
         "definitions": {
             "balance_qty": "planned_qty - received_qty (negative means over-receipt)",
             "qty_variance": "received_qty - planned_qty",

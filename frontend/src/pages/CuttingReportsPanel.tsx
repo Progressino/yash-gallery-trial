@@ -311,6 +311,21 @@ export default function CuttingReportsPanel() {
               <tr><td colSpan={21} className="text-center text-gray-400 py-8">No Cutting JOs match these filters.</td></tr>
             )}
           </tbody>
+          {rows.length > 0 && (
+            <tfoot className="bg-slate-100 border-t-2 border-slate-300 font-semibold text-[11px]">
+              <tr>
+                <td className="px-2 py-2" colSpan={8}>Totals (filtered)</td>
+                <td className="px-2 py-2 text-right">{fmt(kpis.planned_qty)}</td>
+                <td className="px-2 py-2 text-right">{fmt(kpis.issued_qty)}</td>
+                <td className="px-2 py-2 text-right text-emerald-700">{fmt(kpis.received_qty)}</td>
+                <td className="px-2 py-2 text-right text-amber-700">{fmt(kpis.balance_qty)}</td>
+                <td className="px-2 py-2 text-right">{fmt(kpis.opening_balance)}</td>
+                <td className="px-2 py-2 text-right">{fmt(kpis.closing_balance)}</td>
+                <td className="px-2 py-2 text-right">{fmt(kpis.received_on_date)}</td>
+                <td className="px-2 py-2" colSpan={6} />
+              </tr>
+            </tfoot>
+          )}
         </table>
         <div className="p-2 flex gap-2 justify-end">
           <button type="button" disabled={page <= 1} onClick={() => setPage(p => p - 1)} className="px-2 py-1 border rounded text-xs disabled:opacity-40">Prev</button>

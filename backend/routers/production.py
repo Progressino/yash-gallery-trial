@@ -756,6 +756,8 @@ def cutting_report(
     brand: str = "",
     search: str = "",
     group_by: str = "",
+    vendor_name: str = "",
+    exec_type: str = "",
     as_of_date: str = "",
     activity_date: str = "",
     production_mode: str = "",
@@ -768,6 +770,7 @@ def cutting_report(
     from ..services.cutting_reports import build_cutting_report
 
     return build_cutting_report(
+        process="Cutting",
         date_from=date_from,
         date_to=date_to,
         so_number=so_number,
@@ -784,11 +787,109 @@ def cutting_report(
         brand=brand,
         search=search,
         group_by=group_by,
+        vendor_name=vendor_name,
+        exec_type=exec_type,
         as_of_date=as_of_date,
         activity_date=activity_date,
         production_mode=production_mode,
         components=components,
         balance_level=balance_level,
+        page=page,
+        page_size=page_size,
+        export=export,
+    )
+
+
+@router.get("/stitching-report")
+def stitching_report(
+    date_from: str = "",
+    date_to: str = "",
+    so_number: str = "",
+    parent_style: str = "",
+    sku: str = "",
+    size: str = "",
+    jo_number: str = "",
+    component: str = "",
+    status: str = "",
+    aging_bucket: str = "",
+    aging_basis: str = "jo_date",
+    variance: str = "",
+    brand: str = "",
+    search: str = "",
+    group_by: str = "vendor",
+    vendor_name: str = "",
+    exec_type: str = "",
+    as_of_date: str = "",
+    activity_date: str = "",
+    production_mode: str = "",
+    components: str = "",
+    page: int = 1,
+    page_size: int = 200,
+    export: bool = False,
+):
+    """Stitching JO balance report (Cutting-style) with vendor/fabricator visibility."""
+    from ..services.cutting_reports import build_cutting_report
+
+    return build_cutting_report(
+        process="Stitching",
+        date_from=date_from,
+        date_to=date_to,
+        so_number=so_number,
+        parent_style=parent_style,
+        sku=sku,
+        size=size,
+        jo_number=jo_number,
+        component=component,
+        status=status,
+        aging_bucket=aging_bucket,
+        aging_basis=aging_basis,
+        variance=variance,
+        brand=brand,
+        search=search,
+        group_by=group_by,
+        vendor_name=vendor_name,
+        exec_type=exec_type,
+        as_of_date=as_of_date,
+        activity_date=activity_date,
+        production_mode=production_mode,
+        components=components,
+        balance_level="component",
+        page=page,
+        page_size=page_size,
+        export=export,
+    )
+
+
+@router.get("/process-date-transactions")
+def process_date_transactions(
+    date_from: str = "",
+    date_to: str = "",
+    txn_date: str = "",
+    process: str = "",
+    so_number: str = "",
+    sku: str = "",
+    jo_number: str = "",
+    component: str = "",
+    vendor_name: str = "",
+    txn_type: str = "",
+    page: int = 1,
+    page_size: int = 200,
+    export: bool = False,
+):
+    """Per-transaction date-wise audit for all production stages (create / receive / issue)."""
+    from ..services.process_date_transactions import build_process_date_transactions
+
+    return build_process_date_transactions(
+        date_from=date_from,
+        date_to=date_to,
+        txn_date=txn_date,
+        process=process,
+        so_number=so_number,
+        sku=sku,
+        jo_number=jo_number,
+        component=component,
+        vendor_name=vendor_name,
+        txn_type=txn_type,
         page=page,
         page_size=page_size,
         export=export,

@@ -443,7 +443,17 @@ export default function HRM() {
   // ── Mutations ─────────────────────────────────────────────────────────────────
   const createDeptMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/departments', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-depts'] }); setShowDeptForm(false); setDeptForm({ name: '', description: '', hod_name: '' }) } })
   const updateDeptMut = useMutation({ mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/departments/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-depts'] }); setEditDept(null) } })
-  const createEmpMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/employees', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }); setShowEmpForm(false) } })
+  const createEmpMut = useMutation({
+    mutationFn: (b: object) => api.post('/hrm/employees', b),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['hrm-emps'] })
+      qc.invalidateQueries({ queryKey: ['hrm-all-emps'] })
+      setShowEmpForm(false)
+      setEmpForm({ name: '', emp_code: '', department_id: '', designation: '', phone: '', email: '', join_date: '', reports_to_employee_id: '' as any })
+      setEmpNameSuggest([])
+    },
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not save employee'),
+  })
   const updateEmpMut = useMutation({ mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/employees/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }); setEditEmp(null) } })
   const deleteEmpMut = useMutation({ mutationFn: (id: number) => api.delete(`/hrm/employees/${id}`), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }) } })
   const createRespMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/responsibilities', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-resps'] }); qc.invalidateQueries({ queryKey: ['hrm-hod'] }); setShowRespForm(false); setShowQuickResp(false); setAiParsed(null); setVoiceText('') } })
@@ -1821,7 +1831,22 @@ export default function HRM() {
                 ))}
               </div>
               <div className="flex gap-2">
-                <button onClick={() => createEmpMut.mutate({ ...empForm, department_id: empForm.department_id ? +empForm.department_id : null, emp_code: empForm.emp_code || undefined })} disabled={!empForm.name} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Save</button>
+                <button
+                  onClick={() => createEmpMut.mutate({
+                    name: empForm.name.trim(),
+                    emp_code: empForm.emp_code.trim() || undefined,
+                    department_id: empForm.department_id ? +empForm.department_id : null,
+                    designation: empForm.designation || '',
+                    phone: empForm.phone || '',
+                    email: empForm.email || '',
+                    join_date: empForm.join_date || '',
+                    reports_to_employee_id: empForm.reports_to_employee_id ? +empForm.reports_to_employee_id : null,
+                  })}
+                  disabled={!empForm.name.trim() || createEmpMut.isPending}
+                  className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50"
+                >
+                  {createEmpMut.isPending ? 'Saving…' : 'Save'}
+                </button>
                 <button onClick={() => setShowEmpForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               </div>
             </div>
