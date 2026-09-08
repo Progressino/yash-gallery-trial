@@ -13,7 +13,7 @@ const statusClass: Record<string, string> = {
 }
 
 const EXPORT_HEADERS = [
-  'SO No', 'SO Date', 'JO', 'JO Date', 'Vendor', 'Exec', 'Parent Style', 'SKU', 'Size',
+  'SO No', 'SO Date', 'JO', 'JO Date', 'Vendor', 'Exec', 'Path', 'Parent Style', 'SKU', 'Size',
   'Component', 'Planned', 'Issued', 'Received', 'Balance', 'Variance', 'Status',
   'Last Activity', 'Aging Days', 'Aging Bucket',
 ]
@@ -25,7 +25,10 @@ export default function StitchingReportsPanel() {
     jo_number: '', component: '', status: '', aging_bucket: '',
     aging_basis: 'jo_date', variance: '', brand: '', search: '', group_by: 'vendor',
     vendor_name: '', exec_type: '', as_of_date: '', activity_date: '',
-    production_mode: 'all', components: '',
+    // Default: regular stitching path (In-house + Outsource exec), excludes Stitch-to-Pack
+    production_mode: 'inhouse',
+    components: '',
+    balance_level: 'component',
   })
   const [page, setPage] = useState(1)
   const params = useMemo(() => ({ ...filters, page, page_size: 150 }), [filters, page])
@@ -52,7 +55,7 @@ export default function StitchingReportsPanel() {
       `stitching_report_${new Date().toISOString().slice(0, 10)}.csv`,
       EXPORT_HEADERS,
       all.map((r: any) => [
-        r.so_number, r.so_date, r.jo_number, r.jo_date, r.vendor_name, r.exec_type,
+        r.so_number, r.so_date, r.jo_number, r.jo_date, r.vendor_name, r.exec_type, r.production_mode,
         r.parent_style, r.sku, r.size, r.component,
         r.planned_qty, r.issued_qty, r.received_qty, r.balance_qty,
         r.qty_variance, r.status, r.last_activity_date, r.aging_days ?? '', r.aging_bucket,
@@ -65,9 +68,11 @@ export default function StitchingReportsPanel() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 className="font-semibold text-gray-800">Stitching summary &amp; balance</h3>
-          <p className="text-[11px] text-gray-500">
-            Balance = Planned − Received. Vendor / fabricator columns support outsourced stitching.
-            Group by Vendor to see pending and partial receipts per party.
+          <p className="text-[11px] text-gray-500 max-w-4xl">
+            Balance = Planned − Received.
+            {' '}<b>Production Mode</b> = SO path (default <b>Regular / In-house path</b> = In-house + Outsource stitching together, excluding Stitch-to-Pack).
+            {' '}<b>Exec Type</b> = who stitches within that path (optional narrow to In-house only or Outsource only).
+            Use Production Mode = Stitch-to-Pack to view that path separately.
           </p>
         </div>
         <button type="button" onClick={() => void exportAll()} className="px-3 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg">
@@ -97,8 +102,10 @@ export default function StitchingReportsPanel() {
           ['date_from', 'JO from', 'date'], ['date_to', 'JO to', 'date'],
           ['activity_date', 'Activity date', 'date'], ['as_of_date', 'As-of date', 'date'],
           ['so_number', 'SO No', 'text'], ['parent_style', 'Parent style', 'text'],
-          ['sku', 'SKU', 'text'], ['jo_number', 'Stitching JO', 'text'],
-          ['vendor_name', 'Vendor / Fabricator', 'text'], ['search', 'Search', 'text'],
+          ['sku', 'SKU', 'text'], ['size', 'Size', 'text'],
+          ['jo_number', 'Stitching JO', 'text'], ['component', 'Component', 'text'],
+          ['vendor_name', 'Vendor / Fabricator', 'text'], ['brand', 'Brand', 'text'],
+          ['search', 'Search', 'text'],
         ].map(([k, label, type]) => (
           <label key={k} className="block">
             <span className="text-gray-500">{label}</span>
@@ -107,12 +114,33 @@ export default function StitchingReportsPanel() {
           </label>
         ))}
         <label className="block">
-          <span className="text-gray-500">Exec type</span>
-          <select value={filters.exec_type} onChange={e => set('exec_type', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
-            <option value="">All</option>
-            <option value="Outsource">Outsource</option>
-            <option value="Inhouse">In-house</option>
+          <span className="text-gray-500">Production mode</span>
+          <select value={filters.production_mode} onChange={e => set('production_mode', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
+            <option value="inhouse">Regular (excl. Stitch-to-Pack)</option>
+            <option value="stitch_to_pack">Stitch-to-Pack only</option>
+            <option value="cut_to_pack">Cut-to-Pack</option>
+            <option value="all">All paths</option>
           </select>
+        </label>
+        <label className="block">
+          <span className="text-gray-500">Exec type (who stitches)</span>
+          <select value={filters.exec_type} onChange={e => set('exec_type', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
+            <option value="">All (In-house + Outsource)</option>
+            <option value="Outsource">Outsource only</option>
+            <option value="Inhouse">In-house only</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-gray-500">Balance level</span>
+          <select value={filters.balance_level} onChange={e => set('balance_level', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
+            <option value="component">Component (TOP/PANT/DUPATTA)</option>
+            <option value="set">SKU / Set (Excel reconcile)</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-gray-500">Components (comma)</span>
+          <input type="text" value={filters.components} onChange={e => set('components', e.target.value)}
+            placeholder="TOP,PANT" className="mt-0.5 w-full border rounded px-2 py-1" />
         </label>
         <label className="block">
           <span className="text-gray-500">Status</span>
@@ -125,10 +153,28 @@ export default function StitchingReportsPanel() {
           </select>
         </label>
         <label className="block">
+          <span className="text-gray-500">Aging basis</span>
+          <select value={filters.aging_basis} onChange={e => set('aging_basis', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
+            <option value="jo_date">Stitching JO date</option>
+            <option value="so_date">SO date</option>
+            <option value="delivery_date">Delivery / due date</option>
+          </select>
+        </label>
+        <label className="block">
           <span className="text-gray-500">Aging bucket</span>
           <select value={filters.aging_bucket} onChange={e => set('aging_bucket', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
             <option value="">All</option>
             {['0-2', '3-5', '6-10', '11-15', '15+'].map(b => <option key={b} value={b}>{b} days</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-gray-500">Over / Under</span>
+          <select value={filters.variance} onChange={e => set('variance', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
+            <option value="">All</option>
+            <option value="pending">Pending</option>
+            <option value="exact">Exact</option>
+            <option value="over">Over</option>
+            <option value="under">Under</option>
           </select>
         </label>
         <label className="block">
@@ -138,6 +184,7 @@ export default function StitchingReportsPanel() {
             <option value="so">SO</option>
             <option value="parent_style">Parent style</option>
             <option value="sku">SKU</option>
+            <option value="component">Component</option>
             <option value="jo">JO</option>
             <option value="exec_type">Exec type</option>
           </select>
@@ -181,7 +228,7 @@ export default function StitchingReportsPanel() {
         <table className="w-full text-[11px]">
           <thead className="bg-gray-50 text-gray-500 uppercase sticky top-0">
             <tr>
-              {['SO', 'JO', 'Vendor', 'Exec', 'Style', 'SKU', 'Size', 'Comp', 'Plan', 'Iss', 'Rec', 'Bal', 'Var', 'Status', 'Age'].map(h => (
+              {['SO', 'JO', 'Vendor', 'Exec', 'Path', 'Style', 'SKU', 'Size', 'Comp', 'Plan', 'Iss', 'Rec', 'Bal', 'Var', 'Status', 'Age'].map(h => (
                 <th key={h} className="text-left px-2 py-2 whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -193,6 +240,7 @@ export default function StitchingReportsPanel() {
                 <td className="px-2 py-1.5 font-mono">{r.jo_number}</td>
                 <td className="px-2 py-1.5">{r.vendor_name || '—'}</td>
                 <td className="px-2 py-1.5 text-[10px]">{r.exec_type || '—'}</td>
+                <td className="px-2 py-1.5 text-[10px]">{r.production_mode || '—'}</td>
                 <td className="px-2 py-1.5">{r.parent_style}</td>
                 <td className="px-2 py-1.5 font-mono">{r.sku}</td>
                 <td className="px-2 py-1.5">{r.size || '—'}</td>
@@ -207,13 +255,13 @@ export default function StitchingReportsPanel() {
               </tr>
             ))}
             {rows.length === 0 && (
-              <tr><td colSpan={15} className="text-center text-gray-400 py-8">No Stitching JOs match these filters.</td></tr>
+              <tr><td colSpan={16} className="text-center text-gray-400 py-8">No Stitching JOs match these filters.</td></tr>
             )}
           </tbody>
           {rows.length > 0 && (
             <tfoot className="bg-slate-100 border-t-2 border-slate-300 font-semibold">
               <tr>
-                <td className="px-2 py-2" colSpan={8}>Totals (filtered)</td>
+                <td className="px-2 py-2" colSpan={9}>Totals (filtered)</td>
                 <td className="px-2 py-2 text-right">{fmt(kpis.planned_qty)}</td>
                 <td className="px-2 py-2 text-right">{fmt(kpis.issued_qty)}</td>
                 <td className="px-2 py-2 text-right text-emerald-700">{fmt(kpis.received_qty)}</td>

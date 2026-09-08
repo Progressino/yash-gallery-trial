@@ -910,13 +910,20 @@ def stitching_report(
     exec_type: str = "",
     as_of_date: str = "",
     activity_date: str = "",
-    production_mode: str = "",
+    production_mode: str = "inhouse",
     components: str = "",
+    balance_level: str = "component",
     page: int = 1,
     page_size: int = 200,
     export: bool = False,
 ):
-    """Stitching JO balance report (Cutting-style) with vendor/fabricator visibility."""
+    """Stitching JO balance report (Cutting-style) with vendor/fabricator visibility.
+
+    Production Mode filters the SO path (regular inhouse vs stitch_to_pack).
+    Exec Type filters who stitches (Inhouse vs Outsource) within that path.
+    Default production_mode=inhouse = regular stitching (In-house + Outsource exec),
+    excluding Stitch-to-Pack.
+    """
     from ..services.cutting_reports import build_cutting_report
 
     return build_cutting_report(
@@ -942,7 +949,7 @@ def stitching_report(
         activity_date=activity_date,
         production_mode=production_mode,
         components=components,
-        balance_level="component",
+        balance_level=balance_level,
         page=page,
         page_size=page_size,
         export=export,

@@ -497,8 +497,8 @@ def build_cutting_report(
     mode_want = _production_mode_filter(production_mode)
     comp_want = _parse_components_filter(components)
     level = str(balance_level or "component").strip().lower()
-    if not is_cutting:
-        # Set/panel WIP rollups are Cutting-specific
+    if not is_cutting and level == "panel_wip":
+        # Panel WIP is Cutting-specific; Stitching/others use component or set rollup
         level = "component"
     if level not in {"component", "set", "panel_wip"}:
         level = "component"

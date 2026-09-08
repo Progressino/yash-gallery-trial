@@ -72,3 +72,46 @@ def test_date_wise_receipts_are_separate_rows(tmp_path, monkeypatch):
     assert len(recs) == 3
     assert sorted(int(r["qty"]) for r in recs) == [20, 30, 50]
     assert data["totals"]["received_qty"] == 100
+
+
+def test_stitching_regular_path_excludes_stitch_to_pack(tmp_path, monkeypatch):
+    db = str(tmp_path / "prod_stitch_mode.db")
+    monkeypatch.setenv("PRODUCTION_DB_PATH", db)
+    monkeypatch.setattr(production_db, "_DB", db)
+    production_db.init_db()
+    production_db.create_jo(
+        {
+            "so_number": "SO-REG",
+            "so_source": "manual",
+            "sku": "A-M",
+            "process": "Stitching",
+            "planned_qty": 40,
+            "exec_type": "Outsource",
+            "vendor_name": "Vendor A",
+            "production_mode": "inhouse",
+            "jo_date": "2026-09-01",
+            "create_component_jos": False,
+            "lines": [{"sku": "A-M", "style": "M", "planned_qty": 40}],
+        }
+    )
+    production_db.create_jo(
+        {
+            "so_number": "SO-S2P",
+            "so_source": "manual",
+            "sku": "B-M",
+            "process": "Stitching",
+            "planned_qty": 60,
+            "exec_type": "Outsource",
+            "vendor_name": "Vendor B",
+            "production_mode": "stitch_to_pack",
+            "jo_date": "2026-09-01",
+            "create_component_jos": False,
+            "lines": [{"sku": "B-M", "style": "M", "planned_qty": 60}],
+        }
+    )
+    regular = build_cutting_report(process="Stitching", production_mode="inhouse", export=True)
+    assert regular["kpis"]["planned_qty"] == 40
+    s2p = build_cutting_report(process="Stitching", production_mode="stitch_to_pack", export=True)
+    assert s2p["kpis"]["planned_qty"] == 60
+    all_paths = build_cutting_report(process="Stitching", production_mode="all", export=True)
+    assert all_paths["kpis"]["planned_qty"] == 100
