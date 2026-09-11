@@ -3929,18 +3929,27 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
 
     ot_rows = conn.execute(
         """
-        SELECT id, title, description, due_date, status, started_at, completed_at, priority
-        FROM one_time_tasks
-        WHERE employee_id=? AND active=1
-          AND status IN ('Pending', 'In Progress', 'Done', 'Rejected')
+        SELECT t.id, t.title, t.description, t.due_date, t.status, t.started_at, t.completed_at,
+               t.priority, t.assigned_by, t.employee_id, t.duration_minutes,
+               t.paused_at, t.active_seconds, t.paused_seconds, t.session_started_at, t.auto_paused,
+               t.backup_employee_id, t.linked_to_employee_id,
+               e.name AS employee_name,
+               be.name AS backup_employee_name,
+               le.name AS linked_to_employee_name
+        FROM one_time_tasks t
+        LEFT JOIN employees e ON e.id = t.employee_id
+        LEFT JOIN employees be ON be.id = t.backup_employee_id
+        LEFT JOIN employees le ON le.id = t.linked_to_employee_id
+        WHERE t.employee_id=? AND t.active=1
+          AND t.status IN ('Pending', 'In Progress', 'Done', 'Rejected')
         ORDER BY
-          CASE status
+          CASE t.status
             WHEN 'In Progress' THEN 0
             WHEN 'Pending' THEN 1
             WHEN 'Done' THEN 2
             ELSE 3
           END,
-          due_date
+          t.due_date
         """,
         (employee_id,),
     ).fetchall()
@@ -4056,9 +4065,22 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         )
 
     one_time = [_one_time_task_row(r) for r in ot_rows]
+    one_time.sort(
+        key=lambda t: (
+            0 if t.get("timer_status") == "Active" else 1 if t.get("timer_status") == "Paused" else 2,
+            _priority_rank(t.get("priority") or "Medium"),
+            str(t.get("due_date") or "9999"),
+            str(t.get("title") or ""),
+        )
+    )
     working_tasks = [t for t in one_time if t.get("status") == "In Progress"]
     pending_tasks = [t for t in one_time if t.get("status") in ("Pending", "Rejected")]
     awaiting_approval = [t for t in one_time if t.get("status") == "Done"]
+    actionable = [
+        t
+        for t in one_time
+        if t.get("status") in ("Pending", "Rejected", "In Progress")
+    ]
 
     expected_daily = [
         i
@@ -4083,6 +4105,8 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         "one_time_working": working_tasks,
         "one_time_pending": pending_tasks,
         "one_time_awaiting_approval": awaiting_approval,
+        "one_time_tasks": actionable,
+        "one_time_all": one_time,
         "summary": {
             "responsibilities_total": len(worked_on)
             + len(not_worked)
@@ -4582,7 +4606,58 @@ def _one_time_task_row(row) -> dict:
     d["status"] = _normalize_one_time_status(d.get("status") or "")
     if not d.get("duration_minutes") and d.get("started_at") and d.get("completed_at"):
         d["duration_minutes"] = _duration_minutes(d["started_at"], d["completed_at"])
+    started = str(d.get("started_at") or "").strip()
+    completed = str(d.get("completed_at") or "").strip()
+    paused = str(d.get("paused_at") or "").strip()
+    session_start = str(d.get("session_started_at") or "").strip() or started
+    try:
+        active_sec = int(d.get("active_seconds") or 0)
+    except (TypeError, ValueError):
+        active_sec = 0
+    try:
+        paused_sec = int(d.get("paused_seconds") or 0)
+    except (TypeError, ValueError):
+        paused_sec = 0
+    now = _now_iso()
+    status = d["status"]
+    if status in ("Done", "Approved"):
+        ts = "Completed"
+        ended = completed
+    elif status == "In Progress":
+        if paused:
+            ts = "Paused"
+            paused_sec = paused_sec + _seconds_between(paused, now)
+        else:
+            ts = "Active"
+            active_sec = active_sec + _seconds_between(session_start, now)
+        ended = ""
+    elif status in ("Pending", "Rejected"):
+        ts = "Not Started"
+        ended = ""
+    else:
+        ts = timer_status(started, completed, paused)
+        ended = completed
+    mins = int(d.get("duration_minutes") or 0)
+    if ts in ("Active", "Paused") and active_sec:
+        mins = active_sec // 60
+    elif not mins and active_sec:
+        mins = active_sec // 60
+    d["timer_status"] = ts
+    d["ended_at"] = ended
+    d["active_seconds"] = active_sec
+    d["paused_seconds"] = paused_sec
+    d["active_minutes"] = active_sec // 60
+    d["paused_minutes"] = paused_sec // 60
+    d["duration_minutes"] = mins
+    d["auto_paused"] = int(d.get("auto_paused") or 0)
+    d["is_active"] = ts == "Active"
     return d
+
+
+def _priority_rank(priority: str) -> int:
+    p = str(priority or "Medium").strip().lower()
+    order = {"urgent": 0, "critical": 0, "high": 1, "medium": 2, "low": 3}
+    return order.get(p, 2)
 
 
 def get_one_time_task_owner(task_id: int) -> int | None:

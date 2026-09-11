@@ -151,6 +151,73 @@ def test_start_one_time_pauses_responsibility(hrm, monkeypatch):
     assert detail["timer_status"] == "Paused"
 
 
+def test_employee_check_one_time_tasks_timer_controls(hrm, monkeypatch):
+    """Employee Check exposes OT tasks with timer fields for Start/Pause/Complete UX."""
+    a, b, _, _ = _emps(hrm)
+    monkeypatch.setattr(hrm_db, "in_task_action_window", lambda *a, **k: True)
+    rid = create_responsibility(
+        {
+            "employee_id": a,
+            "title": "Daily R",
+            "frequency": "Daily",
+            "backup_employee_id": b,
+            "mandatory": True,
+        }
+    )
+    pending = create_one_time_task(
+        {
+            "employee_id": a,
+            "title": "Urgent OT",
+            "priority": "Critical",
+            "require_backup": False,
+        }
+    )
+    active = create_one_time_task(
+        {"employee_id": a, "title": "Medium OT", "priority": "Medium", "require_backup": False}
+    )
+    day = date.today().isoformat()
+    assert start_responsibility_timer(rid, day) is True
+    assert start_one_time_task(active) is True
+
+    check = get_employee_day_check(a, day)
+    assert check is not None
+    tasks = check.get("one_time_tasks") or []
+    assert len(tasks) >= 2
+    by_id = {int(t["id"]): t for t in tasks}
+    assert by_id[active]["timer_status"] == "Active"
+    assert by_id[active]["status"] == "In Progress"
+    assert by_id[active].get("employee_name")
+    assert by_id[pending]["timer_status"] == "Not Started"
+    assert by_id[pending]["priority"] == "Critical"
+    # Active OT sorts ahead of pending; Critical pending ahead of Medium when same timer bucket
+    assert int(tasks[0]["id"]) == active
+
+    # Switching: start Critical OT pauses the active Medium OT and the responsibility
+    assert start_one_time_task(pending) is True
+    check2 = get_employee_day_check(a, day)
+    by_id2 = {int(t["id"]): t for t in (check2.get("one_time_tasks") or [])}
+    assert by_id2[pending]["timer_status"] == "Active"
+    assert by_id2[active]["timer_status"] == "Paused"
+    resp = next(
+        i
+        for bucket in ("worked_on", "not_worked", "whenever_required")
+        for i in (check2.get(bucket) or [])
+        if int(i.get("responsibility_id") or 0) == rid
+    )
+    assert resp["timer_status"] == "Paused"
+
+    assert pause_one_time_task(pending) is True
+    assert resume_one_time_task(pending) is True
+    assert hrm_db.complete_one_time_task(pending, "done") is True
+    check3 = get_employee_day_check(a, day)
+    actionable_ids = {int(t["id"]) for t in (check3.get("one_time_tasks") or [])}
+    assert pending not in actionable_ids
+    awaiting = {int(t["id"]) for t in (check3.get("one_time_awaiting_approval") or [])}
+    assert pending in awaiting
+    done_row = next(t for t in (check3.get("one_time_awaiting_approval") or []) if int(t["id"]) == pending)
+    assert done_row["timer_status"] == "Completed"
+
+
 def test_one_time_3h_auto_pause(hrm, monkeypatch):
     a, _, _, _ = _emps(hrm)
     tid = create_one_time_task({"employee_id": a, "title": "Long", "require_backup": False})

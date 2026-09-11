@@ -726,6 +726,8 @@ export default function HRM() {
     qc.invalidateQueries({ queryKey: ['hrm-hod-pending-tasks'] })
     qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
     qc.invalidateQueries({ queryKey: ['hrm-perf'] })
+    qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
+    qc.invalidateQueries({ queryKey: ['hrm-dwr'] })
   }
   const updateOneTimeTaskMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/one-time-tasks/${id}`, data),
@@ -945,6 +947,68 @@ export default function HRM() {
       return
     }
     markTaskMut.mutate({ responsibility_id: respId, log_date: logDate, status })
+  }
+
+  const renderOneTimeCheck = (t: any) => {
+    const ts = t.timer_status || (t.status === 'In Progress' && t.paused_at ? 'Paused' : t.status === 'In Progress' ? 'Active' : t.status === 'Done' || t.status === 'Approved' ? 'Completed' : 'Not Started')
+    const timerLabel = ts === 'Paused' && Number(t.auto_paused) ? 'Auto-paused' : ts
+    const isAssignee = Number(scope?.employee_id) > 0 && Number(checkEmp) === Number(scope?.employee_id)
+    const canTime = isAssignee || canEditAssignments
+    const activeMin = t.active_minutes ?? Math.floor(Number(t.active_seconds || 0) / 60)
+    const pausedMin = t.paused_minutes ?? Math.floor(Number(t.paused_seconds || 0) / 60)
+    const pri = String(t.priority || 'Medium')
+    const isUrgent = /urgent|critical|high/i.test(pri)
+    return (
+      <div className={`flex-1 min-w-0 ${isUrgent ? 'rounded-lg -mx-1 px-1 py-0.5 bg-red-50/60' : ''}`}>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <p className="font-medium text-sm text-gray-800">{t.title}</p>
+          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${priorityStyle(pri)}`}>{pri}</span>
+          {ts === 'Active' && (
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue-600 text-white">Working now</span>
+          )}
+        </div>
+        {t.description && <p className="text-xs text-gray-400 mt-0.5">{t.description}</p>}
+        <p className="text-xs text-gray-400">
+          One-time · {t.status}{t.due_date ? ` · due ${t.due_date}` : ''}{t.assigned_by ? ` · by ${t.assigned_by}` : ''}
+        </p>
+        {t.employee_name && (
+          <p className="text-xs text-gray-500 mt-0.5">Assigned: <b>{t.employee_name}</b></p>
+        )}
+        <LinkedPersonLine item={t} />
+        <BackupPersonLine item={t} />
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${timerBadgeClass(ts)}`}>{timerLabel}</span>
+          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${oneTimeStatusStyle(t.status)}`}>{t.status}</span>
+          <span className="text-[11px] text-gray-500">Start: {fmtDateTime(t.started_at)}</span>
+          {t.paused_at && <span className="text-[11px] text-amber-700">Paused: {fmtDateTime(t.paused_at)}{Number(t.auto_paused) ? ' (auto)' : ''}</span>}
+          <span className="text-[11px] text-gray-500">End: {fmtDateTime(t.completed_at || t.ended_at)}</span>
+          <span className="text-[11px] font-semibold text-[#002B5B]">Active {fmtDuration(activeMin || t.duration_minutes)}</span>
+          {pausedMin > 0 && <span className="text-[11px] text-amber-800">Paused {fmtDuration(pausedMin)}</span>}
+        </div>
+        {canTime && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            {(t.status === 'Pending' || t.status === 'Rejected') && (
+              <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" disabled={startOneTimeTaskMut.isPending} onClick={() => startOneTimeTaskMut.mutate(t.id)}>▶ Start</button>
+            )}
+            {t.status === 'In Progress' && ts === 'Active' && (
+              <>
+                <button type="button" className="text-xs px-2 py-0.5 bg-amber-500 text-white rounded" disabled={pauseOneTimeTaskMut.isPending} onClick={() => pauseOneTimeTaskMut.mutate(t.id)}>⏸ Pause</button>
+                <button type="button" className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded" onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}>■ Complete</button>
+              </>
+            )}
+            {t.status === 'In Progress' && ts === 'Paused' && (
+              <>
+                <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" disabled={resumeOneTimeTaskMut.isPending} onClick={() => resumeOneTimeTaskMut.mutate(t.id)}>▶ Resume</button>
+                <button type="button" className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded" onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}>■ Complete</button>
+              </>
+            )}
+            {t.status === 'Done' && (
+              <span className="text-[10px] text-amber-700">Awaiting HOD approval</span>
+            )}
+          </div>
+        )}
+      </div>
+    )
   }
 
   const renderRespCheck = (i: any, opts?: { showMark?: boolean }) => {
@@ -1738,18 +1802,37 @@ export default function HRM() {
                 </div>
               )}
 
-              {((dayCheckFiltered?.one_time_working || []).length > 0 || (dayCheckFiltered?.one_time_pending || []).length > 0 || (dayCheckFiltered?.one_time_awaiting_approval || []).length > 0) && (
-                <div className="bg-white rounded-xl border p-4 space-y-3">
-                  <h4 className="font-semibold text-[#002B5B] text-sm">One-time tasks</h4>
-                  {(dayCheckFiltered?.one_time_working || []).map((t: any) => (
-                    <p key={t.id} className="text-sm"><span className="text-blue-700 font-medium">In progress:</span> {t.title}</p>
-                  ))}
-                  {(dayCheckFiltered?.one_time_pending || []).map((t: any) => (
-                    <p key={t.id} className="text-sm"><span className="text-gray-600 font-medium">{t.status}:</span> {t.title}{t.due_date ? ` (due ${t.due_date})` : ''}</p>
-                  ))}
-                  {(dayCheckFiltered?.one_time_awaiting_approval || []).map((t: any) => (
-                    <p key={t.id} className="text-sm"><span className="text-amber-700 font-medium">Awaiting HOD:</span> {t.title}</p>
-                  ))}
+              {((dayCheckFiltered?.one_time_tasks || []).length > 0 || (dayCheckFiltered?.one_time_awaiting_approval || []).length > 0) && (
+                <div className="bg-white rounded-xl border overflow-hidden">
+                  <div className="px-4 py-2.5 bg-[#002B5B] text-white font-semibold text-sm flex flex-wrap items-center justify-between gap-2">
+                    <span>One-Time Tasks ({(dayCheckFiltered?.one_time_tasks || []).length + (dayCheckFiltered?.one_time_awaiting_approval || []).length})</span>
+                    <span className="text-[11px] font-normal text-blue-200">Same controls as Responsibilities · starting pauses other active work</span>
+                  </div>
+                  <ul className="divide-y">
+                    {(dayCheckFiltered?.one_time_tasks || []).map((t: any) => (
+                      <li key={t.id} className="px-4 py-3">
+                        <div className="flex items-start gap-2">
+                          <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${
+                            t.timer_status === 'Active' ? 'bg-blue-100 text-blue-800' :
+                            t.timer_status === 'Paused' ? 'bg-amber-100 text-amber-900' :
+                            t.status === 'Rejected' ? 'bg-red-100 text-red-700' :
+                            'bg-gray-100 text-gray-600'
+                          }`}>
+                            {t.timer_status === 'Active' ? '▶' : t.timer_status === 'Paused' ? '⏸' : t.status === 'Rejected' ? '↩' : '○'}
+                          </span>
+                          {renderOneTimeCheck(t)}
+                        </div>
+                      </li>
+                    ))}
+                    {(dayCheckFiltered?.one_time_awaiting_approval || []).map((t: any) => (
+                      <li key={`await-${t.id}`} className="px-4 py-3">
+                        <div className="flex items-start gap-2">
+                          <span className="mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs bg-amber-100 text-amber-800">✓</span>
+                          {renderOneTimeCheck(t)}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
 
