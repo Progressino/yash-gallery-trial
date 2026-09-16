@@ -179,6 +179,8 @@ def init_db() -> None:
         "ALTER TABLE items ADD COLUMN stock REAL DEFAULT 0",
         "ALTER TABLE items ADD COLUMN reserved REAL DEFAULT 0",
         "ALTER TABLE items ADD COLUMN procurement_type TEXT DEFAULT ''",
+        "ALTER TABLE items ADD COLUMN image_path TEXT DEFAULT ''",
+        "ALTER TABLE items ADD COLUMN image_updated_at TEXT DEFAULT ''",
     ]:
         try:
             conn.execute(col_ddl)
@@ -447,7 +449,9 @@ def list_items(
     q += " ORDER BY i.created_at DESC, i.id DESC"
     rows = conn.execute(q, params).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    from ..services.item_images import enrich_item_image_fields
+
+    return [enrich_item_image_fields(dict(r)) for r in rows]
 
 
 def get_item(item_id: int) -> Optional[dict]:
@@ -477,7 +481,9 @@ def get_item(item_id: int) -> Optional[dict]:
     ).fetchall()
     item["routing"] = [dict(r) for r in routing]
     conn.close()
-    return item
+    from ..services.item_images import enrich_item_image_fields
+
+    return enrich_item_image_fields(item)
 
 
 def create_item(
@@ -592,6 +598,38 @@ def get_item_by_code(item_code: str) -> Optional[dict]:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_item_by_code_ci(item_code: str) -> Optional[dict]:
+    """Case-insensitive exact match on item_code."""
+    code = str(item_code or "").strip()
+    if not code:
+        return None
+    conn = _connect()
+    row = conn.execute(
+        """SELECT i.*, t.name AS item_type_name, t.code AS item_type_code
+           FROM items i JOIN item_types t ON i.item_type_id = t.id
+           WHERE LOWER(i.item_code) = LOWER(?)""",
+        (code,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def set_item_image_meta(item_id: int, image_path: str, image_updated_at: str) -> bool:
+    conn = _connect()
+    cur = conn.execute(
+        "UPDATE items SET image_path = ?, image_updated_at = ? WHERE id = ?",
+        (image_path or "", image_updated_at or "", int(item_id)),
+    )
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def clear_item_image_meta(item_id: int) -> bool:
+    return set_item_image_meta(item_id, "", "")
 
 
 def apply_document_stock_delta(

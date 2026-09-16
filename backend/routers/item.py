@@ -23,10 +23,15 @@ DELETE /api/items/{id}/boms/{bom_id}/lines/{lid} — delete BOM line
 POST /api/items/{id}/boms/{bom_id}/copy          — copy BOM to another item
 
 POST /api/items/import                            — bulk import from Excel/CSV
+POST /api/items/{id}/image                        — upload/replace product image (≤100KB)
+DELETE /api/items/{id}/image                      — remove product image
+GET  /api/items/by-code/{item_code}/image         — serve mapped image (inherits parent)
+POST /api/items/images/bulk                       — ZIP bulk map by filename=item_code
 """
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from ..services.permissions import may_access_erp_admin
@@ -46,6 +51,7 @@ from ..db.item_db import (
     adjust_item_stock, list_stock_adjustments, book_stock_for_code, get_item_by_code,
 )
 from ..services.item_import import parse_item_import
+from ..services import item_images
 
 router = APIRouter()
 
@@ -307,6 +313,60 @@ def add_item(body: ItemCreate):
 def search_items(q: str = ""):
     """Lightweight search for BOM component lookup."""
     return list_items(search=q, parent_only=False)
+
+
+@router.get("/by-code/{item_code}/image")
+def get_item_image_by_code(item_code: str):
+    path = item_images.resolve_image_file_for_code(item_code)
+    if path is None:
+        raise HTTPException(status_code=404, detail="No image for this item")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        filename=path.name,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+@router.post("/images/bulk")
+async def bulk_upload_item_images(file: UploadFile = File(...)):
+    """ZIP of images named by item_code (e.g. STYLE123.jpg). Auto-optimized to ≤100KB."""
+    name = (file.filename or "").lower()
+    if not name.endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Upload a .zip file of images named by item_code")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+    try:
+        return item_images.bulk_import_zip(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{item_id}/image")
+async def upload_item_image(item_id: int, file: UploadFile = File(...)):
+    item = get_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+    # Soft cap before optimize (reject absurd uploads)
+    if len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large (max 15MB before optimize)")
+    try:
+        return item_images.save_item_image(item_id, raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/{item_id}/image")
+def remove_item_image(item_id: int):
+    item = get_item(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    item_images.delete_item_image(item_id)
+    return {"ok": True}
 
 
 @router.get("/{item_id}")

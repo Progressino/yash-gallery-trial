@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { mayAccessErpAdmin, useAuth } from '../store/auth'
 import SetBomPanel, { parentStyleKeyFromSku } from '../components/SetBomPanel'
+import { itemImageUrl } from '../lib/itemImage'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface ItemType    { id: number; name: string; code: string }
@@ -35,6 +36,9 @@ interface Item {
   uom: string; variant_count: number; created_at: string
   alias: string; gst_applicability: string; type_of_supply: string; gst_rate: number
   procurement_type?: string
+  has_image?: boolean
+  image_url?: string
+  image_updated_at?: string
 }
 interface ItemDetail extends Item {
   variants: { id: number; item_code: string; size_label: string }[]
@@ -566,6 +570,16 @@ const totalCost = useMemo(() =>
   const [importTotal,   setImportTotal]   = useState(0)
   const [importMsg,     setImportMsg]     = useState('')
   const [importing,     setImporting]     = useState(false)
+  const [bulkImgMsg,    setBulkImgMsg]    = useState('')
+  const [bulkImgBusy,   setBulkImgBusy]   = useState(false)
+  const [bulkImgResult, setBulkImgResult] = useState<null | {
+    matched_count: number; unmatched_count: number; error_count: number
+    unmatched: string[]; errors: string[]; matched: { file: string; item_code: string; bytes: number }[]
+  }>(null)
+  const bulkImgRef = useRef<HTMLInputElement>(null)
+  const [editImgBusy, setEditImgBusy] = useState(false)
+  const [editImgBust, setEditImgBust] = useState(0)
+  const editImgRef = useRef<HTMLInputElement>(null)
 
   async function handleImportPreview(file: File) {
     setImportPreview(null); setImportMsg('')
@@ -592,6 +606,56 @@ const totalCost = useMemo(() =>
     } catch (e: any) {
       setImportMsg('✗ ' + (e?.response?.data?.detail ?? 'Import failed.'))
     } finally { setImporting(false) }
+  }
+
+  async function handleBulkImageZip(file: File) {
+    setBulkImgBusy(true); setBulkImgMsg(''); setBulkImgResult(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const { data } = await api.post('/items/images/bulk', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      setBulkImgResult(data)
+      setBulkImgMsg(`✓ Mapped ${data.matched_count} image(s). Unmatched: ${data.unmatched_count}. Errors: ${data.error_count}.`)
+      qc.invalidateQueries({ queryKey: ['items'] })
+      qc.invalidateQueries({ queryKey: ['item-detail'] })
+    } catch (e: any) {
+      setBulkImgMsg('✗ ' + (e?.response?.data?.detail ?? 'Bulk image upload failed.'))
+    } finally {
+      setBulkImgBusy(false)
+    }
+  }
+
+  async function uploadEditItemImage(file: File) {
+    if (!editItem) return
+    setEditImgBusy(true); setEditItemErr('')
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      await api.post(`/items/${editItem.id}/image`, fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      setEditImgBust(Date.now())
+      qc.invalidateQueries({ queryKey: ['items'] })
+      qc.invalidateQueries({ queryKey: ['item-detail'] })
+    } catch (e: any) {
+      setEditItemErr(e?.response?.data?.detail ?? 'Image upload failed.')
+    } finally {
+      setEditImgBusy(false)
+    }
+  }
+
+  async function removeEditItemImage() {
+    if (!editItem) return
+    if (!confirm('Remove product image for this item?')) return
+    setEditImgBusy(true); setEditItemErr('')
+    try {
+      await api.delete(`/items/${editItem.id}/image`)
+      setEditImgBust(Date.now())
+      qc.invalidateQueries({ queryKey: ['items'] })
+      qc.invalidateQueries({ queryKey: ['item-detail'] })
+    } catch (e: any) {
+      setEditItemErr(e?.response?.data?.detail ?? 'Could not remove image.')
+    } finally {
+      setEditImgBusy(false)
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════════
@@ -831,6 +895,7 @@ const totalCost = useMemo(() =>
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="bg-gray-50 border-b border-gray-200">
+                        <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Img</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Item Code</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Name</th>
                         <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
@@ -848,6 +913,18 @@ const totalCost = useMemo(() =>
                           <tr
                             className="hover:bg-gray-50 cursor-pointer transition-colors"
                             onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}>
+                            <td className="px-4 py-2">
+                              {item.has_image ? (
+                                <img
+                                  src={itemImageUrl(item.item_code, item.image_updated_at)}
+                                  alt=""
+                                  className="w-9 h-9 object-cover rounded border border-gray-200 bg-white"
+                                  loading="lazy"
+                                />
+                              ) : (
+                                <div className="w-9 h-9 rounded border border-dashed border-gray-200 bg-gray-50" title="No image" />
+                              )}
+                            </td>
                             <td className="px-4 py-3 font-mono font-medium text-[#002B5B]">{item.item_code}</td>
                             <td className="px-4 py-3 font-medium text-gray-900">{item.item_name}</td>
                             <td className="px-4 py-3">
@@ -882,7 +959,7 @@ const totalCost = useMemo(() =>
                           </tr>
                           {expandedId === item.id && expandedDetail && expandedDetail.id === item.id && (
                             <tr key={`exp-${item.id}`} className="bg-blue-50/40">
-                              <td colSpan={9} className="px-6 py-3">
+                              <td colSpan={10} className="px-6 py-3">
                                 <div className="flex flex-wrap gap-5 text-xs text-gray-600">
                                   {expandedDetail.variants.length > 0 && (
                                     <div>
@@ -1170,6 +1247,39 @@ const totalCost = useMemo(() =>
                       </div>
                       <button onClick={() => setShowEditItem(false)} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
                     </div>
+
+                    <div className="rounded-xl border border-gray-200 bg-slate-50 p-3 flex flex-wrap items-center gap-3">
+                      <img
+                        key={editImgBust}
+                        src={itemImageUrl(editItem.item_code, editImgBust || Date.now())}
+                        alt=""
+                        className="w-20 h-20 object-cover rounded-lg border border-gray-200 bg-white"
+                        onError={e => { (e.target as HTMLImageElement).style.visibility = 'hidden' }}
+                      />
+                      <div className="space-y-1.5 min-w-0 flex-1">
+                        <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Product image</p>
+                        <p className="text-[11px] text-gray-500">Auto-optimized to ≤100KB. Shown on JO / PO / JWO prints.</p>
+                        <div className="flex flex-wrap gap-2">
+                          <button type="button" disabled={editImgBusy}
+                            onClick={() => editImgRef.current?.click()}
+                            className="text-xs px-3 py-1.5 bg-[#002B5B] text-white rounded-lg disabled:opacity-50">
+                            {editImgBusy ? 'Uploading…' : 'Upload / Replace'}
+                          </button>
+                          <button type="button" disabled={editImgBusy}
+                            onClick={() => void removeEditItemImage()}
+                            className="text-xs px-3 py-1.5 border border-red-200 text-red-600 rounded-lg disabled:opacity-50">
+                            Remove
+                          </button>
+                        </div>
+                        <input ref={editImgRef} type="file" accept="image/*" className="hidden"
+                          onChange={e => {
+                            const f = e.target.files?.[0]
+                            if (f) void uploadEditItemImage(f)
+                            e.target.value = ''
+                          }} />
+                      </div>
+                    </div>
+
                     <div className="grid grid-cols-2 gap-3">
                       {([
                         ['item_name',      'Item Name *',    'text'],
@@ -2130,6 +2240,47 @@ const totalCost = useMemo(() =>
                   </div>
                 </div>
               )}
+
+              <div className="border-t border-gray-200 pt-6 space-y-3">
+                <h3 className="text-sm font-semibold text-[#002B5B]">Bulk product images (ZIP)</h3>
+                <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 text-xs text-amber-900 space-y-1">
+                  <p>Name each file after the <strong>Item / Style / P-Code</strong> exactly (e.g. <code className="font-mono bg-white px-1 rounded">STYLE123.jpg</code>, <code className="font-mono bg-white px-1 rounded">P00456.png</code>).</p>
+                  <p>Put all photos in one ZIP and upload here. Images are auto-compressed to ≤100KB and then appear on JO / PO / JWO prints.</p>
+                  <p>Excel embedded photos cannot be imported — use this ZIP method instead.</p>
+                </div>
+                <div
+                  className="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center hover:border-[#002B5B] transition-colors cursor-pointer"
+                  onClick={() => bulkImgRef.current?.click()}
+                  onDragOver={e => e.preventDefault()}
+                  onDrop={e => {
+                    e.preventDefault()
+                    const f = e.dataTransfer.files[0]
+                    if (f) void handleBulkImageZip(f)
+                  }}>
+                  <div className="text-3xl mb-2">🖼️</div>
+                  <p className="text-sm text-gray-600 font-medium">{bulkImgBusy ? 'Uploading & optimizing…' : 'Click or drop a ZIP of item images'}</p>
+                  <p className="text-xs text-gray-400 mt-1">.zip with .jpg / .png / .webp files</p>
+                  <input ref={bulkImgRef} type="file" accept=".zip,application/zip" className="hidden"
+                    onChange={e => {
+                      const f = e.target.files?.[0]
+                      if (f) void handleBulkImageZip(f)
+                      e.target.value = ''
+                    }} />
+                </div>
+                {bulkImgMsg && (
+                  <p className={`text-sm font-medium ${bulkImgMsg.startsWith('✓') ? 'text-green-600' : 'text-red-500'}`}>{bulkImgMsg}</p>
+                )}
+                {bulkImgResult && (bulkImgResult.unmatched?.length > 0 || bulkImgResult.errors?.length > 0) && (
+                  <div className="text-xs text-gray-600 space-y-1 rounded-lg border border-gray-200 p-3 bg-white max-h-40 overflow-y-auto">
+                    {bulkImgResult.unmatched?.slice(0, 30).map(f => (
+                      <p key={f}>Unmatched file: <span className="font-mono">{f}</span></p>
+                    ))}
+                    {bulkImgResult.errors?.slice(0, 20).map((err, i) => (
+                      <p key={i} className="text-red-600">{err}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

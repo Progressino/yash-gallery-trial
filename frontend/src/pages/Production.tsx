@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
+import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
 import {
   appendManualJoLine,
   expandJoExportRows,
@@ -523,6 +524,13 @@ const printJO = async (jo: JO) => {
     const bundle = await fetchDocBarcode('JO', jo.jo_number)
     barcodeHtml = barcodePrintBlock(bundle)
   } catch { /* optional */ }
+  const imageCodes = [
+    jo.sku,
+    jo.fabric_code,
+    ...jo.lines.map(l => l.sku),
+  ].filter(Boolean) as string[]
+  const imageMap = await fetchItemImageDataUrlMap(imageCodes)
+  const headerThumb = printThumbHtml(imageMap[jo.sku] || imageMap[jo.lines[0]?.sku || ''], 72)
   const win = window.open('', '_blank', 'width=900,height=700')
   if (!win) { alert('Allow popups to print'); return }
   win.document.write(`<!DOCTYPE html><html><head><title>JO - ${jo.jo_number}</title>
@@ -556,7 +564,9 @@ const printJO = async (jo: JO) => {
     @media print{body{padding:12px}}
   </style></head><body>
   <div class="header">
-    <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b">Production Department</div></div>
+    <div style="display:flex;gap:12px;align-items:flex-start">${headerThumb}<div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b">Production Department</div>
+      ${jo.sku ? `<div style="margin-top:6px;font-size:12px;font-weight:600;color:#002B5B">${jo.sku}${jo.sku_name ? ' — ' + jo.sku_name : ''}</div>` : ''}
+    </div></div>
     <div><div class="doc-title">JOB ORDER</div><div class="doc-num">${jo.jo_number}</div>${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}</div>
   </div>
   <div class="routing-bar">
@@ -570,7 +580,7 @@ const printJO = async (jo: JO) => {
     <div class="info-box"><div class="info-label">JO Date</div><div class="info-value">${jo.jo_date}</div>
       <div class="info-label" style="margin-top:8px">Expected Completion</div><div class="info-value">${jo.expected_completion || '—'}</div></div>
     ${jo.process === 'Cutting' && jo.fabric_code ? `
-    <div class="info-box"><div class="info-label">Fabric Code</div><div class="info-value">${jo.fabric_code}</div>
+    <div class="info-box"><div class="info-label">Fabric Code</div><div class="info-value">${printThumbHtml(imageMap[jo.fabric_code], 36)}${jo.fabric_code}</div>
       <div class="info-label" style="margin-top:8px">Fabric Qty</div><div class="info-value">${jo.fabric_qty} ${jo.fabric_unit}</div></div>` : ''}
   </div>
   <table>
@@ -581,7 +591,7 @@ const printJO = async (jo: JO) => {
     <tbody>
       ${jo.lines.map((l, i) => `<tr>
         <td>${i+1}</td>
-        <td><strong>${l.sku}</strong></td>
+        <td>${printThumbHtml(imageMap[l.sku], 36)}<strong>${l.sku}</strong></td>
         <td>${l.sku_name}${l.style ? ' — ' + l.style : ''}</td>
         <td class="r">${fmt(l.planned_qty)}</td>
         <td class="r">${fmtR(l.vendor_rate)}</td>

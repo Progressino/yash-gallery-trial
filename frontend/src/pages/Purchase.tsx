@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
+import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
 
 type Tab = 'dashboard' | 'suppliers' | 'processors' | 'pr' | 'po' | 'jwo' | 'grn' | 'min' | 'gate-pass' | 'audit'
 type PRSubTab = 'list' | 'new' | 'from-mrp'
@@ -174,7 +175,7 @@ const printDocument = (html: string, title: string) => {
 async function printWithBarcode(
   docType: string,
   docNumber: string,
-  buildHtml: (barcodeHtml: string) => string,
+  buildHtml: (barcodeHtml: string) => string | Promise<string>,
   title: string,
 ) {
   let barcodeHtml = ''
@@ -184,10 +185,10 @@ async function printWithBarcode(
   } catch {
     /* print without barcode if API unavailable */
   }
-  printDocument(buildHtml(barcodeHtml), title)
+  printDocument(await buildHtml(barcodeHtml), title)
 }
 
-const buildPOPrintHTML = (po: PO, barcodeHtml = '') => {
+const buildPOPrintHTML = (po: PO, barcodeHtml = '', imageMap: Record<string, string> = {}) => {
   const logoUrl = typeof window !== 'undefined' ? `${window.location.origin}/logo.png` : '/logo.png'
   const subtotal = po.lines.reduce((s, l) => s + l.amount, 0)
   const gstTotal = po.lines.reduce((s, l) => s + (l.amount * (l.gst_pct || 0) / 100), 0)
@@ -264,7 +265,7 @@ const buildPOPrintHTML = (po: PO, barcodeHtml = '') => {
       <tbody>
         ${po.lines.map((l, i) => `<tr>
           <td>${i + 1}</td>
-          <td><strong>${l.material_code}</strong></td>
+          <td>${printThumbHtml(imageMap[l.material_code], 40)}<strong>${l.material_code}</strong></td>
           <td>${l.material_name}</td>
           <td>${l.material_type || '—'}</td>
           <td class="right">${l.po_qty}</td>
@@ -289,7 +290,7 @@ const buildPOPrintHTML = (po: PO, barcodeHtml = '') => {
     </div>`
 }
 
-const buildJWOPrintHTML = (jwo: JWO, barcodeHtml = '') => {
+const buildJWOPrintHTML = (jwo: JWO, barcodeHtml = '', imageMap: Record<string, string> = {}) => {
   const total = jwo.lines.reduce((s, l) => s + (l.output_qty * l.rate), 0)
   return `
     <div class="header">
@@ -329,8 +330,8 @@ const buildJWOPrintHTML = (jwo: JWO, barcodeHtml = '') => {
       <tbody>
         ${jwo.lines.map((l, i) => `<tr>
           <td>${i + 1}</td>
-          <td><strong>${l.input_material}</strong></td>
-          <td>${l.output_material}</td>
+          <td>${printThumbHtml(imageMap[l.input_material], 36)}<strong>${l.input_material}</strong></td>
+          <td>${printThumbHtml(imageMap[l.output_material], 36)}${l.output_material}</td>
           <td>${l.process_type}</td>
           <td class="right">${l.output_qty}</td>
           <td>${l.unit || 'PCS'}</td>
@@ -1768,7 +1769,10 @@ export default function Purchase() {
                     <span className="text-sm font-semibold text-gray-700">{fmt(po.total)}</span>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(po.status)}`}>{po.status}</span>
                     {/* ── Print button for PO ── */}
-                    <button onClick={e => { e.stopPropagation(); void printWithBarcode('PO', po.po_number, bc => buildPOPrintHTML(po, bc), `PO - ${po.po_number}`) }}
+                    <button onClick={e => { e.stopPropagation(); void printWithBarcode('PO', po.po_number, async bc => {
+                      const map = await fetchItemImageDataUrlMap(po.lines.map(l => l.material_code))
+                      return buildPOPrintHTML(po, bc, map)
+                    }, `PO - ${po.po_number}`) }}
                       className="text-xs px-2 py-1 border border-gray-200 rounded text-gray-500 hover:bg-gray-50 flex items-center gap-1" title="Print PO">
                       🖨️ Print
                     </button>
@@ -1935,7 +1939,11 @@ export default function Purchase() {
                     <span className="text-sm font-semibold text-gray-700">{fmt(jwo.total)}</span>
                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusColor(jwo.status)}`}>{jwo.status}</span>
                     {/* ── Print button for JWO ── */}
-                    <button onClick={e => { e.stopPropagation(); void printWithBarcode('JWO', jwo.jwo_number, bc => buildJWOPrintHTML(jwo, bc), `JWO - ${jwo.jwo_number}`) }}
+                    <button onClick={e => { e.stopPropagation(); void printWithBarcode('JWO', jwo.jwo_number, async bc => {
+                      const codes = jwo.lines.flatMap(l => [l.input_material, l.output_material])
+                      const map = await fetchItemImageDataUrlMap(codes)
+                      return buildJWOPrintHTML(jwo, bc, map)
+                    }, `JWO - ${jwo.jwo_number}`) }}
                       className="text-xs px-2 py-1 border border-gray-200 rounded text-gray-500 hover:bg-gray-50 flex items-center gap-1" title="Print JWO">
                       🖨️ Print
                     </button>
