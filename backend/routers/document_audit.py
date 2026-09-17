@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from ..db import document_audit_db as audit
-from ..services.permissions import may_access_erp_admin
+from ..services.permissions import can_document_verify, may_access_erp_admin
 
 router = APIRouter()
 
@@ -21,11 +21,7 @@ def _role(request: Request) -> str:
 
 
 def _can_verify(request: Request) -> bool:
-    role = _role(request).lower()
-    if may_access_erp_admin(role):
-        return True
-    # Accounts / finance / manager / hod can verify
-    return any(k in role for k in ("admin", "manager", "accounts", "finance", "hod", "audit"))
+    return can_document_verify(_role(request))
 
 
 class UnverifyBody(BaseModel):

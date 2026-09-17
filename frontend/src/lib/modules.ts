@@ -14,6 +14,7 @@ export type ModuleKey =
   | 'sales'
   | 'items'
   | 'purchase'
+  | 'document_audit'
   | 'tna'
   | 'production'
   | 'stitching'
@@ -38,6 +39,7 @@ export const MODULE_LABELS: Record<ModuleKey, string> = {
   sales: 'Sales Orders',
   items: 'Item Master',
   purchase: 'Purchase',
+  document_audit: 'Doc Verify / Audit',
   tna: 'TNA Calendar',
   production: 'Production',
   stitching: 'Stitching Costing',
@@ -64,7 +66,7 @@ export const PATH_MODULE: Record<string, ModuleKey> = {
   '/sales': 'sales',
   '/items': 'items',
   '/purchase': 'purchase',
-  '/document-audit': 'purchase',
+  '/document-audit': 'document_audit',
   '/gate': 'purchase',
   '/tna': 'tna',
   '/production': 'production',

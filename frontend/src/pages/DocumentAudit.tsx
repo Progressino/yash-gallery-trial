@@ -3,12 +3,21 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { mayAccessErpAdmin, useAuth } from '../store/auth'
 
+/** Verify/Unverify is Accounts/Admin/Audit — not granted by Production or Purchase module access. */
+function canDocumentVerify(role: string, user: Parameters<typeof mayAccessErpAdmin>[0]): boolean {
+  if (mayAccessErpAdmin(user) && /^(Super Admin|Admin|Sir)$/i.test(String(user?.role || role))) {
+    return true
+  }
+  return /accounts|account|finance|audit|auditor/i.test(role)
+}
+
 const today = () => new Date().toISOString().slice(0, 10)
 
 export default function DocumentAudit() {
   const { user } = useAuth()
   const role = String(user?.role || '')
-  const canVerify = mayAccessErpAdmin(user) || /accounts|finance|manager|hod|audit|admin/i.test(role)
+  const canVerify = canDocumentVerify(role, user)
+  const canForce = mayAccessErpAdmin(user) && /^(Super Admin|Admin|Sir)$/i.test(role)
   const qc = useQueryClient()
   const [filters, setFilters] = useState({
     audit_status: 'Pending',
@@ -191,7 +200,7 @@ export default function DocumentAudit() {
             <h3 className="font-semibold">Unverify {unverifyModal.doc_type} {unverifyModal.doc_number}</h3>
             <p className="text-xs text-gray-500">Mandatory reason. Document returns to Pending and becomes editable (unless downstream force is required).</p>
             <textarea value={reason} onChange={e => setReason(e.target.value)} rows={3} className="w-full border rounded-lg px-2 py-1.5 text-sm" placeholder="Reason for unverify…" />
-            {mayAccessErpAdmin(user) && (
+            {canForce && (
               <label className="flex items-center gap-2 text-xs text-rose-800">
                 <input type="checkbox" checked={force} onChange={e => setForce(e.target.checked)} />
                 Admin force (downstream dependencies present)

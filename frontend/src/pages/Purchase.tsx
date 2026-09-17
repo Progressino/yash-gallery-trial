@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
+import { YASH_GALLERY, brandLogoDataUrl, brandPrintHeaderHtml } from '../lib/printBrand'
 
 type Tab = 'dashboard' | 'suppliers' | 'processors' | 'pr' | 'po' | 'jwo' | 'grn' | 'min' | 'gate-pass' | 'audit'
 type PRSubTab = 'list' | 'new' | 'from-mrp'
@@ -94,14 +95,6 @@ const GRN_TYPES = ['PO Receipt', 'JWO Receipt']
 const PAYMENT_TERMS = ['Immediate', 'Net 15', 'Net 30', 'Net 45', 'Net 60']
 const GST_RATES = [0, 5, 12, 18, 28]
 
-const YASH_GALLERY = {
-  name: 'Yash Gallery Pvt. Ltd.',
-  address: 'Bhiwandi, Thane District, Maharashtra — 421302, India',
-  gst: '',
-  phone: '',
-  email: 'purchase@yashgallery.com',
-}
-
 const defaultBillTo = () => ({
   bill_to_name: YASH_GALLERY.name,
   bill_to_address: YASH_GALLERY.address,
@@ -188,8 +181,8 @@ async function printWithBarcode(
   printDocument(await buildHtml(barcodeHtml), title)
 }
 
-const buildPOPrintHTML = (po: PO, barcodeHtml = '', imageMap: Record<string, string> = {}) => {
-  const logoUrl = typeof window !== 'undefined' ? `${window.location.origin}/logo.png` : '/logo.png'
+const buildPOPrintHTML = async (po: PO, barcodeHtml = '', imageMap: Record<string, string> = {}) => {
+  const logoSrc = await brandLogoDataUrl()
   const subtotal = po.lines.reduce((s, l) => s + l.amount, 0)
   const gstTotal = po.lines.reduce((s, l) => s + (l.amount * (l.gst_pct || 0) / 100), 0)
   const grand = subtotal + gstTotal
@@ -201,23 +194,13 @@ const buildPOPrintHTML = (po: PO, barcodeHtml = '', imageMap: Record<string, str
   const shipContact = [po.ship_to_contact, po.ship_to_phone].filter(Boolean).join(' · ')
   const shipGst = po.ship_to_gst || ''
   return `
-    <div class="header">
-      <div class="company-block">
-        <img src="${logoUrl}" alt="Yash Gallery" class="company-logo" onerror="this.style.display='none'" />
-        <div>
-          <div class="company-name">${YASH_GALLERY.name}</div>
-          <div class="company-meta">${YASH_GALLERY.address.replace(/\n/g, '<br/>')}</div>
-          ${YASH_GALLERY.phone ? `<div class="company-meta">Tel: ${YASH_GALLERY.phone}</div>` : ''}
-          ${YASH_GALLERY.email ? `<div class="company-meta">${YASH_GALLERY.email}</div>` : ''}
-        </div>
-      </div>
-      <div>
-        <div class="doc-title">PURCHASE ORDER</div>
-        <div class="doc-num">${po.po_number}</div>
-        <div style="font-size:11px;color:#64748b;text-align:right;margin-top:6px">Date: ${po.po_date || today()}</div>
-        ${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}
-      </div>
-    </div>
+    ${brandPrintHeaderHtml({
+      logoSrc,
+      department: 'Purchase Department',
+      docTitle: 'PURCHASE ORDER',
+      docNumber: po.po_number,
+      barcodeHtml,
+    })}
     <div class="party-grid">
       <div class="party-box">
         <div class="party-title">Bill To</div>
@@ -290,14 +273,17 @@ const buildPOPrintHTML = (po: PO, barcodeHtml = '', imageMap: Record<string, str
     </div>`
 }
 
-const buildJWOPrintHTML = (jwo: JWO, barcodeHtml = '', imageMap: Record<string, string> = {}) => {
+const buildJWOPrintHTML = async (jwo: JWO, barcodeHtml = '', imageMap: Record<string, string> = {}) => {
+  const logoSrc = await brandLogoDataUrl()
   const total = jwo.lines.reduce((s, l) => s + (l.output_qty * l.rate), 0)
   return `
-    <div class="header">
-      <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b;margin-top:4px">Production Department</div></div>
-      <div><div class="doc-title">JOB WORK ORDER</div><div class="doc-num">${jwo.jwo_number}</div>
-      ${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}</div>
-    </div>
+    ${brandPrintHeaderHtml({
+      logoSrc,
+      department: 'Production Department',
+      docTitle: 'JOB WORK ORDER',
+      docNumber: jwo.jwo_number,
+      barcodeHtml,
+    })}
     <div class="info-grid">
       <div class="info-box">
         <div class="info-label">Processor</div>
@@ -355,12 +341,16 @@ const buildJWOPrintHTML = (jwo: JWO, barcodeHtml = '', imageMap: Record<string, 
     </div>`
 }
 
-const buildGRNPrintHTML = (grn: GRN, barcodeHtml = '') => {
+const buildGRNPrintHTML = async (grn: GRN, barcodeHtml = '') => {
+  const logoSrc = await brandLogoDataUrl()
   return `
-    <div class="header">
-      <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b;margin-top:4px">Stores Department</div></div>
-      <div><div class="doc-title">GOODS RECEIPT NOTE</div><div class="doc-num">${grn.grn_number}</div>${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}</div>
-    </div>
+    ${brandPrintHeaderHtml({
+      logoSrc,
+      department: 'Stores Department',
+      docTitle: 'GOODS RECEIPT NOTE',
+      docNumber: grn.grn_number,
+      barcodeHtml,
+    })}
     <div class="info-grid">
       <div class="info-box">
         <div class="info-label">Party Name</div>
@@ -417,12 +407,16 @@ const buildGRNPrintHTML = (grn: GRN, barcodeHtml = '') => {
     </div>`
 }
 
-const buildMINPrintHTML = (min: any, barcodeHtml = '') => {
+const buildMINPrintHTML = async (min: any, barcodeHtml = '') => {
+  const logoSrc = await brandLogoDataUrl()
   return `
-    <div class="header">
-      <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b;margin-top:4px">Stores Department</div></div>
-      <div><div class="doc-title">MATERIAL ISSUE NOTE / DELIVERY CHALLAN</div><div class="doc-num">${min.min_number}</div>${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}</div>
-    </div>
+    ${brandPrintHeaderHtml({
+      logoSrc,
+      department: 'Stores Department',
+      docTitle: 'MATERIAL ISSUE NOTE / DELIVERY CHALLAN',
+      docNumber: min.min_number,
+      barcodeHtml,
+    })}
     <div class="info-grid">
       <div class="info-box">
         <div class="info-label">From Location</div><div class="info-value">${min.from_location || 'Grey Warehouse'}</div>
@@ -607,12 +601,15 @@ function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string })
   )
 }
 
-const buildGatePasePrintHTML = (gp: any) => {
+const buildGatePasePrintHTML = async (gp: any) => {
+  const logoSrc = await brandLogoDataUrl()
   return `
-    <div class="header">
-      <div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b;margin-top:4px">Security / Store Department</div></div>
-      <div><div class="doc-title">GATE PASS</div><div class="doc-num">${gp.gp_number}</div></div>
-    </div>
+    ${brandPrintHeaderHtml({
+      logoSrc,
+      department: 'Security / Store Department',
+      docTitle: 'GATE PASS',
+      docNumber: gp.gp_number,
+    })}
     <div class="info-grid">
       <div class="info-box">
         <div class="info-label">From</div><div class="info-value">${gp.from_location || 'Factory'}</div>

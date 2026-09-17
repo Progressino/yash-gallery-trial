@@ -414,6 +414,8 @@ def barcode_qr_svg(type: str = Query(...), number: str = Query(...)):
 
 @router.get("/gin/{gin_id}/print", response_class=HTMLResponse)
 def gin_print(gin_id: int):
+    from ..services.print_brand import brand_header_html
+
     g = get_gin(gin_id)
     if not g:
         raise HTTPException(404, "GIN not found")
@@ -430,26 +432,31 @@ def gin_print(gin_id: int):
         f"<td>{ln.get('unit') or ''}</td></tr>"
         for i, ln in enumerate(g.get("lines") or [])
     )
+    barcode_html = (
+        f"<img src='{qr}' width='110' height='110' alt='QR'/>"
+        f"<div style='font-size:10px;margin-top:4px'>{g.get('barcode_payload') or ''}</div>"
+        if qr
+        else ""
+    )
+    header = brand_header_html(
+        doc_title="GATE INWARD NOTE",
+        doc_number=g["gin_number"],
+        department="Security / Store Department",
+        barcode_html=barcode_html,
+        extra_left=(
+            f"<div style='margin-top:6px;font-size:11px'>{g.get('gin_date') or ''}</div>"
+            f"<div style='font-size:11px'>{g.get('source_type')}: {g.get('source_number')} · {g.get('party_name') or ''}</div>"
+            f"<div style='font-size:11px'>Stage: {g.get('stage') or '—'}</div>"
+        ),
+    )
     html = f"""<!DOCTYPE html><html><head><title>{g['gin_number']}</title>
     <style>
       body{{font-family:Segoe UI,sans-serif;padding:24px;font-size:12px}}
-      .hdr{{display:flex;justify-content:space-between;border-bottom:2px solid #002B5B;padding-bottom:12px}}
-      .title{{font-size:18px;font-weight:700;color:#002B5B}}
       table{{width:100%;border-collapse:collapse;margin-top:16px}}
       th{{background:#002B5B;color:#fff;padding:6px;text-align:left}}
       td{{padding:6px;border-bottom:1px solid #e2e8f0}}
     </style></head><body>
-    <div class="hdr">
-      <div><div class="title">GATE INWARD NOTE</div>
-        <div>{g['gin_number']} · {g.get('gin_date','')}</div>
-        <div>{g.get('source_type')}: {g.get('source_number')} · {g.get('party_name') or ''}</div>
-        <div>Stage: {g.get('stage') or '—'}</div>
-      </div>
-      <div style="text-align:right">
-        {"<img src='"+qr+"' width='110' height='110' alt='QR'/>" if qr else ""}
-        <div style="font-size:10px;margin-top:4px">{g.get('barcode_payload') or ''}</div>
-      </div>
-    </div>
+    {header}
     <table><thead><tr><th>#</th><th>SKU / Code</th><th>Name</th><th>Planned</th><th>Received</th><th>Unit</th></tr></thead>
     <tbody>{rows}</tbody></table>
     <script>window.onload=()=>window.print()</script>

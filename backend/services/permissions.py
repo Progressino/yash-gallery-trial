@@ -55,6 +55,19 @@ def may_access_erp_admin(role_name: str) -> bool:
     return role_name in _ERP_ADMIN_ROLES
 
 
+def can_document_verify(role_name: str | None) -> bool:
+    """Accounts / Admin audit action — independent of Production/Purchase module access.
+
+    Generic Manager / Production / Clerk roles do NOT inherit Verify/Unverify.
+    Force-unverify remains Admin-gated via may_access_erp_admin.
+    """
+    role = (role_name or "").strip()
+    if role in ("Super Admin", "Admin", "Sir"):
+        return True
+    low = role.lower()
+    return any(k in low for k in ("accounts", "account", "finance", "audit", "auditor"))
+
+
 _DEPARTMENT_ADMIN_USERS = frozenset({"harsh"})
 
 

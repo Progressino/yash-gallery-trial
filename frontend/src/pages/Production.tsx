@@ -4,6 +4,7 @@ import axios from 'axios'
 import api from '../api/client'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
+import { brandLogoDataUrl, brandPrintHeaderHtml, BRAND_PRINT_CSS } from '../lib/printBrand'
 import {
   appendManualJoLine,
   expandJoExportRows,
@@ -530,6 +531,7 @@ const printJO = async (jo: JO) => {
     ...jo.lines.map(l => l.sku),
   ].filter(Boolean) as string[]
   const imageMap = await fetchItemImageDataUrlMap(imageCodes)
+  const logoSrc = await brandLogoDataUrl()
   const headerThumb = printThumbHtml(imageMap[jo.sku] || imageMap[jo.lines[0]?.sku || ''], 72)
   const win = window.open('', '_blank', 'width=900,height=700')
   if (!win) { alert('Allow popups to print'); return }
@@ -537,10 +539,7 @@ const printJO = async (jo: JO) => {
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:'Segoe UI',sans-serif;font-size:12px;color:#1a1a1a;padding:24px}
-    .header{display:flex;justify-content:space-between;border-bottom:2px solid #002B5B;padding-bottom:12px;margin-bottom:16px}
-    .company{font-size:20px;font-weight:700;color:#002B5B}
-    .doc-title{font-size:16px;font-weight:600;color:#002B5B;text-align:right}
-    .doc-num{font-size:22px;font-weight:800;color:#002B5B;text-align:right}
+    ${BRAND_PRINT_CSS}
     .info-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
     .info-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px}
     .info-label{font-size:10px;text-transform:uppercase;color:#64748b;font-weight:600;margin-bottom:4px}
@@ -563,12 +562,15 @@ const printJO = async (jo: JO) => {
     .sign-line{border-top:1px solid #64748b;margin-top:32px;padding-top:6px;font-size:10px;color:#64748b}
     @media print{body{padding:12px}}
   </style></head><body>
-  <div class="header">
-    <div style="display:flex;gap:12px;align-items:flex-start">${headerThumb}<div><div class="company">🧵 Garment ERP</div><div style="font-size:11px;color:#64748b">Production Department</div>
-      ${jo.sku ? `<div style="margin-top:6px;font-size:12px;font-weight:600;color:#002B5B">${jo.sku}${jo.sku_name ? ' — ' + jo.sku_name : ''}</div>` : ''}
-    </div></div>
-    <div><div class="doc-title">JOB ORDER</div><div class="doc-num">${jo.jo_number}</div>${barcodeHtml ? `<div style="margin-top:8px;display:flex;justify-content:flex-end">${barcodeHtml}</div>` : ''}</div>
-  </div>
+  ${brandPrintHeaderHtml({
+    logoSrc,
+    department: 'Production Department',
+    docTitle: 'JOB ORDER',
+    docNumber: jo.jo_number,
+    barcodeHtml,
+    extraLeft: headerThumb
+      + (jo.sku ? `<div style="margin-top:6px;font-size:12px;font-weight:600;color:#002B5B">${jo.sku}${jo.sku_name ? ' — ' + jo.sku_name : ''}</div>` : ''),
+  })}
   <div class="routing-bar">
     ${(jo.routing || []).map(p => `<span class="step ${p === jo.process ? 'active' : ''}">${PROCESS_ICONS[p] || ''} ${p}</span>${p !== jo.routing[jo.routing.length-1] ? '<span class="arrow">→</span>' : ''}`).join('')}
   </div>

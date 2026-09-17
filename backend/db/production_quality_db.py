@@ -642,21 +642,29 @@ def list_rework_orders(
 ) -> list[dict]:
     init_quality_tables()
     conn = _connect()
-    sql = "SELECT * FROM rework_orders WHERE 1=1"
+    sql = """
+        SELECT r.*,
+               j.jo_number AS original_jo_number,
+               d.reason AS defect_reason
+        FROM rework_orders r
+        LEFT JOIN job_orders j ON j.id = r.original_jo_id
+        LEFT JOIN quality_defects d ON d.id = r.defect_id
+        WHERE 1=1
+    """
     params: list[Any] = []
     if status:
-        sql += " AND status=?"
+        sql += " AND r.status=?"
         params.append(status)
     if process:
-        sql += " AND process=?"
+        sql += " AND r.process=?"
         params.append(process)
     if original_jo_id:
-        sql += " AND original_jo_id=?"
+        sql += " AND r.original_jo_id=?"
         params.append(int(original_jo_id))
     if vendor:
-        sql += " AND (IFNULL(responsible_vendor,'') LIKE ? COLLATE NOCASE OR IFNULL(rework_by_vendor,'') LIKE ? COLLATE NOCASE)"
+        sql += " AND (IFNULL(r.responsible_vendor,'') LIKE ? COLLATE NOCASE OR IFNULL(r.rework_by_vendor,'') LIKE ? COLLATE NOCASE)"
         params.extend([f"%{vendor}%", f"%{vendor}%"])
-    sql += " ORDER BY id DESC LIMIT ?"
+    sql += " ORDER BY r.id DESC LIMIT ?"
     params.append(max(1, min(int(limit or 200), 2000)))
     rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
     conn.close()
@@ -826,18 +834,26 @@ def list_debit_notes(
 ) -> list[dict]:
     init_quality_tables()
     conn = _connect()
-    sql = "SELECT * FROM debit_notes WHERE 1=1"
+    sql = """
+        SELECT dn.*,
+               j.jo_number AS original_jo_number,
+               d.reason AS defect_reason
+        FROM debit_notes dn
+        LEFT JOIN job_orders j ON j.id = dn.original_jo_id
+        LEFT JOIN quality_defects d ON d.id = dn.defect_id
+        WHERE 1=1
+    """
     params: list[Any] = []
     if vendor:
-        sql += " AND IFNULL(responsible_vendor,'') LIKE ? COLLATE NOCASE"
+        sql += " AND IFNULL(dn.responsible_vendor,'') LIKE ? COLLATE NOCASE"
         params.append(f"%{vendor}%")
     if jo_id:
-        sql += " AND original_jo_id=?"
+        sql += " AND dn.original_jo_id=?"
         params.append(int(jo_id))
     if status:
-        sql += " AND status=?"
+        sql += " AND dn.status=?"
         params.append(status)
-    sql += " ORDER BY id DESC LIMIT ?"
+    sql += " ORDER BY dn.id DESC LIMIT ?"
     params.append(max(1, min(int(limit or 200), 2000)))
     rows = []
     for r in conn.execute(sql, params).fetchall():

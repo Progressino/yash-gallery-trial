@@ -4,6 +4,8 @@ from __future__ import annotations
 import html
 from typing import Any
 
+from .print_brand import YASH_GALLERY, brand_header_html
+
 
 _PRINT_CSS = """
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -184,19 +186,14 @@ def challan_detail_html(detail: dict[str, Any]) -> str:
 <style>{_PRINT_CSS}</style>
 </head>
 <body>
-<div class="header">
-  <div>
-    <div class="company">Garment ERP — Stitching Costing</div>
-    <div style="font-size:11px;color:#64748b;margin-top:4px">{style} · {party}</div>
-  </div>
-  <div>
-    <div class="doc-title">CHALLAN REPORT</div>
-    <div class="doc-sub">Challan No: {challan_no}</div>
-    <div class="doc-sub">Generated: {_esc(now_str)}</div>
-  </div>
-</div>
+{brand_header_html(
+    doc_title="CHALLAN REPORT",
+    doc_number=challan_no,
+    department="Stitching Costing",
+    extra_left=f'<div style="margin-top:4px;font-size:11px;color:#64748b">{style} · {party}</div>',
+)}
 {body}
-<div class="footer">Use Print → Save as PDF · Progressino Garment ERP</div>
+<div class="footer">Use Print → Save as PDF · {YASH_GALLERY["name"]}</div>
 <script>window.onload=function(){{window.focus();window.print();}}</script>
 </body>
 </html>"""
@@ -346,19 +343,13 @@ def stitching_reports_print_html(hub: dict[str, Any]) -> str:
 <style>{_PRINT_CSS}</style>
 </head>
 <body>
-<div class="header">
-  <div>
-    <div class="company">Garment ERP — Stitching Costing</div>
-    <div style="font-size:11px;color:#64748b;margin-top:4px">Payroll &amp; profitability report pack</div>
-  </div>
-  <div>
-    <div class="doc-title">STITCHING REPORTS</div>
-    <div class="doc-sub">Period: {date_from} to {date_to}</div>
-    <div class="doc-sub">Generated: {generated}</div>
-  </div>
-</div>
+{brand_header_html(
+    doc_title="STITCHING REPORTS",
+    department="Stitching Costing",
+    extra_left=f'<div style="margin-top:4px;font-size:11px;color:#64748b">Period: {date_from} to {date_to}<br/>Generated: {generated}</div>',
+)}
 {body}
-<div class="footer">Use Print → Save as PDF · Progressino Garment ERP</div>
+<div class="footer">Use Print → Save as PDF · {YASH_GALLERY["name"]}</div>
 <script>window.onload=function(){{window.focus();window.print();}}</script>
 </body>
 </html>"""
