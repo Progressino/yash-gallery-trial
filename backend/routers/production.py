@@ -917,16 +917,8 @@ def stitching_report(
     page_size: int = 200,
     export: bool = False,
 ):
-    """Stitching JO balance report (Cutting-style) with vendor/fabricator visibility.
-
-    Production Mode filters the SO path (regular inhouse vs stitch_to_pack).
-    Exec Type filters who stitches (Inhouse vs Outsource) within that path.
-    Default production_mode=inhouse = regular stitching (In-house + Outsource exec),
-    excluding Stitch-to-Pack.
-    """
-    from ..services.cutting_reports import build_cutting_report
-
-    return build_cutting_report(
+    """Stitching JO balance report — alias of process-balance-report."""
+    return process_balance_report(
         process="Stitching",
         date_from=date_from,
         date_to=date_to,
@@ -948,6 +940,74 @@ def stitching_report(
         as_of_date=as_of_date,
         activity_date=activity_date,
         production_mode=production_mode,
+        components=components,
+        balance_level=balance_level,
+        page=page,
+        page_size=page_size,
+        export=export,
+    )
+
+
+@router.get("/process-balance-report")
+def process_balance_report(
+    process: str = "Stitching",
+    date_from: str = "",
+    date_to: str = "",
+    so_number: str = "",
+    parent_style: str = "",
+    sku: str = "",
+    size: str = "",
+    jo_number: str = "",
+    component: str = "",
+    status: str = "",
+    aging_bucket: str = "",
+    aging_basis: str = "jo_date",
+    variance: str = "",
+    brand: str = "",
+    search: str = "",
+    group_by: str = "vendor",
+    vendor_name: str = "",
+    exec_type: str = "",
+    as_of_date: str = "",
+    activity_date: str = "",
+    production_mode: str = "all",
+    components: str = "",
+    balance_level: str = "component",
+    page: int = 1,
+    page_size: int = 200,
+    export: bool = False,
+):
+    """JO balance report for any production process (same engine as Cutting/Stitching)."""
+    from ..services.cutting_reports import build_cutting_report
+
+    proc = str(process or "Stitching").strip() or "Stitching"
+    # Stitching defaults to regular path; other processes show all paths unless filtered
+    mode = production_mode
+    if not mode:
+        mode = "inhouse" if proc == "Stitching" else "all"
+
+    return build_cutting_report(
+        process=proc,
+        date_from=date_from,
+        date_to=date_to,
+        so_number=so_number,
+        parent_style=parent_style,
+        sku=sku,
+        size=size,
+        jo_number=jo_number,
+        component=component,
+        status=status,
+        aging_bucket=aging_bucket,
+        aging_basis=aging_basis,
+        variance=variance,
+        brand=brand,
+        search=search,
+        group_by=group_by,
+        vendor_name=vendor_name,
+        exec_type=exec_type,
+        as_of_date=as_of_date,
+        activity_date=activity_date,
+        production_mode=mode,
         components=components,
         balance_level=balance_level,
         page=page,

@@ -456,6 +456,19 @@ def _panel_wip_balance_rows(*, production_mode: str = "") -> list[dict[str, Any]
     return rows
 
 
+def _process_sql_names(process_name: str) -> list[str]:
+    """Exact JO.process values to match (handles Kaj / Shirring aliases)."""
+    p = str(process_name or "").strip()
+    if not p:
+        return ["Cutting"]
+    low = p.lower().replace(" ", "")
+    if p in ("Kajh Button", "Kaj Button") or low in ("kajhbutton", "kajbutton"):
+        return ["Kajh Button", "Kaj Button"]
+    if low.startswith("shirring") or "bobbin" in low:
+        return ["Shirring (Bobbin Elastic)", "Shirring"]
+    return [p]
+
+
 def build_cutting_report(
     *,
     process: str = "Cutting",
@@ -489,6 +502,7 @@ def build_cutting_report(
     from .so_production_path import normalize_production_mode
 
     process_name = str(process or "Cutting").strip() or "Cutting"
+    process_names = _process_sql_names(process_name)
     is_cutting = process_name.lower() == "cutting"
     today = _today_ist()
     so_map = _so_lookup()
@@ -504,18 +518,19 @@ def build_cutting_report(
         level = "component"
     conn = production_db._connect()
     try:
+        placeholders = ",".join("?" for _ in process_names)
         jos = [
             dict(r)
             for r in conn.execute(
-                """SELECT id, jo_number, jo_date, so_number, sku, sku_name, process, status,
+                f"""SELECT id, jo_number, jo_date, so_number, sku, sku_name, process, status,
                           planned_qty, issued_qty, received_qty, rejected_qty, balance_qty,
                           expected_completion, fabric_code, fabric_qty, fabric_unit,
                           fabric_issued_qty, fabric_received_qty, fabric_consumption,
                           main_sku, component_code, sku_role, created_at, updated_at,
                           production_mode, vendor_name, exec_type, vendor_rate
                    FROM job_orders
-                   WHERE process=? AND IFNULL(status,'') != 'Cancelled'""",
-                (process_name,),
+                   WHERE process IN ({placeholders}) AND IFNULL(status,'') != 'Cancelled'""",
+                tuple(process_names),
             ).fetchall()
         ]
         if mode_want:

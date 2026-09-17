@@ -33,9 +33,10 @@ _DEFAULT_ROUTING = [
     ("Stitching", "Assembly and stitching",        4),
     # Canonical spelling — "Kaj Button" was a duplicate empty tab; keep Kajh Button.
     ("Kajh Button", "Kaj / button attaching",      5),
-    ("Handwork",  "Hand embroidery / extra work",  6),
-    ("Finishing", "Quality check and ironing",     7),
-    ("Packing",   "Tagging and packing",           8),
+    ("Shirring (Bobbin Elastic)", "Bobbin elastic / shirring", 6),
+    ("Handwork",  "Hand embroidery / extra work",  7),
+    ("Finishing", "Quality check and ironing",     8),
+    ("Packing",   "Tagging and packing",           9),
 ]
 
 

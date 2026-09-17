@@ -919,7 +919,7 @@ def get_all_routing_steps() -> list:
             names.append(n)
         return names
     except Exception:
-        return ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Kajh Button', 'Handwork', 'Finishing', 'Packing']
+        return ['Cutting', 'Printing', 'Embroidery', 'Stitching', 'Kajh Button', 'Shirring (Bobbin Elastic)', 'Handwork', 'Finishing', 'Packing']
 
 
 # ── Process Stock ──────────────────────────────────────────────────────────────
@@ -2508,6 +2508,21 @@ def _create_single_jo(data: dict) -> str:
             )
         except Exception:
             pass
+    try:
+        from ..db import document_audit_db as _audit
+
+        _audit.enroll_document(
+            "JO",
+            int(joid),
+            doc_number=num,
+            module="production",
+            so_reference=so_number or "",
+            party_name=str(data.get("vendor_name") or ""),
+            process_name=str(process or ""),
+            doc_date=str(data.get("jo_date") or ""),
+        )
+    except Exception:
+        pass
     return num
 
 
@@ -2531,6 +2546,14 @@ def _record_jo_qty_history(conn, joid: int, field: str, old_qty, new_qty, change
 
 
 def update_jo(joid: int, data: dict):
+    try:
+        from ..db.document_audit_db import assert_doc_editable, record_edit_event
+
+        assert_doc_editable("JO", int(joid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     prev = conn.execute(
         """SELECT so_number, fabric_code, fabric_qty, fabric_issued_qty, status, planned_qty,

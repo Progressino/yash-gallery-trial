@@ -18,30 +18,49 @@ const EXPORT_HEADERS = [
   'Last Activity', 'Aging Days', 'Aging Bucket',
 ]
 
-/** Stitching JO balance report — Cutting-style with vendor/fabricator focus. */
-export default function StitchingReportsPanel() {
+export type ProcessBalanceProps = {
+  /** Exact process name stored on job_orders.process */
+  process?: string
+  title?: string
+  /** Default Production Mode filter (Stitching defaults to regular/inhouse path) */
+  defaultProductionMode?: string
+  defaultGroupBy?: string
+}
+
+/** JO balance report for any process — same fields/filters as Stitching Report. */
+export default function StitchingReportsPanel({
+  process = 'Stitching',
+  title,
+  defaultProductionMode,
+  defaultGroupBy,
+}: ProcessBalanceProps = {}) {
+  const isStitching = process === 'Stitching'
   const [filters, setFilters] = useState({
     date_from: '', date_to: '', so_number: '', parent_style: '', sku: '', size: '',
     jo_number: '', component: '', status: '', aging_bucket: '',
-    aging_basis: 'jo_date', variance: '', brand: '', search: '', group_by: 'vendor',
+    aging_basis: 'jo_date', variance: '', brand: '', search: '',
+    group_by: defaultGroupBy ?? (isStitching ? 'vendor' : 'so'),
     vendor_name: '', exec_type: '', as_of_date: '', activity_date: '',
-    // Default: regular stitching path (In-house + Outsource exec), excludes Stitch-to-Pack
-    production_mode: 'inhouse',
+    production_mode: defaultProductionMode ?? (isStitching ? 'inhouse' : 'all'),
     components: '',
     balance_level: 'component',
   })
   const [page, setPage] = useState(1)
-  const params = useMemo(() => ({ ...filters, page, page_size: 150 }), [filters, page])
+  const params = useMemo(
+    () => ({ ...filters, process, page, page_size: 150 }),
+    [filters, page, process],
+  )
 
   const { data, isFetching } = useQuery({
-    queryKey: ['stitching-report', params],
-    queryFn: () => api.get('/production/stitching-report', { params }).then(r => r.data),
+    queryKey: ['process-balance-report', process, params],
+    queryFn: () => api.get('/production/process-balance-report', { params }).then(r => r.data),
   })
 
   const kpis = data?.kpis || {}
   const rows = data?.rows || []
   const groups = data?.groups || []
   const total = Number(data?.total || 0)
+  const heading = title || `${process} summary & balance`
 
   const set = (k: string, v: string) => {
     setPage(1)
@@ -49,10 +68,13 @@ export default function StitchingReportsPanel() {
   }
 
   const exportAll = async () => {
-    const res = await api.get('/production/stitching-report', { params: { ...filters, export: true, page_size: 0 } })
+    const res = await api.get('/production/process-balance-report', {
+      params: { ...filters, process, export: true, page_size: 0 },
+    })
     const all = res.data?.rows || []
+    const slug = process.toLowerCase().replace(/[^a-z0-9]+/g, '_')
     downloadCsv(
-      `stitching_report_${new Date().toISOString().slice(0, 10)}.csv`,
+      `${slug}_report_${new Date().toISOString().slice(0, 10)}.csv`,
       EXPORT_HEADERS,
       all.map((r: any) => [
         r.so_number, r.so_date, r.jo_number, r.jo_date, r.vendor_name, r.exec_type, r.production_mode,
@@ -67,12 +89,20 @@ export default function StitchingReportsPanel() {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="font-semibold text-gray-800">Stitching summary &amp; balance</h3>
+          <h3 className="font-semibold text-gray-800">{heading}</h3>
           <p className="text-[11px] text-gray-500 max-w-4xl">
             Balance = Planned − Received.
-            {' '}<b>Production Mode</b> = SO path (default <b>Regular / In-house path</b> = In-house + Outsource stitching together, excluding Stitch-to-Pack).
-            {' '}<b>Exec Type</b> = who stitches within that path (optional narrow to In-house only or Outsource only).
-            Use Production Mode = Stitch-to-Pack to view that path separately.
+            {isStitching ? (
+              <>
+                {' '}<b>Production Mode</b> = SO path (default <b>Regular / In-house path</b> = In-house + Outsource stitching together, excluding Stitch-to-Pack).
+                {' '}<b>Exec Type</b> = who stitches within that path (optional).
+              </>
+            ) : (
+              <>
+                {' '}Same filters, aging, grouping and export as Stitching Report.
+                {' '}Default Production Mode = <b>All paths</b>.
+              </>
+            )}
           </p>
         </div>
         <button type="button" onClick={() => void exportAll()} className="px-3 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg">
@@ -103,8 +133,8 @@ export default function StitchingReportsPanel() {
           ['activity_date', 'Activity date', 'date'], ['as_of_date', 'As-of date', 'date'],
           ['so_number', 'SO No', 'text'], ['parent_style', 'Parent style', 'text'],
           ['sku', 'SKU', 'text'], ['size', 'Size', 'text'],
-          ['jo_number', 'Stitching JO', 'text'], ['component', 'Component', 'text'],
-          ['vendor_name', 'Vendor / Fabricator', 'text'], ['brand', 'Brand', 'text'],
+          ['jo_number', `${process} JO`, 'text'], ['component', 'Component', 'text'],
+          ['vendor_name', 'Vendor / Party', 'text'], ['brand', 'Brand', 'text'],
           ['search', 'Search', 'text'],
         ].map(([k, label, type]) => (
           <label key={k} className="block">
@@ -123,7 +153,7 @@ export default function StitchingReportsPanel() {
           </select>
         </label>
         <label className="block">
-          <span className="text-gray-500">Exec type (who stitches)</span>
+          <span className="text-gray-500">Exec type</span>
           <select value={filters.exec_type} onChange={e => set('exec_type', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
             <option value="">All (In-house + Outsource)</option>
             <option value="Outsource">Outsource only</option>
@@ -155,7 +185,7 @@ export default function StitchingReportsPanel() {
         <label className="block">
           <span className="text-gray-500">Aging basis</span>
           <select value={filters.aging_basis} onChange={e => set('aging_basis', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
-            <option value="jo_date">Stitching JO date</option>
+            <option value="jo_date">{process} JO date</option>
             <option value="so_date">SO date</option>
             <option value="delivery_date">Delivery / due date</option>
           </select>
@@ -255,7 +285,7 @@ export default function StitchingReportsPanel() {
               </tr>
             ))}
             {rows.length === 0 && (
-              <tr><td colSpan={16} className="text-center text-gray-400 py-8">No Stitching JOs match these filters.</td></tr>
+              <tr><td colSpan={16} className="text-center text-gray-400 py-8">No {process} JOs match these filters.</td></tr>
             )}
           </tbody>
           {rows.length > 0 && (

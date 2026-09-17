@@ -39,6 +39,8 @@ from .routers.erp_admin import router as erp_admin_router
 from .routers.marketplace_connect import router as marketplace_router
 from .routers.myntra_partner import router as myntra_partner_router
 from .routers.gate import router as gate_router
+from .routers.document_audit import router as document_audit_router
+from .db.document_audit_db import init_db as init_document_audit_db
 from .db.finance_db import init_db
 from .db.item_db import init_db as init_item_db
 from .db.marketplace_db import init_db as init_marketplace_db
@@ -69,11 +71,15 @@ init_po_raised_db()
 init_forecast_session_pg()
 init_forecast_ops_pg()
 try:
+    init_document_audit_db()
+except Exception:
+    pass
+try:
     from .services.perf_metrics import init_db as init_perf_metrics_db
 
     init_perf_metrics_db()
 except Exception:
-    log.exception("perf metrics init failed")
+    pass
 
 log = logging.getLogger("erp.cache_warmer")
 
@@ -3771,6 +3777,7 @@ app.include_router(admin_performance_router, prefix="/api/admin", tags=["admin-p
 app.include_router(marketplace_router, prefix="/api/marketplace", tags=["marketplace"])
 app.include_router(myntra_partner_router, prefix="/api/myntra/partner", tags=["myntra-partner"])
 app.include_router(gate_router,        prefix="/api/gate",       tags=["gate"])
+app.include_router(document_audit_router, prefix="/api/document-audit", tags=["document-audit"])
 
 
 @app.get("/api/health")

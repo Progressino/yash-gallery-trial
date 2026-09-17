@@ -43,6 +43,7 @@ const Admin                  = lazy(() => import('./pages/Admin'))
 const AdminPerformance       = lazy(() => import('./pages/AdminPerformance'))
 const MarketplaceConnections = lazy(() => import('./pages/MarketplaceConnections'))
 const SKUDeepDive            = lazy(() => import('./pages/SKUDeepDive'))
+const DocumentAudit          = lazy(() => import('./pages/DocumentAudit'))
 
 const qc = new QueryClient({
   defaultOptions: {
@@ -342,6 +343,7 @@ export default function App() {
               <Route path="snapdeal"  element={<Snapdeal />} />
               <Route path="sales"     element={<SalesOrders />} />
               <Route path="purchase"  element={<Purchase />} />
+              <Route path="document-audit" element={<DocumentAudit />} />
               <Route path="gate"      element={<GateInward />} />
               <Route path="tna"       element={<TNA />} />
               <Route path="production" element={<Production />} />

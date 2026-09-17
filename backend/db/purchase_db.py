@@ -758,6 +758,20 @@ def create_po(data: dict):
         from ..db.production_db import record_mrp_po_commitment
 
         record_mrp_po_commitment(so_ref, lines, doc_ref=num)
+    try:
+        from ..db import document_audit_db as _audit
+
+        _audit.enroll_document(
+            "PO",
+            int(poid),
+            doc_number=num,
+            module="purchase",
+            so_reference=data.get("so_reference") or "",
+            party_name=data.get("supplier_name") or "",
+            doc_date=data.get("po_date") or "",
+        )
+    except Exception:
+        pass
     return num
 
 def update_po_status(poid: int, status: str):
@@ -765,6 +779,14 @@ def update_po_status(poid: int, status: str):
     conn.commit(); conn.close()
 
 def update_po(poid: int, data: dict):
+    try:
+        from ..db.document_audit_db import assert_doc_editable, record_edit_event
+
+        assert_doc_editable("PO", int(poid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     allowed = [
         'supplier_id', 'supplier_name', 'payment_terms', 'delivery_location', 'delivery_date',
@@ -789,6 +811,12 @@ def update_po(poid: int, data: dict):
         conn.execute("UPDATE po_headers SET subtotal=?,gst_amount=?,total=? WHERE id=?",
             (subtotal, gst_total, subtotal + gst_total, poid))
     conn.commit(); conn.close()
+    try:
+        from ..db.document_audit_db import record_edit_event
+
+        record_edit_event("PO", int(poid), detail="update_po")
+    except Exception:
+        pass
 
 def mark_pr_lines_ordered(pr_id: int, updates: list):
     conn = _connect()
@@ -1004,6 +1032,21 @@ def create_jwo(data: dict):
         create_min_for_jwo(jwoid, num, jwo_header, line_snapshots)
     except Exception:
         pass
+    try:
+        from ..db import document_audit_db as _audit
+
+        _audit.enroll_document(
+            "JWO",
+            int(jwoid),
+            doc_number=num,
+            module="purchase",
+            so_reference=(jwo_header.get("so_reference") or ""),
+            party_name=(jwo_header.get("processor_name") or ""),
+            doc_date=(jwo_header.get("jwo_date") or ""),
+            process_name="Printing",
+        )
+    except Exception:
+        pass
     return num
 
 def update_jwo_status(jwoid: int, status: str):
@@ -1011,6 +1054,14 @@ def update_jwo_status(jwoid: int, status: str):
     conn.commit(); conn.close()
 
 def update_jwo(jwoid: int, data: dict):
+    try:
+        from ..db.document_audit_db import assert_doc_editable
+
+        assert_doc_editable("JWO", int(jwoid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     allowed = ['processor_id','processor_name','pr_reference','so_reference','expected_return_date','remarks','issued_by']
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
@@ -1567,10 +1618,34 @@ def create_grn(data: dict):
     conn.close()
     if data.get("return_id"):
         return {"grn_number": num, "grn_id": grnid}
+    try:
+        from ..db import document_audit_db as _audit
+
+        _audit.enroll_document(
+            "GRN",
+            int(grnid),
+            doc_number=num,
+            module="purchase",
+            so_reference=data.get("so_reference") or "",
+            party_name=data.get("party_name") or "",
+            doc_date=data.get("grn_date") or "",
+        )
+    except Exception:
+        pass
     return num
 
 
 def update_grn_status(grnid: int, status: str, qc_by: str = ""):
+    try:
+        from ..db.document_audit_db import assert_doc_editable
+
+        # Allow verify/cancel transitions; block other status edits when Accounts-locked
+        if str(status or "") not in ("Verified", "Cancelled", "Draft"):
+            assert_doc_editable("GRN", int(grnid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     hdr = conn.execute("SELECT * FROM grn_headers WHERE id=?", (grnid,)).fetchone()
     if not hdr:
