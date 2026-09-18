@@ -27,19 +27,21 @@ def _assert_jo_not_cancelled(jo: dict, *, action: str = "modify") -> None:
 
 
 def _assert_jo_mutable(jo: dict, *, action: str = "modify") -> None:
-    """Block receive/edits on cancelled JOs and fully-received (Closed) JOs."""
+    """Block receive/issue on cancelled/closed JOs. Allow header/qty edits on Closed."""
     st = str(jo.get("status") or "").strip()
     if st in _IMMUTABLE_JO_STATUSES:
         raise ValueError(
             f"Job order is {st.lower()} — {action} is not allowed (historical record only)"
         )
+    # Closed = receive complete: still allow Accounts-style field edits (vendor/rate/qty),
+    # but block operational receive/issue/cost posting.
     if st == "Closed" and action in {
         "receive pieces",
         "receive",
-        "update",
         "add cost",
         "issue fabric",
         "return fabric",
+        "issue pieces",
     }:
         raise ValueError(
             f"Job order is closed — {action} is not allowed (receive complete; issue forward if stock remains)"
@@ -2574,7 +2576,7 @@ def update_jo(joid: int, data: dict):
         line_updates = data.pop("line_qtys", None)
 
     line_rows = [dict(r) for r in conn.execute(
-        """SELECT id, sku, style, planned_qty, issued_qty, received_qty, rejected_qty
+        """SELECT id, sku, style, planned_qty, issued_qty, received_qty, rejected_qty, vendor_rate
            FROM jo_lines WHERE jo_id=? ORDER BY id""",
         (joid,),
     ).fetchall()]
@@ -2631,12 +2633,15 @@ def update_jo(joid: int, data: dict):
             if not by_id:
                 raise ValueError("This job order has no size lines to edit.")
             pending: dict[int, int] = {}
+            pending_rates: dict[int, float] = {}
             for item in line_updates:
                 if not isinstance(item, dict):
                     continue
                 lid = int(item.get("id") or 0)
                 if lid not in by_id:
                     raise ValueError(f"jo_line id {lid} does not belong to this job order")
+                if item.get("vendor_rate") is not None:
+                    pending_rates[lid] = float(item.get("vendor_rate") or 0)
                 if item.get("planned_qty") is None:
                     continue
                 new_l = int(item["planned_qty"])
@@ -2649,6 +2654,19 @@ def update_jo(joid: int, data: dict):
                         f"planned_qty for {sku} cannot be below issued/received ({floor_l})."
                     )
                 pending[lid] = new_l
+            if pending_rates:
+                for lid, rate in pending_rates.items():
+                    ln = by_id[lid]
+                    old_r = float(ln.get("vendor_rate") or 0)
+                    conn.execute(
+                        "UPDATE jo_lines SET vendor_rate=? WHERE id=? AND jo_id=?",
+                        (rate, lid, joid),
+                    )
+                    if rate != old_r:
+                        _record_jo_qty_history(
+                            conn, joid, f"line:{lid}:vendor_rate", old_r, rate,
+                            changed_by, remarks or f"SKU {ln.get('sku')} rate", lid,
+                        )
             if pending:
                 for lid, new_l in pending.items():
                     ln = by_id[lid]

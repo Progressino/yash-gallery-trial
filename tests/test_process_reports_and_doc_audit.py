@@ -96,6 +96,7 @@ def test_print_brand_uses_embedded_logo():
     assert url.startswith("data:image/png;base64,")
     html = brand_header_html(doc_title="PURCHASE ORDER", doc_number="PO-1", department="Purchase")
     assert "Yash Gallery Pvt. Ltd." in html
-    assert "Bhiwandi" in html
+    assert "Jaipur" in html
+    assert "08AABCY3804E1ZJ" in html or "GSTIN" in html
     assert url in html
 

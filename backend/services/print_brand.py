@@ -8,7 +8,8 @@ from pathlib import Path
 YASH_GALLERY = {
     "name": "Yash Gallery Pvt. Ltd.",
     "short_name": "Yash Gallery",
-    "address": "Bhiwandi, Thane District, Maharashtra — 421302, India",
+    "address": "55 TO 64, Tatiyawas, Brij Vihar, Amber, Jaipur (Raj.) 303704",
+    "gst": "08AABCY3804E1ZJ",
     "email": "purchase@yashgallery.com",
 }
 
@@ -52,12 +53,18 @@ def brand_header_html(
     logo = logo_data_url()
     addr = YASH_GALLERY["address"]
     email = YASH_GALLERY.get("email") or ""
+    gst = YASH_GALLERY.get("gst") or ""
     dept = (
         f'<div style="margin-top:6px;font-size:11px;font-weight:700;color:#002B5B">{department}</div>'
         if department
         else ""
     )
     email_html = f'<div style="font-size:11px;color:#334155;margin-top:2px">{email}</div>' if email else ""
+    gst_html = (
+        f'<div style="font-size:11px;color:#1e293b;margin-top:2px"><strong>GSTIN:</strong> {gst}</div>'
+        if gst
+        else ""
+    )
     num = (
         f'<div style="font-size:20px;font-weight:800;color:#002B5B;text-align:right">{doc_number}</div>'
         if doc_number
@@ -75,6 +82,7 @@ def brand_header_html(
         <div>
           <div style="font-size:18px;font-weight:700;color:#002B5B;line-height:1.25">{YASH_GALLERY["name"]}</div>
           <div style="font-size:11px;color:#1e293b;font-weight:500;line-height:1.45;margin-top:3px">{addr}</div>
+          {gst_html}
           {email_html}
           {dept}
           {extra_left}

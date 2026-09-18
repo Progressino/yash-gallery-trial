@@ -333,12 +333,106 @@ export default function SalesOrders() {
     })
   }
 
+  const demandImportRef = useRef<HTMLInputElement>(null)
+  const soImportRef = useRef<HTMLInputElement>(null)
+  const [demandImportBusy, setDemandImportBusy] = useState(false)
+  const [soImportBusy, setSoImportBusy] = useState(false)
+
   function addDLine() { setDLines(l => [...l, { sku: '', sku_name: '', demand_qty: 0 }]) }
   const blankSOLine = () => ({
     sku: '', sku_name: '', qty: 0, unit: 'PCS', rate: 0, remarks: '',
     hsn_code: '', gst_pct: 0, merchant_code: '', priority: 'Normal', line_delivery_date: soForm.delivery_date
   })
   function addSOLine() { setSOLines(l => [...l, blankSOLine()]) }
+
+  async function downloadImportTemplate(kind: 'demand' | 'order') {
+    const path = kind === 'demand' ? '/sales/demands/import-template' : '/sales/orders/import-template'
+    const filename = kind === 'demand' ? 'demand_lines_import_template.csv' : 'sales_order_lines_import_template.csv'
+    try {
+      const res = await api.get(path, { responseType: 'blob' })
+      const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err: unknown) {
+      const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message: string }).message) : 'Download failed'
+      alert(msg)
+    }
+  }
+
+  async function importSkuLines(kind: 'demand' | 'order', file: File) {
+    const path = kind === 'demand' ? '/sales/demands/import-lines' : '/sales/orders/import-lines'
+    const fd = new FormData()
+    fd.append('file', file)
+    const setBusy = kind === 'demand' ? setDemandImportBusy : setSoImportBusy
+    setBusy(true)
+    try {
+      const res = await api.post(path, fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      const lines = (res.data?.lines || []) as Array<Record<string, unknown>>
+      const errors = (res.data?.errors || []) as string[]
+      if (!lines.length) {
+        alert(errors.slice(0, 8).join('\n') || 'No valid SKU lines found in file')
+        return
+      }
+      if (kind === 'demand') {
+        setDLines(prev => {
+          const bySku = new Map(prev.map(l => [l.sku.toUpperCase(), { ...l }]))
+          for (const row of lines) {
+            const sku = String(row.sku || '')
+            const key = sku.toUpperCase()
+            const qty = Number(row.demand_qty) || 0
+            const name = String(row.sku_name || '')
+            const existing = bySku.get(key)
+            if (existing) {
+              existing.demand_qty += qty
+              if (name && !existing.sku_name) existing.sku_name = name
+            } else {
+              bySku.set(key, { sku, sku_name: name, demand_qty: qty })
+            }
+          }
+          return Array.from(bySku.values())
+        })
+      } else {
+        setSOLines(prev => {
+          const bySku = new Map(prev.map(l => [l.sku.toUpperCase(), { ...l }]))
+          for (const row of lines) {
+            const sku = String(row.sku || '')
+            const key = sku.toUpperCase()
+            const qty = Number(row.qty) || 0
+            const existing = bySku.get(key)
+            if (existing) {
+              existing.qty += qty
+            } else {
+              bySku.set(key, {
+                ...blankSOLine(),
+                sku,
+                sku_name: String(row.sku_name || ''),
+                qty,
+                unit: String(row.unit || 'PCS') || 'PCS',
+                rate: Number(row.rate) || 0,
+                hsn_code: String(row.hsn_code || ''),
+                gst_pct: Number(row.gst_pct) || 0,
+                merchant_code: String(row.merchant_code || ''),
+                priority: String(row.priority || 'Normal') || 'Normal',
+                line_delivery_date: String(row.line_delivery_date || soForm.delivery_date || ''),
+                remarks: String(row.remarks || ''),
+              })
+            }
+          }
+          return Array.from(bySku.values())
+        })
+      }
+      const warn = errors.length ? `\n\n${errors.slice(0, 8).join('\n')}` : ''
+      alert((res.data?.message || `Imported ${lines.length} SKU line(s) into the form.`) + warn)
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      alert(typeof detail === 'string' ? detail : 'Import failed')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   async function fetchDemandLines() {
     if (!soForm.ref_demand.trim()) return
@@ -568,9 +662,37 @@ export default function SalesOrders() {
 
               {/* SKU Lines */}
               <div>
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
                   <p className="text-sm font-medium text-gray-600">SKU Lines</p>
-                  <button onClick={addDLine} className="text-xs text-blue-600 hover:underline">+ Add Line Manually</button>
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={demandImportRef}
+                      type="file"
+                      accept=".csv,.xlsx,.xls"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0]
+                        e.target.value = ''
+                        if (file) await importSkuLines('demand', file)
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => downloadImportTemplate('demand')}
+                      className="text-xs px-2 py-1 border border-gray-300 rounded text-gray-600 hover:bg-gray-50"
+                    >
+                      📥 Template
+                    </button>
+                    <button
+                      type="button"
+                      disabled={demandImportBusy}
+                      onClick={() => demandImportRef.current?.click()}
+                      className="text-xs px-2 py-1 border border-[#002B5B] text-[#002B5B] rounded hover:bg-blue-50 disabled:opacity-50"
+                    >
+                      {demandImportBusy ? 'Importing…' : '📥 Import Excel'}
+                    </button>
+                    <button onClick={addDLine} className="text-xs text-blue-600 hover:underline">+ Add Line Manually</button>
+                  </div>
                 </div>
 
                 <ParentSkuPicker onAddLines={lines => setDLines(l => [...l, ...lines])} />
@@ -601,7 +723,9 @@ export default function SalesOrders() {
                   </div>
                 ))}
                 {dLines.length === 0 && (
-                  <p className="text-xs text-gray-400 mt-1">Search a parent SKU above to add size-wise lines, or click "+ Add Line Manually".</p>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Search a parent SKU, download the Excel template + Import, or click "+ Add Line Manually".
+                  </p>
                 )}
               </div>
 
@@ -793,14 +917,42 @@ export default function SalesOrders() {
 
               {/* SO Lines — Streamlit-style card layout */}
               <div className="space-y-3">
-                <div className="flex justify-between items-center">
+                <div className="flex justify-between items-center gap-2 flex-wrap">
                   <p className="text-sm font-semibold text-gray-700">SKU Lines
                     {soLines.length > 0 && <span className="ml-2 text-xs text-gray-400 font-normal">({soLines.length} line{soLines.length > 1 ? 's' : ''})</span>}
                   </p>
-                  <button onClick={addSOLine}
-                    className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">
-                    + Add SKU Line
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={soImportRef}
+                      type="file"
+                      accept=".csv,.xlsx,.xls"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0]
+                        e.target.value = ''
+                        if (file) await importSkuLines('order', file)
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => downloadImportTemplate('order')}
+                      className="px-3 py-1.5 border border-gray-300 rounded-lg text-xs text-gray-600 hover:bg-gray-50"
+                    >
+                      📥 Template
+                    </button>
+                    <button
+                      type="button"
+                      disabled={soImportBusy}
+                      onClick={() => soImportRef.current?.click()}
+                      className="px-3 py-1.5 border border-[#002B5B] text-[#002B5B] rounded-lg text-xs font-medium hover:bg-blue-50 disabled:opacity-50"
+                    >
+                      {soImportBusy ? 'Importing…' : '📥 Import Excel'}
+                    </button>
+                    <button onClick={addSOLine}
+                      className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">
+                      + Add SKU Line
+                    </button>
+                  </div>
                 </div>
 
                 {soLines.map((ln, i) => (
@@ -935,7 +1087,7 @@ export default function SalesOrders() {
 
                 {soLines.length === 0 && (
                   <div className="border-2 border-dashed border-gray-200 rounded-xl p-6 text-center text-gray-400 text-sm">
-                    No SKU lines added. Fetch from a demand or click "+ Add SKU Line".
+                    No SKU lines yet. Fetch from a demand, download Template + Import Excel, or click "+ Add SKU Line".
                   </div>
                 )}
 

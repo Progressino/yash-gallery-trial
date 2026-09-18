@@ -5,8 +5,8 @@ import { YASH_GALLERY_LOGO_DATA_URL } from './yashGalleryLogoDataUrl'
 export const YASH_GALLERY = {
   name: 'Yash Gallery Pvt. Ltd.',
   shortName: 'Yash Gallery',
-  address: 'Bhiwandi, Thane District, Maharashtra — 421302, India',
-  gst: '',
+  address: '55 TO 64, Tatiyawas, Brij Vihar, Amber, Jaipur (Raj.) 303704',
+  gst: '08AABCY3804E1ZJ',
   phone: '',
   email: 'purchase@yashgallery.com',
 }
@@ -53,6 +53,7 @@ export function brandPrintHeaderHtml(opts: BrandHeaderOpts): string {
         <div>
           <div class="company-name">${YASH_GALLERY.name}</div>
           <div class="company-meta company-address">${YASH_GALLERY.address.replace(/\n/g, '<br/>')}</div>
+          ${YASH_GALLERY.gst ? `<div class="company-meta"><strong>GSTIN:</strong> ${YASH_GALLERY.gst}</div>` : ''}
           ${YASH_GALLERY.phone ? `<div class="company-meta">Tel: ${YASH_GALLERY.phone}</div>` : ''}
           ${YASH_GALLERY.email ? `<div class="company-meta">${YASH_GALLERY.email}</div>` : ''}
           ${dept ? `<div class="company-meta company-dept">${dept}</div>` : ''}

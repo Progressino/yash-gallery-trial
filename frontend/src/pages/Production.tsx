@@ -445,20 +445,22 @@ function VendorExecutionEditor({
   jo: JO
   vendorSuggestions: string[]
   saving: boolean
-  onSave: (data: { exec_type: string; vendor_name: string }) => void
+  onSave: (data: { exec_type: string; vendor_name: string; vendor_rate: number }) => void
   disabled?: boolean
 }) {
   const [execType, setExecType] = useState(jo.exec_type || 'Inhouse')
   const [vendorName, setVendorName] = useState(jo.vendor_name || '')
+  const [vendorRate, setVendorRate] = useState(String(jo.vendor_rate ?? 0))
 
   useEffect(() => {
     setExecType(jo.exec_type || 'Inhouse')
     setVendorName(jo.vendor_name || '')
-  }, [jo.id, jo.exec_type, jo.vendor_name])
+    setVendorRate(String(jo.vendor_rate ?? 0))
+  }, [jo.id, jo.exec_type, jo.vendor_name, jo.vendor_rate])
 
   return (
     <div className="bg-white rounded-lg border p-3 space-y-3">
-      <p className="text-xs font-semibold text-gray-500 uppercase">Execution / Vendor</p>
+      <p className="text-xs font-semibold text-gray-500 uppercase">Execution / Vendor / Rate — editable for all processes</p>
       <div className="grid sm:grid-cols-3 gap-3">
         <div>
           <label className="text-xs text-gray-500">Execution type</label>
@@ -477,8 +479,20 @@ function VendorExecutionEditor({
             ))}
           </select>
         </div>
+        <div>
+          <label className="text-xs text-gray-500">Vendor rate (₹)</label>
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            value={vendorRate}
+            disabled={disabled}
+            onChange={e => setVendorRate(e.target.value)}
+            className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1"
+          />
+        </div>
         {isOutsourceExec(execType) && (
-          <div className="sm:col-span-2">
+          <div>
             <label className="text-xs text-gray-500">Vendor name *</label>
             <input
               list="jo-vendor-suggestions"
@@ -503,14 +517,16 @@ function VendorExecutionEditor({
           onClick={() => onSave({
             exec_type: execType,
             vendor_name: isOutsourceExec(execType) ? vendorName.trim() : '',
+            vendor_rate: Number(vendorRate) || 0,
           })}
           className="px-3 py-1.5 text-xs bg-[#002B5B] text-white rounded-lg font-medium disabled:opacity-50"
         >
-          {saving ? 'Saving…' : 'Save vendor'}
+          {saving ? 'Saving…' : 'Save vendor / rate'}
         </button>
         <span className="text-xs text-gray-500">
           Current: <b>{execTypeLabel(jo.exec_type)}</b>
           {isOutsourceExec(jo.exec_type) && jo.vendor_name ? ` · ${jo.vendor_name}` : ''}
+          {` · ₹${fmtR(jo.vendor_rate || 0)}`}
         </span>
       </div>
     </div>
@@ -1251,6 +1267,7 @@ export default function Production() {
   })
   const [editPlannedQty, setEditPlannedQty] = useState<Record<number, string>>({})
   const [editLineQty, setEditLineQty] = useState<Record<number, string>>({})
+  const [editLineRate, setEditLineRate] = useState<Record<number, string>>({})
   const [reportsView, setReportsView] = useState<
     'cutting' | 'stitching' | 'embroidery' | 'kajh' | 'shirring' | 'handwork' | 'finishing' | 'date_txns' | 'quality' | 'process' | 'master'
   >('master')
@@ -2075,11 +2092,11 @@ export default function Production() {
               ))}
             </div>
 
-            {/* Planned qty: size-wise when the JO has multiple SKU/size lines; otherwise header total. */}
-            {(jo.status === 'Created' || jo.status === 'In Progress') && jo.lines.length <= 1 && (
+            {/* Planned qty edit — all processes (not Cancelled). Closed JOs allow qty/vendor corrections. */}
+            {!joLocked && jo.lines.length <= 1 && (
               <div className="bg-white border rounded-lg p-3 flex flex-wrap items-end gap-2">
                 <div>
-                  <label className="text-xs text-gray-500">Edit planned qty</label>
+                  <label className="text-xs text-gray-500">Edit planned qty ({jo.process})</label>
                   <input
                     type="number"
                     min={Math.max(jo.issued_qty || 0, jo.received_qty || 0, jo.output_qty || 0)}
@@ -2110,13 +2127,13 @@ export default function Production() {
                   Save qty
                 </button>
                 <p className="text-[10px] text-gray-500 max-w-xs">
-                  Cannot go below issued/received/output. JO total equals this size. Written to jo_qty_history.
+                  Cannot go below issued/received/output. Available for all processes while not Cancelled.
                 </p>
               </div>
             )}
-            {(jo.status === 'Created' || jo.status === 'In Progress') && jo.lines.length > 1 && !joLocked && (
+            {!joLocked && jo.lines.length > 1 && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-[11px] text-amber-900">
-                Edit planned quantity per size in the lines table. JO total is the sum of sizes
+                Edit planned quantity per size in the lines table ({jo.process}). JO total is the sum of sizes
                 ({fmt(jo.lines.reduce((s, l) => s + (Number(l.planned_qty) || 0), 0))} pcs).
               </div>
             )}
@@ -2276,7 +2293,7 @@ export default function Production() {
                 <div className="px-3 py-2 bg-gray-50 text-xs font-semibold text-gray-600 flex justify-between items-center gap-2">
                   <span>Lines — Issue / Receive per SKU</span>
                   <span className="flex items-center gap-2">
-                    {(jo.status === 'Created' || jo.status === 'In Progress') && !joLocked && (
+                    {!joLocked && (
                       <button
                         type="button"
                         disabled={updateJoQtyMut.isPending}
@@ -2284,20 +2301,26 @@ export default function Production() {
                           const lines = jo.lines.map(line => {
                             const raw = editLineQty[line.id]
                             const v = raw == null ? line.planned_qty : parseInt(raw, 10)
-                            return { id: line.id, planned_qty: v }
+                            const rateRaw = editLineRate[line.id]
+                            const rate = rateRaw == null ? Number(line.vendor_rate) || 0 : parseFloat(rateRaw)
+                            return { id: line.id, planned_qty: v, vendor_rate: rate }
                           })
                           if (lines.some(l => !Number.isFinite(l.planned_qty) || l.planned_qty < 0)) {
                             alert('Each size planned quantity must be a number ≥ 0')
                             return
                           }
+                          if (lines.some(l => !Number.isFinite(l.vendor_rate) || l.vendor_rate < 0)) {
+                            alert('Each size rate must be a number ≥ 0')
+                            return
+                          }
                           updateJoQtyMut.mutate({
                             id: jo.id,
-                            data: { lines, qty_change_remarks: 'UI size-wise planned_qty edit' },
+                            data: { lines, qty_change_remarks: 'UI size-wise qty/rate edit' },
                           })
                         }}
                         className="px-2 py-1 bg-amber-600 text-white rounded font-medium disabled:opacity-50"
                       >
-                        Save size qtys
+                        Save size qty/rate
                       </button>
                     )}
                     <span className="text-gray-400">{jo.lines.length} lines</span>
@@ -2321,7 +2344,7 @@ export default function Production() {
                         <td className="px-3 py-2 font-mono font-semibold text-[#002B5B]">{line.sku}</td>
                         <td className="px-3 py-2 text-gray-500">{line.style || '—'}</td>
                         <td className="px-3 py-2 text-right">
-                          {(jo.status === 'Created' || jo.status === 'In Progress') ? (
+                          {!joLocked ? (
                             <input
                               type="number"
                               min={Math.max(line.issued_qty || 0, line.received_qty || 0, 0)}
@@ -2336,7 +2359,20 @@ export default function Production() {
                         <td className="px-3 py-2 text-right text-green-600 font-semibold">{fmt(line.received_qty)}</td>
                         <td className="px-3 py-2 text-right text-red-500">{fmt(line.rejected_qty)}</td>
                         <td className={`px-3 py-2 text-right font-semibold ${line.balance_qty > 0 ? 'text-amber-600' : 'text-green-600'}`}>{fmt(line.balance_qty)}</td>
-                        <td className="px-3 py-2 text-right">{fmtR(line.vendor_rate)}</td>
+                        <td className="px-3 py-2 text-right">
+                          {!joLocked ? (
+                            <input
+                              type="number"
+                              min={0}
+                              step="0.01"
+                              value={editLineRate[line.id] ?? String(line.vendor_rate ?? 0)}
+                              onChange={e => setEditLineRate(m => ({ ...m, [line.id]: e.target.value }))}
+                              className="w-20 border border-amber-200 bg-amber-50 rounded px-1 py-0.5 text-right font-semibold"
+                            />
+                          ) : (
+                            fmtR(line.vendor_rate)
+                          )}
+                        </td>
                         <td className="px-3 py-2 text-right font-semibold">{fmtR(line.planned_qty * line.vendor_rate)}</td>
                         <td className="px-3 py-2 text-center">
                           {!joReceiveLocked ? (
