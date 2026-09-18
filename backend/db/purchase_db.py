@@ -679,6 +679,20 @@ def create_pos_from_pr(pr_id: int, lines_data: list, delivery_date: str = '', pa
             so_reference=pr.get("so_reference", "") or "",
             delivery_location=pr.get("delivery_location", "") or "",
         )
+        try:
+            from ..db import document_audit_db as _audit
+
+            _audit.enroll_document(
+                "PO",
+                int(poid),
+                doc_number=num,
+                module="purchase",
+                so_reference=pr.get("so_reference") or "",
+                party_name=sup_name or "",
+                doc_date=datetime.now().strftime("%Y-%m-%d"),
+            )
+        except Exception:
+            pass
     all_lines = conn.execute("SELECT required_qty, po_qty FROM pr_lines WHERE pr_id=?", (pr_id,)).fetchall()
     all_covered = all((l['po_qty'] or 0) >= (l['required_qty'] or 0) for l in all_lines)
     conn.execute("UPDATE pr_headers SET status=? WHERE id=?", ('PO Created' if all_covered else 'Partial PO', pr_id))
@@ -1809,9 +1823,33 @@ def create_min(data: dict):
             (minid, ln['material_code'], ln.get('material_name',''),
             ln.get('material_type','GF'), ln.get('issue_qty',0),
             ln.get('unit','MTR'), ln.get('rate',0), amt, ln.get('remarks','')))
-    conn.commit(); conn.close(); return num
+    conn.commit(); conn.close()
+    try:
+        from ..db import document_audit_db as _audit
+
+        _audit.enroll_document(
+            "MIN",
+            int(minid),
+            doc_number=num,
+            module="purchase",
+            so_reference=str(data.get("so_reference") or data.get("jwo_reference") or ""),
+            party_name=str(data.get("to_vendor") or ""),
+            process_name="Material Issue",
+            doc_date=str(data.get("min_date") or ""),
+        )
+    except Exception:
+        pass
+    return num
 
 def update_min_status(minid: int, status: str):
+    try:
+        from ..db import document_audit_db as _audit
+
+        _audit.assert_doc_editable("MIN", int(minid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     row = conn.execute("SELECT * FROM material_issue_notes WHERE id=?", (minid,)).fetchone()
     if not row:
@@ -2045,7 +2083,24 @@ def create_gin_record(header: dict, lines: list[dict]) -> dict:
         )
     conn.commit()
     conn.close()
-    return get_gin(gin_id)
+    gin = get_gin(gin_id)
+    try:
+        from ..db import document_audit_db as _audit
+
+        _audit.enroll_document(
+            "GIN",
+            int(gin_id),
+            doc_number=num,
+            module="gate",
+            so_reference=str(header.get("source_number") or ""),
+            party_name=str(header.get("party_name") or ""),
+            process_name=str(header.get("stage") or "Gate Inward"),
+            doc_date=str(header.get("gin_date") or ""),
+            created_by=str(header.get("created_by") or ""),
+        )
+    except Exception:
+        pass
+    return gin
 
 
 def link_gin_grn(gin_id: int, grn_id: int):

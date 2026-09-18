@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
-import { YASH_GALLERY, brandLogoDataUrl, brandPrintHeaderHtml } from '../lib/printBrand'
+import { YASH_GALLERY, brandLogoDataUrl, brandPrintHeaderHtml, BRAND_PRINT_CSS } from '../lib/printBrand'
 
 type Tab = 'dashboard' | 'suppliers' | 'processors' | 'pr' | 'po' | 'jwo' | 'grn' | 'min' | 'gate-pass' | 'audit'
 type PRSubTab = 'list' | 'new' | 'from-mrp'
@@ -126,17 +126,11 @@ const printDocument = (html: string, title: string) => {
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:'Segoe UI',sans-serif;font-size:12px;color:#1a1a1a;padding:24px}
-    .header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #002B5B;padding-bottom:12px;margin-bottom:16px}
-    .company-block{display:flex;gap:14px;align-items:flex-start}
-    .company-logo{height:56px;width:auto;object-fit:contain}
-    .company-name{font-size:18px;font-weight:700;color:#002B5B;line-height:1.2}
-    .company-meta{font-size:10px;color:#475569;line-height:1.5;margin-top:4px}
+    ${BRAND_PRINT_CSS}
     .party-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
     .party-box{border:1px solid #cbd5e1;border-radius:6px;padding:10px;background:#fff}
     .party-title{font-size:10px;font-weight:700;text-transform:uppercase;color:#002B5B;margin-bottom:6px;letter-spacing:.04em}
     .party-line{font-size:12px;color:#1e293b;line-height:1.45}
-    .doc-title{font-size:16px;font-weight:600;color:#002B5B;text-align:right}
-    .doc-num{font-size:22px;font-weight:800;color:#002B5B;text-align:right}
     .info-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
     .info-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px}
     .info-label{font-size:10px;text-transform:uppercase;color:#64748b;font-weight:600;margin-bottom:4px}

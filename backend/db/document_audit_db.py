@@ -32,7 +32,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+_INITIALIZED_PATH: str | None = None
+
+
 def init_db() -> None:
+    global _INITIALIZED_PATH
+    if _INITIALIZED_PATH == DB_PATH:
+        return
     conn = _connect()
     conn.executescript(
         """
@@ -58,6 +64,8 @@ def init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_doc_audit_status ON document_audit(audit_status, doc_date);
         CREATE INDEX IF NOT EXISTS idx_doc_audit_type ON document_audit(doc_type, doc_number);
+        CREATE INDEX IF NOT EXISTS idx_doc_audit_created ON document_audit(created_at);
+        CREATE INDEX IF NOT EXISTS idx_doc_audit_status_id ON document_audit(audit_status, id DESC);
 
         CREATE TABLE IF NOT EXISTS document_audit_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,9 +82,21 @@ def init_db() -> None:
     )
     conn.commit()
     conn.close()
+    _INITIALIZED_PATH = DB_PATH
 
 
-DOC_TYPES = ("PO", "JWO", "GRN", "MIN", "JO", "GIN")
+# Operational docs Accounts verifies daily (issue/receive are piece movement docs).
+DOC_TYPES = ("PO", "JWO", "GRN", "MIN", "JO", "GIN", "JO_ISSUE", "JO_RECEIVE")
+DOC_TYPE_LABELS = {
+    "PO": "Purchase Order",
+    "JWO": "Job Work Order",
+    "GRN": "Goods Receipt Note",
+    "MIN": "Material Issue Note",
+    "JO": "Process Job Order",
+    "GIN": "Gate Inward Note",
+    "JO_ISSUE": "Issue to Next Process",
+    "JO_RECEIVE": "Piece Receipt / Receive",
+}
 
 
 def enroll_document(
@@ -190,43 +210,212 @@ def list_documents(
 ) -> dict[str, Any]:
     init_db()
     conn = _connect()
-    q = "SELECT * FROM document_audit WHERE 1=1"
+    where = " WHERE 1=1"
     params: list[Any] = []
     if audit_status:
-        q += " AND audit_status=?"
+        where += " AND audit_status=?"
         params.append(audit_status)
     if doc_type:
-        q += " AND doc_type=?"
+        where += " AND doc_type=?"
         params.append(doc_type.upper())
+    # Prefer indexed doc_date; fall back to created_at date only when doc_date empty
     if date_from:
-        q += " AND IFNULL(NULLIF(doc_date,''), substr(created_at,1,10)) >= ?"
+        where += " AND COALESCE(NULLIF(doc_date,''), substr(created_at,1,10)) >= ?"
         params.append(date_from[:10])
     if date_to:
-        q += " AND IFNULL(NULLIF(doc_date,''), substr(created_at,1,10)) <= ?"
+        where += " AND COALESCE(NULLIF(doc_date,''), substr(created_at,1,10)) <= ?"
         params.append(date_to[:10])
     if search:
         like = f"%{search.strip()}%"
-        q += " AND (doc_number LIKE ? OR so_reference LIKE ? OR party_name LIKE ? OR process_name LIKE ?)"
+        where += " AND (doc_number LIKE ? OR so_reference LIKE ? OR party_name LIKE ? OR process_name LIKE ?)"
         params.extend([like, like, like, like])
-    count = conn.execute(
-        f"SELECT COUNT(*) AS c FROM ({q})", params
-    ).fetchone()["c"]
-    q += " ORDER BY IFNULL(NULLIF(doc_date,''), created_at) DESC, id DESC LIMIT ? OFFSET ?"
-    params.extend([int(limit), int(offset)])
-    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
-    pending = conn.execute(
-        "SELECT COUNT(*) AS c FROM document_audit WHERE audit_status='Pending'"
-    ).fetchone()["c"]
-    verified = conn.execute(
-        "SELECT COUNT(*) AS c FROM document_audit WHERE audit_status='Verified'"
-    ).fetchone()["c"]
+
+    count = int(conn.execute(f"SELECT COUNT(*) AS c FROM document_audit{where}", params).fetchone()["c"])
+    # Fast path: status-only list uses status+id index
+    if not date_from and not date_to and not search:
+        order = " ORDER BY id DESC"
+    else:
+        order = " ORDER BY COALESCE(NULLIF(doc_date,''), created_at) DESC, id DESC"
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            f"SELECT * FROM document_audit{where}{order} LIMIT ? OFFSET ?",
+            [*params, int(limit), int(offset)],
+        ).fetchall()
+    ]
+    pending = int(
+        conn.execute("SELECT COUNT(*) AS c FROM document_audit WHERE audit_status='Pending'").fetchone()["c"]
+    )
+    verified = int(
+        conn.execute("SELECT COUNT(*) AS c FROM document_audit WHERE audit_status='Verified'").fetchone()["c"]
+    )
     conn.close()
     return {
         "rows": rows,
-        "total": int(count),
-        "pending": int(pending),
-        "verified": int(verified),
+        "total": count,
+        "pending": pending,
+        "verified": verified,
     }
+
+
+def backfill_from_modules(*, limit_per_type: int = 5000, actor: str = "system-backfill") -> dict[str, int]:
+    """Enroll existing operational docs that were created before audit hooks."""
+    init_db()
+    counts: dict[str, int] = {t: 0 for t in DOC_TYPES}
+    lim = max(1, min(int(limit_per_type or 5000), 20000))
+
+    def _enroll_many(rows: list[dict], doc_type: str, mapper) -> None:
+        for r in rows:
+            meta = mapper(r)
+            if not meta.get("doc_id"):
+                continue
+            before = get_audit(doc_type, int(meta["doc_id"]))
+            enroll_document(doc_type, int(meta["doc_id"]), created_by=actor, **{k: v for k, v in meta.items() if k != "doc_id"})
+            if not before:
+                counts[doc_type] = counts.get(doc_type, 0) + 1
+
+    try:
+        from ..db import purchase_db as pdb
+
+        conn = pdb._connect()
+        pos = [dict(r) for r in conn.execute(
+            "SELECT id, po_number, supplier_name, so_reference, po_date FROM po_headers ORDER BY id DESC LIMIT ?",
+            (lim,),
+        ).fetchall()]
+        jwos = [dict(r) for r in conn.execute(
+            "SELECT id, jwo_number, processor_name, so_reference, jwo_date FROM jwo_headers ORDER BY id DESC LIMIT ?",
+            (lim,),
+        ).fetchall()]
+        grns = [dict(r) for r in conn.execute(
+            "SELECT id, grn_number, party_name, reference_number, grn_date FROM grn_headers ORDER BY id DESC LIMIT ?",
+            (lim,),
+        ).fetchall()]
+        try:
+            mins = [dict(r) for r in conn.execute(
+                "SELECT id, min_number, to_vendor, so_reference, jwo_reference, min_date FROM material_issue_notes ORDER BY id DESC LIMIT ?",
+                (lim,),
+            ).fetchall()]
+        except Exception:
+            mins = []
+        try:
+            gins = [dict(r) for r in conn.execute(
+                "SELECT id, gin_number, party_name, source_number, gin_date, stage FROM gin_headers ORDER BY id DESC LIMIT ?",
+                (lim,),
+            ).fetchall()]
+        except Exception:
+            gins = []
+        conn.close()
+
+        _enroll_many(pos, "PO", lambda r: {
+            "doc_id": r["id"], "doc_number": r.get("po_number") or "", "module": "purchase",
+            "so_reference": r.get("so_reference") or "", "party_name": r.get("supplier_name") or "",
+            "doc_date": r.get("po_date") or "",
+        })
+        _enroll_many(jwos, "JWO", lambda r: {
+            "doc_id": r["id"], "doc_number": r.get("jwo_number") or "", "module": "purchase",
+            "so_reference": r.get("so_reference") or "", "party_name": r.get("processor_name") or "",
+            "doc_date": r.get("jwo_date") or "",
+        })
+        _enroll_many(grns, "GRN", lambda r: {
+            "doc_id": r["id"], "doc_number": r.get("grn_number") or "", "module": "purchase",
+            "so_reference": r.get("reference_number") or "", "party_name": r.get("party_name") or "",
+            "doc_date": r.get("grn_date") or "",
+        })
+        _enroll_many(mins, "MIN", lambda r: {
+            "doc_id": r["id"], "doc_number": r.get("min_number") or "", "module": "purchase",
+            "so_reference": r.get("so_reference") or r.get("jwo_reference") or "",
+            "party_name": r.get("to_vendor") or "", "doc_date": r.get("min_date") or "",
+            "process_name": "Material Issue",
+        })
+        _enroll_many(gins, "GIN", lambda r: {
+            "doc_id": r["id"], "doc_number": r.get("gin_number") or "", "module": "gate",
+            "so_reference": r.get("source_number") or "", "party_name": r.get("party_name") or "",
+            "doc_date": r.get("gin_date") or "", "process_name": r.get("stage") or "Gate Inward",
+        })
+    except Exception:
+        pass
+
+    try:
+        from ..db import production_db as prdb
+
+        conn = prdb._connect()
+        jos = [dict(r) for r in conn.execute(
+            """SELECT id, jo_number, vendor_name, so_number, process, jo_date
+               FROM job_orders WHERE IFNULL(status,'') != 'Cancelled'
+               ORDER BY id DESC LIMIT ?""",
+            (lim,),
+        ).fetchall()]
+        try:
+            issues = [dict(r) for r in conn.execute(
+                """SELECT id, jo_id, from_process, to_process, so_number, sku, issue_date, issued_qty
+                   FROM jo_piece_issues ORDER BY id DESC LIMIT ?""",
+                (lim,),
+            ).fetchall()]
+        except Exception:
+            issues = []
+        try:
+            receipts = [dict(r) for r in conn.execute(
+                """SELECT id, jo_id, process, so_number, sku, receipt_date, received_qty
+                   FROM jo_piece_receipts ORDER BY id DESC LIMIT ?""",
+                (lim,),
+            ).fetchall()]
+        except Exception:
+            receipts = []
+        jo_nums = {}
+        if issues or receipts:
+            ids = {int(r["jo_id"]) for r in issues + receipts if r.get("jo_id")}
+            if ids:
+                qmarks = ",".join("?" * len(ids))
+                for row in conn.execute(
+                    f"SELECT id, jo_number FROM job_orders WHERE id IN ({qmarks})",
+                    tuple(ids),
+                ).fetchall():
+                    jo_nums[int(row["id"])] = row["jo_number"]
+        conn.close()
+
+        _enroll_many(jos, "JO", lambda r: {
+            "doc_id": r["id"], "doc_number": r.get("jo_number") or "", "module": "production",
+            "so_reference": r.get("so_number") or "", "party_name": r.get("vendor_name") or "",
+            "process_name": r.get("process") or "", "doc_date": r.get("jo_date") or "",
+        })
+        _enroll_many(issues, "JO_ISSUE", lambda r: {
+            "doc_id": r["id"],
+            "doc_number": f"ISS-{r['id']}",
+            "module": "production",
+            "so_reference": r.get("so_number") or "",
+            "party_name": jo_nums.get(int(r.get("jo_id") or 0), f"JO#{r.get('jo_id')}"),
+            "process_name": f"{r.get('from_process') or ''} → {r.get('to_process') or ''}".strip(" →"),
+            "doc_date": r.get("issue_date") or "",
+        })
+        _enroll_many(receipts, "JO_RECEIVE", lambda r: {
+            "doc_id": r["id"],
+            "doc_number": f"RCV-{r['id']}",
+            "module": "production",
+            "so_reference": r.get("so_number") or "",
+            "party_name": jo_nums.get(int(r.get("jo_id") or 0), f"JO#{r.get('jo_id')}"),
+            "process_name": r.get("process") or "Receive",
+            "doc_date": r.get("receipt_date") or "",
+        })
+    except Exception:
+        pass
+
+    counts["total_new"] = sum(v for k, v in counts.items() if k != "total_new")
+    return counts
+
+
+def get_document_detail(doc_type: str, doc_id: int, *, include_blockers: bool = True) -> dict:
+    row = get_audit(doc_type, doc_id)
+    if not row:
+        raise ValueError("Not found in audit registry")
+    out = {
+        **row,
+        "events": list_audit_events(doc_type, doc_id),
+        "editable": row.get("audit_status") != "Verified",
+        "dependency_blockers": [],
+    }
+    if include_blockers:
+        out["dependency_blockers"] = dependency_blockers(doc_type, doc_id)
+    return out
 
 
 def _append_event(

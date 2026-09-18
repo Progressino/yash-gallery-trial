@@ -238,7 +238,24 @@ def create_min_for_jwo(jwoid: int, jwo_number: str, jwo: dict, jwo_lines: list[d
 
     conn.commit()
     conn.close()
-    return get_min_by_jwo_id(jwoid)
+    note = get_min_by_jwo_id(jwoid)
+    if note:
+        try:
+            from ..db import document_audit_db as _audit
+
+            _audit.enroll_document(
+                "MIN",
+                int(note["id"]),
+                doc_number=str(note.get("min_number") or ""),
+                module="purchase",
+                so_reference=str(note.get("so_reference") or jwo_number or ""),
+                party_name=str(note.get("to_vendor") or jwo.get("processor_name") or ""),
+                process_name="Material Issue",
+                doc_date=str(note.get("min_date") or ""),
+            )
+        except Exception:
+            pass
+    return note
 
 
 def get_min_by_jwo_id(jwoid: int) -> dict | None:

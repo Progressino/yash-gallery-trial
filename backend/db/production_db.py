@@ -2724,6 +2724,19 @@ def update_jo(joid: int, data: dict):
     conn.execute(f"UPDATE job_orders SET {sets}, updated_at=? WHERE id=?", vals)
     conn.commit()
     conn.close()
+    try:
+        from ..db.document_audit_db import record_edit_event
+
+        changed = [k for k in ("vendor_name", "vendor_rate", "exec_type", "planned_qty", "remarks") if k in data]
+        if changed or line_updates is not None:
+            record_edit_event(
+                "JO",
+                int(joid),
+                actor=changed_by,
+                detail=",".join(changed) or "lines",
+            )
+    except Exception:
+        pass
 
 
 def list_jo_qty_history(joid: int) -> list:
@@ -2743,6 +2756,14 @@ def list_jo_qty_history(joid: int) -> list:
 # ── Fabric Issue ───────────────────────────────────────────────────────────────
 
 def issue_fabric(joid: int, data: dict):
+    try:
+        from ..db.document_audit_db import assert_doc_editable
+
+        assert_doc_editable("JO", int(joid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     jo = dict(conn.execute("SELECT * FROM job_orders WHERE id=?", (joid,)).fetchone() or {})
     if not jo:
@@ -2792,6 +2813,14 @@ def issue_fabric(joid: int, data: dict):
 
 
 def return_fabric(joid: int, data: dict):
+    try:
+        from ..db.document_audit_db import assert_doc_editable
+
+        assert_doc_editable("JO", int(joid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     jo = dict(conn.execute("SELECT * FROM job_orders WHERE id=?", (joid,)).fetchone() or {})
     if not jo:
@@ -2824,6 +2853,14 @@ def return_fabric(joid: int, data: dict):
 # ── Issue Pieces (process → next process) ─────────────────────────────────────
 
 def issue_pieces(joid: int, data: dict):
+    try:
+        from ..db.document_audit_db import assert_doc_editable
+
+        assert_doc_editable("JO", int(joid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     jo = dict(conn.execute("SELECT * FROM job_orders WHERE id=?", (joid,)).fetchone() or {})
     if not jo:
@@ -2909,6 +2946,7 @@ def issue_pieces(joid: int, data: dict):
         (joid, jo_line_id, from_process, to_process, so_number, sku,
          data.get('issue_date') or datetime.now().strftime('%Y-%m-%d'),
          issued, data.get('issued_by',''), data.get('remarks','')))
+    issue_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     # Update line issued_qty
     if jo_line_id:
@@ -2941,7 +2979,35 @@ def issue_pieces(joid: int, data: dict):
 
     conn.commit()
     conn.close()
-    return {"ok": True, "child_jo": child_jo}
+    try:
+        from ..db import document_audit_db as _audit
+
+        issue_date = data.get("issue_date") or datetime.now().strftime("%Y-%m-%d")
+        _audit.enroll_document(
+            "JO_ISSUE",
+            issue_id,
+            doc_number=f"ISS-{issue_id}",
+            module="production",
+            so_reference=str(so_number or ""),
+            party_name=str(jo.get("jo_number") or f"JO#{joid}"),
+            process_name=f"{from_process} → {to_process}",
+            doc_date=str(issue_date),
+            created_by=str(data.get("issued_by") or ""),
+        )
+        if child_jo and child_jo.get("id"):
+            _audit.enroll_document(
+                "JO",
+                int(child_jo["id"]),
+                doc_number=str(child_jo.get("jo_number") or ""),
+                module="production",
+                so_reference=str(so_number or ""),
+                party_name=str(child_jo.get("vendor_name") or jo.get("vendor_name") or ""),
+                process_name=str(to_process or ""),
+                doc_date=str(issue_date),
+            )
+    except Exception:
+        pass
+    return {"ok": True, "child_jo": child_jo, "issue_id": issue_id}
 
 
 def _embroidery_stock_key(style_key: str, component_code: str, embroidery_type: str) -> tuple[str, str, str]:
@@ -3417,6 +3483,14 @@ def _ensure_downstream_jo_for_issue(
 def receive_pieces(joid: int, data: dict):
     from ..services.document_qty_control import cutting_receive_tolerance_pct, max_allowed_receive
 
+    try:
+        from ..db.document_audit_db import assert_doc_editable
+
+        assert_doc_editable("JO", int(joid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     jo = dict(conn.execute("SELECT * FROM job_orders WHERE id=?", (joid,)).fetchone() or {})
     if not jo:
@@ -3598,6 +3672,22 @@ def receive_pieces(joid: int, data: dict):
     if stock_credit is not None:
         out["embroidery_stock_balance"] = stock_credit
         out["leftover_credited"] = leftover
+    try:
+        from ..db import document_audit_db as _audit
+
+        _audit.enroll_document(
+            "JO_RECEIVE",
+            int(receipt_id),
+            doc_number=f"RCV-{receipt_id}",
+            module="production",
+            so_reference=str(so_number or ""),
+            party_name=str(jo.get("jo_number") or f"JO#{joid}"),
+            process_name=str(process or "Receive"),
+            doc_date=str(data.get("receipt_date") or datetime.now().strftime("%Y-%m-%d")),
+            created_by=str(data.get("received_by") or ""),
+        )
+    except Exception:
+        pass
     return out
 
 
@@ -3686,10 +3776,21 @@ def create_next_process_jo(parent_joid: int) -> dict:
     conn.commit()
     conn.close()
     try:
+        from ..db import document_audit_db as _audit
         from ..services.jo_issue_notes import create_issue_note_for_jo
 
         child = get_jo(new_joid)
         if child:
+            _audit.enroll_document(
+                "JO",
+                int(new_joid),
+                doc_number=num,
+                module="production",
+                so_reference=so_number or "",
+                party_name=str(child.get("vendor_name") or parent.get("vendor_name") or ""),
+                process_name=str(next_process or ""),
+                doc_date=str(child.get("jo_date") or ""),
+            )
             create_issue_note_for_jo(new_joid, num, child, child.get("lines") or [])
     except Exception:
         pass

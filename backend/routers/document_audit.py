@@ -50,18 +50,43 @@ def list_docs(
     )
 
 
-@router.get("/{doc_type}/{doc_id}")
-def get_doc(doc_type: str, doc_id: int):
-    row = audit.get_audit(doc_type, doc_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Not found in audit registry")
-    blockers = audit.dependency_blockers(doc_type, doc_id)
+@router.get("/meta")
+def audit_meta():
     return {
-        **row,
-        "events": audit.list_audit_events(doc_type, doc_id),
-        "dependency_blockers": blockers,
-        "editable": row.get("audit_status") != "Verified",
+        "doc_types": list(audit.DOC_TYPES),
+        "labels": audit.DOC_TYPE_LABELS,
     }
+
+
+@router.post("/backfill")
+def backfill(request: Request, limit_per_type: int = Query(5000, ge=1, le=20000)):
+    """Enroll historical PO/JWO/GRN/MIN/JO/GIN/issue/receive into the audit registry."""
+    if not (may_access_erp_admin(_role(request)) or _can_verify(request)):
+        raise HTTPException(status_code=403, detail="Accounts/Admin required to backfill")
+    return audit.backfill_from_modules(limit_per_type=limit_per_type, actor=_actor(request) or "backfill")
+
+
+@router.get("/{doc_type}/{doc_id}")
+def get_doc(
+    doc_type: str,
+    doc_id: int,
+    include_blockers: int = Query(0, ge=0, le=1),
+):
+    try:
+        return audit.get_document_detail(
+            doc_type,
+            doc_id,
+            include_blockers=bool(include_blockers),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{doc_type}/{doc_id}/blockers")
+def get_blockers(doc_type: str, doc_id: int):
+    if not audit.get_audit(doc_type, doc_id):
+        raise HTTPException(status_code=404, detail="Not found in audit registry")
+    return {"dependency_blockers": audit.dependency_blockers(doc_type, doc_id)}
 
 
 @router.post("/{doc_type}/{doc_id}/verify")
@@ -69,7 +94,6 @@ def verify(doc_type: str, doc_id: int, request: Request):
     if not _can_verify(request):
         raise HTTPException(status_code=403, detail="Accounts/Admin role required to verify")
     try:
-        # Auto-enroll if missing (backfill from lookup is best-effort)
         if not audit.get_audit(doc_type, doc_id):
             audit.enroll_document(doc_type, doc_id, created_by=_actor(request))
         return audit.verify_document(doc_type, doc_id, actor=_actor(request))
@@ -97,9 +121,9 @@ def unverify(doc_type: str, doc_id: int, body: UnverifyBody, request: Request):
 
 
 @router.get("/{doc_type}/{doc_id}/editable")
-def editable(doc_type: str, doc_id: int):
+def editable(doc_type: str, doc_id: int, include_blockers: int = Query(0, ge=0, le=1)):
     verified = audit.is_verified(doc_type, doc_id)
-    blockers = audit.dependency_blockers(doc_type, doc_id)
+    blockers = audit.dependency_blockers(doc_type, doc_id) if include_blockers else []
     return {
         "editable": not verified,
         "verified": verified,

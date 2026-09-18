@@ -11,7 +11,7 @@ function canDocumentVerify(role: string, user: Parameters<typeof mayAccessErpAdm
   return /accounts|account|finance|audit|auditor/i.test(role)
 }
 
-const today = () => new Date().toISOString().slice(0, 10)
+const DOC_TYPES = ['PO', 'JWO', 'GRN', 'MIN', 'JO', 'GIN', 'JO_ISSUE', 'JO_RECEIVE'] as const
 
 export default function DocumentAudit() {
   const { user } = useAuth()
@@ -22,19 +22,30 @@ export default function DocumentAudit() {
   const [filters, setFilters] = useState({
     audit_status: 'Pending',
     doc_type: '',
-    date_from: today(),
-    date_to: today(),
+    date_from: '',
+    date_to: '',
     search: '',
   })
   const [unverifyModal, setUnverifyModal] = useState<null | { doc_type: string; doc_id: number; doc_number: string }>(null)
   const [reason, setReason] = useState('')
   const [force, setForce] = useState(false)
   const [detail, setDetail] = useState<any>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
 
-  const params = useMemo(() => ({ ...filters, limit: 300 }), [filters])
-  const { data, isFetching } = useQuery({
+  const params = useMemo(() => {
+    const p: Record<string, string | number> = { limit: 300 }
+    if (filters.audit_status) p.audit_status = filters.audit_status
+    if (filters.doc_type) p.doc_type = filters.doc_type
+    if (filters.date_from) p.date_from = filters.date_from
+    if (filters.date_to) p.date_to = filters.date_to
+    if (filters.search.trim()) p.search = filters.search.trim()
+    return p
+  }, [filters])
+
+  const { data, isFetching, isLoading } = useQuery({
     queryKey: ['document-audit', params],
     queryFn: () => api.get('/document-audit', { params }).then(r => r.data),
+    staleTime: 15_000,
   })
 
   const verifyMut = useMutation({
@@ -60,12 +71,39 @@ export default function DocumentAudit() {
     onError: (e: any) => alert(e?.response?.data?.detail || 'Unverify failed'),
   })
 
+  const backfillMut = useMutation({
+    mutationFn: () => api.post('/document-audit/backfill', null, { params: { limit_per_type: 8000 } }).then(r => r.data),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['document-audit'] })
+      alert(`Backfill complete. New enrollments: ${res?.total_new ?? 0}\n${JSON.stringify(res, null, 2)}`)
+    },
+    onError: (e: any) => alert(e?.response?.data?.detail || 'Backfill failed'),
+  })
+
   const rows = data?.rows || []
   const set = (k: string, v: string) => setFilters(f => ({ ...f, [k]: v }))
 
   const openDetail = async (row: any) => {
-    const { data: d } = await api.get(`/document-audit/${row.doc_type}/${row.doc_id}`)
-    setDetail(d)
+    setDetailLoading(true)
+    setDetail({ ...row, events: [], dependency_blockers: [], _loading: true })
+    try {
+      // Fast trail: events only (no cross-DB blockers)
+      const { data: d } = await api.get(`/document-audit/${row.doc_type}/${row.doc_id}`, {
+        params: { include_blockers: 0 },
+      })
+      setDetail(d)
+      // Lazy blockers (optional, for Unverify guidance)
+      void api.get(`/document-audit/${row.doc_type}/${row.doc_id}/blockers`).then(r => {
+        setDetail((prev: any) => prev && prev.doc_id === row.doc_id && prev.doc_type === row.doc_type
+          ? { ...prev, dependency_blockers: r.data?.dependency_blockers || [] }
+          : prev)
+      }).catch(() => undefined)
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || 'Could not load trail')
+      setDetail(null)
+    } finally {
+      setDetailLoading(false)
+    }
   }
 
   return (
@@ -74,14 +112,26 @@ export default function DocumentAudit() {
         <div>
           <h1 className="text-xl font-bold text-[#002B5B]">Document Verification (Accounts)</h1>
           <p className="text-xs text-gray-500 max-w-3xl mt-1">
-            Daily audit of ERP documents. Verify after matching the physical paper.
-            Verified documents are locked from normal edits. Unverify requires a reason;
-            downstream-dependent docs need Admin force-unverify (correction chain preserved in event log).
+            Daily audit of ERP documents. Flow: Create → Edit while Pending → Verify (locks edit) →
+            Unverify with reason → Edit → Re-verify. Downstream Receive/Issue/WIP chains require Admin force-unverify.
           </p>
         </div>
-        <div className="flex gap-2 text-xs">
+        <div className="flex flex-wrap gap-2 text-xs items-center">
           <span className="px-2 py-1 rounded bg-amber-100 text-amber-900 font-semibold">Pending {data?.pending ?? '—'}</span>
           <span className="px-2 py-1 rounded bg-emerald-100 text-emerald-900 font-semibold">Verified {data?.verified ?? '—'}</span>
+          {(canVerify || canForce) && (
+            <button
+              type="button"
+              disabled={backfillMut.isPending}
+              onClick={() => {
+                if (!window.confirm('Enroll all existing PO / JWO / GRN / MIN / JO / GIN / Issue / Receive into Doc Verify?')) return
+                backfillMut.mutate()
+              }}
+              className="px-2 py-1 rounded border border-sky-300 bg-sky-50 text-sky-900 font-medium disabled:opacity-50"
+            >
+              {backfillMut.isPending ? 'Backfilling…' : 'Sync / Backfill docs'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -98,15 +148,15 @@ export default function DocumentAudit() {
           <span className="text-gray-500">Doc type</span>
           <select value={filters.doc_type} onChange={e => set('doc_type', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1">
             <option value="">All</option>
-            {['PO', 'JWO', 'GRN', 'MIN', 'JO', 'GIN'].map(t => <option key={t} value={t}>{t}</option>)}
+            {DOC_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         </label>
         <label className="block">
-          <span className="text-gray-500">From</span>
+          <span className="text-gray-500">From (optional)</span>
           <input type="date" value={filters.date_from} onChange={e => set('date_from', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1" />
         </label>
         <label className="block">
-          <span className="text-gray-500">To</span>
+          <span className="text-gray-500">To (optional)</span>
           <input type="date" value={filters.date_to} onChange={e => set('date_to', e.target.value)} className="mt-0.5 w-full border rounded px-2 py-1" />
         </label>
         <label className="block">
@@ -116,7 +166,10 @@ export default function DocumentAudit() {
       </div>
 
       <div className="bg-white border rounded-xl overflow-auto">
-        <div className="px-3 py-2 text-xs text-gray-500">{isFetching ? 'Loading…' : `${Number(data?.total || 0).toLocaleString()} documents`}</div>
+        <div className="px-3 py-2 text-xs text-gray-500">
+          {isLoading || isFetching ? 'Loading…' : `${Number(data?.total || 0).toLocaleString()} documents`}
+          {!filters.date_from && !filters.date_to ? ' · showing all dates (Pending filter)' : ''}
+        </div>
         <table className="w-full text-xs">
           <thead className="bg-gray-50 text-gray-500 uppercase">
             <tr>
@@ -146,7 +199,8 @@ export default function DocumentAudit() {
                   <div className="flex flex-wrap gap-1">
                     <button type="button" className="text-[10px] px-2 py-0.5 border rounded" onClick={() => void openDetail(r)}>Trail</button>
                     {canVerify && r.audit_status !== 'Verified' && (
-                      <button type="button" className="text-[10px] px-2 py-0.5 bg-emerald-600 text-white rounded"
+                      <button type="button" className="text-[10px] px-2 py-0.5 bg-emerald-600 text-white rounded disabled:opacity-50"
+                        disabled={verifyMut.isPending}
                         onClick={() => verifyMut.mutate({ doc_type: r.doc_type, doc_id: r.doc_id })}>Verify</button>
                     )}
                     {canVerify && r.audit_status === 'Verified' && (
@@ -159,8 +213,13 @@ export default function DocumentAudit() {
                 </td>
               </tr>
             ))}
-            {rows.length === 0 && (
-              <tr><td colSpan={9} className="text-center text-gray-400 py-10">No documents in this filter. New PO/JWO/GRN/JO enroll automatically on create.</td></tr>
+            {rows.length === 0 && !isLoading && (
+              <tr>
+                <td colSpan={9} className="text-center text-gray-400 py-10">
+                  No documents in this filter. Click <b>Sync / Backfill docs</b> to enroll existing PO/JWO/GRN/MIN/JO/GIN/Issue/Receive,
+                  or clear the date filters.
+                </td>
+              </tr>
             )}
           </tbody>
         </table>
@@ -172,7 +231,7 @@ export default function DocumentAudit() {
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="font-semibold text-gray-900">{detail.doc_type} {detail.doc_number}</h3>
-                <p className="text-xs text-gray-500">Status: {detail.audit_status}</p>
+                <p className="text-xs text-gray-500">Status: {detail.audit_status}{detailLoading ? ' · loading…' : ''}</p>
               </div>
               <button type="button" onClick={() => setDetail(null)}>✕</button>
             </div>
@@ -182,6 +241,7 @@ export default function DocumentAudit() {
               </div>
             )}
             <div className="max-h-64 overflow-y-auto text-xs space-y-1">
+              {(detail.events || []).length === 0 && <p className="text-gray-400">No events yet.</p>}
               {(detail.events || []).map((ev: any) => (
                 <div key={ev.id} className="border-b border-gray-100 py-1">
                   <b>{ev.event_type}</b> · {ev.actor || '—'} · {ev.event_at}

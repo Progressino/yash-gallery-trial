@@ -70,3 +70,32 @@ def test_unverify_requires_reason(audit_env):
     audit.verify_document("JO", 5, actor="A")
     with pytest.raises(ValueError, match="Reason"):
         audit.unverify_document("JO", 5, actor="A", reason="")
+
+
+def test_list_documents_fast_without_date_filter(audit_env):
+    for i in range(5):
+        audit.enroll_document("JO", 1000 + i, doc_number=f"JO-{i}", process_name="Cutting")
+    out = audit.list_documents(audit_status="Pending", limit=10)
+    assert out["total"] >= 5
+    assert out["pending"] >= 5
+    assert len(out["rows"]) >= 5
+
+
+def test_get_document_detail_skips_blockers_when_requested(audit_env):
+    audit.enroll_document("GRN", 9, doc_number="GRN-9")
+    d = audit.get_document_detail("GRN", 9, include_blockers=False)
+    assert d["doc_number"] == "GRN-9"
+    assert d["dependency_blockers"] == []
+    assert d["events"]
+
+
+def test_print_brand_uses_embedded_logo():
+    from backend.services.print_brand import brand_header_html, logo_data_url
+
+    url = logo_data_url()
+    assert url.startswith("data:image/png;base64,")
+    html = brand_header_html(doc_title="PURCHASE ORDER", doc_number="PO-1", department="Purchase")
+    assert "Yash Gallery Pvt. Ltd." in html
+    assert "Bhiwandi" in html
+    assert url in html
+
