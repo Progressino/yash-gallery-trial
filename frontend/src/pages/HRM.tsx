@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useAuth } from '../store/auth'
-import { FREQUENCIES, PRIORITIES, TIME_PERIODS, WEEKDAYS, MONTHS, priorityStyle } from './hrmConstants'
+import { FREQUENCIES, PRIORITIES, WEEKDAYS, MONTHS, priorityStyle } from './hrmConstants'
 import { loadHrmLang, saveHrmLang, t, type HrmLang } from './hrmI18n'
 
 type Tab = 'dashboard' | 'check' | 'approvals' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'reports' | 'hierarchy'
@@ -157,7 +157,6 @@ export default function HRM() {
   const [appraisalTo, setAppraisalTo] = useState(today())
   const [checkDate, setCheckDate] = useState(today())
   const [checkEmp, setCheckEmp] = useState<number | ''>('')
-  const [checkPeriod, setCheckPeriod] = useState('')
   const [showDailyGuide, setShowDailyGuide] = useState(false)
 
   const [showDeptForm, setShowDeptForm] = useState(false)
