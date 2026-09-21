@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -581,6 +582,10 @@ def init_db():
         "ALTER TABLE one_time_tasks ADD COLUMN paused_seconds INTEGER DEFAULT 0",
         "ALTER TABLE one_time_tasks ADD COLUMN session_started_at TEXT DEFAULT ''",
         "ALTER TABLE one_time_tasks ADD COLUMN auto_paused INTEGER DEFAULT 0",
+        # Expected time + KPI weightage on responsibilities (Time Period retained for legacy data)
+        "ALTER TABLE responsibilities ADD COLUMN expected_time TEXT DEFAULT ''",
+        "ALTER TABLE responsibilities ADD COLUMN expected_minutes INTEGER DEFAULT 0",
+        "ALTER TABLE responsibilities ADD COLUMN kpi_weightage REAL DEFAULT 0",
     ):
         try:
             conn.execute(sql)
@@ -736,7 +741,113 @@ def parse_duration_to_minutes(value) -> int:
         if h < 0 or m < 0 or m > 59:
             raise ValueError("Invalid time (minutes 0-59)")
         return h * 60 + m
+    # "30m", "30 min", "1h", "1h 30m"
+    lower = s.lower().replace(",", " ")
+    m = re.fullmatch(
+        r"(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:utes?)?)?)?",
+        lower,
+    )
+    if m and (m.group(1) or m.group(2)):
+        hours = int(m.group(1) or 0)
+        mins = int(m.group(2) or 0)
+        return hours * 60 + mins
     raise ValueError("Invalid duration format (use minutes or HH:MM)")
+
+
+def parse_optional_expected_time(value) -> tuple[str, int]:
+    """Return (display_string, minutes). Empty input → ('', 0). Invalid non-empty raises ValueError."""
+    if value is None:
+        return "", 0
+    s = str(value).strip()
+    if not s:
+        return "", 0
+    mins = parse_duration_to_minutes(s)
+    return s, mins
+
+
+def parse_optional_kpi_weightage(value) -> float:
+    """Optional KPI weightage 0–100. Empty → 0. Raises ValueError if out of range."""
+    if value is None or value == "":
+        return 0.0
+    try:
+        w = float(str(value).strip().replace("%", ""))
+    except (TypeError, ValueError) as e:
+        raise ValueError("KPI weightage must be a number between 0 and 100") from e
+    if w < 0 or w > 100:
+        raise ValueError("KPI weightage must be between 0 and 100")
+    return round(w, 2)
+
+
+def is_sunday_ist(check_date: str | date | None) -> bool:
+    """True when the calendar date is Sunday in the business timezone (IST)."""
+    if check_date is None:
+        d = today_ist()
+    elif isinstance(check_date, date):
+        d = check_date
+    else:
+        d = date.fromisoformat(str(check_date)[:10])
+    return d.weekday() == 6
+
+
+def count_working_days_ist(from_date: str, to_date: str) -> int:
+    """Count IST calendar days in [from_date, to_date] excluding Sundays."""
+    d0 = date.fromisoformat(str(from_date)[:10])
+    d1 = date.fromisoformat(str(to_date)[:10])
+    if d1 < d0:
+        return 0
+    n = 0
+    cur = d0
+    while cur <= d1:
+        if cur.weekday() != 6:
+            n += 1
+        cur += timedelta(days=1)
+    return n
+
+
+RESPONSIBILITY_IMPORT_COLUMNS = (
+    "employee_code",
+    "employee_name",
+    "title",
+    "description",
+    "frequency",
+    "category",
+    "priority",
+    "mandatory",
+    "expected_time",
+    "kpi_weightage",
+    "schedule_weekday",
+    "schedule_month_day",
+    "schedule_month",
+    "backup_employee_code",
+    "added_by",
+)
+
+TASK_IMPORT_COLUMNS = (
+    "employee_code",
+    "employee_name",
+    "title",
+    "description",
+    "due_date",
+    "priority",
+    "assigned_by",
+)
+
+
+def responsibility_import_template_csv() -> str:
+    header = ",".join(RESPONSIBILITY_IMPORT_COLUMNS)
+    examples = [
+        "EMP001,Sample Employee,Morning stock check,Count warehouse,Daily,General,Medium,yes,30,10,,,,,Admin",
+        "EMP001,,Weekly review,,Weekly,General,High,no,1:00,5,Monday,,,,Admin",
+    ]
+    return "\n".join([header, *examples]) + "\n"
+
+
+def task_import_template_csv() -> str:
+    header = ",".join(TASK_IMPORT_COLUMNS)
+    examples = [
+        "EMP001,Sample Employee,Urgent floor walk,Boss asked verbally,2026-09-22,High,Self",
+    ]
+    return "\n".join([header, *examples]) + "\n"
 
 
 def is_schedule_due(
@@ -1375,18 +1486,31 @@ def _normalize_import_row(row: dict) -> dict:
 
 
 def _resolve_employee_id(conn, row: dict) -> int | None:
-    code = row.get("employee_code") or row.get("emp_code") or ""
+    code = (
+        row.get("employee_code")
+        or row.get("emp_code")
+        or row.get("employee_id")
+        or ""
+    )
     name = row.get("employee_name") or row.get("employee") or row.get("name") or ""
     if code:
         found = conn.execute(
-            "SELECT id FROM employees WHERE emp_code=? AND status='Active'",
+            "SELECT id FROM employees WHERE UPPER(TRIM(emp_code))=UPPER(TRIM(?)) AND status='Active'",
             (code,),
         ).fetchone()
         if found:
             return int(found["id"])
+        # Numeric employee primary key fallback (not emp_code)
+        if str(code).isdigit():
+            found = conn.execute(
+                "SELECT id FROM employees WHERE id=? AND status='Active'",
+                (int(code),),
+            ).fetchone()
+            if found:
+                return int(found["id"])
     if name:
         found = conn.execute(
-            "SELECT id FROM employees WHERE LOWER(name)=LOWER(?) AND status='Active'",
+            "SELECT id FROM employees WHERE LOWER(TRIM(name))=LOWER(TRIM(?)) AND status='Active'",
             (name,),
         ).fetchone()
         if found:
@@ -1394,8 +1518,27 @@ def _resolve_employee_id(conn, row: dict) -> int | None:
     return None
 
 
+def _truthy_import_flag(raw: str) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "y", "mandatory"}
+
+
+def _find_duplicate_responsibility(conn, employee_id: int, title: str, frequency: str) -> int | None:
+    row = conn.execute(
+        """
+        SELECT id FROM responsibilities
+        WHERE employee_id=? AND active=1
+          AND LOWER(TRIM(title))=LOWER(TRIM(?))
+          AND LOWER(TRIM(COALESCE(frequency,'')))=LOWER(TRIM(?))
+        LIMIT 1
+        """,
+        (employee_id, title, frequency or "Daily"),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
 def import_responsibilities(rows: list[dict]) -> dict:
     created = 0
+    skipped = 0
     errors: list[str] = []
     conn = _connect()
     try:
@@ -1407,26 +1550,80 @@ def import_responsibilities(rows: list[dict]) -> dict:
                 continue
             emp_id = _resolve_employee_id(conn, row)
             if not emp_id:
-                errors.append(f"Row {idx}: employee not found ({row.get('employee_name') or row.get('emp_code') or '?'})")
+                errors.append(
+                    f"Row {idx}: employee not found "
+                    f"({row.get('employee_name') or row.get('employee_code') or row.get('emp_code') or '?'})"
+                )
                 continue
-            create_responsibility(
-                {
-                    "employee_id": emp_id,
-                    "title": title,
-                    "description": row.get("description", ""),
-                    "frequency": row.get("frequency") or "Daily",
-                    "category": row.get("category") or "General",
-                    "added_by": row.get("added_by") or row.get("assigned_by") or "",
-                }
-            )
-            created += 1
+            freq = row.get("frequency") or "Daily"
+            dup_id = _find_duplicate_responsibility(conn, emp_id, title, freq)
+            if dup_id:
+                skipped += 1
+                errors.append(
+                    f"Row {idx}: skipped duplicate active responsibility "
+                    f"'{title}' for employee (id={dup_id})"
+                )
+                continue
+            try:
+                expected_time, expected_minutes = parse_optional_expected_time(
+                    row.get("expected_time") or row.get("expected") or ""
+                )
+                kpi_weightage = parse_optional_kpi_weightage(
+                    row.get("kpi_weightage") or row.get("kpi") or row.get("weightage") or ""
+                )
+            except ValueError as e:
+                errors.append(f"Row {idx}: {e}")
+                continue
+            backup_id = None
+            backup_code = row.get("backup_employee_code") or row.get("backup_emp_code") or ""
+            backup_name = row.get("backup_employee_name") or row.get("backup") or ""
+            if backup_code or backup_name:
+                backup_id = _resolve_employee_id(
+                    conn,
+                    {
+                        "employee_code": backup_code,
+                        "employee_name": backup_name,
+                    },
+                )
+                if not backup_id:
+                    errors.append(f"Row {idx}: backup employee not found")
+                    continue
+            payload = {
+                "employee_id": emp_id,
+                "title": title,
+                "description": row.get("description", ""),
+                "frequency": freq,
+                "category": row.get("category") or "General",
+                "added_by": row.get("added_by") or row.get("assigned_by") or "",
+                "priority": row.get("priority") or "Medium",
+                "mandatory": _truthy_import_flag(row.get("mandatory") or ""),
+                "schedule_weekday": row.get("schedule_weekday") or row.get("weekday") or "",
+                "schedule_month_day": int(float(row["schedule_month_day"]))
+                if str(row.get("schedule_month_day") or "").strip()
+                else 0,
+                "schedule_month": int(float(row["schedule_month"]))
+                if str(row.get("schedule_month") or "").strip()
+                else 0,
+                "expected_time": expected_time,
+                "expected_minutes": expected_minutes,
+                "kpi_weightage": kpi_weightage,
+                "backup_employee_id": backup_id,
+            }
+            try:
+                create_responsibility(payload)
+                created += 1
+            except ValueError as e:
+                errors.append(f"Row {idx}: {e}")
+            except Exception as e:
+                errors.append(f"Row {idx}: unexpected error — {e}")
     finally:
         conn.close()
-    return {"created": created, "errors": errors}
+    return {"created": created, "skipped": skipped, "errors": errors}
 
 
 def import_one_time_tasks(rows: list[dict]) -> dict:
     created = 0
+    skipped = 0
     errors: list[str] = []
     conn = _connect()
     try:
@@ -1438,21 +1635,47 @@ def import_one_time_tasks(rows: list[dict]) -> dict:
                 continue
             emp_id = _resolve_employee_id(conn, row)
             if not emp_id:
-                errors.append(f"Row {idx}: employee not found ({row.get('employee_name') or row.get('emp_code') or '?'})")
+                errors.append(
+                    f"Row {idx}: employee not found "
+                    f"({row.get('employee_name') or row.get('employee_code') or row.get('emp_code') or '?'})"
+                )
                 continue
-            create_one_time_task(
-                {
-                    "employee_id": emp_id,
-                    "title": title,
-                    "description": row.get("description", ""),
-                    "due_date": row.get("due_date") or row.get("due") or "",
-                    "assigned_by": row.get("assigned_by") or row.get("added_by") or "",
-                }
-            )
-            created += 1
+            due = row.get("due_date") or row.get("due") or ""
+            existing = conn.execute(
+                """
+                SELECT id FROM one_time_tasks
+                WHERE employee_id=? AND active=1
+                  AND LOWER(TRIM(title))=LOWER(TRIM(?))
+                  AND COALESCE(due_date,'')=?
+                  AND status IN ('Pending','In Progress','Done','Rejected')
+                LIMIT 1
+                """,
+                (emp_id, title, due),
+            ).fetchone()
+            if existing:
+                skipped += 1
+                errors.append(f"Row {idx}: skipped duplicate task '{title}'")
+                continue
+            try:
+                create_one_time_task(
+                    {
+                        "employee_id": emp_id,
+                        "title": title,
+                        "description": row.get("description", ""),
+                        "due_date": due,
+                        "priority": row.get("priority") or "Medium",
+                        "assigned_by": row.get("assigned_by") or row.get("added_by") or "",
+                        "require_backup": False,
+                    }
+                )
+                created += 1
+            except ValueError as e:
+                errors.append(f"Row {idx}: {e}")
+            except Exception as e:
+                errors.append(f"Row {idx}: unexpected error — {e}")
     finally:
         conn.close()
-    return {"created": created, "errors": errors}
+    return {"created": created, "skipped": skipped, "errors": errors}
 
 
 def list_responsibilities(employee_id=None, department_id=None, active_only=True):
@@ -1542,14 +1765,28 @@ def create_responsibility(data: dict):
     except ValueError:
         conn.close()
         raise
+    try:
+        expected_time, expected_minutes = parse_optional_expected_time(
+            data.get("expected_time", data.get("expected_minutes", ""))
+        )
+        if data.get("expected_minutes") not in (None, "", 0, "0") and not expected_time:
+            expected_minutes = int(parse_duration_to_minutes(data.get("expected_minutes")))
+            expected_time = str(data.get("expected_minutes"))
+        kpi_weightage = parse_optional_kpi_weightage(data.get("kpi_weightage", 0))
+    except ValueError:
+        conn.close()
+        raise
+    if data.get("expected_minutes") not in (None, "") and expected_minutes == 0 and expected_time:
+        pass  # already parsed from expected_time
     conn.execute(
         """INSERT INTO responsibilities(
             employee_id,department_id,title,description,frequency,category,added_by,active,
             priority,mandatory,schedule_weekday,schedule_month_day,time_period,
             schedule_month,linked_to_employee_id,
-            backup_employee_id,backup_allocation_value,backup_allocation_unit
+            backup_employee_id,backup_allocation_value,backup_allocation_unit,
+            expected_time,expected_minutes,kpi_weightage
         )
-        VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?)""",
+        VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             data["employee_id"],
             dept_id,
@@ -1568,6 +1805,9 @@ def create_responsibility(data: dict):
             backup_id,
             backup_val,
             backup_unit,
+            expected_time,
+            expected_minutes,
+            kpi_weightage,
         ),
     )
     conn.commit()
@@ -1597,10 +1837,30 @@ def update_responsibility(rid: int, data: dict):
         "backup_employee_id",
         "backup_allocation_value",
         "backup_allocation_unit",
+        "expected_time",
+        "expected_minutes",
+        "kpi_weightage",
     ]
     payload = {k: data[k] for k in data if k in allowed}
     if "mandatory" in payload:
         payload["mandatory"] = 1 if payload["mandatory"] else 0
+    if "expected_time" in payload or "expected_minutes" in payload:
+        try:
+            et, em = parse_optional_expected_time(payload.get("expected_time", ""))
+            if payload.get("expected_minutes") not in (None, "") and not et:
+                em = int(parse_duration_to_minutes(payload.get("expected_minutes")))
+                et = str(payload.get("expected_minutes"))
+            payload["expected_time"] = et
+            payload["expected_minutes"] = em
+        except ValueError:
+            conn.close()
+            raise
+    if "kpi_weightage" in payload:
+        try:
+            payload["kpi_weightage"] = parse_optional_kpi_weightage(payload.get("kpi_weightage"))
+        except ValueError:
+            conn.close()
+            raise
     if "linked_to_employee_id" in payload:
         v = payload["linked_to_employee_id"]
         try:
@@ -1741,6 +2001,11 @@ def mark_task(
     if not allow_override and not in_task_action_window(log_date):
         return "window_closed"
 
+    # Sundays are always N/A for performance — force neutral status
+    if is_sunday_ist(log_date) and status not in NEUTRAL_TASK_STATUSES:
+        status = "N/A"
+        remarks = (remarks or "").strip() or "Auto: Sunday not applicable"
+
     conn = _connect()
     resp = conn.execute(
         """SELECT employee_id, department_id, linked_to_employee_id
@@ -1778,9 +2043,21 @@ def mark_task(
         approved_at = ""
 
     existing = conn.execute(
-        "SELECT id, marked_at, approval_status, status FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        """SELECT id, marked_at, approval_status, status, started_at, ended_at,
+                  COALESCE(active_seconds,0) as active_seconds
+           FROM task_logs WHERE responsibility_id=? AND log_date=?""",
         (responsibility_id, log_date),
     ).fetchone()
+
+    # Mandatory time tracking before quality status (Leave / N/A exempt).
+    # HOD/Admin overrides and system auto-marks may skip the timer gate.
+    if status not in NEUTRAL_TASK_STATUSES and not allow_override:
+        started = str(existing["started_at"] or "").strip() if existing else ""
+        active_secs = int(existing["active_seconds"] or 0) if existing else 0
+        if not started and active_secs <= 0:
+            conn.close()
+            return "timer_required"
+
     if existing:
         existing_status = str(existing["status"] or "Pending").strip() or "Pending"
         # A timer-only Pending DWR row is not a committed quality mark — employee can still mark Done.
@@ -1926,6 +2203,7 @@ def mark_task(
     conn.commit()
     conn.close()
     return True
+
 
 
 def list_pending_linked_approvals(linked_employee_id: int) -> list[dict]:
@@ -2478,6 +2756,11 @@ def set_responsibility_manual_time(
         conn.close()
         return "not_found"
     row = _ensure_task_log_row(conn, responsibility_id, int(resp["employee_id"]), log_date)
+    # Lock time edits once a quality status has been submitted (Pending timer-only still editable)
+    st = str(row.get("status") or "Pending").strip() or "Pending"
+    if st not in ("Pending",) and not allow_override:
+        conn.close()
+        return "status_locked"
     mins = _duration_minutes(start, end) if start and end else 0
     active = mins * 60
     conn.execute(
@@ -3882,6 +4165,56 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         (employee_id,),
     ).fetchall()
 
+    # Sundays: auto-mark due responsibilities as N/A (does not delete prior data)
+    if is_sunday_ist(day):
+        for r in resps:
+            rdict = dict(r)
+            freq = rdict.get("frequency") or "Daily"
+            if freq == "Whenever Required":
+                continue
+            if not is_schedule_due(
+                freq,
+                day,
+                rdict.get("schedule_weekday") or "",
+                int(rdict.get("schedule_month_day") or 0),
+                int(rdict.get("schedule_month") or 0),
+            ):
+                continue
+            existing = conn.execute(
+                "SELECT id, status FROM task_logs WHERE responsibility_id=? AND log_date=?",
+                (int(rdict["id"]), day),
+            ).fetchone()
+            if existing:
+                st = str(existing["status"] or "Pending").strip() or "Pending"
+                if st not in ("Pending", "N/A"):
+                    continue
+                if st != "N/A":
+                    conn.execute(
+                        """UPDATE task_logs
+                           SET status='N/A', remarks=?, marked_by='system-sunday',
+                               marked_at=?, approval_status='N/A'
+                           WHERE id=?""",
+                        ("Auto: Sunday not applicable", _now_iso(), int(existing["id"])),
+                    )
+            else:
+                conn.execute(
+                    """INSERT INTO task_logs(
+                        responsibility_id, employee_id, log_date, status, remarks,
+                        marked_by, marked_at, approval_status
+                    ) VALUES (?,?,?,?,?,?,?,?)""",
+                    (
+                        int(rdict["id"]),
+                        employee_id,
+                        day,
+                        "N/A",
+                        "Auto: Sunday not applicable",
+                        "system-sunday",
+                        _now_iso(),
+                        "N/A",
+                    ),
+                )
+        conn.commit()
+
     logs = conn.execute(
         """
         SELECT id, responsibility_id, status, remarks, marked_by, marked_at,
@@ -4210,6 +4543,7 @@ def mark_unmarked_daily_as_missed(
             "Missed",
             marked_by=marked_by,
             remarks="Auto-marked: not updated by end of day",
+            allow_override=True,
         )
         marked += 1
     return {"ok": True, "marked": marked, "check_date": day, "employee_id": employee_id}
@@ -4276,7 +4610,8 @@ def get_performance(department_id=None, from_date=None, to_date=None):
     dates = []
     cur = start
     while cur <= end:
-        dates.append(cur.isoformat())
+        if cur.weekday() != 6:  # exclude Sundays (IST business week)
+            dates.append(cur.isoformat())
         cur += timedelta(days=1)
     total_days = len(dates)
 
@@ -4290,7 +4625,8 @@ def get_performance(department_id=None, from_date=None, to_date=None):
     resps = conn.execute(
         f"""
         SELECT r.id, r.employee_id, r.frequency, e.name as employee_name,
-               d.name as department_name
+               d.name as department_name,
+               COALESCE(r.kpi_weightage, 0) as kpi_weightage
         FROM responsibilities r
         JOIN employees e ON e.id=r.employee_id
         LEFT JOIN departments d ON d.id=r.department_id
@@ -4396,6 +4732,8 @@ def get_performance(department_id=None, from_date=None, to_date=None):
             if r["frequency"] == "Daily"
             else (total_days // 7 if r["frequency"] == "Weekly" else 1)
         )
+        weight = float(r["kpi_weightage"] or 0) if "kpi_weightage" in r.keys() else 0.0
+        unit_w = weight if weight > 0 else 1.0
         done_weight = 0.0
         missed = 0
         blocked = 0
@@ -4403,6 +4741,7 @@ def get_performance(department_id=None, from_date=None, to_date=None):
             entry = log_map.get((r["id"], d))
             if not entry:
                 continue
+            # Sundays already excluded from dates; N/A never counts via task_log_counts_for_performance
             bucket = task_log_counts_for_performance(
                 entry["status"],
                 approval_status=entry.get("approval_status") or "",
@@ -4410,14 +4749,14 @@ def get_performance(department_id=None, from_date=None, to_date=None):
                 linked_to_employee_id=entry.get("linked_to_employee_id"),
             )
             if bucket == "done":
-                done_weight += 1
+                done_weight += unit_w
             elif bucket == "partial":
-                done_weight += 0.5
+                done_weight += 0.5 * unit_w
             elif bucket == "missed":
                 missed += 1
             elif bucket == "blocked":
                 blocked += 1
-        emp_stats[eid]["total_tasks"] += expected
+        emp_stats[eid]["total_tasks"] += expected * unit_w
         emp_stats[eid]["done_tasks"] += done_weight
         emp_stats[eid]["missed_tasks"] += missed
         emp_stats[eid]["blocked_tasks"] += blocked

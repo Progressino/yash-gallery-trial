@@ -3,6 +3,7 @@ import io
 
 import pandas as pd
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, field_validator
 from typing import Any, Optional
 
@@ -16,6 +17,8 @@ from ..db.hrm_db import (
     delete_employee,
     import_responsibilities,
     import_one_time_tasks,
+    responsibility_import_template_csv,
+    task_import_template_csv,
     list_responsibilities,
     create_responsibility,
     update_responsibility,
@@ -247,7 +250,9 @@ class ResponsibilityIn(BaseModel):
     schedule_weekday: Optional[str] = ""
     schedule_month_day: Optional[int] = 0
     schedule_month: Optional[int] = 0
-    time_period: Optional[str] = ""
+    time_period: Optional[str] = ""  # legacy; prefer expected_time
+    expected_time: Optional[str] = ""
+    kpi_weightage: Optional[float] = 0
     linked_to_employee_id: Optional[int] = None
     backup_employee_id: Optional[int] = None
     backup_allocation_value: Optional[float] = None
@@ -268,6 +273,8 @@ class ResponsibilityUpdate(BaseModel):
     schedule_month_day: Optional[int] = None
     schedule_month: Optional[int] = None
     time_period: Optional[str] = None
+    expected_time: Optional[str] = None
+    kpi_weightage: Optional[float] = None
     linked_to_employee_id: Optional[int] = None
     backup_employee_id: Optional[int] = None
     backup_allocation_value: Optional[float] = None
@@ -590,13 +597,44 @@ def _parse_import_rows(content: bytes, filename: str) -> list[dict]:
     return df.fillna("").to_dict(orient="records")
 
 
+@router.get("/import/responsibilities/template")
+def download_responsibility_import_template(request: Request):
+    scope = _scope_from_request(request)
+    if not scope.can_edit_assignments:
+        raise HTTPException(403, "Not allowed to import responsibilities")
+    return Response(
+        content=responsibility_import_template_csv(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="hrm_responsibilities_import_template.csv"'},
+    )
+
+
+@router.get("/import/one-time-tasks/template")
+def download_task_import_template(request: Request):
+    scope = _scope_from_request(request)
+    if scope.is_employee:
+        raise HTTPException(403, "Not allowed to import tasks")
+    return Response(
+        content=task_import_template_csv(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="hrm_tasks_import_template.csv"'},
+    )
+
+
 @router.post("/import/responsibilities")
 async def post_import_responsibilities(request: Request, file: UploadFile = File(...)):
     scope = _scope_from_request(request)
     if not scope.can_edit_assignments:
         raise HTTPException(403, "Not allowed to import responsibilities")
     content = await file.read()
-    rows = _parse_import_rows(content, file.filename or "")
+    try:
+        rows = _parse_import_rows(content, file.filename or "")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Could not read file: {e}") from e
+    if not rows:
+        raise HTTPException(400, "Import file is empty")
     result = import_responsibilities(rows)
     return {"ok": True, **result}
 
@@ -607,7 +645,14 @@ async def post_import_one_time_tasks(request: Request, file: UploadFile = File(.
     if scope.is_employee:
         raise HTTPException(403, "Not allowed to import tasks")
     content = await file.read()
-    rows = _parse_import_rows(content, file.filename or "")
+    try:
+        rows = _parse_import_rows(content, file.filename or "")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Could not read file: {e}") from e
+    if not rows:
+        raise HTTPException(400, "Import file is empty")
     result = import_one_time_tasks(rows)
     return {"ok": True, **result}
 
@@ -720,6 +765,11 @@ def post_mark_task(body: TaskMarkIn, request: Request):
         )
     if ok == "invalid_status":
         raise HTTPException(400, "Invalid status")
+    if ok == "timer_required":
+        raise HTTPException(
+            400,
+            "Start time tracking before updating status (press ▶ Start, or enter Manual Time)",
+        )
     raise HTTPException(404, "Responsibility not found")
 
 
@@ -743,6 +793,11 @@ def _timer_http_result(ok):
         raise HTTPException(400, "End time cannot be earlier than start time")
     if ok == "invalid_time":
         raise HTTPException(400, "Invalid time. Use YYYY-MM-DD HH:MM")
+    if ok == "status_locked":
+        raise HTTPException(
+            409,
+            "Time cannot be edited after status has been submitted",
+        )
     if ok == "already_active":
         raise HTTPException(
             409,
@@ -750,8 +805,6 @@ def _timer_http_result(ok):
         )
     if ok == "already_paused":
         raise HTTPException(400, "Timer is already paused")
-    if ok == "already_active":
-        raise HTTPException(400, "Timer is already running")
     if ok == "pause_limit":
         raise HTTPException(409, "Maximum 3 pauses reached for this task today")
     if ok == "resume_limit":
@@ -1400,15 +1453,34 @@ def get_dwr(
     department_id: Optional[int] = None,
     check_date: Optional[str] = None,
 ):
-    """Admin/HOD Daily Work Report for a selected employee and date."""
+    """Daily Work Report — scoped by role (self / department / org)."""
     scope = _scope_from_request(request)
-    assert_hrm_hod_or_admin(scope)
+    # Employees: own report only
+    if scope.is_employee:
+        if not scope.employee_id:
+            raise HTTPException(403, "No employee linked to this login")
+        if employee_id is not None and int(employee_id) != int(scope.employee_id):
+            raise HTTPException(403, "You can only view your own working report")
+        return list_dwr_rows(employee_id=int(scope.employee_id), check_date=check_date)
+    # HOD: department subordinates only
+    if scope.is_hod:
+        dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
+        if emp_f == -1 or dept_f == -1:
+            return {"check_date": check_date or today_ist().isoformat(), "rows": []}
+        if emp_f:
+            assert_employee_in_scope(scope, emp_f)
+        return list_dwr_rows(
+            employee_id=emp_f,
+            department_id=dept_f if not emp_f else None,
+            check_date=check_date,
+        )
+    # Admin / Sir / org managers
+    if not scope.can_manage_org and not scope.can_edit_assignments:
+        raise HTTPException(403, "Not allowed to view Daily Working Report")
     if employee_id is not None:
         assert_employee_in_scope(scope, employee_id)
     if department_id is not None:
         assert_department_in_scope(scope, department_id)
-    if department_id is None and employee_id is None and scope.department_id:
-        department_id = scope.department_id
     return list_dwr_rows(
         employee_id=employee_id,
         department_id=department_id,
@@ -1469,18 +1541,19 @@ def get_one_time_tasks(
 def post_one_time_task(body: OneTimeTaskIn, request: Request):
     scope = _scope_from_request(request)
     assert_employee_in_scope(scope, body.employee_id)
+    # User ID → Task: employees may self-assign only
     if scope.is_employee:
-        raise HTTPException(403, "Employees cannot assign one-time tasks")
+        if not scope.employee_id or int(body.employee_id) != int(scope.employee_id):
+            raise HTTPException(403, "You can only create tasks for yourself")
     data = body.model_dump()
-    backup_id = data.get("backup_employee_id")
-    if backup_id:
-        assert_employee_in_scope(scope, int(backup_id))
-        if int(backup_id) == int(body.employee_id):
-            raise HTTPException(400, "Backup person must be different from the assigned employee")
+    # Backup person is no longer collected on Assign Task — ignore if sent
+    data.pop("backup_employee_id", None)
+    data.pop("backup_allocation_value", None)
+    data.pop("backup_allocation_unit", None)
     data["require_backup"] = False
     if not (data.get("assigned_by") or "").strip():
         _, name = _recorder_from_request(request)
-        data["assigned_by"] = name
+        data["assigned_by"] = name if not scope.is_employee else (name or "Self")
     try:
         tid = create_one_time_task(data)
     except ValueError as e:

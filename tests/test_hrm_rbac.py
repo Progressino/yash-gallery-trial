@@ -247,6 +247,7 @@ def test_employee_cannot_resolve_issue(monkeypatch):
 def test_hod_can_override_locked_task_status_via_api(monkeypatch):
     dept_id, emp_id, _, rid, _ = _seed_resp_and_task()
     today = __import__("datetime").date.today().isoformat()
+    hrm_db.start_responsibility_timer(rid, today)
     hrm_db.mark_task(rid, today, "Done", marked_by="HOD")
     client = _make_client(
         monkeypatch,
@@ -264,6 +265,7 @@ def test_hod_can_override_locked_task_status_via_api(monkeypatch):
 def test_employee_cannot_override_locked_task_status(monkeypatch):
     dept_id, emp_id, _, rid, _ = _seed_resp_and_task()
     today = __import__("datetime").date.today().isoformat()
+    hrm_db.start_responsibility_timer(rid, today)
     hrm_db.mark_task(rid, today, "Done", marked_by="HOD")
     client = _make_client(
         monkeypatch,

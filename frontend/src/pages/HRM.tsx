@@ -5,7 +5,7 @@ import { useAuth } from '../store/auth'
 import { FREQUENCIES, PRIORITIES, TIME_PERIODS, WEEKDAYS, MONTHS, priorityStyle } from './hrmConstants'
 import { loadHrmLang, saveHrmLang, t, type HrmLang } from './hrmI18n'
 
-type Tab = 'dashboard' | 'check' | 'approvals' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'hierarchy'
+type Tab = 'dashboard' | 'check' | 'approvals' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'reports' | 'hierarchy'
 
 const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected'] as const
 const TASK_LOG_STATUSES = ['Done', 'Partial', 'Missed', 'Blocked', 'Leave', 'N/A'] as const
@@ -134,6 +134,8 @@ export default function HRM() {
   const isEmployeeScope = scopeLevel === 'self'
   const isHodSelfCheck = userRole === 'HOD' || !!scope?.is_hod
   const canAssignTasks = !isEmployeeScope
+  const canSelfAssignTask = isEmployeeScope && !!scope?.employee_id
+  const canCreateTask = canAssignTasks || canSelfAssignTask
   const canEditAssignments = scope?.can_edit_assignments ?? (canManageOrg || userRole === 'HOD')
   const canMutateRecords = canManageOrg || userRole === 'HOD' || !!scope?.is_hod || (scope?.can_mutate_assignment_records ?? false)
   const canDeleteHrm = scope?.can_delete_hrm_records ?? canManageOrg
@@ -186,7 +188,12 @@ export default function HRM() {
   const [completeNotes, setCompleteNotes] = useState('')
   const [approvalModal, setApprovalModal] = useState<{ id: number; title: string; action: 'approve' | 'reject' } | null>(null)
   const [approvalNotes, setApprovalNotes] = useState('')
-  const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks' | 'dwr'>('responsibilities')
+  const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks'>('responsibilities')
+  const [reportsSubTab, setReportsSubTab] = useState<'dwr' | 'performance'>('dwr')
+  const [dwrShowSlots, setDwrShowSlots] = useState(false)
+  const [reportsDept, setReportsDept] = useState<any>('')
+  const [reportsEmp, setReportsEmp] = useState<any>('')
+  const [reportsDate, setReportsDate] = useState(today())
   const [editDept, setEditDept] = useState<any>(null)
   const [editEmp, setEditEmp] = useState<any>(null)
   const [editResp, setEditResp] = useState<any>(null)
@@ -201,12 +208,12 @@ export default function HRM() {
   const [respForm, setRespForm] = useState({
     employee_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General',
     added_by: '', priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
-    schedule_month: 0, time_period: '', linked_to_employee_id: '' as any,
+    schedule_month: 0, expected_time: '', kpi_weightage: '' as any, linked_to_employee_id: '' as any,
     backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
   })
   const [taskForm, setTaskForm] = useState({
     employee_id: '' as any, title: '', description: '', due_date: '', assigned_by: '', priority: 'Medium',
-    backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
+    linked_to_employee_id: '' as any,
   })
   const [reassignForm, setReassignForm] = useState({
     original_responsibility_id: '' as any, to_employee_id: '' as any, reassignment_date: today(),
@@ -245,7 +252,7 @@ export default function HRM() {
     employee_id: '' as any, department_id: '' as any, title: '', description: '',
     frequency: 'Daily', category: 'General', added_by: '', due_date: '',
     priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
-    schedule_month: 0, time_period: '', linked_to_employee_id: '' as any,
+    schedule_month: 0, expected_time: '', kpi_weightage: '' as any, linked_to_employee_id: '' as any,
     backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
   })
   const [showQuickResp, setShowQuickResp] = useState(false)
@@ -365,14 +372,16 @@ export default function HRM() {
     enabled: !!hodDept,
   })
   const { data: dwrData } = useQuery({
-    queryKey: ['hrm-dwr', hodDept, hodEmp, toDate],
+    queryKey: ['hrm-dwr', reportsDept, reportsEmp, reportsDate, scopeLevel, scope?.employee_id],
     queryFn: () => {
-      const p = new URLSearchParams({ check_date: toDate })
-      if (hodEmp) p.set('employee_id', String(hodEmp))
-      if (hodDept) p.set('department_id', String(hodDept))
+      const p = new URLSearchParams({ check_date: reportsDate || today() })
+      const empId = reportsEmp || (scopeLevel === 'self' ? scope?.employee_id : '')
+      const deptId = reportsDept || (scopeLevel === 'department' ? scope?.department_id : '')
+      if (empId) p.set('employee_id', String(empId))
+      if (deptId && !empId) p.set('department_id', String(deptId))
       return api.get(`/hrm/dwr?${p}`).then(r => r.data)
     },
-    enabled: tab === 'hod' && hodSubTab === 'dwr' && !!hodDept,
+    enabled: tab === 'reports' && reportsSubTab === 'dwr',
   })
   const { data: issues = [] } = useQuery({
     queryKey: ['hrm-issues', selDept, selEmp, fromDate, toDate, issueStatusFilter, issueQ],
@@ -414,7 +423,7 @@ export default function HRM() {
   const { data: perfData = [] } = useQuery({
     queryKey: ['hrm-perf', selDept, selEmp, fromDate, toDate],
     queryFn: () => api.get(`/hrm/performance?from_date=${fromDate}&to_date=${toDate}${selDept ? `&department_id=${selDept}` : ''}${selEmp ? `&employee_id=${selEmp}` : ''}`).then(r => r.data),
-    enabled: tab === 'performance',
+    enabled: tab === 'reports' && reportsSubTab === 'performance',
   })
   const myTaskEmpId = isEmployeeScope ? scope?.employee_id : null
   const { data: myTasks = [] } = useQuery({
@@ -568,7 +577,7 @@ export default function HRM() {
       qc.invalidateQueries({ queryKey: ['hrm-resps'] })
       qc.invalidateQueries({ queryKey: ['hrm-hod'] })
       const { created, errors } = res.data
-      alert(`Imported ${created} responsibility row(s).${errors?.length ? `\n\nIssues:\n${errors.slice(0, 5).join('\n')}` : ''}`)
+      alert(`Imported ${created} responsibility row(s)${res.data?.skipped ? ` · skipped ${res.data.skipped} duplicate(s)` : ''}.${errors?.length ? `\n\nIssues:\n${errors.slice(0, 8).join('\n')}` : ''}`)
     },
   })
   const importTaskMut = useMutation({
@@ -744,7 +753,7 @@ export default function HRM() {
       setVoiceText('')
       setTaskForm({
         employee_id: '', title: '', description: '', due_date: '', assigned_by: '', priority: 'Medium',
-        backup_employee_id: '', backup_allocation_value: 1, backup_allocation_unit: 'days',
+        linked_to_employee_id: '',
       })
     },
   })
@@ -822,7 +831,7 @@ export default function HRM() {
         due_date: form.due_date || '',
         assigned_by: form.added_by || '',
         priority: form.priority || 'Medium',
-        ...backupPayload,
+        linked_to_employee_id: form.linked_to_employee_id ? +form.linked_to_employee_id : null,
       })
     } else {
       if ((form.frequency === 'Weekly' || form.frequency === 'Fortnightly') && !form.schedule_weekday) {
@@ -850,7 +859,8 @@ export default function HRM() {
         schedule_weekday: form.schedule_weekday || '',
         schedule_month_day: form.schedule_month_day || 0,
         schedule_month: form.schedule_month || 0,
-        time_period: form.time_period || '',
+        expected_time: form.expected_time || '',
+        kpi_weightage: form.kpi_weightage === '' || form.kpi_weightage == null ? 0 : +form.kpi_weightage,
         linked_to_employee_id: form.linked_to_employee_id ? +form.linked_to_employee_id : null,
         ...backupPayload,
       })
@@ -887,7 +897,7 @@ export default function HRM() {
       if (taskStatusFilter) p.set('status', taskStatusFilter)
       return api.get(`/hrm/reports/tasks?${p}`).then(r => r.data)
     },
-    enabled: tab === 'performance',
+    enabled: tab === 'reports' && reportsSubTab === 'performance',
   })
 
   const filteredResponsibilities = useMemo(() => {
@@ -913,8 +923,8 @@ export default function HRM() {
   }, [oneTimeTasks, taskTitleFilter, taskPriorityFilter, taskAssignedByFilter])
 
   const dayCheckFiltered = useMemo(() => {
-    if (!dayCheck || !checkPeriod) return dayCheck
-    const filterItems = (arr: any[]) => (arr || []).filter((i: any) => !i.time_period || i.time_period === checkPeriod || i.time_period === 'Full Day')
+    if (!dayCheck) return dayCheck
+    const filterItems = (arr: any[]) => arr || []
     return {
       ...dayCheck,
       worked_on: filterItems(dayCheck.worked_on),
@@ -924,7 +934,7 @@ export default function HRM() {
       additional_work: dayCheck.additional_work || [],
       submitted_for_approval: filterItems(dayCheck.submitted_for_approval || []),
     }
-  }, [dayCheck, checkPeriod])
+  }, [dayCheck])
 
   const openReassignModal = (task: { responsibility_id?: number; id?: number; title?: string; employee_id?: number }, date?: string) => {
     const rid = task.responsibility_id ?? task.id
@@ -939,8 +949,16 @@ export default function HRM() {
     }))
   }
 
-  const handleStatusSelect = (respId: number, logDate: string, status: string) => {
+  const handleStatusSelect = (respId: number, logDate: string, status: string, item?: any) => {
     if (!status) return
+    if (status !== 'Leave' && status !== 'N/A') {
+      const started = String(item?.started_at || '').trim()
+      const active = Number(item?.active_seconds || 0)
+      if (!started && active <= 0) {
+        alert('Start time tracking before updating status (press ▶ Start, or enter Manual Time).')
+        return
+      }
+    }
     if (status === 'Blocked') {
       setBlockedModal({ respId, date: logDate })
       setBlockedForm({ blocker_employee_id: '', blocker_reason: '', marked_by: '' })
@@ -1020,7 +1038,9 @@ export default function HRM() {
     const canPause = i.can_pause !== false && ts !== 'Completed'
     const canResume = i.can_resume !== false && ts === 'Paused'
     const canEnd = i.can_complete !== false && (ts === 'Active' || ts === 'In Progress' || ts === 'Paused')
+    const timeLocked = !!i.marked && i.status !== 'Pending'
     const openManual = () => {
+      if (timeLocked && !canEditAssignments) { alert('Time cannot be edited after status has been submitted'); return }
       setDwrManualId(i.responsibility_id)
       setDwrManualStart(toDatetimeLocal(i.started_at))
       setDwrManualEnd(toDatetimeLocal(i.ended_at))
@@ -1111,7 +1131,7 @@ export default function HRM() {
             onChange={e => {
               const val = e.target.value
               if (!val) return
-              handleStatusSelect(i.responsibility_id, checkDate, val)
+              handleStatusSelect(i.responsibility_id, checkDate, val, i)
               e.target.value = ''
             }}
             className="mt-1.5 text-xs border rounded px-1.5 py-1 bg-white"
@@ -1163,10 +1183,11 @@ export default function HRM() {
     ['issues', `⚠️ ${t(lang, 'issues')}`],
     ['appraisal', `📁 ${t(lang, 'appraisal')}`],
     ['performance', `📈 ${t(lang, 'performance')}`],
+    ['reports', `📑 Reports`],
   ]
 
   const TABS = useMemo(() => {
-    let tabs = ALL_TABS
+    let tabs = ALL_TABS.filter(([k]) => k !== 'performance') // performance lives under Reports
     if (!canViewDashboard) {
       tabs = tabs.filter(([k]) => k !== 'dashboard')
     }
@@ -1180,7 +1201,7 @@ export default function HRM() {
       tabs = tabs.filter(([k]) => k !== 'hierarchy')
     }
     if (scopeLevel === 'self') {
-      tabs = tabs.filter(([k]) => ['check', 'approvals', 'responsibilities', 'issues', 'appraisal'].includes(k) || (canViewDashboard && k === 'dashboard'))
+      tabs = tabs.filter(([k]) => ['check', 'approvals', 'responsibilities', 'tasks', 'issues', 'appraisal', 'reports'].includes(k) || (canViewDashboard && k === 'dashboard'))
       // Employees never see dashboard (canViewDashboard false for Employee)
       tabs = tabs.filter(([k]) => k !== 'dashboard')
     }
@@ -1524,12 +1545,14 @@ export default function HRM() {
                         <option value="yes">{t(lang, 'yes')}</option>
                       </select>
                     </div>
-                    <div><label className="text-xs text-gray-500">{t(lang, 'timePeriod')}</label>
-                      <select value={quickResp.time_period} onChange={e => setQuickResp(f => ({ ...f, time_period: e.target.value }))}
-                        className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                        <option value="">—</option>
-                        {TIME_PERIODS.map(tp => <option key={tp}>{tp}</option>)}
-                      </select>
+                    <div><label className="text-xs text-gray-500">Expected Time <span className="text-gray-400">(optional)</span></label>
+                      <input value={quickResp.expected_time} onChange={e => setQuickResp(f => ({ ...f, expected_time: e.target.value }))}
+                        placeholder="e.g. 30 or 1:00" className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
+                    </div>
+                    <div><label className="text-xs text-gray-500">KPI Weightage %</label>
+                      <input type="number" min={0} max={100} step="0.1" value={quickResp.kpi_weightage}
+                        onChange={e => setQuickResp(f => ({ ...f, kpi_weightage: e.target.value }))}
+                        className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
                     </div>
                   </>
                 ) : (
@@ -1632,10 +1655,6 @@ export default function HRM() {
             {!(isEmployeeScope || isHodSelfCheck) && (
               <input type="date" value={checkDate} onChange={e => setCheckDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
             )}
-            <select value={checkPeriod} onChange={e => setCheckPeriod(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm">
-              <option value="">{t(lang, 'timePeriod')} — All</option>
-              {TIME_PERIODS.map(tp => <option key={tp}>{tp}</option>)}
-            </select>
             {!(isEmployeeScope || isHodSelfCheck) && (
               <button onClick={() => setCheckDate(today())} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600">Today</button>
             )}
@@ -2017,6 +2036,13 @@ export default function HRM() {
               <>
                 <input ref={respImportRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
                   onChange={e => { const f = e.target.files?.[0]; if (f) importRespMut.mutate(f); e.target.value = '' }} />
+                <button type="button" onClick={async () => {
+                  try {
+                    const res = await api.get('/hrm/import/responsibilities/template', { responseType: 'blob' })
+                    const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }))
+                    const a = document.createElement('a'); a.href = url; a.download = 'hrm_responsibilities_import_template.csv'; a.click(); URL.revokeObjectURL(url)
+                  } catch (e: any) { alert(e?.response?.data?.detail || 'Template download failed') }
+                }} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600 hover:bg-gray-50">📥 Template</button>
                 <button onClick={() => respImportRef.current?.click()} disabled={importRespMut.isPending}
                   className="px-4 py-2 border border-[#002B5B] text-[#002B5B] rounded-lg text-sm font-medium disabled:opacity-50">
                   {importRespMut.isPending ? 'Importing…' : '📥 Import Sheet'}
@@ -2090,11 +2116,14 @@ export default function HRM() {
                     {PRIORITIES.map(pr => <option key={pr}>{pr}</option>)}
                   </select>
                 </div>
-                <div><label className="text-xs text-gray-500">{t(lang, 'timePeriod')}</label>
-                  <select value={respForm.time_period} onChange={e => setRespForm(f => ({ ...f, time_period: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    <option value="">—</option>
-                    {TIME_PERIODS.map(tp => <option key={tp}>{tp}</option>)}
-                  </select>
+                <div><label className="text-xs text-gray-500">Expected Time <span className="text-gray-400">(optional)</span></label>
+                  <input value={respForm.expected_time} onChange={e => setRespForm(f => ({ ...f, expected_time: e.target.value }))}
+                    placeholder="e.g. 30, 1:00, or 30m" className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
+                </div>
+                <div><label className="text-xs text-gray-500">KPI Weightage % <span className="text-gray-400">(optional)</span></label>
+                  <input type="number" min={0} max={100} step="0.1" value={respForm.kpi_weightage}
+                    onChange={e => setRespForm(f => ({ ...f, kpi_weightage: e.target.value }))}
+                    placeholder="0–100" className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
                 </div>
                 <div><label className="text-xs text-gray-500">{t(lang, 'mandatory')}</label>
                   <select value={respForm.mandatory ? 'yes' : 'no'} onChange={e => setRespForm(f => ({ ...f, mandatory: e.target.value === 'yes' }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
@@ -2201,11 +2230,10 @@ export default function HRM() {
                                 </select>
                               </div>
                               <div>
-                                <label className="text-[10px] text-gray-400">Time Period</label>
-                                <select value={editResp.time_period || ''} onChange={e => setEditResp((x: any) => ({ ...x, time_period: e.target.value }))} className="w-full border rounded px-2 py-1 text-sm">
-                                  <option value="">—</option>
-                                  {TIME_PERIODS.map(tp => <option key={tp}>{tp}</option>)}
-                                </select>
+                                <label className="text-[10px] text-gray-400">Expected Time</label>
+                                <input value={editResp.expected_time || ''} onChange={e => setEditResp((x: any) => ({ ...x, expected_time: e.target.value }))} placeholder="30 or 1:00" className="w-full border rounded px-2 py-1 text-sm" />
+                                <label className="text-[10px] text-gray-400 mt-1 block">KPI Weightage %</label>
+                                <input type="number" min={0} max={100} step="0.1" value={editResp.kpi_weightage ?? ''} onChange={e => setEditResp((x: any) => ({ ...x, kpi_weightage: e.target.value }))} className="w-full border rounded px-2 py-1 text-sm" />
                               </div>
                               <div className="col-span-2">
                                 <label className="text-[10px] text-gray-400">Assigned To</label>
@@ -2234,7 +2262,7 @@ export default function HRM() {
                                   if (editResp.frequency === 'Quarterly' && !(editResp.schedule_month > 0)) { alert('Select anchor month for Quarterly'); return }
                                   if (editResp.mandatory && !editResp.backup_employee_id) { alert('Backup person is required for mandatory responsibilities'); return }
                                   if (editResp.backup_employee_id && +editResp.backup_employee_id === +editResp.employee_id) { alert('Backup must differ from assignee'); return }
-                                  updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null, priority: editResp.priority || 'Medium', mandatory: !!editResp.mandatory, schedule_weekday: editResp.schedule_weekday || '', schedule_month_day: editResp.schedule_month_day || 0, schedule_month: editResp.schedule_month || 0, time_period: editResp.time_period || '', backup_employee_id: editResp.backup_employee_id || null } })
+                                  updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null, priority: editResp.priority || 'Medium', mandatory: !!editResp.mandatory, schedule_weekday: editResp.schedule_weekday || '', schedule_month_day: editResp.schedule_month_day || 0, schedule_month: editResp.schedule_month || 0, expected_time: editResp.expected_time || '', kpi_weightage: editResp.kpi_weightage === '' || editResp.kpi_weightage == null ? 0 : +editResp.kpi_weightage, backup_employee_id: editResp.backup_employee_id || null } })
                                 }} disabled={!editResp.title || updateRespMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
                                 <button onClick={() => setEditResp(null)} className="px-3 py-1 border rounded text-xs">Cancel</button>
                               </div>
@@ -2265,7 +2293,7 @@ export default function HRM() {
                                   )}
                                   {canMutateRecords && (
                                     <>
-                                      <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '', priority: r.priority || 'Medium', mandatory: !!r.mandatory, schedule_weekday: r.schedule_weekday || '', schedule_month_day: r.schedule_month_day || 0, schedule_month: r.schedule_month || 0, time_period: r.time_period || '', backup_employee_id: r.backup_employee_id || '', backup_allocation_value: r.backup_allocation_value || 1, backup_allocation_unit: r.backup_allocation_unit || 'days' })} className="text-xs text-blue-600">✏️</button>
+                                      <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '', priority: r.priority || 'Medium', mandatory: !!r.mandatory, schedule_weekday: r.schedule_weekday || '', schedule_month_day: r.schedule_month_day || 0, schedule_month: r.schedule_month || 0, expected_time: r.expected_time || '', kpi_weightage: r.kpi_weightage ?? '', backup_employee_id: r.backup_employee_id || '', backup_allocation_value: r.backup_allocation_value || 1, backup_allocation_unit: r.backup_allocation_unit || 'days' })} className="text-xs text-blue-600">✏️</button>
                                       {canDeleteHrm && (
                                         <button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button>
                                       )}
@@ -2314,28 +2342,51 @@ export default function HRM() {
                 {ONE_TIME_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
-            {canAssignTasks && (
+            {canCreateTask && (
               <div className="flex gap-2 flex-wrap">
-                <button onClick={() => setShowTaskForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">+ Assign Item</button>
+                <button onClick={() => {
+                  if (canSelfAssignTask && scope?.employee_id) {
+                    setTaskForm(f => ({ ...f, employee_id: scope.employee_id, assigned_by: 'Self' }))
+                  }
+                  setShowTaskForm(true)
+                }} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">
+                  {canSelfAssignTask ? '+ Add My Task' : '+ Assign Item'}
+                </button>
+                {canAssignTasks && (
+                  <>
                 <input ref={taskImportRef} type="file" accept=".csv,.xlsx,.xls" className="hidden"
                   onChange={e => { const f = e.target.files?.[0]; if (f) importTaskMut.mutate(f); e.target.value = '' }} />
+                <button type="button" onClick={async () => {
+                  try {
+                    const res = await api.get('/hrm/import/one-time-tasks/template', { responseType: 'blob' })
+                    const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }))
+                    const a = document.createElement('a'); a.href = url; a.download = 'hrm_tasks_import_template.csv'; a.click(); URL.revokeObjectURL(url)
+                  } catch (e: any) { alert(e?.response?.data?.detail || 'Template download failed') }
+                }} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600 hover:bg-gray-50">📥 Template</button>
                 <button onClick={() => taskImportRef.current?.click()} disabled={importTaskMut.isPending}
                   className="px-4 py-2 border border-[#002B5B] text-[#002B5B] rounded-lg text-sm font-medium disabled:opacity-50">
                   {importTaskMut.isPending ? 'Importing…' : '📥 Import Sheet'}
                 </button>
+                  </>
+                )}
               </div>
             )}
           </div>
 
-          {showTaskForm && canAssignTasks && (
+          {showTaskForm && canCreateTask && (
             <div className="bg-white rounded-xl border p-4 space-y-3">
-              <h3 className="font-semibold text-gray-700">Assign Task</h3>
+              <h3 className="font-semibold text-gray-700">{canSelfAssignTask ? 'My Task (self-assign)' : 'Assign Task'}</h3>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <div><label className="text-xs text-gray-500">Employee *</label>
+                  {canSelfAssignTask ? (
+                    <input readOnly value={pickerEmps.find((e: any) => e.id === scope?.employee_id)?.name || 'Me'}
+                      className="w-full border rounded px-2 py-1.5 text-sm mt-1 bg-gray-50" />
+                  ) : (
                   <select value={taskForm.employee_id} onChange={e => setTaskForm(f => ({ ...f, employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
                     {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
                   </select>
+                  )}
                 </div>
                 <div className="col-span-2"><label className="text-xs text-gray-500">Title *</label>
                   <input value={taskForm.title} onChange={e => setTaskForm(f => ({ ...f, title: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
@@ -2354,9 +2405,9 @@ export default function HRM() {
                     {assigneeOptions.map(n => <option key={n}>{n}</option>)}
                   </select>
                 </div>
-                <div><label className="text-xs text-gray-500">Backup person</label>
-                  <select value={taskForm.backup_employee_id} onChange={e => setTaskForm(f => ({ ...f, backup_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    <option value="">Select</option>
+                <div><label className="text-xs text-gray-500">Linked Person (optional)</label>
+                  <select value={taskForm.linked_to_employee_id || ''} onChange={e => setTaskForm(f => ({ ...f, linked_to_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                    <option value="">—</option>
                     {assignPickers.filter((e: any) => String(e.id) !== String(taskForm.employee_id)).map((e: any) => (
                       <option key={e.id} value={e.id}>{e.name}</option>
                     ))}
@@ -2380,11 +2431,12 @@ export default function HRM() {
                     schedule_weekday: '',
                     schedule_month_day: 0,
                     schedule_month: 0,
-                    time_period: '',
-                    linked_to_employee_id: '',
-                    backup_employee_id: taskForm.backup_employee_id,
-                    backup_allocation_value: taskForm.backup_allocation_value,
-                    backup_allocation_unit: taskForm.backup_allocation_unit,
+                    expected_time: '',
+                    kpi_weightage: 0,
+                    linked_to_employee_id: taskForm.linked_to_employee_id || '',
+                    backup_employee_id: '',
+                    backup_allocation_value: 0,
+                    backup_allocation_unit: 'days',
                   })}
                   disabled={!taskForm.employee_id || !taskForm.title || createOneTimeTaskMut.isPending}
                   className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
@@ -2544,7 +2596,7 @@ export default function HRM() {
                 <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
               </>
             )}
-            {hodSubTab === 'dwr' && (
+            {false /* dwr moved to Reports */ && (
               <input type="date" value={toDate} onChange={e => setToDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
             )}
           </div>
@@ -2557,11 +2609,8 @@ export default function HRM() {
               className={`px-3 py-1.5 rounded-md text-xs font-medium ${hodSubTab === 'tasks' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
               ✅ Tasks {hodPendingTasks.length > 0 && <span className="ml-1 bg-amber-500 text-white px-1.5 rounded-full">{hodPendingTasks.length}</span>}
             </button>
-            <button onClick={() => setHodSubTab('dwr')}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium ${hodSubTab === 'dwr' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
-              🕒 Daily Work Report
-            </button>
           </div>
+          <p className="text-xs text-gray-500">Daily Working Report moved to the <b>Reports</b> tab.</p>
           {!hodDept && <p className="text-center text-gray-400 py-8 text-sm">Select a department</p>}
           {hodDept && hodSubTab === 'tasks' && (
             <div className="bg-white rounded-xl border overflow-hidden">
@@ -2607,7 +2656,7 @@ export default function HRM() {
               )}
             </div>
           )}
-          {hodDept && hodSubTab === 'dwr' && (
+          {hodDept && false /* dwr moved to Reports */ && (
             <div className="bg-white rounded-xl border overflow-hidden">
               <div className="px-4 py-3 bg-teal-800 text-white font-semibold">
                 Daily Work Report — {toDate}
@@ -3225,9 +3274,106 @@ export default function HRM() {
         </div>
       )}
 
-      {/* ── PERFORMANCE ── */}
-      {tab === 'performance' && (
+      {/* ── REPORTS (Daily Working Report + Performance) ── */}
+      {tab === 'reports' && (
         <div className="space-y-4">
+          <div className="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+            <button type="button" onClick={() => setReportsSubTab('dwr')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium ${reportsSubTab === 'dwr' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
+              Daily Working Report
+            </button>
+            <button type="button" onClick={() => setReportsSubTab('performance')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium ${reportsSubTab === 'performance' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
+              Performance
+            </button>
+          </div>
+
+          {reportsSubTab === 'dwr' && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-end gap-2">
+                {!isEmployeeScope && (
+                  <>
+                    <div>
+                      <label className="text-[10px] text-gray-400 block">Department</label>
+                      <select value={reportsDept} onChange={e => setReportsDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                        <option value="">{isHodSelfCheck || userRole === 'HOD' ? 'My department' : 'All Departments'}</option>
+                        {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-gray-400 block">Employee</label>
+                      <select value={reportsEmp} onChange={e => setReportsEmp(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                        <option value="">All in scope</option>
+                        {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                    </div>
+                  </>
+                )}
+                <div>
+                  <label className="text-[10px] text-gray-400 block">Date</label>
+                  <input type="date" value={reportsDate} onChange={e => setReportsDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+                </div>
+                <button type="button" onClick={() => setDwrShowSlots(v => !v)}
+                  className="px-3 py-1.5 border rounded-lg text-xs font-medium text-[#002B5B] hover:bg-blue-50">
+                  {dwrShowSlots ? 'Hide time slots' : 'Show time slots'}
+                </button>
+              </div>
+              <div className="bg-white rounded-xl border overflow-hidden">
+                <div className="px-4 py-3 bg-teal-800 text-white font-semibold flex justify-between gap-2 flex-wrap">
+                  <span>Daily Working Report — {reportsDate}</span>
+                  <span className="text-teal-100 text-xs font-normal">From Employee Check responsibility updates</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="text-gray-400 text-xs uppercase bg-gray-50">
+                      <tr>
+                        <th className="text-left px-3 py-2">Employee</th>
+                        <th className="text-left px-3 py-2">Responsibility</th>
+                        <th className="text-left px-3 py-2">Status</th>
+                        <th className="text-left px-3 py-2">Timer</th>
+                        <th className="text-left px-3 py-2">Duration</th>
+                        <th className="text-left px-3 py-2">Linked Person</th>
+                        {dwrShowSlots && (
+                          <>
+                            <th className="text-left px-3 py-2">Start</th>
+                            <th className="text-left px-3 py-2">End</th>
+                          </>
+                        )}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(dwrData?.rows || []).map((row: any) => (
+                        <tr key={`${row.employee_id}-${row.responsibility_id}`} className="border-t">
+                          <td className="px-3 py-2">{row.employee_name}</td>
+                          <td className="px-3 py-2">
+                            <p className="font-medium">{row.title}</p>
+                            <p className="text-[10px] text-gray-400">{row.frequency}</p>
+                          </td>
+                          <td className="px-3 py-2">{row.status}</td>
+                          <td className="px-3 py-2"><span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${timerBadgeClass(row.timer_status)}`}>{row.timer_status}</span></td>
+                          <td className="px-3 py-2 text-xs font-semibold">{fmtDuration(row.duration_minutes)}</td>
+                          <td className="px-3 py-2 text-xs text-indigo-800">{row.linked_person || row.linked_to_employee_name || 'Self-complete'}</td>
+                          {dwrShowSlots && (
+                            <>
+                              <td className="px-3 py-2 text-xs">{fmtDateTime(row.started_at)}</td>
+                              <td className="px-3 py-2 text-xs">{fmtDateTime(row.ended_at)}</td>
+                            </>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!(dwrData?.rows || []).length && (
+                    <p className="text-center text-gray-400 py-8 text-sm">No Daily Working Report rows for this date.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {reportsSubTab === 'performance' && (
+        <div className="space-y-4">
+      {/* legacy performance body continues below via rename */}
           <div className="bg-white rounded-xl border overflow-hidden">
             <div className="px-4 py-3 bg-[#002B5B] text-white flex justify-between items-center flex-wrap gap-2">
               <h3 className="font-semibold">{t(lang, 'taskReport')}</h3>
@@ -3323,6 +3469,8 @@ export default function HRM() {
             ))}
             {(perfData as any[]).length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No data yet. Mark tasks in HOD view first.</p>}
           </div>
+        </div>
+          )}
         </div>
       )}
 

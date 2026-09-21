@@ -44,6 +44,7 @@ def test_hrm_department_employee_task_flow(hrm_db):
     rid = resps[0]["id"]
 
     today = date.today().isoformat()
+    assert hrm_db.start_responsibility_timer(rid, today) is True
     assert hrm_db.mark_task(rid, today, "Done", marked_by="HOD") is True
     assert hrm_db.mark_task(rid, today, "Partial") == "locked"
     assert hrm_db.mark_task(rid, today, "Partial", allow_override=True) is True
@@ -187,6 +188,7 @@ def test_employee_day_check_worked_vs_not(hrm_db):
     resps = hrm_db.list_responsibilities(employee_id=emp_id)
     morning_id = next(r["id"] for r in resps if r["title"] == "Morning check")
 
+    assert hrm_db.start_responsibility_timer(morning_id, day) is True
     hrm_db.mark_task(morning_id, day, "Done", marked_by="Harsh")
     snap = hrm_db.get_employee_day_check(emp_id, day)
     assert snap is not None
