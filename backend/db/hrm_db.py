@@ -4168,22 +4168,12 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         (employee_id,),
     ).fetchall()
 
-    # Sundays: auto-mark due responsibilities as N/A (does not delete prior data).
+    # Sundays: auto-mark ALL active responsibilities as N/A (does not delete prior data).
     # Also converts EOD Missed / Pending leftovers so Sundays never stay actionable.
     if is_sunday_ist(day):
         for r in resps:
             rdict = dict(r)
             freq = (rdict.get("frequency") or "Daily").strip()
-            if freq.lower() == "whenever required":
-                continue
-            if not is_schedule_due(
-                freq,
-                day,
-                rdict.get("schedule_weekday") or "",
-                int(rdict.get("schedule_month_day") or 0),
-                int(rdict.get("schedule_month") or 0),
-            ):
-                continue
             existing = conn.execute(
                 "SELECT id, status FROM task_logs WHERE responsibility_id=? AND log_date=?",
                 (int(rdict["id"]), day),
@@ -4192,7 +4182,6 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
                 st = str(existing["status"] or "Pending").strip() or "Pending"
                 if st in NEUTRAL_TASK_STATUSES:
                     continue
-                # Override Pending/Missed/Done/Partial/Blocked — Sunday is always N/A
                 conn.execute(
                     """UPDATE task_logs
                        SET status='N/A', remarks=?, marked_by='system-sunday',
