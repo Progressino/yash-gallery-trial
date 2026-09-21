@@ -182,6 +182,15 @@ def test_sunday_auto_na_and_excluded_from_performance(hrm, monkeypatch):
     row = next(i for i in items if i["responsibility_id"] == rid)
     assert row["status"] == "N/A"
 
+    # EOD Missed leftovers must also become N/A when check is opened
+    monkeypatch.setattr(hrm_db, "is_sunday_ist", lambda *_: False)
+    assert mark_task(rid, sunday, "Missed", allow_override=True) is True
+    monkeypatch.setattr(hrm_db, "is_sunday_ist", lambda x: str(x)[:10] == sunday)
+    snap2 = get_employee_day_check(a, sunday)
+    items2 = (snap2.get("worked_on") or []) + (snap2.get("not_worked") or []) + (snap2.get("other") or [])
+    row2 = next(i for i in items2 if i["responsibility_id"] == rid)
+    assert row2["status"] == "N/A"
+
     monday = (d + timedelta(days=1)).isoformat()
     monkeypatch.setattr(hrm_db, "in_task_action_window", lambda *a, **k: True)
     monkeypatch.setattr(hrm_db, "is_sunday_ist", lambda x: str(x)[:10] == sunday)
@@ -194,6 +203,8 @@ def test_sunday_auto_na_and_excluded_from_performance(hrm, monkeypatch):
     me = next(p for p in perf if p["employee_id"] == a)
     # Sunday should not inflate denominator as a working day for Daily
     assert me["total_tasks"] >= 1
+    # Prior Sunday Missed must not appear as missed in the window
+    assert int(me.get("missed_tasks") or 0) == 0
 
 
 def test_dwr_includes_employee_check_updates(hrm, monkeypatch):

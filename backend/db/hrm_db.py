@@ -917,6 +917,9 @@ def task_log_counts_for_performance(
     if st in NEUTRAL_TASK_STATUSES:
         return None
     ld = (log_date or "")[:10]
+    # Sundays never affect performance (even if a Missed/Done log exists)
+    if ld and is_sunday_ist(ld):
+        return None
     legacy = bool(ld and ld < PERFORMANCE_CUTOVER_DATE)
     appr = (approval_status or "").strip()
     linked = bool(linked_to_employee_id)
@@ -4165,12 +4168,13 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         (employee_id,),
     ).fetchall()
 
-    # Sundays: auto-mark due responsibilities as N/A (does not delete prior data)
+    # Sundays: auto-mark due responsibilities as N/A (does not delete prior data).
+    # Also converts EOD Missed / Pending leftovers so Sundays never stay actionable.
     if is_sunday_ist(day):
         for r in resps:
             rdict = dict(r)
-            freq = rdict.get("frequency") or "Daily"
-            if freq == "Whenever Required":
+            freq = (rdict.get("frequency") or "Daily").strip()
+            if freq.lower() == "whenever required":
                 continue
             if not is_schedule_due(
                 freq,
@@ -4186,16 +4190,16 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             ).fetchone()
             if existing:
                 st = str(existing["status"] or "Pending").strip() or "Pending"
-                if st not in ("Pending", "N/A"):
+                if st in NEUTRAL_TASK_STATUSES:
                     continue
-                if st != "N/A":
-                    conn.execute(
-                        """UPDATE task_logs
-                           SET status='N/A', remarks=?, marked_by='system-sunday',
-                               marked_at=?, approval_status='N/A'
-                           WHERE id=?""",
-                        ("Auto: Sunday not applicable", _now_iso(), int(existing["id"])),
-                    )
+                # Override Pending/Missed/Done/Partial/Blocked — Sunday is always N/A
+                conn.execute(
+                    """UPDATE task_logs
+                       SET status='N/A', remarks=?, marked_by='system-sunday',
+                           marked_at=?, approval_status='N/A'
+                       WHERE id=?""",
+                    ("Auto: Sunday not applicable", _now_iso(), int(existing["id"])),
+                )
             else:
                 conn.execute(
                     """INSERT INTO task_logs(
@@ -4303,7 +4307,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     submitted_for_approval: list[dict] = []
 
     def _bucket(item: dict, status: str):
-        if item.get("frequency") == "Whenever Required":
+        if (item.get("frequency") or "").strip().lower() == "whenever required":
             whenever_required.append(item)
             return
         if status in ("Done", "Partial"):
@@ -4527,6 +4531,10 @@ def mark_unmarked_daily_as_missed(
 ) -> dict:
     """Auto-close unmarked Daily responsibilities for a day as Missed."""
     day = check_date or date.today().isoformat()
+    if is_sunday_ist(day):
+        # Sundays are N/A — never auto-miss
+        snap = get_employee_day_check(employee_id, day)
+        return {"ok": True, "marked": 0, "check_date": day, "employee_id": employee_id, "skipped": "sunday"}
     snap = get_employee_day_check(employee_id, day)
     if not snap:
         return {"ok": False, "marked": 0, "error": "Employee not found"}
@@ -4553,9 +4561,18 @@ def process_end_of_day_missed_ist(*, as_of: date | None = None, actor: str = "sy
     """
     At IST day rollover, mark yesterday's due unmarked tasks as Missed.
     Does not overwrite Done/Partial/Missed/Leave/N/A/Blocked or Whenever Required.
+    Sundays are skipped (N/A business day — never auto-missed).
     """
     as_of = as_of or today_ist()
     target_day = (as_of - timedelta(days=1)).isoformat()
+    if is_sunday_ist(target_day):
+        return {
+            "ok": True,
+            "target_day": target_day,
+            "marked_missed": 0,
+            "as_of": as_of.isoformat(),
+            "skipped": "sunday",
+        }
     missed_n = 0
     conn = _connect()
     try:
@@ -4567,8 +4584,8 @@ def process_end_of_day_missed_ist(*, as_of: date | None = None, actor: str = "sy
             """
         ).fetchall()
         for r in resps:
-            freq = r["frequency"] or "Daily"
-            if freq == "Whenever Required":
+            freq = (r["frequency"] or "Daily").strip()
+            if freq.lower() == "whenever required":
                 continue
             if not is_schedule_due(
                 freq,
