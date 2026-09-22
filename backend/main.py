@@ -1040,6 +1040,27 @@ def merge_inventory_into_warm_cache(sess) -> None:
     except Exception:
         log.exception("inventory Amazon ledger guard failed (continuing)")
 
+    # Refuse MIT-only / no-OMS frames when warm already holds a real OMS snapshot.
+    try:
+        from .services.inventory import inventory_frame_has_oms_channel
+
+        incoming = getattr(sess, "inventory_df_variant", None)
+        existing_variant = _warm_cache.get("inventory_df_variant")
+        if (
+            existing_variant is not None
+            and hasattr(existing_variant, "empty")
+            and not existing_variant.empty
+            and inventory_frame_has_oms_channel(existing_variant)
+            and not inventory_frame_has_oms_channel(incoming)
+        ):
+            log.warning(
+                "merge_inventory_into_warm_cache: refusing MIT-only/no-OMS publish "
+                "over warm inventory with OMS_Inventory — keeping warm snapshot"
+            )
+            return
+    except Exception:
+        log.exception("inventory OMS publish guard failed (continuing)")
+
     try:
         from .services.manual_intransit_sheet import ensure_manual_intransit_overlay_applied
 
@@ -1563,7 +1584,14 @@ def _spawn_background_sales_rebuild() -> None:
 
             parquet_path = os.path.join(_DISK_CACHE_DIR, "sales_df.parquet")
             try:
-                new_sales.to_parquet(parquet_path, index=False)
+                from .services.helpers import _coerce_df_for_parquet
+                from .services.combo_sku_map import combo_fan_mask
+
+                to_save = new_sales
+                if "_Combo_Fan" in to_save.columns:
+                    to_save = to_save.copy()
+                    to_save["_Combo_Fan"] = combo_fan_mask(to_save["_Combo_Fan"]).astype(bool)
+                _coerce_df_for_parquet(to_save).to_parquet(parquet_path, index=False)
                 log.info("sales_df.parquet saved to %s", parquet_path)
             except Exception:
                 log.exception("Failed to save sales_df.parquet to disk")

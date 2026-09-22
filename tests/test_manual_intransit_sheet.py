@@ -85,8 +85,63 @@ def test_recompute_inventory_totals_excludes_total_inventory_column():
     assert int(out["Total_Inventory"].iloc[0]) == 150
 
 
-def test_manual_intransit_overlay_total_matches_user_expected_formula():
-    """OMS + marketplaces + manual in-transit + not-in-inventory (buffer excluded)."""
+def test_overlay_does_not_promote_mit_only_when_oms_missing():
+    """Empty inventory + MIT overlay must not become the live snapshot (probe race)."""
+    overlay = pd.DataFrame(
+        {
+            "OMS_SKU": ["C", "D"],
+            "Manual_InTransit": [4, 0],
+            "Not_In_Inventory_Qty": [0, 7],
+        }
+    )
+
+    class Sess:
+        inventory_df_variant = pd.DataFrame()
+        inventory_df_parent = pd.DataFrame()
+        manual_intransit_overlay_df = overlay
+
+    sess = Sess()
+    apply_manual_intransit_overlay_to_inventory(sess)
+    assert sess.inventory_df_variant is None or getattr(
+        sess.inventory_df_variant, "empty", True
+    )
+    assert len(sess.manual_intransit_overlay_df) == 2
+
+
+def test_overlay_merges_when_oms_present():
+    inv = pd.DataFrame(
+        {
+            "OMS_SKU": ["A"],
+            "OMS_Inventory": [100],
+            "Amazon_Inventory": [10],
+            "Marketplace_Total": [10],
+            "Total_Inventory": [110],
+        }
+    )
+    overlay = pd.DataFrame(
+        {
+            "OMS_SKU": ["A", "B"],
+            "Manual_InTransit": [5, 3],
+            "Not_In_Inventory_Qty": [0, 0],
+        }
+    )
+
+    class Sess:
+        inventory_df_variant = inv.copy()
+        inventory_df_parent = pd.DataFrame()
+        manual_intransit_overlay_df = overlay
+
+    sess = Sess()
+    apply_manual_intransit_overlay_to_inventory(sess)
+    assert "OMS_Inventory" in sess.inventory_df_variant.columns
+    by = sess.inventory_df_variant.set_index("OMS_SKU")
+    assert float(by.loc["A", "OMS_Inventory"]) == 100
+    assert int(by.loc["A", "Manual_InTransit"]) == 5
+    assert int(by.loc["B", "Manual_InTransit"]) == 3
+
+
+def test_manual_intransit_overlay_total_includes_mit_in_grand_total():
+    """MIT/NIIQ are excluded from Marketplace_Total but included in Total_Inventory."""
     inv = pd.DataFrame(
         {
             "OMS_SKU": ["A", "B"],
@@ -131,10 +186,13 @@ def test_manual_intransit_overlay_total_matches_user_expected_formula():
         int(totals["Amazon_Inventory"])
         + int(totals["Myntra_Other_Inventory"])
         + int(totals["Flipkart_Inventory"])
+    )
+    expected_total = (
+        int(totals["OMS_Inventory"])
+        + expected_marketplace
         + int(totals["Manual_InTransit"])
         + int(totals["Not_In_Inventory_Qty"])
     )
-    expected_total = int(totals["OMS_Inventory"]) + expected_marketplace
 
     assert int(totals["Marketplace_Total"]) == expected_marketplace
     assert int(totals["Total_Inventory"]) == expected_total

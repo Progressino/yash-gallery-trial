@@ -66,6 +66,26 @@ def test_export_totals_row_matches_ui_totals():
     assert int(rows[1][total_idx]) == 42
 
 
+def test_export_always_includes_oms_inventory_column():
+    """MIT-only frames must still export OMS_Inventory (0) so probes never KeyError."""
+    df = pd.DataFrame(
+        {
+            "OMS_SKU": ["A", "B"],
+            "Manual_InTransit": [10, 5],
+            "Not_In_Inventory_Qty": [1, 2],
+            "Marketplace_Total": [0, 0],
+            "Total_Inventory": [11, 7],
+        }
+    )
+    raw, _ = inventory_export_csv_bytes(df)
+    rows = list(csv.reader(io.StringIO(raw.decode("utf-8"))))
+    assert "OMS_Inventory" in rows[0]
+    oms_idx = rows[0].index("OMS_Inventory")
+    assert rows[1][0] == "__TOTALS__"
+    assert int(rows[1][oms_idx]) == 0
+    assert "Amazon_Inventory" in rows[0]
+
+
 def test_stale_totals_detection():
     df = pd.DataFrame(
         {

@@ -359,6 +359,13 @@ def inventory_totals_match_frame(totals: dict | None, df: pd.DataFrame) -> bool:
     return True
 
 
+def inventory_frame_has_oms_channel(df: pd.DataFrame | None) -> bool:
+    """True when the frame carries an OMS warehouse column (even if all zeros)."""
+    if df is None or getattr(df, "empty", True):
+        return False
+    return "OMS_Inventory" in getattr(df, "columns", [])
+
+
 def inventory_export_csv_bytes(
     df: pd.DataFrame,
     *,
@@ -371,6 +378,9 @@ def inventory_export_csv_bytes(
 
     Column order: OMS_SKU, source columns, then computed Marketplace_Total and Total_Inventory.
     Total_Inventory = OMS_Inventory + Marketplace_Total (do not sum every column).
+
+    Always emit OMS_Inventory (and other preferred channels) even when a race left the
+    live frame as Manual_InTransit-only — probes and reconcilers key on that header.
     """
     import csv
     import io
@@ -403,6 +413,13 @@ def inventory_export_csv_bytes(
         "Marketplace_Total",
         "Total_Inventory",
     ]
+    # Ensure OMS + marketplace headers always exist so export never drops OMS_Inventory
+    # when only Manual_InTransit / Not_In_Inventory_Qty were merged onto an empty base.
+    for col in preferred:
+        if col == "OMS_SKU":
+            continue
+        if col not in work.columns:
+            work[col] = 0
     cols = [c for c in preferred if c in work.columns]
     cols += [c for c in work.columns if c not in cols]
     # Drop nonsense empty
@@ -412,6 +429,9 @@ def inventory_export_csv_bytes(
     # When search filters rows, recompute totals from the visible set only so export total matches rows.
     if q:
         totals = inventory_column_totals(work)
+    for col in preferred:
+        if col != "OMS_SKU" and col not in totals:
+            totals[col] = 0
 
     buf = io.StringIO(newline="")
     w = csv.writer(buf)
@@ -687,8 +707,46 @@ def sync_inventory_snapshot_from_warm(sess: Any) -> None:
         and hasattr(warm_variant, "empty")
         and not warm_variant.empty
     )
+    # Disk fallback when RAM warm is still empty (Phase-0 can take minutes after deploy).
+    # Without this, Manual_InTransit overlay alone becomes the live "inventory" frame.
+    if not warm_has:
+        try:
+            from pathlib import Path
+
+            inv_path = Path(getattr(_main, "_DISK_CACHE_DIR", "/data/warm_cache")) / (
+                "inventory_df_variant.parquet"
+            )
+            if inv_path.is_file():
+                disk_inv = pd.read_parquet(inv_path)
+                if disk_inv is not None and not disk_inv.empty and inventory_frame_has_oms_channel(
+                    disk_inv
+                ):
+                    if getattr(_main, "_warm_cache", None) is None:
+                        _main._warm_cache = {}
+                    _main._warm_cache["inventory_df_variant"] = disk_inv
+                    warm = _main._warm_cache
+                    warm_variant = disk_inv
+                    warm_has = True
+                    if not warm_meta:
+                        meta_path = inv_path.with_name("inventory_session_meta.json")
+                        if meta_path.is_file():
+                            import json
+
+                            disk_meta = json.loads(meta_path.read_text())
+                            if isinstance(disk_meta, dict) and disk_meta:
+                                warm[_main._INVENTORY_META_WARM_KEY] = disk_meta
+                                warm_meta = disk_meta
+                                warm_at = inventory_snapshot_upload_epoch(
+                                    str(disk_meta.get("inventory_snapshot_uploaded_at") or "")
+                                )
+        except Exception:
+            pass
     sess_df = getattr(sess, "inventory_df_variant", None)
     sess_has = sess_df is not None and hasattr(sess_df, "empty") and not sess_df.empty
+    # MIT-only session (no OMS_Inventory) must never beat a full warm/disk snapshot.
+    if sess_has and warm_has and not inventory_frame_has_oms_channel(sess_df):
+        if inventory_frame_has_oms_channel(warm_variant):
+            sess_at = 0.0
 
     def _amz_expected(meta_or_debug: dict | None) -> float:
         if not isinstance(meta_or_debug, dict):

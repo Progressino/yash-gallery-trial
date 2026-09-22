@@ -371,13 +371,51 @@ def ensure_manual_intransit_overlay_applied(sess) -> bool:
 
 
 def apply_manual_intransit_overlay_to_inventory(sess) -> None:
-    """Merge manual in-transit / not-in-inventory columns into the live inventory snapshot."""
+    """Merge manual in-transit / not-in-inventory columns into the live inventory snapshot.
+
+    Never promote an overlay-only frame (OMS_SKU + Manual_InTransit / Not_In_Inventory_Qty)
+    into ``inventory_df_variant`` when the OMS warehouse snapshot is still loading — that
+    race made Inventory Daily / export look like MIT-only stock and broke prod probes.
+    """
     inv = getattr(sess, "inventory_df_variant", None)
     if inv is None:
         inv = pd.DataFrame()
     overlay = getattr(sess, "manual_intransit_overlay_df", pd.DataFrame())
 
     if overlay is None or overlay.empty:
+        return
+
+    from .inventory import inventory_frame_has_oms_channel
+
+    # If live inventory is empty / MIT-only, pull OMS snapshot from warm RAM or disk
+    # without going through sync_inventory_snapshot_from_warm (would re-enter this path).
+    if not inventory_frame_has_oms_channel(inv):
+        try:
+            import backend.main as _main
+
+            warm = getattr(_main, "_warm_cache", None) or {}
+            warm_inv = warm.get("inventory_df_variant")
+            if inventory_frame_has_oms_channel(warm_inv):
+                inv = warm_inv.copy() if hasattr(warm_inv, "copy") else warm_inv
+                sess.inventory_df_variant = inv
+            else:
+                from pathlib import Path
+
+                inv_path = Path(getattr(_main, "_DISK_CACHE_DIR", "/data/warm_cache")) / (
+                    "inventory_df_variant.parquet"
+                )
+                if inv_path.is_file():
+                    disk_inv = pd.read_parquet(inv_path)
+                    if inventory_frame_has_oms_channel(disk_inv):
+                        inv = disk_inv
+                        sess.inventory_df_variant = inv
+                        if getattr(_main, "_warm_cache", None) is None:
+                            _main._warm_cache = {}
+                        _main._warm_cache.setdefault("inventory_df_variant", disk_inv)
+        except Exception:
+            pass
+    if not inventory_frame_has_oms_channel(inv):
+        # Keep overlay on the session; do not publish MIT-only as the inventory snapshot.
         return
 
     base = inv.copy() if inv is not None and not inv.empty else pd.DataFrame(columns=["OMS_SKU"])
@@ -389,6 +427,8 @@ def apply_manual_intransit_overlay_to_inventory(sess) -> None:
             merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0).astype(int)
         else:
             merged[col] = 0
+    if "OMS_Inventory" not in merged.columns:
+        merged["OMS_Inventory"] = 0
 
     from .inventory import recompute_inventory_totals
 

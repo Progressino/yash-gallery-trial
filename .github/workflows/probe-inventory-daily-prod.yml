@@ -205,6 +205,11 @@ jobs:
 
           ui_oms = int(totals.get("OMS_Inventory") or 0)
           row_oms = int(round(oms_sum))
+          if ui_oms <= 0:
+              raise SystemExit(
+                  f"UI OMS totals is {ui_oms} with {total_rows} inventory rows — "
+                  "OMS snapshot missing (MIT-only race or warm inventory not loaded)"
+              )
           if ui_oms != row_oms:
               raise SystemExit(f"UI OMS totals {ui_oms} != row sum {row_oms}")
           print("UI_VS_ROWS_OMS_OK", ui_oms)
@@ -217,6 +222,11 @@ jobs:
           hdr = rows[0]
           tot_row = rows[1]
           assert tot_row[0] == "__TOTALS__", tot_row[0]
+          if "OMS_Inventory" not in hdr:
+              raise SystemExit(
+                  f"export CSV missing OMS_Inventory column — headers={hdr!r} "
+                  "(MIT-only inventory frame; warm OMS snapshot not attached)"
+              )
           oms_idx = hdr.index("OMS_Inventory")
           export_oms = int(float(tot_row[oms_idx]))
           print("EXPORT_OMS", export_oms)
