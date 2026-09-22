@@ -33,6 +33,7 @@ interface PO {
   ship_to_contact?: string
   ship_to_phone?: string
   ship_to_gst?: string
+  accounts_verified?: boolean
   lines: POLine[]
 }
 interface POLine { id: number; material_code: string; material_name: string; material_type: string; po_qty: number; unit: string; rate: number; gst_pct: number; amount: number }
@@ -795,7 +796,11 @@ export default function Purchase() {
 
   const createGRNMut = useMutation({ mutationFn: (b: object) => api.post('/purchase/grn', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['grns'] }); invalidate(); setShowGRNForm(false); setGRNLines([]) } })
   const verifyGRNMut = useMutation({ mutationFn: ({ id, status }: { id: number; status: string }) => api.patch(`/purchase/grn/${id}/verify`, { status }), onSuccess: () => qc.invalidateQueries({ queryKey: ['grns'] }) })
-  const updatePOMut = useMutation({ mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/purchase/po/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ['pos'] }); setEditingPO(null) } })
+  const updatePOMut = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/purchase/po/${id}`, data),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['pos'] }); setEditingPO(null) },
+    onError: (e: any) => alert(e?.response?.data?.detail || 'Could not update PO'),
+  })
   const createMINMut = useMutation({ mutationFn: (b: object) => api.post('/purchase/min', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['mins'] }); setShowMINForm(false); setMINLines([]) } })
   const confirmMINMut = useMutation({
     mutationFn: ({ id, status }: { id: number; status: string }) => api.patch(`/purchase/min/${id}/status`, { status }),
@@ -1836,11 +1841,16 @@ export default function Purchase() {
                       </div>
                     ) : (
                       <div className="space-y-2 pt-3">
-                        {po.status === 'Draft' && (
+                        {po.status === 'Draft' && !po.accounts_verified && (
                           <div className="flex justify-end">
                             <button onClick={() => { const sup = suppliers.find(s => s.supplier_name === po.supplier_name); setEditingPO(po.id); setEditPOForm({ supplier_id: sup?.id, supplier_name: po.supplier_name, delivery_date: po.delivery_date || '', payment_terms: po.payment_terms || '', so_reference: po.so_reference || '', remarks: '', bill_to_name: po.bill_to_name || YASH_GALLERY.name, bill_to_address: po.bill_to_address || YASH_GALLERY.address, bill_to_gst: po.bill_to_gst || '', ship_to_name: po.ship_to_name || '', ship_to_address: po.ship_to_address || '', ship_to_contact: po.ship_to_contact || '', ship_to_phone: po.ship_to_phone || '', ship_to_gst: po.ship_to_gst || '' }); setEditPOLines(po.lines.map(l => ({ material_code: l.material_code, material_name: l.material_name, material_type: l.material_type || 'RM', po_qty: l.po_qty, unit: l.unit, rate: l.rate, gst_pct: l.gst_pct }))) }}
                               className="text-xs px-3 py-1 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50">✏️ Edit</button>
                           </div>
+                        )}
+                        {po.accounts_verified && (
+                          <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                            Accounts-Verified — locked. Unverify in Document Audit before editing.
+                          </p>
                         )}
                         <table className="w-full text-xs">
                           <thead><tr className="text-gray-400 uppercase border-b"><th className="text-left pb-1">Code</th><th className="text-left pb-1">Name</th><th className="text-right pb-1">Qty</th><th className="text-right pb-1">Rate</th><th className="text-right pb-1">Amount</th></tr></thead>

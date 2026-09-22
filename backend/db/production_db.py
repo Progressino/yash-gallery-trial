@@ -1897,6 +1897,13 @@ def list_jos(
                 item_path=routing_cache[cache_key],
             )
         jo["next_process"] = next_cache[nkey]
+    try:
+        from ..db.document_audit_db import is_verified
+        for jo in result:
+            jo["accounts_verified"] = bool(is_verified("JO", int(jo["id"])))
+    except Exception:
+        for jo in result:
+            jo.setdefault("accounts_verified", False)
     return result
 
 
@@ -2010,6 +2017,11 @@ def get_jo(joid: int):
         jo['issue_note'] = get_issue_note_by_jo_id(jo['id'])
     except Exception:
         jo['issue_note'] = None
+    try:
+        from ..db.document_audit_db import is_verified
+        jo['accounts_verified'] = bool(is_verified('JO', int(jo['id'])))
+    except Exception:
+        jo['accounts_verified'] = False
     return jo
 
 
@@ -2667,6 +2679,11 @@ def update_jo(joid: int, data: dict):
                             conn, joid, f"line:{lid}:vendor_rate", old_r, rate,
                             changed_by, remarks or f"SKU {ln.get('sku')} rate", lid,
                         )
+                # Refresh line_rows vendor_rate for cost rollup
+                for ln in line_rows:
+                    lid = int(ln["id"])
+                    if lid in pending_rates:
+                        ln["vendor_rate"] = pending_rates[lid]
             if pending:
                 for lid, new_l in pending.items():
                     ln = by_id[lid]
@@ -2681,11 +2698,23 @@ def update_jo(joid: int, data: dict):
                             conn, joid, f"line:{lid}:planned_qty", old_l, new_l,
                             changed_by, remarks or f"SKU {ln.get('sku')}", lid,
                         )
+                    ln["planned_qty"] = new_l
                 new_plan = 0
                 for ln in line_rows:
                     lid = int(ln["id"])
                     new_plan += pending[lid] if lid in pending else int(ln.get("planned_qty") or 0)
                 _apply_header_plan(new_plan, sync_single_line=False)
+            if pending_rates or pending:
+                total_amt = sum(
+                    int(ln.get("planned_qty") or 0) * float(ln.get("vendor_rate") or 0)
+                    for ln in line_rows
+                )
+                data["total_cost"] = round(total_amt, 2)
+                data["process_cost"] = round(total_amt, 2)
+                # Keep header rate in sync when all lines share one rate
+                rates = {round(float(ln.get("vendor_rate") or 0), 4) for ln in line_rows}
+                if len(rates) == 1:
+                    data["vendor_rate"] = next(iter(rates))
         elif "planned_qty" in data and data["planned_qty"] is not None:
             if len(line_rows) > 1:
                 raise ValueError(
@@ -2700,6 +2729,16 @@ def update_jo(joid: int, data: dict):
     if "so_source" in data and data["so_source"] is not None:
         ss = str(data["so_source"]).strip().lower()
         data["so_source"] = ss if ss in ("system", "manual") else (prev.get("so_source") or "system")
+
+    # Header vendor_rate → push to all size lines and roll up amount
+    if "vendor_rate" in data and data["vendor_rate"] is not None and not line_updates:
+        rate = float(data["vendor_rate"] or 0)
+        if rate < 0:
+            raise ValueError("vendor_rate cannot be negative")
+        conn.execute("UPDATE jo_lines SET vendor_rate=? WHERE jo_id=?", (rate, joid))
+        total_amt = sum(int(ln.get("planned_qty") or 0) * rate for ln in line_rows)
+        data["total_cost"] = round(total_amt, 2)
+        data["process_cost"] = round(total_amt, 2)
 
     allowed = [
         "status",

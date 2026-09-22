@@ -46,6 +46,7 @@ class SOLineIn(BaseModel):
     merchant_code: Optional[str] = ''
     priority: Optional[str] = 'Normal'
     line_delivery_date: Optional[str] = ''
+    procurement_override: Optional[str] = ''
 
 class SOIn(BaseModel):
     so_date: Optional[str] = None
@@ -75,6 +76,7 @@ class SOLineUpdate(BaseModel):
     rate:          Optional[float] = None
     delivery_date: Optional[str]   = None
     remarks:       Optional[str]   = None
+    procurement_override: Optional[str] = None
 
 
 def _read_upload_rows(file: UploadFile, raw: bytes) -> list[dict]:

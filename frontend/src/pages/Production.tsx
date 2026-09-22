@@ -217,6 +217,7 @@ interface JO {
   process: string
   exec_type: string
   vendor_name: string
+  accounts_verified?: boolean
   vendor_rate: number
   so_qty: number
   planned_qty: number
@@ -1724,6 +1725,8 @@ export default function Production() {
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/production/orders/${id}`, data),
     onSuccess: async (_res, vars) => {
       invalidateAll()
+      setEditLineQty({})
+      setEditLineRate({})
       try {
         const fresh = await api.get(`/production/orders/${vars.id}`).then(r => r.data)
         setActiveJO(fresh)
@@ -1731,7 +1734,7 @@ export default function Production() {
         /* list refresh is enough */
       }
     },
-    onError: (e: unknown) => alert(apiErrorMessage(e, 'Could not update planned quantity')),
+    onError: (e: unknown) => alert(apiErrorMessage(e, 'Could not update planned quantity / rate')),
   })
   const issueFabricMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.post(`/production/orders/${id}/issue-fabric`, data),
@@ -2002,7 +2005,7 @@ export default function Production() {
     const totalReceived = jo.lines.reduce((s, l) => s + l.received_qty, 0) || jo.received_qty
     const totalBalance = totalPlanned - totalReceived
     const pct = totalPlanned > 0 ? Math.min(100, (totalReceived / totalPlanned) * 100) : 0
-    const joLocked = jo.status === 'Cancelled'
+    const joLocked = jo.status === 'Cancelled' || Boolean(jo.accounts_verified)
     const joReceiveLocked = jo.status === 'Cancelled' || jo.status === 'Closed'
 
     return (
@@ -2148,7 +2151,9 @@ export default function Production() {
 
             {joLocked && (
               <div className="bg-gray-100 border border-gray-200 rounded-lg p-3 text-xs text-gray-600">
-                {jo.status} — historical record only. Receive, issue, and edits are disabled.
+                {jo.accounts_verified
+                  ? 'Accounts-Verified — editing locked. Unverify in Document Audit (with reason) before changing this JO.'
+                  : `${jo.status} — historical record only. Receive, issue, and edits are disabled.`}
               </div>
             )}
 
@@ -2373,7 +2378,10 @@ export default function Production() {
                             fmtR(line.vendor_rate)
                           )}
                         </td>
-                        <td className="px-3 py-2 text-right font-semibold">{fmtR(line.planned_qty * line.vendor_rate)}</td>
+                        <td className="px-3 py-2 text-right font-semibold">{fmtR(
+                          (editLineQty[line.id] != null ? parseInt(editLineQty[line.id], 10) : line.planned_qty)
+                          * (editLineRate[line.id] != null ? parseFloat(editLineRate[line.id]) : Number(line.vendor_rate) || 0)
+                        )}</td>
                         <td className="px-3 py-2 text-center">
                           {!joReceiveLocked ? (
                           <div className="flex gap-1 justify-center">
@@ -2471,7 +2479,7 @@ export default function Production() {
               )}
               {joLocked && (
                 <span className="px-3 py-1.5 text-xs bg-gray-100 text-gray-600 rounded-lg border border-gray-200 font-medium">
-                  Status: {jo.status} (cancelled — locked)
+                  Status: {jo.accounts_verified ? 'Accounts-Verified (locked)' : `${jo.status} (cancelled — locked)`}
                 </span>
               )}
               {jo.status === 'Closed' && !joLocked && (

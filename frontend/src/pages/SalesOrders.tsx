@@ -32,6 +32,7 @@ interface SOLine {
   id: number; sku: string; sku_name: string; qty: number
   produced_qty: number; dispatch_qty: number; received_qty: number; unit: string
   rate: number; delivery_date: string; remarks: string
+  procurement_override?: string
 }
 
 const SOURCES = ['Sales Team', 'Forecasting System', 'Buyer Indent', 'Marketing Team']
@@ -218,7 +219,10 @@ export default function SalesOrders() {
   const [expandedSO, setExpandedSO] = useState<number | null>(null)
   const [filterStatus, setFilterStatus] = useState('')
   const [editingLineId, setEditingLineId] = useState<number | null>(null)
-  const [editLineForm, setEditLineForm] = useState({ qty: 0, rate: 0, delivery_date: '', remarks: '', produced_qty: 0, dispatch_qty: 0, received_qty: 0 })
+  const [editLineForm, setEditLineForm] = useState({
+    qty: 0, rate: 0, delivery_date: '', remarks: '', produced_qty: 0, dispatch_qty: 0, received_qty: 0,
+    procurement_override: '',
+  })
 
   // Reports & settings state
   const [reportView, setReportView] = useState<ReportView>('sku-pending')
@@ -249,6 +253,7 @@ export default function SalesOrders() {
   const [soLines, setSOLines] = useState<{
     sku: string; sku_name: string; qty: number; unit: string; rate: number; remarks: string
     hsn_code: string; gst_pct: number; merchant_code: string; priority: string; line_delivery_date: string
+    procurement_override: string
   }[]>([])
   const [fetchingDemand, setFetchingDemand] = useState(false)
 
@@ -341,7 +346,8 @@ export default function SalesOrders() {
   function addDLine() { setDLines(l => [...l, { sku: '', sku_name: '', demand_qty: 0 }]) }
   const blankSOLine = () => ({
     sku: '', sku_name: '', qty: 0, unit: 'PCS', rate: 0, remarks: '',
-    hsn_code: '', gst_pct: 0, merchant_code: '', priority: 'Normal', line_delivery_date: soForm.delivery_date
+    hsn_code: '', gst_pct: 0, merchant_code: '', priority: 'Normal', line_delivery_date: soForm.delivery_date,
+    procurement_override: '',
   })
   function addSOLine() { setSOLines(l => [...l, blankSOLine()]) }
 
@@ -1039,8 +1045,8 @@ export default function SalesOrders() {
                       </div>
                     </div>
 
-                    {/* Row 3: Priority + GST% + Merchant Code + Remarks */}
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {/* Row 3: Priority + GST% + Merchant Code + Sourcing + Remarks */}
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                       <div>
                         <label className="text-xs text-gray-500 mb-0.5 block">Priority</label>
                         <select value={ln.priority}
@@ -1063,6 +1069,18 @@ export default function SalesOrders() {
                           onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, merchant_code: e.target.value } : x))}
                           placeholder="Merchant code"
                           className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-500 mb-0.5 block">Sourcing</label>
+                        <select value={ln.procurement_override}
+                          onChange={e => setSOLines(l => l.map((x, j) => j === i ? { ...x, procurement_override: e.target.value } : x))}
+                          className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm bg-white"
+                          title="Blank = use Item Master Procurement Type. Purchase = direct FG PO from MRP.">
+                          <option value="">Item default</option>
+                          <option value="Purchase">Purchase (direct FG)</option>
+                          <option value="Make">Make (BOM / production)</option>
+                          <option value="Subcontract">Subcontract</option>
+                        </select>
                       </div>
                       <div>
                         <label className="text-xs text-gray-500 mb-0.5 block">Remarks</label>
@@ -1177,6 +1195,7 @@ export default function SalesOrders() {
                           <th className="text-right py-1">Produced</th>
                           <th className="text-right py-1">Dispatched</th>
                           <th className="text-right py-1">Pending</th>
+                          <th className="text-left py-1">Sourcing</th>
                           <th className="text-left py-1 pl-2">Remarks</th>
                           <th className="py-1" />
                         </tr>
@@ -1208,6 +1227,16 @@ export default function SalesOrders() {
                                   className="w-16 border border-gray-300 rounded px-1 py-0.5 text-xs text-right bg-green-50" />
                               </td>
                               <td className="py-1.5 text-right text-orange-600">{Math.max(0, editLineForm.qty - editLineForm.dispatch_qty).toLocaleString()}</td>
+                              <td className="py-1.5">
+                                <select value={editLineForm.procurement_override}
+                                  onChange={e => setEditLineForm(f => ({ ...f, procurement_override: e.target.value }))}
+                                  className="border border-gray-300 rounded px-1 py-0.5 text-xs bg-white">
+                                  <option value="">Item default</option>
+                                  <option value="Purchase">Purchase</option>
+                                  <option value="Make">Make</option>
+                                  <option value="Subcontract">Subcontract</option>
+                                </select>
+                              </td>
                               <td className="py-1.5 pl-2">
                                 <input value={editLineForm.remarks}
                                   onChange={e => setEditLineForm(f => ({ ...f, remarks: e.target.value }))}
@@ -1231,9 +1260,10 @@ export default function SalesOrders() {
                               <td className="py-1.5 text-right text-blue-600">{l.produced_qty.toLocaleString()}</td>
                               <td className="py-1.5 text-right text-green-600">{l.dispatch_qty.toLocaleString()}</td>
                               <td className="py-1.5 text-right text-orange-600">{Math.max(0, l.qty - l.dispatch_qty).toLocaleString()}</td>
+                              <td className="py-1.5 text-gray-600">{l.procurement_override || 'Item default'}</td>
                               <td className="py-1.5 pl-2 text-gray-400 max-w-[120px] truncate">{l.remarks || '—'}</td>
                               <td className="py-1.5 pl-2">
-                                <button onClick={() => { setEditingLineId(l.id); setEditLineForm({ qty: l.qty, rate: l.rate || 0, delivery_date: l.delivery_date || '', remarks: l.remarks || '', produced_qty: l.produced_qty || 0, dispatch_qty: l.dispatch_qty || 0, received_qty: l.received_qty || 0 }) }}
+                                <button onClick={() => { setEditingLineId(l.id); setEditLineForm({ qty: l.qty, rate: l.rate || 0, delivery_date: l.delivery_date || '', remarks: l.remarks || '', produced_qty: l.produced_qty || 0, dispatch_qty: l.dispatch_qty || 0, received_qty: l.received_qty || 0, procurement_override: l.procurement_override || '' }) }}
                                   className="text-xs text-blue-500 hover:text-blue-700 hover:underline">Edit</button>
                               </td>
                             </tr>

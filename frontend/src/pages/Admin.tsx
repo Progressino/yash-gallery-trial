@@ -95,6 +95,7 @@ export default function Admin() {
 
   const [userForm, setUserForm] = useState({ ...EMPTY_USER_FORM })
   const [modulePick, setModulePick] = useState<string[]>([])
+  const [editModulePick, setEditModulePick] = useState<string[]>([])
   const [roleForm, setRoleForm] = useState({ role_name: '', description: '' })
   const [includeInactiveUsers, setIncludeInactiveUsers] = useState(false)
   const [newDepartmentName, setNewDepartmentName] = useState('')
@@ -143,7 +144,12 @@ export default function Admin() {
   })
   const updateUserMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/erp-admin/users/${id}`, data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['erp-users'] }); setEditUser(null) }
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['erp-users'] })
+      setEditUser(null)
+      setEditData({})
+      setEditModulePick([])
+    }
   })
   const deactivateUserMut = useMutation({
     mutationFn: (id: number) => api.delete(`/erp-admin/users/${id}`),
@@ -538,12 +544,34 @@ export default function Admin() {
                   </select>
                 </div>
               </div>
+              <div>
+                <label className="text-xs text-gray-500">Module access</label>
+                <p className="text-[10px] text-gray-400 mb-1">
+                  Update modules for this user. Empty selection clears override (role default applies).
+                  HOD/Employee default to HRM only unless you add modules here.
+                </p>
+                <div className="flex flex-wrap gap-2 mt-1">
+                  {ALL_MODULE_KEYS.map(m => (
+                    <label key={m} className="flex items-center gap-1 text-xs border rounded px-2 py-1 cursor-pointer bg-white">
+                      <input type="checkbox" checked={editModulePick.includes(m)}
+                        onChange={e => setEditModulePick(prev => e.target.checked ? [...prev, m] : prev.filter(x => x !== m))} />
+                      {MODULE_LABELS[m]}
+                    </label>
+                  ))}
+                </div>
+              </div>
               <div className="flex gap-2">
-                <button onClick={() => updateUserMut.mutate({ id: editUser.id, data: editData })} disabled={updateUserMut.isPending}
+                <button
+                  onClick={() => {
+                    const data: Record<string, unknown> = { ...editData }
+                    data.module_access = editModulePick.length ? JSON.stringify(editModulePick) : '[]'
+                    updateUserMut.mutate({ id: editUser.id, data })
+                  }}
+                  disabled={updateUserMut.isPending}
                   className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium disabled:opacity-50">
                   {updateUserMut.isPending ? 'Saving…' : 'Save Changes'}
                 </button>
-                <button onClick={() => setEditUser(null)} className="px-4 py-2 border rounded-lg text-sm text-gray-600">Cancel</button>
+                <button onClick={() => { setEditUser(null); setEditModulePick([]) }} className="px-4 py-2 border rounded-lg text-sm text-gray-600">Cancel</button>
               </div>
             </div>
           )}
@@ -571,7 +599,19 @@ export default function Admin() {
                     </td>
                     <td className="px-4 py-2">
                       <div className="flex gap-2 flex-wrap">
-                        <button onClick={() => { setEditUser(u); setEditData({}) }} className="text-xs text-blue-500 hover:text-blue-700">Edit</button>
+                        <button onClick={() => {
+                          setEditUser(u)
+                          setEditData({})
+                          let mods: string[] = []
+                          try {
+                            const raw = u.module_access
+                            if (raw) {
+                              const parsed = JSON.parse(raw)
+                              if (Array.isArray(parsed)) mods = parsed.map(String)
+                            }
+                          } catch { /* ignore */ }
+                          setEditModulePick(mods)
+                        }} className="text-xs text-blue-500 hover:text-blue-700">Edit</button>
                         {u.active ? (
                           <button
                             type="button"

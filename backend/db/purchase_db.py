@@ -718,7 +718,28 @@ def list_pos(status=None):
         d = dict(r)
         d['lines'] = [dict(l) for l in conn.execute("SELECT * FROM po_lines WHERE po_id=?", (d['id'],)).fetchall()]
         result.append(d)
-    conn.close(); return result
+    conn.close()
+    try:
+        from ..db.document_audit_db import is_verified
+        for d in result:
+            d['accounts_verified'] = bool(is_verified('PO', int(d['id'])))
+    except Exception:
+        for d in result:
+            d.setdefault('accounts_verified', False)
+    return result
+
+
+def update_po_status(poid: int, status: str):
+    try:
+        from ..db.document_audit_db import assert_doc_editable
+
+        assert_doc_editable("PO", int(poid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
+    conn = _connect(); conn.execute("UPDATE po_headers SET status=? WHERE id=?", (status, poid))
+    conn.commit(); conn.close()
 
 def create_po(data: dict):
     so_ref = (data.get("so_reference") or "").strip()
@@ -787,10 +808,6 @@ def create_po(data: dict):
     except Exception:
         pass
     return num
-
-def update_po_status(poid: int, status: str):
-    conn = _connect(); conn.execute("UPDATE po_headers SET status=? WHERE id=?", (status, poid))
-    conn.commit(); conn.close()
 
 def update_po(poid: int, data: dict):
     try:

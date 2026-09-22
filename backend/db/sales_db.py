@@ -76,6 +76,7 @@ def init_db():
         "ALTER TABLE so_lines ADD COLUMN priority TEXT DEFAULT 'Normal'",
         "ALTER TABLE so_lines ADD COLUMN line_delivery_date TEXT DEFAULT ''",
         "ALTER TABLE sales_orders ADD COLUMN production_mode TEXT DEFAULT 'inhouse'",
+        "ALTER TABLE so_lines ADD COLUMN procurement_override TEXT DEFAULT ''",
     ]:
         try:
             conn.execute(col_ddl)
@@ -173,13 +174,13 @@ def create_order(data: dict):
         conn.execute(
             """INSERT INTO so_lines
                (so_id,sku,sku_name,qty,unit,rate,delivery_date,remarks,
-                hsn_code,gst_pct,merchant_code,priority,line_delivery_date)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                hsn_code,gst_pct,merchant_code,priority,line_delivery_date,procurement_override)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (soid, ln['sku'], ln.get('sku_name',''), ln.get('qty',0), ln.get('unit','PCS'),
              ln.get('rate') or 0, ln.get('delivery_date',''), ln.get('remarks',''),
              ln.get('hsn_code',''), ln.get('gst_pct') or 0,
              ln.get('merchant_code',''), ln.get('priority') or 'Normal',
-             ln.get('line_delivery_date','')))
+             ln.get('line_delivery_date',''), ln.get('procurement_override') or ''))
     conn.commit(); conn.close(); return num
 
 def update_order(soid: int, data: dict):
@@ -200,7 +201,7 @@ def update_order(soid: int, data: dict):
 
 def update_so_line(lid: int, data: dict):
     allowed = ['produced_qty','dispatch_qty','received_qty','qty','rate','delivery_date','remarks',
-               'hsn_code','gst_pct','merchant_code','priority','line_delivery_date']
+               'hsn_code','gst_pct','merchant_code','priority','line_delivery_date','procurement_override']
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed] + [lid]
     if not sets: return
@@ -211,7 +212,8 @@ def update_so_line(lid: int, data: dict):
 def get_open_orders():
     """Returns open SOs suitable for MRP/Production"""
     conn = _connect()
-    rows = conn.execute("""SELECT so.*, sl.sku, sl.sku_name, sl.qty, sl.produced_qty, sl.unit
+    rows = conn.execute("""SELECT so.*, sl.sku, sl.sku_name, sl.qty, sl.produced_qty, sl.unit,
+        COALESCE(sl.procurement_override,'') AS procurement_override
         FROM sales_orders so JOIN so_lines sl ON sl.so_id=so.id
         WHERE so.status NOT IN ('Closed','Cancelled')
         ORDER BY so.delivery_date, so.id""").fetchall()

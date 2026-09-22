@@ -154,6 +154,55 @@ def _is_printed_component(ctype: str, code: str) -> bool:
     return bool(c) and c.startswith("P") and any(ch.isdigit() for ch in c[:6])
 
 
+def _normalize_procurement(raw: str | None) -> str:
+    s = str(raw or "").strip().lower().replace("-", " ").replace("_", " ")
+    aliases = {
+        "purchase": "Purchase",
+        "buy": "Purchase",
+        "bought out": "Purchase",
+        "boughtout": "Purchase",
+        "direct purchase": "Purchase",
+        "direct fg": "Purchase",
+        "make": "Make",
+        "manufacture": "Make",
+        "manufactured": "Make",
+        "inhouse": "Make",
+        "in house": "Make",
+        "subcontract": "Subcontract",
+        "sub contract": "Subcontract",
+        "job work": "Subcontract",
+        "jobwork": "Subcontract",
+    }
+    return aliases.get(s, str(raw or "").strip().title() if s else "")
+
+
+def _resolve_fg_procurement(conn, sku: str, line_override: str | None = None) -> str:
+    """Effective sourcing for an SO FG line: line override wins, else Item Master (size → parent)."""
+    ov = _normalize_procurement(line_override)
+    if ov in ("Purchase", "Make", "Subcontract"):
+        return ov
+    item = _get_item_by_code(conn, sku)
+    if item:
+        pt = _normalize_procurement(item.get("procurement_type"))
+        if pt in ("Purchase", "Make", "Subcontract"):
+            return pt
+        if item.get("parent_id"):
+            parent = _get_item_by_id(conn, item["parent_id"])
+            if parent:
+                pt = _normalize_procurement(parent.get("procurement_type"))
+                if pt in ("Purchase", "Make", "Subcontract"):
+                    return pt
+    for candidate in _parent_candidates(sku):
+        if candidate == sku:
+            continue
+        parent = _get_item_by_code(conn, candidate)
+        if parent:
+            pt = _normalize_procurement(parent.get("procurement_type"))
+            if pt in ("Purchase", "Make", "Subcontract"):
+                return pt
+    return "Make"
+
+
 def calculate_mrp(so_numbers):
     """
     Returns ``{"materials": {...}, "warnings": [...]}``.
@@ -264,6 +313,38 @@ def calculate_mrp(so_numbers):
             continue
         if qty <= 0:
             continue
+        sourcing = _resolve_fg_procurement(conn, sku, line.get("procurement_override"))
+        # Direct FG purchase: require the FG itself — do NOT explode BOM / create Cut-Stitch flow
+        if sourcing == "Purchase":
+            item = _get_item_by_code(conn, sku) or {}
+            code = sku
+            if code not in materials:
+                materials[code] = {
+                    'name': item.get('item_name', code) if item else code,
+                    'type': 'FG',
+                    'unit': line.get('unit') or item.get('uom') or 'PCS',
+                    'total_req': 0.,
+                    'stock': float(item.get('stock') or 0) if item else 0.,
+                    'reserved': 0.,
+                    'breakdown': [],
+                    'level': 0,
+                    'procurement_type': 'Purchase',
+                    'direct_fg_purchase': True,
+                }
+            materials[code]['total_req'] = round(materials[code]['total_req'] + float(qty), 3)
+            materials[code]['breakdown'].append({
+                'so_no': so_no,
+                'sku': sku,
+                'fg_sku': sku,
+                'p_code': '',
+                'printed_code': '',
+                'qty_req': float(qty),
+                'allocated_qty': 0.0,
+                'status': 'Pending',
+                'sourcing': 'Purchase',
+            })
+            matched_sos.add(so_no)
+            continue
         bom_code, anchor, reason = _resolve_bom_anchor(conn, sku)
         if reason:
             warnings.append(f"{so_no} · {sku}: {reason}.")
@@ -345,7 +426,8 @@ class JOIn(BaseModel):
 
 class JOLineQtyUpdate(BaseModel):
     id: int
-    planned_qty: int
+    planned_qty: Optional[int] = None
+    vendor_rate: Optional[float] = None
 
 
 class JOUpdate(BaseModel):

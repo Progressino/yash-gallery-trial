@@ -1086,7 +1086,12 @@ const totalCost = useMemo(() =>
                           className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
                           {PROCUREMENT_TYPES.map(p => <option key={p || '—'} value={p}>{p || '— Not set —'}</option>)}
                         </select>
-                        <p className="text-[11px] text-gray-400">Grey Fabric (GF) is normally <b>Purchase</b>; tracked separately from FG in Grey Fabric module.</p>
+                        <p className="text-[11px] text-gray-400">
+                          <b>Purchase</b> = buy FG directly (MRP raises FG PO, no Cut/Stitch).
+                          <b> Make</b> = manufacture via BOM (default for styles).
+                          <b> Subcontract</b> = job-work path.
+                          Same style can still be Made or Purchased per SO line via Sales → Sourcing override.
+                        </p>
                       </div>
                       {/* Merchant dropdown */}
                       <div className="space-y-1">
