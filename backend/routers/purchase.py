@@ -278,12 +278,18 @@ def post_po(body: POIn):
 
 @router.patch("/po/{poid}/status")
 def patch_po_status(poid: int, body: StatusUpdate):
-    update_po_status(poid, body.status)
+    try:
+        update_po_status(poid, body.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"ok": True}
 
 @router.patch("/po/{poid}")
 def patch_po(poid: int, body: dict):
-    update_po(poid, body)
+    try:
+        update_po(poid, body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"ok": True}
 
 
@@ -314,7 +320,10 @@ def post_jwo(body: JWOIn):
 
 @router.patch("/jwo/{jwoid}/status")
 def patch_jwo_status(jwoid: int, body: StatusUpdate):
-    update_jwo_status(jwoid, body.status)
+    try:
+        update_jwo_status(jwoid, body.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"ok": True}
 
 # ── NEW: Update JWO (header + lines) — mirrors PATCH /po/{poid} ──────────────
@@ -326,7 +335,10 @@ def patch_jwo(jwoid: int, body: JWOUpdateIn):
         for ln in data["lines"]:
             if ln.get("amount") is None:
                 ln["amount"] = ln.get("output_qty", 0) * ln.get("rate", 0)
-    update_jwo(jwoid, data)
+    try:
+        update_jwo(jwoid, data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"ok": True}
 # ── Material Issue Notes (MIN) ────────────────────────────────────────────────
 class MINLineIn(BaseModel):

@@ -106,6 +106,10 @@ def test_verified_jo_blocks_edit(erp_env):
         production_db.update_jo(
             joid, {"vendor_rate": 99, "vendor_name": "X", "exec_type": "Outsource"}
         )
+    with pytest.raises(ValueError, match="Verified"):
+        production_db.add_cost(joid, {"amount": 10, "cost_type": "Labour"})
+    with pytest.raises(ValueError, match="Verified"):
+        production_db.create_next_process_jo(joid)
     audit.unverify_document("JO", joid, actor="accounts", reason="fix typo ok", force=True)
     production_db.update_jo(
         joid, {"vendor_rate": 9, "vendor_name": "X", "exec_type": "Outsource"}

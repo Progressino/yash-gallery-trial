@@ -1714,12 +1714,18 @@ def get_set_matches(so_number: Optional[str] = None, main_sku: Optional[str] = N
 
 @router.post("/orders/{joid}/add-cost")
 def post_add_cost(joid: int, body: CostEntryIn):
-    add_cost(joid, body.model_dump())
+    try:
+        add_cost(joid, body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     return {"ok": True}
 
 @router.post("/orders/{joid}/next-process")
 def post_next_process(joid: int):
-    result = create_next_process_jo(joid)
+    try:
+        result = create_next_process_jo(joid)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     if not result.get('ok'):
         raise HTTPException(400, result.get('message','Cannot create next process JO'))
     return result

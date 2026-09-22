@@ -3751,6 +3751,14 @@ def receive_pieces(joid: int, data: dict):
 # ── Cost Entry ─────────────────────────────────────────────────────────────────
 
 def add_cost(joid: int, data: dict):
+    try:
+        from ..db.document_audit_db import assert_doc_editable
+
+        assert_doc_editable("JO", int(joid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     jo = dict(conn.execute("SELECT * FROM job_orders WHERE id=?", (joid,)).fetchone() or {})
     if not jo:
@@ -3774,6 +3782,14 @@ def add_cost(joid: int, data: dict):
 # ── Next Process JO ────────────────────────────────────────────────────────────
 
 def create_next_process_jo(parent_joid: int) -> dict:
+    try:
+        from ..db.document_audit_db import assert_doc_editable
+
+        assert_doc_editable("JO", int(parent_joid))
+    except ValueError:
+        raise
+    except Exception:
+        pass
     conn = _connect()
     parent = conn.execute("SELECT * FROM job_orders WHERE id=?", (parent_joid,)).fetchone()
     if not parent:
