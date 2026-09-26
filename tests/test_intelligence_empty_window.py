@@ -170,6 +170,40 @@ def test_artifact_without_current_schema_is_ignored(tmp_path, monkeypatch):
     assert payload is None
 
 
+def test_full_mode_serves_gapfill_without_tier3_rebuild(client, monkeypatch):
+    from backend.routers import data as data_router
+    from tests.conftest import bootstrap_test_session
+
+    monkeypatch.setattr(guard, "latest_sales_date", lambda: None)
+    data_router._GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
+    monkeypatch.setattr(data_router, "_bundle_cache_lookup", lambda *a, **k: None)
+    monkeypatch.setattr(data_router, "_disk_bulk_history_available", lambda: True)
+    monkeypatch.setattr(data_router, "_session_has_platform_data", lambda _s: True)
+    gapfill = {
+        "status": "ready",
+        "data_completeness": "partial",
+        "sales_summary": {"total_units": 17486, "total_returns": 0, "net_units": 17486, "return_rate": 0.0},
+        "platform_summary": [{"platform": "Amazon", "loaded": True, "total_units": 17486}],
+        "top_skus": [],
+        "anomalies": [],
+        "dsr_brand_monthly": {"rows": [], "totals": {}, "note": ""},
+    }
+    monkeypatch.setattr(data_router, "_build_intelligence_gapfill_bundle_payload", lambda *a, **k: dict(gapfill))
+
+    def heavy(*a, **k):
+        raise AssertionError("full mode must not rebuild Tier-3 / refresh the session")
+
+    monkeypatch.setattr(data_router, "_try_serve_tier3_intelligence_bundle", heavy)
+    monkeypatch.setattr(data_router, "_schedule_intelligence_refresh_async", heavy)
+    bootstrap_test_session(client)
+    r = client.get(
+        "/api/data/intelligence-bundle",
+        params={"start_date": "2026-08-27", "end_date": "2026-09-26", "mode": "full"},
+    )
+    assert r.status_code == 200
+    assert r.json()["sales_summary"]["total_units"] == 17486
+
+
 def test_legacy_day_parquet_is_discarded(tmp_path, monkeypatch):
     from backend.services import intelligence_artifact_store as store
 

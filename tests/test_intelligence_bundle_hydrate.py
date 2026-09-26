@@ -88,6 +88,7 @@ def test_intelligence_bundle_warming_when_no_data_anywhere(client, monkeypatch):
     monkeypatch.setattr(data_router, "_build_intelligence_bundle_payload_from_session", lambda *a, **k: None)
     monkeypatch.setattr(data_router, "_build_intelligence_bundle_payload_from_tier3", lambda *a, **k: None)
     monkeypatch.setattr(data_router, "_serve_intelligence_bundle_fast", lambda *a, **k: None)
+    monkeypatch.setattr(data_router, "_build_intelligence_gapfill_bundle_payload", lambda *a, **k: None)
     # Skip the global cache lookup so no previous test's result is reused.
     monkeypatch.setattr(data_router, "_bundle_cache_lookup", lambda *a, **k: None)
 

@@ -2356,6 +2356,8 @@ def _build_intelligence_gapfill_bundle_payload(
     limit: int,
     basis: Optional[str],
     include_extras: bool,
+    *,
+    core: dict | None = None,
 ) -> dict | None:
     """Gap-filled platform frames — no unified sales_df scan (memory-safe fast path)."""
     import pandas as pd
@@ -2368,7 +2370,8 @@ def _build_intelligence_gapfill_bundle_payload(
     e = str(end_date)[:10]
     if len(s) != 10 or len(e) != 10:
         return None
-    core = _gapfill_core_cached(sess, s, e, limit, basis)
+    if core is None:
+        core = _gapfill_core_cached(sess, s, e, limit, basis)
     if core is None:
         return None
     payload = dict(core)
@@ -2412,6 +2415,14 @@ def _gapfill_data_token() -> tuple:
     except Exception:
         gen = 0
     return (tok, gen)
+
+
+def _gapfill_core_peek(s: str, e: str, limit: int, basis: Optional[str]) -> dict | None:
+    """Fresh memoized gap-fill core for the window, or None — never builds."""
+    hit = _GAPFILL_CORE_CACHE.get((s, e, int(limit), str(basis or "gross")))
+    if hit and hit[1] == _gapfill_data_token() and time.time() - hit[0] < _GAPFILL_CORE_TTL_SEC:
+        return hit[2]
+    return None
 
 
 def _gapfill_core_cached(
@@ -4834,6 +4845,21 @@ def _intelligence_bundle_sync(
     if cached_early is not None:
         return cached_early
 
+    # Summary / fast already memoized this window — answer without queueing behind
+    # a background artifact build on the gate.
+    memo_core = (
+        _gapfill_core_peek(s_win, e_win, limit, basis)
+        if mode_early == "full" and len(s_win) == 10 and len(e_win) == 10
+        else None
+    )
+    if memo_core is not None:
+        memo_payload = _build_intelligence_gapfill_bundle_payload(
+            sess, s_win, e_win, limit, basis, include_extras, core=memo_core
+        )
+        if memo_payload is not None:
+            _bundle_cache_store(cache_key, bundle_cache, memo_payload)
+            return memo_payload
+
     return single_flight(
         ("intelligence-bundle", cache_key, mode_early),
         lambda: _intelligence_bundle_build(
@@ -4951,6 +4977,17 @@ def _intelligence_bundle_build(
         return cached_instant
 
     _hydrate_session_for_intelligence(sess)
+
+    # mode=full used to rerun Tier-3 direct (with a sales_df build) and queue a
+    # session-wide refresh, only to return this same gap-fill payload — that extra
+    # 1–2 GB OOM-killed the 8 GB VPS. The gap-fill core is memoized per window.
+    if not use_fast and has_dates and len(s_win) == 10 and len(e_win) == 10:
+        gapfill_full = _build_intelligence_gapfill_bundle_payload(
+            sess, s_win, e_win, limit, basis, include_extras
+        )
+        if gapfill_full is not None:
+            _bundle_cache_store(cache_key, bundle_cache, gapfill_full)
+            return gapfill_full
 
     if use_fast and has_dates and len(s_win) == 10 and len(e_win) == 10:
         fast_payload = _serve_intelligence_bundle_fast(

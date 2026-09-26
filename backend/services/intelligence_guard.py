@@ -7,6 +7,7 @@ builds), so unbounded concurrency OOM-killed the backend mid-request.
 from __future__ import annotations
 
 import copy
+import gc
 import os
 import threading
 from concurrent.futures import Future
@@ -61,7 +62,33 @@ def _hold_gate(foreground: bool) -> Iterator[None]:
         yield
     finally:
         _GATE_LOCAL.depth = depth
+        if not depth:
+            _release_freed_memory()
         _BUILD_GATE.release()
+
+
+def _release_freed_memory() -> None:
+    """Return freed heap pages to the OS after a build (glibc keeps them otherwise)."""
+    global _LIBC
+    if _LIBC is False:
+        return
+    try:
+        if _LIBC is None:
+            import ctypes
+            import ctypes.util
+
+            name = ctypes.util.find_library("c")
+            lib = ctypes.CDLL(name) if name else None
+            _LIBC = lib if lib is not None and hasattr(lib, "malloc_trim") else False
+            if _LIBC is False:
+                return
+        gc.collect()
+        _LIBC.malloc_trim(0)
+    except Exception:
+        _LIBC = False
+
+
+_LIBC: Any = None
 
 
 def gated(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
