@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
@@ -20,6 +20,9 @@ import ProcessDateTransactionsPanel from './ProcessDateTransactionsPanel'
 import ProductionQualityPanel from './ProductionQualityPanel'
 import MasterProductionStatusPanel from './MasterProductionStatusPanel'
 import { downloadCsv } from '../lib/exportCsv'
+
+// Ready-To boards can hold 2k+ SO+SKU lines; render in pages so typing stays fast.
+const READY_RENDER_STEP = 200
 
 type MasterSkuOption = {
   sku: string
@@ -1344,22 +1347,14 @@ export default function Production() {
     staleTime: 30_000,
     retry: 1,
   })
-  const { data: readyLines = [] } = useQuery({
-    queryKey: ['ready-to-process', activeProcess, filterJO, filterSku, filterVendor, filterMinQty, filterDateFrom, filterDateTo, listSearch],
-    queryFn: () => {
-      const params = new URLSearchParams()
-      if (listSearch.trim()) params.set('q', listSearch.trim())
-      if (filterJO) params.set('jo', filterJO)
-      if (filterSku) params.set('sku', filterSku)
-      if (filterVendor) params.set('vendor', filterVendor)
-      if (filterMinQty) params.set('min_qty', filterMinQty)
-      if (filterDateFrom) params.set('date_from', filterDateFrom)
-      if (filterDateTo) params.set('date_to', filterDateTo)
-      const qs = params.toString()
-      return api.get(`/production/ready-to-process/${encodeURIComponent(activeProcess)}${qs ? `?${qs}` : ''}`, { timeout: 60_000 }).then(r => r.data)
-    },
-    enabled: tab === 'process' && !josLoading,
-    staleTime: 15_000,
+  // One fetch per process; search/filters run client-side in filteredReadyLines so
+  // typing never waits on the server. Mutations invalidate this key after entries.
+  const { data: readyLines = [], isLoading: readyLoading } = useQuery({
+    queryKey: ['ready-to-process', activeProcess],
+    queryFn: () =>
+      api.get(`/production/ready-to-process/${encodeURIComponent(activeProcess)}`, { timeout: 60_000 }).then(r => r.data),
+    enabled: tab === 'process',
+    staleTime: 60_000,
     retry: 1,
   })
   const { data: processReport = [] } = useQuery({
@@ -1519,7 +1514,12 @@ export default function Production() {
     return parts.some(p => String(p ?? '').toLowerCase().includes(q))
   }
 
+  const readySearch = useDeferredValue(listSearch)
+  const [readyShowLimit, setReadyShowLimit] = useState(READY_RENDER_STEP)
+  useEffect(() => { setReadyShowLimit(READY_RENDER_STEP) }, [activeProcess, readySearch])
+
   const filteredReadyLines = useMemo(() => {
+    const q = readySearch.trim().toLowerCase()
     let rows = (readyLines as any[]).map(r => ({
       ...r,
       vendor_name: r.vendor_name || soBuyerMap.get(String(r.so_number || '').trim()) || '',
@@ -1542,9 +1542,13 @@ export default function Production() {
     }
     if (filterDateFrom) rows = rows.filter(r => String(r.updated_at || '').slice(0, 10) >= filterDateFrom)
     if (filterDateTo) rows = rows.filter(r => !r.updated_at || String(r.updated_at).slice(0, 10) <= filterDateTo)
-    rows = rows.filter(r =>
-      matchesListQuery([r.so_number, r.sku, r.vendor_name, r.fabric_code, r.fabric_name, r.jo_number, r.from_process, r.to_process, r.batch]),
-    )
+    if (q) {
+      rows = rows.filter(r =>
+        [r.so_number, r.sku, r.sku_name, r.vendor_name, r.fabric_code, r.fabric_name, r.jo_number, r.from_process, r.to_process, r.batch]
+          .some(p => String(p ?? '').toLowerCase().includes(q))
+        || (Array.isArray(r.jo_numbers) && r.jo_numbers.some((x: string) => String(x).toLowerCase().includes(q))),
+      )
+    }
     const dir = sortDir === 'asc' ? 1 : -1
     rows = [...rows].sort((a, b) => {
       if (sortBy === 'available_qty') {
@@ -1555,7 +1559,7 @@ export default function Production() {
       return ak.localeCompare(bk, undefined, { numeric: true }) * dir
     })
     return rows
-  }, [readyLines, soBuyerMap, filterSO, filterSku, filterVendor, filterJO, filterMinQty, filterDateFrom, filterDateTo, listSearch, sortBy, sortDir])
+  }, [readyLines, soBuyerMap, filterSO, filterSku, filterVendor, filterJO, filterMinQty, filterDateFrom, filterDateTo, readySearch, sortBy, sortDir])
 
   const filteredProcessJOs = useMemo(() => {
     let rows = [...processJOs]
@@ -2838,7 +2842,9 @@ export default function Production() {
                 >Import Ready-To WIP</button>
               </div>
             </div>
-            {readyLines.length === 0 ? (
+            {readyLoading ? (
+              <p className="text-xs text-amber-700">Loading ready lines…</p>
+            ) : readyLines.length === 0 ? (
               <p className="text-xs text-amber-700">
                 {activeProcess === 'Cutting'
                   ? 'No printed-fabric reservations yet. Reserve fabric under Grey Fabric → Ready to Cut.'
@@ -2848,7 +2854,7 @@ export default function Production() {
               <p className="text-xs text-amber-700">No ready lines match the current search / filters.</p>
             ) : (
               <div className="space-y-2 max-h-56 overflow-y-auto">
-                {filteredReadyLines.map((r: any, i: number) => (
+                {filteredReadyLines.slice(0, readyShowLimit).map((r: any, i: number) => (
                   <div key={i} className="bg-white rounded-lg border border-amber-200 px-3 py-2 flex items-center justify-between gap-2">
                     <div className="text-xs min-w-0">
                       <span className="font-semibold text-[#002B5B]">SO: {r.so_number}</span>
@@ -2912,6 +2918,15 @@ export default function Production() {
                     </button>
                   </div>
                 ))}
+                {filteredReadyLines.length > readyShowLimit && (
+                  <button
+                    type="button"
+                    onClick={() => setReadyShowLimit(n => n + READY_RENDER_STEP)}
+                    className="w-full text-xs py-1.5 rounded border border-amber-300 text-amber-800 hover:bg-amber-100"
+                  >
+                    Show more ({readyShowLimit} of {filteredReadyLines.length} shown — search to narrow)
+                  </button>
+                )}
               </div>
             )}
           </div>

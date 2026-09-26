@@ -6,6 +6,7 @@ runs in-house at the same time.
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 PRODUCTION_MODES = ("inhouse", "cut_to_pack", "stitch_to_pack")
@@ -50,24 +51,48 @@ def normalize_production_mode(raw: str | None) -> str:
     return s if s in PRODUCTION_MODES else "inhouse"
 
 
+_SO_MODE_CACHE: dict = {"fp": None, "modes": {}}
+_SO_MODE_LOCK = threading.Lock()
+
+
+def _so_mode_map() -> dict[str, str]:
+    """All SO production modes, reloaded only when sales.db changes.
+
+    Ready-To / JO routing asks for the mode of every stock row several times;
+    one connection per call made a single Ready-To request open ~15k connections.
+    """
+    from ..db import sales_db
+    from .db_fingerprint import db_fingerprint
+
+    fp = db_fingerprint(sales_db._DB)
+    cached = _SO_MODE_CACHE
+    if cached["fp"] == fp:
+        return cached["modes"]
+    with _SO_MODE_LOCK:
+        if _SO_MODE_CACHE["fp"] == fp:
+            return _SO_MODE_CACHE["modes"]
+        modes: dict[str, str] = {}
+        conn = sales_db._connect()
+        try:
+            for row in conn.execute("SELECT so_number, production_mode FROM sales_orders"):
+                key = str(row["so_number"] or "").strip()
+                if key and key not in modes:
+                    modes[key] = normalize_production_mode(row["production_mode"])
+        finally:
+            conn.close()
+        _SO_MODE_CACHE["modes"] = modes
+        _SO_MODE_CACHE["fp"] = fp
+        return modes
+
+
 def get_so_production_mode(so_number: str | None) -> str:
     so = str(so_number or "").strip()
     if not so:
         return "inhouse"
     try:
-        from ..db.sales_db import _connect
-
-        conn = _connect()
-        row = conn.execute(
-            "SELECT production_mode FROM sales_orders WHERE so_number=?",
-            (so,),
-        ).fetchone()
-        conn.close()
-        if row:
-            return normalize_production_mode(dict(row).get("production_mode"))
+        return _so_mode_map().get(so, "inhouse")
     except Exception:
-        pass
-    return "inhouse"
+        return "inhouse"
 
 
 def production_path_for(

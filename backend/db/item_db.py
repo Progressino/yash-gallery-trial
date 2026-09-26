@@ -201,6 +201,18 @@ def init_db() -> None:
         except Exception:
             pass  # column already exists
 
+    # Lookups by code (case-insensitive), variants by parent, and routing by item
+    # run for every Item Master row / Ready-To stock row.
+    for idx_ddl in [
+        "CREATE INDEX IF NOT EXISTS idx_items_upper_code ON items(upper(item_code))",
+        "CREATE INDEX IF NOT EXISTS idx_items_parent_id ON items(parent_id)",
+        "CREATE INDEX IF NOT EXISTS idx_item_routing_item ON item_routing(item_id, sort_order)",
+    ]:
+        try:
+            conn.execute(idx_ddl)
+        except Exception:
+            pass
+
     # Seed item types
     for name, code in _DEFAULT_TYPES:
         conn.execute(
@@ -429,30 +441,52 @@ def list_items(
     type_id: Optional[int] = None,
     search: Optional[str] = None,
     parent_only: bool = False,
+    *,
+    limit: Optional[int] = None,
+    rank_search: bool = False,
 ) -> list[dict]:
+    """Item Master rows.
+
+    ``rank_search`` orders exact code, then code prefix, then other matches —
+    used by pickers together with ``limit`` so typing "YK" does not ship 6k rows.
+    """
     conn = _connect()
     q = """
         SELECT i.*, t.name AS item_type_name, t.code AS item_type_code,
-               (SELECT COUNT(*) FROM items v WHERE v.parent_id = i.id) AS variant_count
+               (SELECT COUNT(*) FROM items v WHERE v.parent_id = i.id) AS variant_count,
+               p.image_path AS _parent_image_path
         FROM items i
         JOIN item_types t ON i.item_type_id = t.id
+        LEFT JOIN items p ON p.id = i.parent_id
         WHERE 1=1
     """
     params: list = []
     if type_id is not None:
         q += " AND i.item_type_id = ?"
         params.append(type_id)
-    if search:
+    needle = (search or "").strip()
+    if needle:
         q += " AND (i.item_code LIKE ? OR i.item_name LIKE ?)"
-        params += [f"%{search}%", f"%{search}%"]
+        params += [f"%{needle}%", f"%{needle}%"]
     if parent_only:
         q += " AND i.parent_id IS NULL"
-    q += " ORDER BY i.created_at DESC, i.id DESC"
+    if needle and rank_search:
+        q += """ ORDER BY CASE
+                     WHEN upper(i.item_code) = upper(?) THEN 0
+                     WHEN i.item_code LIKE ? THEN 1
+                     ELSE 2
+                 END, i.item_code"""
+        params += [needle, f"{needle}%"]
+    else:
+        q += " ORDER BY i.created_at DESC, i.id DESC"
+    if limit is not None and limit > 0:
+        q += " LIMIT ?"
+        params.append(int(limit))
     rows = conn.execute(q, params).fetchall()
     conn.close()
-    from ..services.item_images import enrich_item_image_fields
+    from ..services.item_images import enrich_item_image_fields_bulk
 
-    return [enrich_item_image_fields(dict(r)) for r in rows]
+    return enrich_item_image_fields_bulk([dict(r) for r in rows])
 
 
 def get_item(item_id: int) -> Optional[dict]:

@@ -130,6 +130,33 @@ def enrich_item_image_fields(item: dict | None) -> dict | None:
     return item
 
 
+def enrich_item_image_fields_bulk(items: list[dict]) -> list[dict]:
+    """``enrich_item_image_fields`` for list rows carrying ``_parent_image_path``.
+
+    Size variants share the parent image, so each file is checked once and no
+    per-row parent query is needed.
+    """
+    exists: dict[str, bool] = {}
+
+    def _has(path) -> bool:
+        key = str(path or "").strip()
+        if not key:
+            return False
+        if key not in exists:
+            exists[key] = absolute_path(key) is not None
+        return exists[key]
+
+    for item in items:
+        parent_path = item.pop("_parent_image_path", None)
+        code = str(item.get("item_code") or "").strip()
+        has = _has(item.get("image_path"))
+        if not has and item.get("parent_id"):
+            has = _has(parent_path)
+        item["has_image"] = bool(has)
+        item["image_url"] = f"/api/items/by-code/{code}/image" if code and has else ""
+    return items
+
+
 def resolve_image_file_for_code(item_code: str) -> Optional[Path]:
     """Resolve on-disk image for a code (exact → parent_id → parent SKU)."""
     code = str(item_code or "").strip()

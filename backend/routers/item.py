@@ -310,9 +310,14 @@ def add_item(body: ItemCreate):
 
 
 @router.get("/search")
-def search_items(q: str = ""):
-    """Lightweight search for BOM component lookup."""
-    return list_items(search=q, parent_only=False)
+def search_items(q: str = "", limit: int = 200):
+    """Lightweight search for BOM component lookup (best matches first)."""
+    return list_items(
+        search=q,
+        parent_only=False,
+        limit=max(1, min(int(limit), 2000)),
+        rank_search=True,
+    )
 
 
 @router.get("/by-code/{item_code}/image")

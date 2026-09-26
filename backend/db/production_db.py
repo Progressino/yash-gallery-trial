@@ -1,6 +1,8 @@
 """Production Module DB — Dynamic Routing, Multi-line JO, Stage Stock"""
 import logging
 import sqlite3, os, json
+import threading
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -10,7 +12,13 @@ _DB = os.environ.get("PRODUCTION_DB_PATH", os.path.join(os.path.dirname(__file__
 _ITEM_DB = os.environ.get("ITEM_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "items_dev.db"))
 _DEFAULT_ITEM_ROUTING = ["Cutting", "Stitching", "Finishing"]
 _ITEM_ROUTING_CACHE: dict[str, tuple] = {}
+_ITEM_ROUTING_FP: list = [None]
 _SET_BOM_CACHE: dict[str, Optional[dict]] = {}
+# process → (db fingerprint, built_at, unfiltered Ready-To rows)
+_READY_CACHE: dict[str, tuple] = {}
+_READY_CACHE_MAX_AGE_S = 120.0
+_READY_LOCKS: dict[str, threading.Lock] = {}
+_READY_LOCKS_GUARD = threading.Lock()
 
 _CANCELLED_JO_STATUS = "Cancelled"
 _IMMUTABLE_JO_STATUSES = frozenset({_CANCELLED_JO_STATUS})
@@ -568,6 +576,41 @@ def _item_routing_with_conn(conn, code: str) -> list:
 
 def clear_item_routing_cache() -> None:
     _ITEM_ROUTING_CACHE.clear()
+
+
+def _item_db_path() -> str:
+    """Same file ``_item_connect`` opens."""
+    if os.path.exists(_ITEM_DB):
+        return _ITEM_DB
+    return os.path.join(os.path.dirname(__file__), "..", "items_dev.db")
+
+
+def _sync_item_routing_cache() -> None:
+    """Drop cached Item Master routings once items.db has been written."""
+    from ..services.db_fingerprint import db_fingerprint
+
+    fp = db_fingerprint(_item_db_path())
+    if _ITEM_ROUTING_FP[0] != fp:
+        if _ITEM_ROUTING_FP[0] is not None:
+            _ITEM_ROUTING_CACHE.clear()
+        _ITEM_ROUTING_FP[0] = fp
+
+
+def _prefetch_item_routings(skus) -> None:
+    """Warm ``_ITEM_ROUTING_CACHE`` for many SKUs with one items DB connection."""
+    unique = {str(s or "").strip().upper() for s in skus}
+    missing = sorted(s for s in unique if s and s not in _ITEM_ROUTING_CACHE)
+    if not missing:
+        return
+    try:
+        ic = _item_connect()
+        try:
+            for code in missing:
+                _ITEM_ROUTING_CACHE[code] = tuple(_item_routing_with_conn(ic, code))
+        finally:
+            ic.close()
+    except Exception:
+        _log.exception("batch item routing prefetch failed")
 
 
 def get_component_routing(sku: str) -> list:
@@ -1133,12 +1176,8 @@ def get_ready_to_process(
     - Cutting: from printed_fabric_reservations in grey.db (+ Incoming process_stock)
     - Other: from process_stock of previous process
     """
-    if process == 'Cutting':
-        result = _get_ready_to_cut()
-    else:
-        result = _get_ready_for_process(process)
-    return _filter_ready_rows(
-        result,
+    rows = _filter_ready_rows(
+        _ready_rows_cached(process),
         q=q,
         jo=jo,
         sku=sku,
@@ -1147,6 +1186,47 @@ def get_ready_to_process(
         date_from=date_from,
         date_to=date_to,
     )
+    return [dict(r) for r in rows]
+
+
+def _grey_db_path() -> str:
+    return os.environ.get("GREY_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "grey.db"))
+
+
+def _ready_to_fingerprint() -> tuple:
+    """Every DB Ready-To reads: stock/JOs, Item Master routing, printed fabric, SO mode."""
+    from ..services.db_fingerprint import db_fingerprint
+    from . import sales_db
+
+    return db_fingerprint(_DB, _item_db_path(), _grey_db_path(), sales_db._DB)
+
+
+def _ready_rows_cached(process: str) -> list:
+    """Unfiltered Ready-To rows, rebuilt only after a write to any source DB.
+
+    Entries re-read the list constantly; recomputing routing for thousands of stock
+    rows on every search keystroke is what made the Ready-To panel slow. Rows are
+    shared — callers must copy before mutating.
+    """
+    fp = _ready_to_fingerprint()
+    hit = _READY_CACHE.get(process)
+    if hit and hit[0] == fp and time.monotonic() - hit[1] < _READY_CACHE_MAX_AGE_S:
+        return hit[2]
+    with _READY_LOCKS_GUARD:
+        lock = _READY_LOCKS.setdefault(process, threading.Lock())
+    with lock:
+        fp = _ready_to_fingerprint()
+        hit = _READY_CACHE.get(process)
+        if hit and hit[0] == fp and time.monotonic() - hit[1] < _READY_CACHE_MAX_AGE_S:
+            return hit[2]
+        _sync_item_routing_cache()
+        built_at = time.monotonic()
+        if process == 'Cutting':
+            rows = _get_ready_to_cut()
+        else:
+            rows = _get_ready_for_process(process)
+        _READY_CACHE[process] = (fp, built_at, rows)
+        return rows
 
 
 def _filter_ready_rows(
@@ -1203,29 +1283,42 @@ def _filter_ready_rows(
     return out
 
 
-def _enrich_ready_row(d: dict, to_process: str) -> dict:
-    """Attach open JO numbers / vendor / updated_at for Ready-To filters."""
+def _enrich_ready_rows(rows: list, to_process: str) -> list:
+    """Attach open JO numbers / vendor / updated_at for Ready-To filters.
+
+    One connection and two table scans for the whole list — per-row queries made
+    Ready-To take 10-30 s on production-sized stock.
+    """
+    if not rows:
+        return rows
     conn = _connect()
     try:
+        jos_by_key: dict[tuple, list] = {}
+        for r in conn.execute(
+            """SELECT so_number, sku, jo_number, vendor_name FROM job_orders
+               WHERE process=? AND status NOT IN ('Cancelled','Closed')
+               ORDER BY id DESC""",
+            (to_process,),
+        ):
+            bucket = jos_by_key.setdefault((r["so_number"], r["sku"]), [])
+            if len(bucket) < 20:
+                bucket.append(r)
+        stock_by_key = {
+            (r["so_number"], r["sku"], r["process"]): r
+            for r in conn.execute(
+                """SELECT so_number, sku, process, updated_at, batch, vendor_name, jo_number
+                   FROM process_stock"""
+            )
+        }
+    finally:
+        conn.close()
+    for d in rows:
         so = d.get("so_number") or ""
         sku = d.get("sku") or ""
-        jos = conn.execute(
-            """SELECT jo_number, vendor_name, status FROM job_orders
-               WHERE so_number=? AND sku=? AND process=? AND status NOT IN ('Cancelled','Closed')
-               ORDER BY id DESC LIMIT 20""",
-            (so, sku, to_process),
-        ).fetchall()
+        jos = jos_by_key.get((so, sku), [])
         jo_numbers = [r["jo_number"] for r in jos if r["jo_number"]]
-        vendor = ""
-        for r in jos:
-            if r["vendor_name"]:
-                vendor = r["vendor_name"]
-                break
-        stock = conn.execute(
-            """SELECT available_qty, updated_at, batch, vendor_name, jo_number
-               FROM process_stock WHERE so_number=? AND sku=? AND process=?""",
-            (so, sku, d.get("from_process") or d.get("process") or ""),
-        ).fetchone()
+        vendor = next((r["vendor_name"] for r in jos if r["vendor_name"]), "")
+        stock = stock_by_key.get((so, sku, d.get("from_process") or d.get("process") or ""))
         d["jo_numbers"] = jo_numbers
         d["jo_number"] = jo_numbers[0] if jo_numbers else (stock["jo_number"] if stock and stock["jo_number"] else "")
         d["vendor_name"] = vendor or (stock["vendor_name"] if stock else "") or d.get("vendor_name") or ""
@@ -1233,9 +1326,7 @@ def _enrich_ready_row(d: dict, to_process: str) -> dict:
         d["batch"] = (stock["batch"] if stock else None) or d.get("batch") or ""
         d["to_process"] = to_process
         d["from_process"] = d.get("from_process") or d.get("process") or ""
-    finally:
-        conn.close()
-    return d
+    return rows
 
 
 def get_path_commitment(so_number: str, sku: str, process: str) -> dict:
@@ -1367,8 +1458,7 @@ def _cutting_jo_planned_map() -> dict[tuple[str, str], float]:
 
 def _get_ready_to_cut() -> list:
     """Get printed fabric reservations ready for cutting — component-level when Set BOM exists."""
-    grey_db_path = os.environ.get("GREY_DB_PATH",
-        os.path.join(os.path.dirname(__file__), "..", "grey.db"))
+    grey_db_path = _grey_db_path()
     result = []
     try:
         gconn = sqlite3.connect(grey_db_path)
@@ -1403,7 +1493,7 @@ def _get_ready_to_cut() -> list:
                 d["routing"] = get_item_routing(d.get("sku", ""))
             d["from_process"] = "Printed"
             d["to_process"] = "Cutting"
-            result.append(_enrich_ready_row(d, "Cutting"))
+            result.append(d)
     except Exception:
         pass
 
@@ -1426,9 +1516,10 @@ def _get_ready_to_cut() -> list:
                 )
             except Exception:
                 d['routing'] = get_item_routing(d.get('sku', ''))
-            result.append(_enrich_ready_row(d, 'Cutting'))
+            result.append(d)
     finally:
         conn2.close()
+    _enrich_ready_rows(result, "Cutting")
     printed = [r for r in result if str(r.get("from_process") or "") != "Incoming"]
     incoming = [r for r in result if str(r.get("from_process") or "") == "Incoming"]
     return printed + _apply_open_jo_planned(incoming, "Cutting")
@@ -1495,6 +1586,7 @@ def _get_ready_for_process(process: str) -> list:
             ORDER BY so_number, sku
         """).fetchall()
     conn2.close()
+    _prefetch_item_routings(r["sku"] for r in all_stocks)
 
     target = normalize_process_name(process)
     result = []
@@ -1554,7 +1646,7 @@ def _get_ready_for_process(process: str) -> list:
             "vendor_name": d.get("vendor_name") or "",
             "jo_number": d.get("jo_number") or "",
         }
-        result.append(_enrich_ready_row(row, process))
+        result.append(row)
     # WIP imports: surface feeder stock for this stage only when Style BOM does
     # not already route that feeder elsewhere (prevents Stitching leftover from
     # appearing on Finishing AND Kaj AND Handwork via historical imports).
@@ -1574,6 +1666,7 @@ def _get_ready_for_process(process: str) -> list:
             conn_w.close()
     except Exception:
         wip_rows = []
+    stock_qty_by_key: dict[tuple[str, str, str], int] | None = None
     for wr in wip_rows:
         d = dict(wr)
         so = str(d.get("so_number") or "")
@@ -1592,17 +1685,18 @@ def _get_ready_for_process(process: str) -> list:
             continue
         # When BOM has no next hop, an explicit Ready-To WIP import for this
         # stage is authoritative (migration / incomplete routing).
-        avail = 0
-        for r in all_stocks:
-            rd = dict(r)
-            if (
-                str(rd.get("so_number") or "") == so
-                and str(rd.get("sku") or "") == sku
-                and normalize_process_name(rd.get("process") or "")
-                == normalize_process_name(from_proc)
-            ):
-                avail = int(rd.get("available_qty") or 0)
-                break
+        if stock_qty_by_key is None:
+            stock_qty_by_key = {}
+            for r in all_stocks:
+                stock_qty_by_key.setdefault(
+                    (
+                        str(r["so_number"] or ""),
+                        str(r["sku"] or ""),
+                        normalize_process_name(r["process"] or ""),
+                    ),
+                    int(r["available_qty"] or 0),
+                )
+        avail = stock_qty_by_key.get((so, sku, normalize_process_name(from_proc)), 0)
         if avail <= 0:
             continue
         seen.add(key)
@@ -1618,7 +1712,8 @@ def _get_ready_for_process(process: str) -> list:
             "vendor_name": d.get("vendor_name") or "",
             "jo_number": d.get("jo_number") or "",
         }
-        result.append(_enrich_ready_row(row, process))
+        result.append(row)
+    _enrich_ready_rows(result, process)
     return _apply_open_jo_planned(_merge_ready_by_sku(result), process)
 
 
@@ -1843,20 +1938,7 @@ def list_jos(
 
     conn.close()
 
-    # Prefetch item routings for unique SKUs with one items DB connection.
-    unique_skus = sorted({str(j.get("sku") or "").strip().upper() for j in result if j.get("sku")})
-    missing = [s for s in unique_skus if s and s not in _ITEM_ROUTING_CACHE]
-    if missing:
-        try:
-            ic = _item_connect()
-            try:
-                for code in missing:
-                    path = _item_routing_with_conn(ic, code)
-                    _ITEM_ROUTING_CACHE[code] = tuple(path)
-            finally:
-                ic.close()
-        except Exception:
-            _log.exception("batch item routing prefetch failed")
+    _prefetch_item_routings(j.get("sku") for j in result)
 
     # Routing: cache by (sku, production_mode) within this request
     routing_cache: dict[tuple[str, str], list] = {}

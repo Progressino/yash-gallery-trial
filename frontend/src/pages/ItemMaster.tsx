@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import api from '../api/client'
 import { mayAccessErpAdmin, useAuth } from '../store/auth'
 import SetBomPanel, { parentStyleKeyFromSku } from '../components/SetBomPanel'
@@ -71,6 +71,8 @@ function lineAmt(l: BOMLine) { return netQty(l) * l.rate }
 // ── Blank form states ─────────────────────────────────────────────────────────
 const UOM_OPTIONS = ['PCS', 'MTR', 'KG', 'LTR', 'SET', 'PAIR', 'BOX', 'ROLL']
 const PROCUREMENT_TYPES = ['', 'Purchase', 'Make', 'Subcontract']
+// 7k+ items with all sizes; render in pages so the table stays responsive.
+const ITEM_RENDER_STEP = 300
 
 const blankItem = () => ({
   item_code: '', item_name: '', item_type_id: 1,
@@ -148,19 +150,31 @@ export default function ItemMaster() {
   }>(null)
   const [editItemErr,  setEditItemErr]  = useState('')
 
-  const { data: items = [], isLoading: loadItems } = useQuery<Item[]>({
-    queryKey: ['items', typeFilter, seasonFilter, searchQ, parentOnly],
+  const [debouncedSearchQ, setDebouncedSearchQ] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearchQ(searchQ.trim()), 300)
+    return () => clearTimeout(t)
+  }, [searchQ])
+  const [itemShowLimit, setItemShowLimit] = useState(ITEM_RENDER_STEP)
+  useEffect(() => { setItemShowLimit(ITEM_RENDER_STEP) }, [typeFilter, seasonFilter, debouncedSearchQ, parentOnly])
+
+  const { data: fetchedItems = [], isLoading: loadItems, isFetching: fetchingItems } = useQuery<Item[]>({
+    queryKey: ['items', typeFilter, debouncedSearchQ, parentOnly],
     queryFn:  async () => {
       const p = new URLSearchParams()
-      if (typeFilter)   p.set('type_id', typeFilter)
-      if (searchQ)      p.set('search', searchQ)
-      if (parentOnly)   p.set('parent_only', 'true')
+      if (typeFilter)       p.set('type_id', typeFilter)
+      if (debouncedSearchQ) p.set('search', debouncedSearchQ)
+      if (parentOnly)       p.set('parent_only', 'true')
       const { data } = await api.get(`/items?${p}`)
-      const result = seasonFilter ? data.filter((i: Item) => i.season === seasonFilter) : data
-      return result
+      return data
     },
     staleTime: 60 * 1000,
+    placeholderData: keepPreviousData,
   })
+  const items = useMemo(
+    () => (seasonFilter ? fetchedItems.filter(i => i.season === seasonFilter) : fetchedItems),
+    [fetchedItems, seasonFilter],
+  )
 
   const { data: expandedDetail } = useQuery<ItemDetail>({
     queryKey: ['item-detail', expandedId],
@@ -862,6 +876,9 @@ const totalCost = useMemo(() =>
                     onChange={e => setSearchQ(e.target.value)}
                     className="border border-gray-200 rounded-lg px-3 py-2 text-sm w-48 focus:outline-none focus:ring-2 focus:ring-[#002B5B]"
                   />
+                  {fetchingItems && !loadItems && (
+                    <span className="self-center text-xs text-gray-400">Searching…</span>
+                  )}
                   <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
                     className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#002B5B]">
                     <option value="">All Types</option>
@@ -908,7 +925,7 @@ const totalCost = useMemo(() =>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {items.map(item => (
+                      {items.slice(0, itemShowLimit).map(item => (
                         <>
                           <tr
                             className="hover:bg-gray-50 cursor-pointer transition-colors"
@@ -1014,6 +1031,17 @@ const totalCost = useMemo(() =>
                       ))}
                     </tbody>
                   </table>
+                  {items.length > itemShowLimit && (
+                    <div className="flex justify-center py-3 border-t border-gray-100">
+                      <button
+                        type="button"
+                        onClick={() => setItemShowLimit(n => n + ITEM_RENDER_STEP)}
+                        className="px-4 py-2 text-sm border rounded-lg text-[#002B5B] hover:bg-slate-50"
+                      >
+                        Show more ({itemShowLimit} of {items.length} shown — search to narrow)
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
