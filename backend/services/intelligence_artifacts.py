@@ -30,7 +30,12 @@ _MEM_LOCK = threading.Lock()
 _BUILD_QUEUED: set[tuple[str, str, str]] = set()
 _BUILD_LOCK = threading.Lock()
 
-STANDARD_WINDOW_DAYS = (7, 30, 90)
+# Start offsets (days before today, IST) of the Intelligence UI presets:
+# 7D = today-6 (seven calendar days inclusive), 30D = today-30, 90D = today-90.
+STANDARD_WINDOW_DAYS = (6, 30, 90)
+# Bump when artifact totals were computed incorrectly — older artifacts are ignored
+# outright (not served stale), since a stale window may never be rebuilt.
+ARTIFACT_SCHEMA = 2
 PER_DAY_ARTIFACT_LOOKBACK = int(os.environ.get("INTELLIGENCE_DAY_ARTIFACT_DAYS", "90"))
 
 
@@ -107,6 +112,7 @@ def _write_disk_artifact(
     tmp = f"{path}.tmp"
     entry = {
         "version": version,
+        "schema": ARTIFACT_SCHEMA,
         "built_at": datetime.now(IST).isoformat(),
         "kind": kind,
         "start_date": start_date[:10],
@@ -137,6 +143,7 @@ def save_artifact(
     s, e = start_date[:10], end_date[:10]
     entry = {
         "version": version,
+        "schema": ARTIFACT_SCHEMA,
         "built_at": time.time(),
         "kind": kind,
         "start_date": s,
@@ -153,6 +160,7 @@ def save_artifact(
             write_deep_parquet(s, e, payload)
             slim = {
                 "version": version,
+                "schema": ARTIFACT_SCHEMA,
                 "built_at": datetime.now(IST).isoformat(),
                 "kind": kind,
                 "start_date": s,
@@ -202,7 +210,7 @@ def load_artifact(
     with _MEM_LOCK:
         mem = _MEM.get((s, e, kind))
 
-    if mem and isinstance(mem.get("payload"), dict):
+    if mem and mem.get("schema") == ARTIFACT_SCHEMA and isinstance(mem.get("payload"), dict):
         if mem.get("version") == current:
             meta.update(source="memory", version=mem["version"])
             return mem["payload"], meta
@@ -216,6 +224,8 @@ def load_artifact(
             return mem["payload"], meta
 
     disk = _read_disk_artifact(s, e, kind)
+    if disk and disk.get("schema") != ARTIFACT_SCHEMA:
+        return None, meta
     payload_from_disk: dict[str, Any] | None = None
     if disk:
         if disk.get("storage") == "parquet" and kind == KIND_DEEP:
@@ -232,6 +242,7 @@ def load_artifact(
         with _MEM_LOCK:
             _MEM[(s, e, kind)] = {
                 "version": disk.get("version") if disk else current,
+                "schema": ARTIFACT_SCHEMA,
                 "built_at": time.time(),
                 "kind": kind,
                 "start_date": s,
@@ -251,7 +262,7 @@ def load_artifact(
             )
             return payload_from_disk, meta
 
-    if kind == KIND_DEEP:
+    if kind == KIND_DEEP and disk is None:
         from .intelligence_artifact_store import read_deep_parquet
 
         parquet_only = read_deep_parquet(s, e)
@@ -339,10 +350,16 @@ def build_and_store_artifact(
     include_extras: bool = False,
 ) -> str | None:
     """Build from Tier-3 (offline pipeline) and persist artifact. Returns version or None."""
+    from .intelligence_guard import gated, window_after_latest_data
+
+    if window_after_latest_data(start_date, end_date):
+        return None
     if kind == KIND_HOT:
-        payload = _build_hot_payload(sess, start_date, end_date, limit)
+        payload = gated(_build_hot_payload, sess, start_date, end_date, limit)
     else:
-        payload = _build_deep_payload(sess, start_date, end_date, limit, include_extras=include_extras)
+        payload = gated(
+            _build_deep_payload, sess, start_date, end_date, limit, include_extras=include_extras
+        )
     if not payload:
         return None
     return save_artifact(start_date, end_date, kind, payload)

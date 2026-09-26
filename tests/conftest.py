@@ -26,6 +26,23 @@ def isolated_daily_sales_sqlite(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _clear_intelligence_memo_caches():
+    """Process-level window memos are keyed on the Tier-3 token, which tests reuse."""
+    from backend.routers import data as data_router
+    from backend.services import intelligence_guard
+
+    def _clear():
+        data_router._GAPFILL_CORE_CACHE.clear()
+        data_router._TIER3_DIRECT_CACHE.clear()
+        intelligence_guard._PARQUET_MAX_CACHE.clear()
+        intelligence_guard._FRAME_MAX_CACHE.clear()
+
+    _clear()
+    yield
+    _clear()
+
+
 @pytest.fixture
 def auth_token(monkeypatch):
     def _decode(token: str | None):

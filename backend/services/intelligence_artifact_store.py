@@ -32,6 +32,9 @@ _GH_API = "https://api.github.com"
 _ARTIFACT_RELEASE_TAG = os.environ.get("INTELLIGENCE_ARTIFACT_GH_TAG", "intelligence-artifacts")
 _ARTIFACT_MANIFEST = "_intelligence_artifact_manifest.json"
 
+# Bump when day totals semantics change; older files are discarded on read.
+DAY_PARQUET_SCHEMA = 2
+
 _PUBLISH_QUEUED: set[str] = set()
 _PUBLISH_LOCK = threading.Lock()
 
@@ -255,6 +258,8 @@ def write_day_parquet(day: str, payload: dict[str, Any]) -> bool:
         rows.append({"section": "sales_summary", "date": iso, **{k: ss.get(k) for k in ss}})
     if not rows:
         return False
+    for row in rows:
+        row["schema"] = DAY_PARQUET_SCHEMA
     tmp = f"{path}.tmp"
     try:
         _coerce_df_for_parquet(pd.DataFrame(rows)).to_parquet(
@@ -282,6 +287,12 @@ def read_day_parquet(day: str) -> dict[str, Any] | None:
         df = pd.read_parquet(path, engine="pyarrow")
         if df.empty:
             return None
+        if "schema" not in df.columns or int(df["schema"].max() or 0) != DAY_PARQUET_SCHEMA:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return None
         platform_summary: list[dict] = []
         sales_summary: dict = {}
         for _, row in df.iterrows():
@@ -304,7 +315,7 @@ def read_day_parquet(day: str) -> dict[str, Any] | None:
                 sales_summary = {
                     k: row[k]
                     for k in row.index
-                    if k not in ("section", "date") and pd.notna(row[k])
+                    if k not in ("section", "date", "schema") and pd.notna(row[k])
                 }
         if not platform_summary:
             return None

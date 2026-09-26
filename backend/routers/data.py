@@ -4,6 +4,7 @@ GET /api/data/coverage, sales-summary, sales-export, sales-by-source, daily-dsr,
 dsr-brand-monthly, dsr-brand-monthly-export, top-skus,
 mtr-analytics, myntra-analytics, meesho-analytics, flipkart-analytics, inventory
 """
+import copy
 import csv
 import datetime
 import io
@@ -63,7 +64,7 @@ router = APIRouter()
 
 # Process-wide Intelligence bundle cache (PG-restore shells share the same Tier-3 window).
 # Bump when bundle shape/semantics change (invalidates persisted intel_bundle_*.json keys).
-_INTELLIGENCE_BUNDLE_CACHE_GEN = "v8"
+_INTELLIGENCE_BUNDLE_CACHE_GEN = "v9"
 _GLOBAL_INTELLIGENCE_BUNDLE_CACHE: dict = {}
 
 # How long a cached bundle is served without recomputation. Real data changes
@@ -107,12 +108,19 @@ def _load_intelligence_bundle_cache_from_disk() -> None:
         for name in os.listdir(_INTEL_BUNDLE_DISK_DIR):
             if not (name.startswith("intel_bundle_") and name.endswith(".json")):
                 continue
+            path = os.path.join(_INTEL_BUNDLE_DISK_DIR, name)
             try:
-                with open(os.path.join(_INTEL_BUNDLE_DISK_DIR, name)) as f:
+                with open(path) as f:
                     data = json.load(f)
                 raw_key = data.get("key") or []
                 entry = data.get("entry")
                 if not (raw_key and isinstance(entry, dict)):
+                    continue
+                if len(raw_key) < 6 or raw_key[5] != _INTELLIGENCE_BUNDLE_CACHE_GEN:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
                     continue
                 # The stored key = (*cache_key, cache_gen, tier3_tokens).
                 # cache_key is the first 5 elements: (start, end, basis, limit, extras).
@@ -142,6 +150,8 @@ def _invalidate_intelligence_bundle_cache() -> None:
     """Clear RAM bundle cache and queue proactive artifact rebuild for standard windows."""
     global _INTELLIGENCE_BUNDLE_CACHE_GEN
     _GLOBAL_INTELLIGENCE_BUNDLE_CACHE.clear()
+    _GAPFILL_CORE_CACHE.clear()
+    _TIER3_DIRECT_CACHE.clear()
 
     # Also delete persisted disk cache files for the process-wide bundle cache.
     # Otherwise unit tests (and real deployments after upload-driven staleness)
@@ -267,11 +277,15 @@ def precompute_tier3_gapfill_intelligence_bundles() -> None:
             )
             continue
 
-        payload = _build_intelligence_gapfill_bundle_payload(
-            sess, start_date, end_date, 10, "gross", include_extras
+        from ..services.intelligence_guard import gated
+
+        payload = gated(
+            _build_intelligence_gapfill_bundle_payload,
+            sess, start_date, end_date, 10, "gross", include_extras,
         )
         if payload is None or not _bundle_payload_has_display_data(payload):
-            tier3_payload = _try_serve_tier3_intelligence_bundle(
+            tier3_payload = gated(
+                _try_serve_tier3_intelligence_bundle,
                 sess,
                 cache_key,
                 bundle_cache,
@@ -2042,10 +2056,41 @@ def _tier3_direct_has_units(
     """
     If Tier-3 has shipment units for the window, return the direct payload tuple; else None.
     """
-    from ..services.daily_store import platforms_with_uploads_in_range
-
     s = str(start_date)[:10]
     e = str(end_date)[:10]
+    key = (
+        s, e, int(limit), str(basis or "gross"), bool(headline_only),
+        bool(getattr(sess, "sku_mapping", None)),
+    )
+    token = _gapfill_data_token()
+    hit = _TIER3_DIRECT_CACHE.get(key)
+    if hit and hit[1] == token and time.time() - hit[0] < _GAPFILL_CORE_TTL_SEC:
+        out = hit[2]
+    else:
+        out = _tier3_direct_build(s, e, sess, limit, basis, headline_only=headline_only)
+        if len(_TIER3_DIRECT_CACHE) > 32:
+            _TIER3_DIRECT_CACHE.clear()
+        _TIER3_DIRECT_CACHE[key] = (time.time(), token, out)
+    if out is None:
+        return None
+    return (copy.deepcopy(out[0]), copy.deepcopy(out[1]), copy.deepcopy(out[2]), *out[3:])
+
+
+# (start, end, limit, basis, headline_only, has_mapping) -> (built_at, data_token, tuple or None)
+_TIER3_DIRECT_CACHE: dict[tuple, tuple[float, tuple, tuple | None]] = {}
+
+
+def _tier3_direct_build(
+    s: str,
+    e: str,
+    sess: AppSession,
+    limit: int,
+    basis: Optional[str],
+    *,
+    headline_only: bool,
+) -> tuple | None:
+    from ..services.daily_store import platforms_with_uploads_in_range
+
     uploaded = platforms_with_uploads_in_range(s, e)
     if not uploaded:
         # Metadata overlap query can lag; still attempt all channels for the window.
@@ -2317,15 +2362,76 @@ def _build_intelligence_gapfill_bundle_payload(
     from ..services.sales import (
         get_anomalies,
         get_dsr_brand_monthly_comparison,
-        get_top_skus,
     )
 
-    _ensure_return_overlay_hydrated(sess)
     s = str(start_date)[:10]
     e = str(end_date)[:10]
     if len(s) != 10 or len(e) != 10:
         return None
+    core = _gapfill_core_cached(sess, s, e, limit, basis)
+    if core is None:
+        return None
+    payload = dict(core)
+    if include_extras:
+        _empty_plat = pd.DataFrame()
+        payload["anomalies"] = get_anomalies(
+            _empty_plat,
+            _empty_plat,
+            _empty_plat,
+            _empty_plat,
+            _empty_plat,
+            sess.inventory_df_variant,
+            pd.DataFrame(),
+            start_date=None,
+            end_date=None,
+        )
+        payload["dsr_brand_monthly"] = get_dsr_brand_monthly_comparison(
+            pd.DataFrame(), start_date=None, end_date=None
+        )
+    if not _bundle_payload_has_display_data(payload):
+        return None
+    return payload
 
+
+# (start, end, limit, basis) -> (built_at, data_token, core payload or None)
+_GAPFILL_CORE_CACHE: dict[tuple, tuple[float, tuple, dict | None]] = {}
+_GAPFILL_CORE_TTL_SEC = 600.0
+
+
+def _gapfill_data_token() -> tuple:
+    try:
+        from ..services.daily_store import get_tier3_sync_token
+
+        tok = tuple(sorted((get_tier3_sync_token() or {}).items()))
+    except Exception:
+        tok = ()
+    try:
+        import backend.main as _main
+
+        gen = int(getattr(_main, "_warm_cache_generation", 0) or 0)
+    except Exception:
+        gen = 0
+    return (tok, gen)
+
+
+def _gapfill_core_cached(
+    sess: AppSession, s: str, e: str, limit: int, basis: Optional[str]
+) -> dict | None:
+    """Platform totals for one window, shared by summary / fast / full / extras requests."""
+    key = (s, e, int(limit), str(basis or "gross"))
+    token = _gapfill_data_token()
+    hit = _GAPFILL_CORE_CACHE.get(key)
+    if hit and hit[1] == token and time.time() - hit[0] < _GAPFILL_CORE_TTL_SEC:
+        return hit[2]
+    core = _build_gapfill_core(sess, s, e)
+    if len(_GAPFILL_CORE_CACHE) > 64:
+        _GAPFILL_CORE_CACHE.clear()
+    _GAPFILL_CORE_CACHE[key] = (time.time(), token, core)
+    return core
+
+
+def _build_gapfill_core(sess: AppSession, s: str, e: str) -> dict | None:
+    _ensure_return_overlay_hydrated(sess)
     mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b = _resolve_bundle_platform_frames(sess, s, e)
     platform_summary = _build_platform_summary_for_bundle(
         sess, mtr_b, myntra_b, meesho_b, flipkart_b, snapdeal_b, s, e
@@ -2347,7 +2453,7 @@ def _build_intelligence_gapfill_bundle_payload(
     elif _best_non_tier3_window_units(sess, s, e) > shipped * 1.15:
         completeness = "partial"
 
-    payload: dict = {
+    return {
         "sales_summary": sales_summary,
         "platform_summary": platform_summary,
         "top_skus": [],
@@ -2357,25 +2463,6 @@ def _build_intelligence_gapfill_bundle_payload(
         "anomalies": [],
         "dsr_brand_monthly": {"rows": [], "totals": {}, "note": ""},
     }
-    if include_extras:
-        _empty_plat = pd.DataFrame()
-        payload["anomalies"] = get_anomalies(
-            _empty_plat,
-            _empty_plat,
-            _empty_plat,
-            _empty_plat,
-            _empty_plat,
-            sess.inventory_df_variant,
-            pd.DataFrame(),
-            start_date=None,
-            end_date=None,
-        )
-        payload["dsr_brand_monthly"] = get_dsr_brand_monthly_comparison(
-            pd.DataFrame(), start_date=None, end_date=None
-        )
-    if not _bundle_payload_has_display_data(payload):
-        return None
-    return payload
 
 
 def _serve_intelligence_bundle_fast(
@@ -2773,8 +2860,11 @@ def _background_bundle_build_worker(
         sess = store.get(session_id)
         if sess is None:
             return
-        payload = _build_intelligence_bundle_payload_from_session(
-            sess, s_win, e_win, limit, basis, include_extras
+        from ..services.intelligence_guard import gated
+
+        payload = gated(
+            _build_intelligence_bundle_payload_from_session,
+            sess, s_win, e_win, limit, basis, include_extras,
         )
         if payload and _bundle_payload_has_display_data(payload):
             bundle_cache = getattr(sess, "_intelligence_bundle_cache", None) or {}
@@ -2812,7 +2902,9 @@ def _intelligence_refresh_worker(session_id: str) -> None:
     if sess is None:
         return
     try:
-        _ensure_intelligence_session_fresh(sess)
+        from ..services.intelligence_guard import gated
+
+        gated(_ensure_intelligence_session_fresh, sess)
     except Exception:
         pass
 
@@ -4687,6 +4779,17 @@ def _intelligence_bundle_sync(
         bundle_cache = {}
         sess._intelligence_bundle_cache = bundle_cache
 
+    from ..services.intelligence_guard import (
+        empty_window_payload,
+        single_flight,
+        window_after_latest_data,
+    )
+
+    if has_dates:
+        latest = window_after_latest_data(s_win, e_win)
+        if latest:
+            return empty_window_payload(s_win, e_win, latest)
+
     # Prebuilt artifact (hot/deep) — no SQLite on request path when warm.
     # mode=full skips partial hot artifacts so gap-fill can settle "Refining totals…".
     mode_early = (mode or "").strip().lower()
@@ -4730,6 +4833,43 @@ def _intelligence_bundle_sync(
     )
     if cached_early is not None:
         return cached_early
+
+    return single_flight(
+        ("intelligence-bundle", cache_key, mode_early),
+        lambda: _intelligence_bundle_build(
+            sess, sid, start_date, end_date, limit, basis, include_extras, mode,
+            cache_key, bundle_cache,
+        ),
+    )
+
+
+def _intelligence_bundle_build(
+    sess: AppSession,
+    sid: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    limit: int,
+    basis: Optional[str],
+    include_extras: bool,
+    mode: Optional[str],
+    cache_key: tuple,
+    bundle_cache: dict,
+):
+    has_dates = bool(start_date or end_date)
+    s_win = str(start_date or end_date or "")[:10] if has_dates else ""
+    e_win = str(end_date or start_date or "")[:10] if has_dates else ""
+
+    # A build that finished while this request waited on the gate already cached it.
+    cached_after_wait = _bundle_cache_lookup(
+        cache_key,
+        bundle_cache,
+        start_date=start_date,
+        end_date=end_date,
+        allow_sparse=True,
+        sess=sess,
+    )
+    if cached_after_wait is not None:
+        return cached_after_wait
 
     tier3_window = False
     if has_dates and len(s_win) == 10 and len(e_win) == 10:

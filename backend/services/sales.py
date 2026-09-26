@@ -1777,12 +1777,18 @@ def _compute_platform_metrics(
         else:
             d_win = d
 
-        if d_win.empty and _refund_units_in_frame(d_blob, txn_col, refund_val) <= 0:
+        # A window with no rows has zero shipments — never fall back to the whole
+        # history (that reported all-time totals as "7D" when uploads lagged).
+        if d_win.empty:
             stub["loaded"] = True
+            if refund_scope == "upload_blob":
+                blob_returns = int(_refund_units_in_frame(d_blob, txn_col, refund_val))
+                stub["total_returns"] = blob_returns
+                stub["net_units"] = -blob_returns
             return stub
 
         ref_df = d_blob if refund_scope == "upload_blob" else d_win
-        ship_df = d_win if not d_win.empty else d_blob
+        ship_df = d_win
 
         shipped_mask  = ship_df[txn_col].astype(str).str.strip() == ship_val
         refund_mask   = ref_df[txn_col].astype(str).str.strip() == refund_val
@@ -1817,7 +1823,7 @@ def _compute_platform_metrics(
             }
 
         # Full analytics path — shipments/monthly/daily use the calendar window.
-        d = d_win if not d_win.empty else ship_df
+        d = d_win
         if "_Date" not in d.columns or d["_Date"].isna().all():
             stub["loaded"] = True
             stub["total_units"] = total_units

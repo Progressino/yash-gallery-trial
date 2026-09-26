@@ -197,6 +197,8 @@ class DashboardSummaryResponse(BaseModel):
     version: str = ""
     stale: bool = False
     refresh_queued: bool = False
+    empty_window: bool = False
+    data_max_date: str = ""
 
 
 class PoReadinessResponse(BaseModel):

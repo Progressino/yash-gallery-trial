@@ -469,7 +469,9 @@ export default function Layout() {
         <div className="shrink-0 px-3 py-3 border-b border-slate-200/80 bg-gradient-to-r from-[#002B5B] to-[#1a4a7c] text-white">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
-              <img src="/logo.png" alt="" className="h-8 w-auto brightness-0 invert opacity-95" />
+              <div className="bg-white rounded-md px-1.5 py-1 shrink-0">
+                <img src="/logo.png" alt="Yash Gallery" className="h-7 w-auto" />
+              </div>
               <div className="min-w-0">
                 <p className="text-xs font-bold leading-tight truncate">Yash Gallery</p>
                 <p className="text-[10px] text-white/70">ERP · Progressino</p>

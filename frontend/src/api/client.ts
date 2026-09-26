@@ -224,6 +224,8 @@ export interface DashboardSummaryResponse {
   version?: string
   stale?: boolean
   refresh_queued?: boolean
+  empty_window?: boolean
+  data_max_date?: string
 }
 
 export interface IntelligenceVersionResponse {

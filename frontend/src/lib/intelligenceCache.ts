@@ -65,6 +65,7 @@ export type IntelligenceBundle = {
   message?: string
   busy?: boolean
   empty_window?: boolean
+  data_max_date?: string
   session_data_range?: { min: string; max: string }
   sales_summary: SalesSummary
   platform_summary: PlatformSummaryItem[]
@@ -83,7 +84,7 @@ export type CachedIntelligenceBundle = IntelligenceBundle & {
   version: string
 }
 
-const STORAGE_PREFIX = 'erp_intelligence_bundle_v6'
+const STORAGE_PREFIX = 'erp_intelligence_bundle_v7'
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000
 
 function ttlMs(): number {
@@ -193,6 +194,7 @@ export function clearIntelligenceCache(): void {
       'erp_intelligence_bundle_v3',
       'erp_intelligence_bundle_v4',
       'erp_intelligence_bundle_v5',
+      'erp_intelligence_bundle_v6',
       STORAGE_PREFIX,
     ]
     const keys: string[] = []
@@ -285,6 +287,7 @@ function purgeLegacyIntelligenceCache(): void {
       'erp_intelligence_bundle_v3',
       'erp_intelligence_bundle_v4',
       'erp_intelligence_bundle_v5',
+      'erp_intelligence_bundle_v6',
     ]
     const keys: string[] = []
     for (let i = 0; i < localStorage.length; i++) {

@@ -71,6 +71,21 @@ function summaryToBundle(summary: DashboardSummaryResponse): IntelligenceBundle 
     note: '',
   }
 
+  if (summary.empty_window) {
+    return {
+      status: 'ready',
+      data_completeness: 'full',
+      empty_window: true,
+      data_max_date: summary.data_max_date,
+      message: summary.message,
+      sales_summary: { total_units: 0, total_returns: 0, net_units: 0, return_rate: 0 },
+      platform_summary: summary.platform_summary ?? [],
+      top_skus: [],
+      anomalies: [],
+      dsr_brand_monthly: emptyDsr,
+    }
+  }
+
   if (summary.platform_summary?.length) {
     const ss = summary.sales_summary || {}
     const totalUnits = Number(ss.total_units ?? 0)
@@ -1548,6 +1563,7 @@ export default function Dashboard() {
     cachedBundleHint,
   ])
 
+  const emptyWindowOffset = Math.max(0, (reportingSpanDays(dateStart, dateEnd) ?? 7) - 1)
   const bundleWarming = intelligenceBundle?.status === 'warming'
   const bundlePartial =
     intelligenceBundle?.data_completeness === 'partial' && !refineSettled
@@ -1975,8 +1991,20 @@ export default function Dashboard() {
         </div>
       ) : null}
       {intelligenceBundle?.empty_window && intelligenceBundle.message ? (
-        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          {intelligenceBundle.message}
+        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <span>{intelligenceBundle.message}</span>
+          {intelligenceBundle.data_max_date ? (
+            <button
+              type="button"
+              className="rounded-md border border-amber-300 bg-white px-3 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+              onClick={() => {
+                const latest = intelligenceBundle.data_max_date as string
+                applyPreset('', () => addDaysIsoIST(latest, -emptyWindowOffset), () => latest)
+              }}
+            >
+              Show latest available ({addDaysIsoIST(intelligenceBundle.data_max_date, -emptyWindowOffset)} → {intelligenceBundle.data_max_date})
+            </button>
+          ) : null}
         </div>
       ) : null}
       {/* ══════════ HERO ══════════ */}
