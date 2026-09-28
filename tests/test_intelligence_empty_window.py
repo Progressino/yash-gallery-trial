@@ -204,6 +204,51 @@ def test_full_mode_serves_gapfill_without_tier3_rebuild(client, monkeypatch):
     assert r.json()["sales_summary"]["total_units"] == 17486
 
 
+def test_memoized_window_does_not_wait_for_background_build(client, monkeypatch):
+    from backend.routers import data as data_router
+    from tests.conftest import bootstrap_test_session
+
+    monkeypatch.setattr(guard, "latest_sales_date", lambda: None)
+    monkeypatch.setattr(data_router, "_bundle_cache_lookup", lambda *a, **k: None)
+    s, e = "2026-08-27", "2026-09-26"
+    core = {
+        "status": "ready",
+        "data_completeness": "partial",
+        "sales_summary": {"total_units": 17486, "total_returns": 0, "net_units": 17486, "return_rate": 0.0},
+        "platform_summary": [{"platform": "Amazon", "loaded": True, "total_units": 17486}],
+        "top_skus": [],
+        "anomalies": [],
+        "dsr_brand_monthly": {"rows": [], "totals": {}, "note": ""},
+    }
+    data_router._GAPFILL_CORE_CACHE[(s, e, 10, "gross")] = (
+        time.time(), data_router._gapfill_data_token(), core,
+    )
+    bootstrap_test_session(client)
+
+    holding, release = threading.Event(), threading.Event()
+
+    def long_build():
+        holding.set()
+        release.wait(5.0)
+
+    bg = threading.Thread(target=lambda: guard.gated(long_build))
+    bg.start()
+    holding.wait(1.0)
+    try:
+        t0 = time.time()
+        r = client.get(
+            "/api/data/intelligence-bundle",
+            params={"start_date": s, "end_date": e, "basis": "gross", "mode": "fast"},
+        )
+        elapsed = time.time() - t0
+    finally:
+        release.set()
+        bg.join(5.0)
+    assert r.status_code == 200
+    assert r.json()["sales_summary"]["total_units"] == 17486
+    assert elapsed < 2.0
+
+
 def test_legacy_day_parquet_is_discarded(tmp_path, monkeypatch):
     from backend.services import intelligence_artifact_store as store
 

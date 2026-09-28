@@ -2064,7 +2064,7 @@ def _tier3_direct_has_units(
     )
     token = _gapfill_data_token()
     hit = _TIER3_DIRECT_CACHE.get(key)
-    if hit and hit[1] == token and time.time() - hit[0] < _GAPFILL_CORE_TTL_SEC:
+    if hit and hit[1] == token and time.time() - hit[0] < _TIER3_DIRECT_TTL_SEC:
         out = hit[2]
     else:
         out = _tier3_direct_build(s, e, sess, limit, basis, headline_only=headline_only)
@@ -2398,7 +2398,11 @@ def _build_intelligence_gapfill_bundle_payload(
 
 # (start, end, limit, basis) -> (built_at, data_token, core payload or None)
 _GAPFILL_CORE_CACHE: dict[tuple, tuple[float, tuple, dict | None]] = {}
-_GAPFILL_CORE_TTL_SEC = 600.0
+# Uploads / warm-cache reloads change the data token, so age is only a safety net.
+# Partial (e.g. no Snapdeal) bundles are never served from the bundle cache, so this
+# memo is what keeps 30D instant between uploads.
+_GAPFILL_CORE_TTL_SEC = float(os.environ.get("INTELLIGENCE_GAPFILL_MEMO_TTL_SEC", "21600"))
+_TIER3_DIRECT_TTL_SEC = 600.0
 
 
 def _gapfill_data_token() -> tuple:
@@ -4845,11 +4849,11 @@ def _intelligence_bundle_sync(
     if cached_early is not None:
         return cached_early
 
-    # Summary / fast already memoized this window — answer without queueing behind
-    # a background artifact build on the gate.
+    # Summary already memoized this window — answer without queueing behind a
+    # background artifact build on the gate.
     memo_core = (
         _gapfill_core_peek(s_win, e_win, limit, basis)
-        if mode_early == "full" and len(s_win) == 10 and len(e_win) == 10
+        if len(s_win) == 10 and len(e_win) == 10
         else None
     )
     if memo_core is not None:

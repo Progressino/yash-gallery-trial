@@ -8,14 +8,20 @@ from __future__ import annotations
 
 import copy
 import gc
+import logging
 import os
 import threading
+import time
 from concurrent.futures import Future
 from contextlib import contextmanager
 from datetime import date, timedelta
 from typing import Any, Callable, Hashable, Iterator, Optional, TypeVar
 
 T = TypeVar("T")
+
+_log = logging.getLogger(__name__)
+_SLOW_WAIT_SEC = 5.0
+_SLOW_HOLD_SEC = 20.0
 
 # Re-entrant so a gated build may call helpers that are themselves gated.
 _BUILD_GATE = threading.RLock()
@@ -33,9 +39,10 @@ _PLATFORM_NAMES = ("Amazon", "Myntra", "Meesho", "Flipkart", "Snapdeal")
 
 
 @contextmanager
-def _hold_gate(foreground: bool) -> Iterator[None]:
+def _hold_gate(foreground: bool, label: str = "") -> Iterator[None]:
     global _FG_WAITING
     depth = getattr(_GATE_LOCAL, "depth", 0)
+    t_wait = time.monotonic()
     if depth:
         _BUILD_GATE.acquire()
     elif foreground:
@@ -57,12 +64,22 @@ def _hold_gate(foreground: bool) -> Iterator[None]:
                 if not _FG_WAITING:
                     break
             _BUILD_GATE.release()
+    t_hold = time.monotonic()
+    waited = t_hold - t_wait
+    if not depth and foreground and waited > _SLOW_WAIT_SEC:
+        _log.warning("intelligence gate: request %s waited %.1fs", label, waited)
     _GATE_LOCAL.depth = depth + 1
     try:
         yield
     finally:
         _GATE_LOCAL.depth = depth
         if not depth:
+            held = time.monotonic() - t_hold
+            if held > _SLOW_HOLD_SEC:
+                _log.warning(
+                    "intelligence gate: %s %s held %.1fs",
+                    "request" if foreground else "background", label, held,
+                )
             _release_freed_memory()
         _BUILD_GATE.release()
 
@@ -93,7 +110,9 @@ _LIBC: Any = None
 
 def gated(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """Run one heavy background Intelligence build at a time; user requests go first."""
-    with _hold_gate(foreground=False):
+    dates = [a for a in args if isinstance(a, str) and len(a) == 10 and a[4:5] == "-"]
+    label = f"{getattr(fn, '__name__', 'build')}({'..'.join(dates)})"
+    with _hold_gate(foreground=False, label=label):
         return fn(*args, **kwargs)
 
 
@@ -109,7 +128,7 @@ def single_flight(key: Hashable, fn: Callable[[], T]) -> T:
         result = fut.result()
         return copy.copy(result) if isinstance(result, dict) else result
     try:
-        with _hold_gate(foreground=True):
+        with _hold_gate(foreground=True, label=str(key)[:160]):
             result = fn()
     except BaseException as exc:
         fut.set_exception(exc)
