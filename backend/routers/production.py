@@ -29,7 +29,7 @@ from ..db.production_db import (
 )
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
-from ..services import jo_issue_notes
+from ..services import jo_issue_notes, jo_returns
 from ..services.jo_import import (
     aggregate_jo_import_payloads,
     build_jo_payload_from_import_row,
@@ -496,6 +496,37 @@ class PieceReceiptIn(BaseModel):
     split_components: Optional[bool] = True
     # Embroidery receive: unused border/yog/etc. returned to stock (measurement units)
     leftover_measurement: Optional[float] = 0
+
+
+class JOReturnLineIn(BaseModel):
+    jo_line_id: Optional[int] = None
+    processed_qty: int = 0
+    unprocessed_qty: int = 0
+    rejected_qty: int = 0
+
+
+class JOReturnIn(BaseModel):
+    lines: List[JOReturnLineIn]
+    return_date: Optional[str] = None
+    reason: Optional[str] = ''
+    remarks: Optional[str] = ''
+    returned_by: Optional[str] = ''
+
+
+class ReconciliationRowIn(BaseModel):
+    material_kind: str
+    material_code: str
+    issued_qty: Optional[float] = None
+    consumed_qty: Optional[float] = None
+    returned_qty: Optional[float] = None
+    wastage_qty: Optional[float] = None
+    remarks: Optional[str] = ''
+
+
+class ReconciliationIn(BaseModel):
+    rows: List[ReconciliationRowIn] = []
+    complete: bool = False
+    reconciled_by: Optional[str] = ''
 
 
 class QualityDefectIn(BaseModel):
@@ -1631,6 +1662,51 @@ def post_receive_pieces(joid: int, body: PieceReceiptIn):
     except Exception as e:
         raise HTTPException(500, f"Receive failed: {e}")
     return result if isinstance(result, dict) else {"ok": True}
+
+
+# ── JO returns + material reconciliation (all job-work processes) ────────────
+
+@router.post("/orders/{joid}/return")
+def post_jo_return(joid: int, body: JOReturnIn):
+    """Vendor return: processed pcs → normal receive; unprocessed pcs → back to Ready-To."""
+    try:
+        return jo_returns.record_return(joid, body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.get("/orders/{joid}/reconciliation")
+def get_jo_reconciliation(joid: int):
+    try:
+        return jo_returns.get_reconciliation(joid)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.post("/orders/{joid}/reconciliation")
+def post_jo_reconciliation(joid: int, body: ReconciliationIn):
+    try:
+        return jo_returns.save_reconciliation(joid, body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.get("/orders/{joid}/return-history")
+def get_jo_return_history(joid: int):
+    try:
+        return jo_returns.get_return_history(joid)
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@router.get("/returns")
+def get_jo_returns(
+    so_number: Optional[str] = None,
+    process: Optional[str] = None,
+    vendor: Optional[str] = None,
+    limit: int = 500,
+):
+    return jo_returns.list_returns(so_number=so_number, process=process, vendor=vendor, limit=limit)
 
 
 # ── Set BOM + Set Match ────────────────────────────────────────────────────────

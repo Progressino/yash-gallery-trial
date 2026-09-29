@@ -19,6 +19,7 @@ import StitchingReportsPanel from './StitchingReportsPanel'
 import ProcessDateTransactionsPanel from './ProcessDateTransactionsPanel'
 import ProductionQualityPanel from './ProductionQualityPanel'
 import MasterProductionStatusPanel from './MasterProductionStatusPanel'
+import { JOReconciliationModal, JOReturnHistoryPanel, JOReturnModal, ReconciliationBadge } from './JOReturnPanel'
 import { downloadCsv } from '../lib/exportCsv'
 
 // Ready-To boards can hold 2k+ SO+SKU lines; render in pages so typing stays fast.
@@ -206,6 +207,7 @@ interface JOLine {
   vendor_rate: number
   process_cost: number
   remarks: string
+  unprocessed_return_qty?: number
 }
 
 interface JO {
@@ -255,6 +257,8 @@ interface JO {
   measurement_qty?: number
   embroidery_type?: string
   embroidery_unit?: string
+  unprocessed_return_qty?: number
+  reconciliation_status?: string
 }
 
 interface IssueNoteLine {
@@ -1258,6 +1262,8 @@ export default function Production() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [modal, setModal] = useState<ModalType>(null)
   const [activeJO, setActiveJO] = useState<JO | null>(null)
+  const [returnJO, setReturnJO] = useState<JO | null>(null)
+  const [reconJoId, setReconJoId] = useState<number | null>(null)
   const [activeLineId, setActiveLineId] = useState<number | null>(null)
 
   // New JO form — so_source: system (open SO) | manual (free-text SO, no master SO created)
@@ -2023,6 +2029,7 @@ export default function Production() {
                 {PROCESS_ICONS[jo.process] || ''} {jo.process}
               </span>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[jo.status] || ''}`}>{jo.status}</span>
+              <ReconciliationBadge status={jo.reconciliation_status} />
               {jo.production_mode && (
                 <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                   String(jo.production_mode).toLowerCase().includes('cut')
@@ -2364,6 +2371,11 @@ export default function Production() {
                           ) : (
                             fmt(line.planned_qty)
                           )}
+                          {(line.unprocessed_return_qty || 0) > 0 && (
+                            <span className="block text-[10px] text-rose-600" title="Unprocessed return — back in Ready-To">
+                              −{fmt(line.unprocessed_return_qty || 0)} returned
+                            </span>
+                          )}
                         </td>
                         <td className="px-3 py-2 text-right text-green-600 font-semibold">{fmt(line.received_qty)}</td>
                         <td className="px-3 py-2 text-right text-red-500">{fmt(line.rejected_qty)}</td>
@@ -2415,6 +2427,7 @@ export default function Production() {
             )}
 
             <JOIssueNotePanel joId={jo.id} joNumber={jo.jo_number} />
+            <JOReturnHistoryPanel joId={jo.id} />
 
             {/* Fabric issues (Cutting only) */}
             {jo.process === 'Cutting' && (
@@ -2452,6 +2465,21 @@ export default function Production() {
               )}
               {!joReceiveLocked && (
                 <button onClick={() => openModal('receive', jo)} className="px-3 py-1.5 text-xs bg-green-600 text-white rounded-lg font-medium hover:bg-green-700">✅ Receive (JO level)</button>
+              )}
+              {!joLocked && totalBalance > 0 && (
+                <button onClick={() => setReturnJO(jo)} className="px-3 py-1.5 text-xs bg-rose-600 text-white rounded-lg font-medium hover:bg-rose-700">↩ Vendor Return</button>
+              )}
+              {jo.status !== 'Cancelled' && (
+                <button
+                  onClick={() => setReconJoId(jo.id)}
+                  className={`px-3 py-1.5 text-xs rounded-lg font-medium ${
+                    jo.reconciliation_status === 'Pending'
+                      ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                      : 'border border-gray-200 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  🧾 Reconciliation{jo.reconciliation_status === 'Pending' ? ' (pending)' : ''}
+                </button>
               )}
               {!joLocked && jo.next_process && !panelCtx && (
                 <button
@@ -3925,6 +3953,20 @@ export default function Production() {
       )}
 
       {/* ── ADD COST MODAL ───────────────────────────────────────────────────── */}
+      {returnJO && (
+        <JOReturnModal
+          jo={returnJO}
+          onClose={() => setReturnJO(null)}
+          onReturned={() => {
+            setReconJoId(returnJO.id)
+            setReturnJO(null)
+          }}
+        />
+      )}
+      {reconJoId != null && (
+        <JOReconciliationModal joId={reconJoId} onClose={() => setReconJoId(null)} />
+      )}
+
       {modal === 'add-cost' && activeJO && (
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">

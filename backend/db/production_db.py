@@ -390,12 +390,24 @@ def init_db():
         ("job_orders", "so_source", "TEXT DEFAULT 'system'"),
         ("jo_qty_history", "jo_line_id", "INTEGER"),
         ("job_orders", "production_mode", "TEXT DEFAULT ''"),
+        # JO returns: planned_qty is net of unprocessed returns (original = planned + returned)
+        ("job_orders", "unprocessed_return_qty", "INTEGER DEFAULT 0"),
+        ("jo_lines", "unprocessed_return_qty", "INTEGER DEFAULT 0"),
+        ("job_orders", "reconciliation_status", "TEXT DEFAULT ''"),
+        ("job_orders", "reconciled_at", "TEXT DEFAULT ''"),
+        ("job_orders", "reconciled_by", "TEXT DEFAULT ''"),
     ]
     for table, col, decl in migrations:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         except Exception:
             pass
+    try:
+        from ..services.jo_returns import init_jo_return_tables
+
+        init_jo_return_tables(conn)
+    except Exception:
+        _log.exception("JO return tables init failed")
     try:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS jo_qty_history (
@@ -2593,6 +2605,12 @@ def _create_single_jo(data: dict) -> str:
         create_issue_note_for_jo(joid, num, jo_snapshot, line_snapshots)
     except Exception:
         pass
+    try:
+        from ..services.jo_returns import allocate_new_jo
+
+        allocate_new_jo(int(joid))
+    except Exception:
+        _log.exception("JO return allocation failed for %s", num)
     if so_source != "manual" and so_number and fabric_code and fabric_qty > 0:
         record_mrp_jo_commitment(so_number, fabric_code, fabric_qty)
     if process == "Cutting" and so_number and data.get("sku"):
@@ -2863,6 +2881,17 @@ def update_jo(joid: int, data: dict):
     conn.execute(f"UPDATE job_orders SET {sets}, updated_at=? WHERE id=?", vals)
     conn.commit()
     conn.close()
+    prev_status = str(prev.get("status") or "")
+    if new_status and new_status != prev_status and new_status in ("Closed", "Cancelled"):
+        try:
+            from ..services import jo_returns
+
+            if new_status == "Closed":
+                jo_returns.mark_reconciliation_required(joid)
+            else:
+                jo_returns.release_allocations(joid)
+        except Exception:
+            _log.exception("JO return hook failed for JO %s", joid)
     try:
         from ..db.document_audit_db import record_edit_event
 
@@ -3800,13 +3829,25 @@ def receive_pieces(joid: int, data: dict):
             )
 
     jo_after = dict(conn.execute("SELECT planned_qty, received_qty, status FROM job_orders WHERE id=?", (joid,)).fetchone())
-    if jo_after and jo_should_auto_close(int(jo_after["planned_qty"] or 0), int(jo_after["received_qty"] or 0), jo_tol):
+    closed_now = bool(
+        jo_after
+        and jo_after.get("status") != "Closed"
+        and jo_should_auto_close(int(jo_after["planned_qty"] or 0), int(jo_after["received_qty"] or 0), jo_tol)
+    )
+    if closed_now:
         conn.execute(
             """UPDATE job_orders SET status='Closed', completed_date=?, updated_at=datetime('now') WHERE id=?""",
             (datetime.now().strftime("%Y-%m-%d"), joid),
         )
     conn.commit()
     conn.close()
+    if closed_now:
+        try:
+            from ..services.jo_returns import mark_reconciliation_required
+
+            mark_reconciliation_required(joid)
+        except Exception:
+            _log.exception("reconciliation flag failed for JO %s", joid)
     out = {"ok": True, "split": split_info, "receipt_id": receipt_id}
     if stock_credit is not None:
         out["embroidery_stock_balance"] = stock_credit

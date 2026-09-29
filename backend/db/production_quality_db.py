@@ -1020,6 +1020,10 @@ def jo_billing_eligibility(jo_id: int) -> dict:
             bill_status = "Partial"
         else:
             bill_status = "Hold — no QC pass"
+    recon_status = str(jo.get("reconciliation_status") or "")
+    if recon_status == "Pending":
+        eligible = 0
+        bill_status = "Hold — Reconciliation pending"
 
     return {
         "jo_id": jo_id,
@@ -1057,6 +1061,7 @@ def jo_billing_eligibility(jo_id: int) -> dict:
         "debit_amount": round(debit_amount, 2),
         "eligible_billing_qty": eligible,
         "billing_status": bill_status,
+        "reconciliation_status": recon_status,
         "rework_orders": [
             {
                 "id": r["id"],
