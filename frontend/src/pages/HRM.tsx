@@ -855,7 +855,7 @@ export default function HRM() {
     } else {
       const rule = SCHEDULE_RULE_FREQS.includes(form.frequency) ? (form.schedule_rule || '').trim() : ''
       if ((form.frequency === 'Weekly' || (form.frequency === 'Fortnightly' && !rule)) && !form.schedule_weekday) {
-        alert('Select a weekday (or a Dynamic Schedule Rule) for Weekly/Fortnightly responsibilities')
+        alert('Select a weekday for Weekly/Fortnightly responsibilities (or set a Dynamic Schedule Rule for Fortnightly)')
         return
       }
       if (form.frequency === 'Monthly' && !rule && !(form.schedule_month_day > 0)) {
@@ -2324,7 +2324,7 @@ export default function HRM() {
                               <div className="flex gap-2 col-span-2">
                                 <button onClick={() => {
                                   const editRule = SCHEDULE_RULE_FREQS.includes(editResp.frequency) ? String(editResp.schedule_rule || '').trim() : ''
-                                  if ((editResp.frequency === 'Weekly' || (editResp.frequency === 'Fortnightly' && !editRule)) && !editResp.schedule_weekday) { alert('Select a weekday (or a Dynamic Schedule Rule) for Weekly/Fortnightly'); return }
+                                  if ((editResp.frequency === 'Weekly' || (editResp.frequency === 'Fortnightly' && !editRule)) && !editResp.schedule_weekday) { alert('Select a weekday for Weekly/Fortnightly (or set a Dynamic Schedule Rule for Fortnightly)'); return }
                                   if (editResp.frequency === 'Monthly' && !editRule && !(editResp.schedule_month_day > 0)) { alert('Select calendar day or a Dynamic Schedule Rule for Monthly'); return }
                                   if (editResp.frequency === 'Quarterly' && !(editResp.schedule_month > 0)) { alert('Select anchor month for Quarterly'); return }
                                   if (editResp.mandatory && !editResp.backup_employee_id) { alert('Backup person is required for mandatory responsibilities'); return }
