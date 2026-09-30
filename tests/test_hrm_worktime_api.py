@@ -68,6 +68,27 @@ def test_office_start_close_blocked_then_ok(env):
     assert c.post("/api/hrm/office/start", json={"employee_id": env["b"]}).status_code == 403
 
 
+def test_no_timer_start_or_resume_after_office_close(env):
+    c, a, clock = env["client"], env["a"], env["clock"]
+    running = hrm_db.create_one_time_task({"employee_id": a, "title": "Running"})
+    fresh = hrm_db.create_one_time_task({"employee_id": a, "title": "Fresh"})
+    assert c.post("/api/hrm/office/start", json={}).status_code == 200
+    clock.t = f"{DAY} 10:00:00"
+    assert c.post(f"/api/hrm/one-time-tasks/{running}/start").status_code == 200
+    clock.t = f"{DAY} 18:00:00"
+    r = c.post("/api/hrm/office/close", json={})
+    assert r.status_code == 200 and r.json()["auto_paused_tasks"] == 1
+    rid = hrm_db.create_responsibility({"employee_id": a, "title": "Late item", "frequency": "Daily"})
+    clock.t = f"{DAY} 18:30:00"
+    assert c.post(f"/api/hrm/one-time-tasks/{running}/resume").status_code == 409
+    assert c.post(f"/api/hrm/one-time-tasks/{fresh}/start").status_code == 409
+    assert c.post(f"/api/hrm/tasks/{rid}/start", json={"log_date": DAY}).status_code == 409
+    task = next(t for t in hrm_db.list_one_time_tasks(employee_id=a) if t["id"] == running)
+    assert task["total_work_seconds"] == 8 * 3600
+    env["as_admin"]()
+    assert c.post(f"/api/hrm/one-time-tasks/{running}/resume").status_code == 200
+
+
 def test_break_confirmation_over_http(env):
     c, a, clock = env["client"], env["a"], env["clock"]
     rid = hrm_db.create_responsibility({"employee_id": a, "title": "Lunch overlap", "frequency": "Daily"})

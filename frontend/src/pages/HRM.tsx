@@ -991,6 +991,8 @@ export default function HRM() {
     markTaskMut.mutate({ responsibility_id: respId, log_date: logDate, status })
   }
 
+  const officeClosed = !canEditAssignments && !!dayCheck?.time_summary?.office_close
+
   const renderOneTimeCheck = (t: any) => {
     const ts = t.timer_status || (t.status === 'In Progress' && t.paused_at ? 'Paused' : t.status === 'In Progress' ? 'Active' : t.status === 'Done' || t.status === 'Approved' ? 'Completed' : 'Not Started')
     const timerLabel = ts === 'Paused' && Number(t.auto_paused) ? 'Auto-paused' : ts
@@ -1036,7 +1038,7 @@ export default function HRM() {
         />
         {canTime && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            {(t.status === 'Pending' || t.status === 'Rejected') && (
+            {(t.status === 'Pending' || t.status === 'Rejected') && !officeClosed && (
               <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" disabled={startOneTimeTaskMut.isPending} onClick={() => startOneTimeTaskMut.mutate(t.id)}>▶ Start</button>
             )}
             {t.status === 'In Progress' && ts === 'Active' && (
@@ -1047,7 +1049,7 @@ export default function HRM() {
             )}
             {t.status === 'In Progress' && ts === 'Paused' && (
               <>
-                <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" disabled={resumeOneTimeTaskMut.isPending} onClick={() => resumeOneTimeTaskMut.mutate(t.id)}>▶ Resume</button>
+                {!officeClosed && <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" disabled={resumeOneTimeTaskMut.isPending} onClick={() => resumeOneTimeTaskMut.mutate(t.id)}>▶ Resume</button>}
                 <button type="button" className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded" onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}>■ Complete</button>
               </>
             )}
@@ -1111,7 +1113,7 @@ export default function HRM() {
         )}
         {canTime && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            {ts === 'Not Started' && (
+            {ts === 'Not Started' && !officeClosed && (
               <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" onClick={() => startRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Start</button>
             )}
             {(ts === 'Active' || ts === 'In Progress') && (
@@ -1122,7 +1124,7 @@ export default function HRM() {
             )}
             {ts === 'Paused' && (
               <>
-                <button type="button" disabled={!canResume || resumeRespMut.isPending} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded disabled:opacity-40" onClick={() => resumeRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Resume</button>
+                {!officeClosed && <button type="button" disabled={!canResume || resumeRespMut.isPending} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded disabled:opacity-40" onClick={() => resumeRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Resume</button>}
                 <button type="button" disabled={!canEnd || endRespMut.isPending} className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded disabled:opacity-40" onClick={endTimer}>■ Complete</button>
               </>
             )}

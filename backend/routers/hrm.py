@@ -847,6 +847,18 @@ def _clean_break_decision(value: Optional[str]) -> Optional[str]:
     return v
 
 
+def _assert_office_open_for_timer(scope: HrmScope) -> None:
+    """Employees cannot start/resume work after their Office Close (HOD/Admin may correct)."""
+    if scope.can_edit_assignments or not scope.employee_id:
+        return
+    session = hrm_worktime.get_office_session(scope.employee_id, today_ist().isoformat())
+    if session and session.get("office_close"):
+        raise HTTPException(
+            409,
+            "Office time is closed for today — work can't be started or resumed after Office Close",
+        )
+
+
 def _timer_http_result(ok):
     if ok is True:
         return {"ok": True}
@@ -896,6 +908,7 @@ def post_start_responsibility_timer(responsibility_id: int, body: Responsibility
     assert_responsibility_in_scope(scope, responsibility_id)
     _, name = _recorder_from_request(request)
     log_date = _enforce_self_check_today(scope, body.log_date)
+    _assert_office_open_for_timer(scope)
     return _timer_http_result(
         start_responsibility_timer(
             responsibility_id,
@@ -928,6 +941,7 @@ def post_resume_responsibility_timer(responsibility_id: int, body: Responsibilit
     assert_responsibility_in_scope(scope, responsibility_id)
     _, name = _recorder_from_request(request)
     log_date = _enforce_self_check_today(scope, body.log_date)
+    _assert_office_open_for_timer(scope)
     return _timer_http_result(
         resume_responsibility_timer(
             responsibility_id,
@@ -1707,6 +1721,7 @@ def post_start_one_time_task(task_id: int, request: Request):
     assert_employee_in_scope(scope, owner)
     if scope.is_employee and scope.employee_id != owner:
         raise HTTPException(403, "You can only start your own tasks")
+    _assert_office_open_for_timer(scope)
     _, name = _recorder_from_request(request)
     ok = start_one_time_task(task_id, actor=name)
     if ok is True:
@@ -1743,6 +1758,7 @@ def post_resume_one_time_task(task_id: int, request: Request):
     assert_employee_in_scope(scope, owner)
     if scope.is_employee and scope.employee_id != owner:
         raise HTTPException(403, "You can only resume your own tasks")
+    _assert_office_open_for_timer(scope)
     _, name = _recorder_from_request(request)
     ok = resume_one_time_task(task_id, actor=name)
     if ok is True:

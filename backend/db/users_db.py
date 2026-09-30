@@ -427,17 +427,15 @@ def update_user(uid: int, data: dict):
         'email', 'full_name', 'role_id', 'department', 'active', 'karigar_id',
         'employee_id', 'hrm_department_id', 'reporting_hod_user_id', 'module_access', 'phone',
     ]
-    sets = ', '.join(f"{k}=?" for k in data if k in allowed)
+    cols = [f"{k}=?" for k in data if k in allowed]
     vals = [data[k] for k in data if k in allowed]
     if 'password' in data:
-        hashed = bcrypt.hashpw(data['password'].encode(), bcrypt.gensalt()).decode()
-        sets += ', password_hash=?, updated_at=?'
-        vals += [hashed, datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
-    elif sets:
-        sets += ', updated_at=?'
-        vals += [datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
-    vals += [uid]
-    if not sets: return
+        cols.append('password_hash=?')
+        vals.append(bcrypt.hashpw(data['password'].encode(), bcrypt.gensalt()).decode())
+    if not cols: return
+    cols.append('updated_at=?')
+    vals += [datetime.now().strftime('%Y-%m-%d %H:%M:%S'), uid]
+    sets = ', '.join(cols)
     conn = _connect(); conn.execute(f"UPDATE erp_users SET {sets} WHERE id=?", vals)
     conn.commit(); conn.close()
 
