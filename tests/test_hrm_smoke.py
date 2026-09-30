@@ -143,7 +143,7 @@ def test_one_time_task_lifecycle(hrm_db):
     assert started["status"] == "In Progress"
     assert started["started_at"]
 
-    assert hrm_db.complete_one_time_task(tid, "Audit checklist signed off") is True
+    assert hrm_db.complete_one_time_task(tid, "Audit checklist signed off", break_decision="count") is True
     completed = hrm_db.list_one_time_tasks(employee_id=emp_id)[0]
     assert completed["status"] == "Done"
     assert completed["completed_at"]
@@ -159,7 +159,7 @@ def test_one_time_task_lifecycle(hrm_db):
     # Rejected tasks can be restarted
     tid2 = hrm_db.create_one_time_task({"employee_id": emp_id, "title": "Stock count"})
     hrm_db.start_one_time_task(tid2)
-    hrm_db.complete_one_time_task(tid2)
+    hrm_db.complete_one_time_task(tid2, break_decision="count")
     assert hrm_db.reject_one_time_task(tid2, approved_by="HOD", approval_notes="Redo section B") is True
     rejected = hrm_db.list_one_time_tasks(employee_id=emp_id, status="Rejected")[0]
     assert rejected["status"] == "Rejected"

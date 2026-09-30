@@ -51,3 +51,18 @@ export const priorityStyle = (p: string) => {
   if (p === 'Medium') return 'bg-blue-100 text-blue-800'
   return 'bg-gray-100 text-gray-700'
 }
+
+/** Calendar date in IST (the HRM server's timezone), YYYY-MM-DD. */
+export const todayIst = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10)
+export const tomorrowIst = () => new Date(Date.now() + 330 * 60_000 + 86_400_000).toISOString().slice(0, 10)
+
+export const fmtHM = (sec?: number | null) => {
+  const s = Math.max(0, Math.floor(Number(sec || 0)))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (!h && !m) return s > 0 ? '<1m' : '0m'
+  return h ? `${h}h ${m}m` : `${m}m`
+}
+
+/** Frequencies that accept a Dynamic Schedule Rule (e.g. "1st Monday", "Last Working Day"). */
+export const SCHEDULE_RULE_FREQS = ['Monthly', 'Fortnightly', 'Yearly']

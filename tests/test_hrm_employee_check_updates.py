@@ -122,7 +122,7 @@ def test_approval_routes_to_linked_person(hrm, monkeypatch):
     assert len(approved_only) == 0
 
 
-def test_timer_pause_resume_complete_limits(hrm, monkeypatch):
+def test_timer_pause_resume_unlimited_slots(hrm, monkeypatch):
     a, b, _ = _three_emps(hrm)
     rid = _daily_resp(hrm, a, b)
     day = date.today().isoformat()
@@ -151,17 +151,18 @@ def test_timer_pause_resume_complete_limits(hrm, monkeypatch):
     monkeypatch.setattr(hrm_db, "_now_iso", _fake_now)
 
     assert start_responsibility_timer(rid, day) is True
-    assert pause_responsibility_timer(rid, day) is True
-    assert resume_responsibility_timer(rid, day) is True
-    assert pause_responsibility_timer(rid, day) is True
-    assert resume_responsibility_timer(rid, day) is True
-    assert pause_responsibility_timer(rid, day) is True
-    assert resume_responsibility_timer(rid, day) == "resume_limit"
-    assert resume_responsibility_timer(rid, day, allow_override=True) is True
-    assert pause_responsibility_timer(rid, day) == "pause_limit"
-    assert end_responsibility_timer(rid, day) is True
+    for _ in range(5):
+        assert pause_responsibility_timer(rid, day) is True
+        assert resume_responsibility_timer(rid, day) is True
+    assert end_responsibility_timer(rid, day, break_decision="count") is True
     assert end_responsibility_timer(rid, day) == "already_ended"
     assert resume_responsibility_timer(rid, day, allow_override=True) == "already_ended"
+    detail = get_responsibility_timer_detail(rid, day)
+    # start→pause ×5 then resume→complete = 6 slots, 5 minutes each
+    assert len(detail["time_slots"]) == 6
+    assert all(not s["is_open"] for s in detail["time_slots"])
+    assert detail["total_work_seconds"] == 6 * 5 * 60
+    assert detail["can_pause"] is True and detail["can_resume"] is True
 
 
 def test_work_sessions_sum_total_time(hrm, monkeypatch):
@@ -189,7 +190,7 @@ def test_work_sessions_sum_total_time(hrm, monkeypatch):
     resume_responsibility_timer(rid, day)
     pause_responsibility_timer(rid, day)
     resume_responsibility_timer(rid, day)
-    end_responsibility_timer(rid, day)
+    end_responsibility_timer(rid, day, break_decision="count")
 
     detail = get_responsibility_timer_detail(rid, day)
     assert len(detail["work_sessions"]) == 3

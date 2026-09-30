@@ -179,6 +179,16 @@ def test_auto_approve_and_missed(hrm):
     task_day = today_ist() - timedelta(days=5)
     day = task_day.isoformat()
     assert mark_task(rid, day, "Done", allow_override=True) is True
+    # Auto-approval runs 2 days after the item was sent, not from the task date.
+    res0 = process_auto_closures_ist(as_of=today_ist(), actor="tester")
+    assert res0["auto_approved"] == 0
+    conn = hrm._connect()
+    conn.execute(
+        "UPDATE task_logs SET approval_sent_at=datetime('now', '-3 days') WHERE responsibility_id=?",
+        (rid,),
+    )
+    conn.commit()
+    conn.close()
     res = process_auto_closures_ist(as_of=today_ist(), actor="tester")
     assert res["auto_approved"] >= 1
     create_responsibility(

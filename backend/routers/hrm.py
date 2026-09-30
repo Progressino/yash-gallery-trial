@@ -3,7 +3,7 @@ import io
 
 import pandas as pd
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, field_validator
 from typing import Any, Optional
 
@@ -80,6 +80,22 @@ from ..db.hrm_db import (
     mark_approval_notifications_read,
     self_check_today_only,
     today_ist,
+    get_responsibility_owner,
+    hold_one_time_task,
+    resume_held_task_now,
+    list_leaves,
+    create_leave,
+    cancel_leave,
+    get_leave,
+    list_holidays,
+    upsert_holiday,
+    delete_holiday,
+    scoped_employee_ids,
+    run_hrm_automations,
+    SCHEDULE_RULE_EXAMPLES,
+    SCHEDULE_RULE_FREQUENCIES,
+    BREAK_WINDOWS,
+    SLOT_RESP,
     FREQUENCIES,
     PRIORITIES,
     TIME_PERIODS,
@@ -87,6 +103,7 @@ from ..db.hrm_db import (
     MONTH_NAMES,
     PERFORMANCE_CUTOVER_DATE,
 )
+from ..db import hrm_worktime
 from ..db.users_db import get_user_auth_profile, search_active_users, get_user_by_id
 from ..services.rbac import (
     build_hrm_scope,
@@ -250,6 +267,7 @@ class ResponsibilityIn(BaseModel):
     schedule_weekday: Optional[str] = ""
     schedule_month_day: Optional[int] = 0
     schedule_month: Optional[int] = 0
+    schedule_rule: Optional[str] = ""
     time_period: Optional[str] = ""  # legacy; prefer expected_time
     expected_time: Optional[str] = ""
     kpi_weightage: Optional[float] = 0
@@ -272,6 +290,7 @@ class ResponsibilityUpdate(BaseModel):
     schedule_weekday: Optional[str] = None
     schedule_month_day: Optional[int] = None
     schedule_month: Optional[int] = None
+    schedule_rule: Optional[str] = None
     time_period: Optional[str] = None
     expected_time: Optional[str] = None
     kpi_weightage: Optional[float] = None
@@ -337,6 +356,44 @@ class ResponsibilityTimerIn(BaseModel):
     log_date: str
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
+    break_decision: Optional[str] = None  # count | deduct (Lunch/Tea overlap on Complete)
+
+
+class TimeSlotEditIn(BaseModel):
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class TimeSlotAddIn(BaseModel):
+    entity_type: str  # responsibility | one_time
+    responsibility_id: Optional[int] = None
+    log_date: Optional[str] = None
+    task_id: Optional[int] = None
+    started_at: str
+    ended_at: str
+    notes: Optional[str] = ""
+
+
+class OfficeActionIn(BaseModel):
+    employee_id: Optional[int] = None
+
+
+class LeaveIn(BaseModel):
+    employee_id: Optional[int] = None
+    from_date: str
+    to_date: str
+    reason: Optional[str] = ""
+
+
+class HolidayIn(BaseModel):
+    holiday_date: str
+    name: Optional[str] = ""
+
+
+class TaskHoldIn(BaseModel):
+    resume_date: str
+    reason: Optional[str] = ""
 
 
 class IssueIn(BaseModel):
@@ -435,6 +492,7 @@ class OneTimeTaskUpdate(BaseModel):
 
 class OneTimeTaskNotesIn(BaseModel):
     notes: Optional[str] = ""
+    break_decision: Optional[str] = None  # count | deduct
 
 
 class OneTimeTaskApprovalIn(BaseModel):
@@ -475,6 +533,9 @@ def get_hrm_meta():
         "weekdays": list(WEEKDAYS),
         "months": [{"value": i + 1, "label": n} for i, n in enumerate(MONTH_NAMES)],
         "performance_cutover": PERFORMANCE_CUTOVER_DATE,
+        "schedule_rule_examples": list(SCHEDULE_RULE_EXAMPLES),
+        "schedule_rule_frequencies": list(SCHEDULE_RULE_FREQUENCIES),
+        "break_windows": [{"name": n, "start": s, "end": e} for n, s, e in BREAK_WINDOWS],
     }
 
 
@@ -773,9 +834,24 @@ def post_mark_task(body: TaskMarkIn, request: Request):
     raise HTTPException(404, "Responsibility not found")
 
 
+def _break_confirm_payload(res: dict) -> dict:
+    return {"ok": False, "needs_break_confirmation": True, "breaks": res.get("breaks") or []}
+
+
+def _clean_break_decision(value: Optional[str]) -> Optional[str]:
+    v = (value or "").strip().lower()
+    if not v:
+        return None
+    if v not in ("count", "deduct"):
+        raise HTTPException(400, "break_decision must be 'count' or 'deduct'")
+    return v
+
+
 def _timer_http_result(ok):
     if ok is True:
         return {"ok": True}
+    if isinstance(ok, dict) and ok.get("status") == "break_confirm":
+        return _break_confirm_payload(ok)
     if ok == "window_closed":
         raise HTTPException(
             409,
@@ -874,6 +950,7 @@ def post_end_responsibility_timer(responsibility_id: int, body: ResponsibilityTi
             log_date,
             allow_override=scope.can_edit_assignments,
             actor=name,
+            break_decision=_clean_break_decision(body.break_decision),
         )
     )
 
@@ -1452,40 +1529,73 @@ def get_dwr(
     employee_id: Optional[int] = None,
     department_id: Optional[int] = None,
     check_date: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
 ):
-    """Daily Work Report — scoped by role (self / department / org)."""
+    """Daily Work Report for a date or date range — scoped by role (self / department / org)."""
     scope = _scope_from_request(request)
-    # Employees: own report only
+    emp_f, dept_f = _report_scope(scope, employee_id, department_id)
+    if emp_f == -1:
+        return {"check_date": check_date or today_ist().isoformat(), "rows": [], "leave_rows": []}
+    try:
+        return list_dwr_rows(
+            employee_id=emp_f,
+            department_id=dept_f,
+            check_date=check_date,
+            from_date=from_date,
+            to_date=to_date,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+def _report_scope(
+    scope: HrmScope, employee_id: Optional[int], department_id: Optional[int]
+) -> tuple[Optional[int], Optional[int]]:
+    """(employee_id, department_id) filters for reports; employee_id -1 = empty result."""
     if scope.is_employee:
         if not scope.employee_id:
             raise HTTPException(403, "No employee linked to this login")
         if employee_id is not None and int(employee_id) != int(scope.employee_id):
             raise HTTPException(403, "You can only view your own working report")
-        return list_dwr_rows(employee_id=int(scope.employee_id), check_date=check_date)
-    # HOD: department subordinates only
+        return int(scope.employee_id), None
     if scope.is_hod:
         dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
         if emp_f == -1 or dept_f == -1:
-            return {"check_date": check_date or today_ist().isoformat(), "rows": []}
+            return -1, None
         if emp_f:
             assert_employee_in_scope(scope, emp_f)
-        return list_dwr_rows(
-            employee_id=emp_f,
-            department_id=dept_f if not emp_f else None,
-            check_date=check_date,
-        )
-    # Admin / Sir / org managers
+        return emp_f, (dept_f if not emp_f else None)
     if not scope.can_manage_org and not scope.can_edit_assignments:
-        raise HTTPException(403, "Not allowed to view Daily Working Report")
+        raise HTTPException(403, "Not allowed to view this report")
     if employee_id is not None:
         assert_employee_in_scope(scope, employee_id)
     if department_id is not None:
         assert_department_in_scope(scope, department_id)
-    return list_dwr_rows(
-        employee_id=employee_id,
-        department_id=department_id,
-        check_date=check_date,
-    )
+    return employee_id, department_id
+
+
+@router.get("/reports/working-hours")
+def get_working_hours_report(
+    request: Request,
+    employee_id: Optional[int] = None,
+    department_id: Optional[int] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+):
+    """Total Office Time vs Actual Working Hours (time slots) vs Free Time, with free gaps."""
+    scope = _scope_from_request(request)
+    emp_f, dept_f = _report_scope(scope, employee_id, department_id)
+    d0 = str(from_date or today_ist().isoformat())[:10]
+    d1 = str(to_date or d0)[:10]
+    if emp_f == -1:
+        return {"from_date": d0, "to_date": d1, "rows": [], "employees": [], "totals": {}}
+    try:
+        return hrm_worktime.working_hours_report(
+            scoped_employee_ids(employee_id=emp_f, department_id=dept_f), d0, d1
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @router.post("/employee-check/{employee_id}/mark-unmarked-missed")
@@ -1651,7 +1761,16 @@ def post_complete_one_time_task(task_id: int, body: OneTimeTaskNotesIn, request:
     assert_employee_in_scope(scope, owner)
     if scope.is_employee and scope.employee_id != owner:
         raise HTTPException(403, "You can only complete your own tasks")
-    if not complete_one_time_task(task_id, body.notes or ""):
+    _, name = _recorder_from_request(request)
+    res = complete_one_time_task(
+        task_id,
+        body.notes or "",
+        break_decision=_clean_break_decision(body.break_decision),
+        actor=name,
+    )
+    if isinstance(res, dict) and res.get("status") == "break_confirm":
+        return _break_confirm_payload(res)
+    if res is not True:
         raise HTTPException(400, "Task must be In Progress to mark complete")
     return {"ok": True}
 
@@ -1699,6 +1818,292 @@ def post_manual_duration(task_id: int, body: ManualDurationIn, request: Request)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {"ok": True, "duration_minutes": mins}
+
+
+@router.post("/one-time-tasks/{task_id}/hold")
+def post_hold_one_time_task(task_id: int, body: TaskHoldIn, request: Request):
+    """Put a task On Hold until resume_date — hidden from Task tab / Employee Check, no time accrues."""
+    scope = _scope_from_request(request)
+    assert_hrm_hod_or_admin(scope)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    _, name = _recorder_from_request(request)
+    res = hold_one_time_task(task_id, body.resume_date, reason=body.reason or "", actor=name)
+    if res is True:
+        return {"ok": True}
+    messages = {
+        "invalid_date": "Resume Date must be YYYY-MM-DD",
+        "resume_in_past": "Resume Date must be after today",
+        "not_holdable": "Only Pending, In Progress or Rejected tasks can be put on hold",
+    }
+    raise HTTPException(400, messages.get(res, "Could not put task on hold"))
+
+
+@router.post("/one-time-tasks/{task_id}/unhold")
+def post_unhold_one_time_task(task_id: int, request: Request):
+    scope = _scope_from_request(request)
+    assert_hrm_hod_or_admin(scope)
+    owner = get_one_time_task_owner(task_id)
+    if owner is None:
+        raise HTTPException(404, "Task not found")
+    assert_employee_in_scope(scope, owner)
+    _, name = _recorder_from_request(request)
+    if not resume_held_task_now(task_id, actor=name):
+        raise HTTPException(400, "Task is not on hold")
+    return {"ok": True}
+
+
+# ── Time slots (pause/resume work periods) ───────────────────────────────────
+
+_SLOT_ERRORS = {
+    "not_found": (404, "Time slot not found"),
+    "invalid_time": (400, "Invalid time — use HH:MM or YYYY-MM-DD HH:MM"),
+    "missing_time": (400, "Start and end time are required"),
+    "slot_open": (400, "Slot is still running — pause the timer before editing its end time"),
+    "status_locked": (400, "Status already marked — ask your HOD to edit time"),
+    "invalid_range": (400, "End time must be after start time"),
+    "future_time": (400, "Time cannot be in the future"),
+    "invalid_entity": (400, "entity_type must be responsibility or one_time"),
+}
+
+
+def _slot_result(res):
+    if isinstance(res, str):
+        code, msg = _SLOT_ERRORS.get(res, (400, "Could not save time slot"))
+        raise HTTPException(code, msg)
+    return {"ok": True, "slot": res}
+
+
+def _assert_slot_access(scope: HrmScope, employee_id: int, log_date: str) -> bool:
+    """Returns allow_override. Owners edit own slots (today only for employees); HOD/Admin in scope."""
+    is_owner = bool(scope.employee_id) and int(scope.employee_id) == int(employee_id)
+    if scope.can_edit_assignments:
+        if not is_owner:
+            assert_employee_in_scope(scope, employee_id)
+        return True
+    if not is_owner:
+        raise HTTPException(403, "You can only edit your own time slots")
+    _enforce_self_check_today(scope, log_date)
+    return False
+
+
+@router.patch("/time-slots/{slot_id}")
+def patch_time_slot(slot_id: int, body: TimeSlotEditIn, request: Request):
+    scope = _scope_from_request(request)
+    slot = hrm_worktime.get_slot(slot_id)
+    if not slot:
+        raise HTTPException(404, "Time slot not found")
+    allow = _assert_slot_access(scope, int(slot["employee_id"]), str(slot.get("log_date") or ""))
+    _, name = _recorder_from_request(request)
+    return _slot_result(
+        hrm_worktime.edit_time_slot(
+            slot_id,
+            started_at=body.started_at,
+            ended_at=body.ended_at,
+            notes=body.notes,
+            actor=name,
+            allow_override=allow,
+        )
+    )
+
+
+@router.post("/time-slots")
+def post_time_slot(body: TimeSlotAddIn, request: Request):
+    scope = _scope_from_request(request)
+    if body.entity_type == SLOT_RESP:
+        if not body.responsibility_id:
+            raise HTTPException(400, "responsibility_id is required")
+        owner = get_responsibility_owner(int(body.responsibility_id))
+        log_date = str(body.log_date or today_ist().isoformat())[:10]
+    else:
+        if not body.task_id:
+            raise HTTPException(400, "task_id is required")
+        owner = get_one_time_task_owner(int(body.task_id))
+        log_date = str(body.started_at or "")[:10] if len(str(body.started_at or "")) >= 10 else today_ist().isoformat()
+    if owner is None:
+        raise HTTPException(404, "Not found")
+    allow = _assert_slot_access(scope, int(owner), log_date)
+    _, name = _recorder_from_request(request)
+    started = body.started_at if len(body.started_at) > 5 else f"{log_date} {body.started_at}"
+    ended = body.ended_at if len(body.ended_at) > 5 else f"{log_date} {body.ended_at}"
+    return _slot_result(
+        hrm_worktime.add_manual_slot(
+            entity_type=body.entity_type,
+            entity_id=body.task_id,
+            responsibility_id=body.responsibility_id,
+            log_date=log_date,
+            started_at=started,
+            ended_at=ended,
+            notes=body.notes or "",
+            actor=name,
+            allow_override=allow,
+        )
+    )
+
+
+@router.get("/time-slots/{slot_id}/audit")
+def get_time_slot_audit(slot_id: int, request: Request):
+    scope = _scope_from_request(request)
+    slot = hrm_worktime.get_slot(slot_id)
+    if not slot:
+        raise HTTPException(404, "Time slot not found")
+    if not (scope.employee_id and int(scope.employee_id) == int(slot["employee_id"])):
+        assert_employee_in_scope(scope, int(slot["employee_id"]))
+    return {"slot": slot, "audit": hrm_worktime.slot_audit(slot_id)}
+
+
+# ── Office time (independent of work time) ───────────────────────────────────
+
+
+def _office_subject(scope: HrmScope, employee_id: Optional[int]) -> int:
+    if employee_id is None or (scope.employee_id and int(employee_id) == int(scope.employee_id)):
+        if not scope.employee_id:
+            raise HTTPException(403, "No employee linked to this login")
+        return int(scope.employee_id)
+    if not scope.can_edit_assignments:
+        raise HTTPException(403, "You can only manage your own office time")
+    assert_employee_in_scope(scope, int(employee_id))
+    return int(employee_id)
+
+
+@router.get("/office/{employee_id}")
+def get_office_summary(employee_id: int, request: Request, check_date: Optional[str] = None):
+    scope = _scope_from_request(request)
+    if not (scope.employee_id and int(scope.employee_id) == int(employee_id)):
+        assert_employee_in_scope(scope, employee_id)
+    day = str(check_date or today_ist().isoformat())[:10]
+    return hrm_worktime.day_time_summary(employee_id, day)
+
+
+@router.get("/office/{employee_id}/close-check")
+def get_office_close_check(employee_id: int, request: Request):
+    scope = _scope_from_request(request)
+    if not (scope.employee_id and int(scope.employee_id) == int(employee_id)):
+        assert_employee_in_scope(scope, employee_id)
+    pending = hrm_worktime.office_close_pending(employee_id, today_ist().isoformat())
+    return {"can_close": not pending, "pending": pending}
+
+
+@router.post("/office/start")
+def post_office_start(body: OfficeActionIn, request: Request):
+    scope = _scope_from_request(request)
+    emp = _office_subject(scope, body.employee_id)
+    _, name = _recorder_from_request(request)
+    try:
+        return hrm_worktime.office_start(emp, actor=name)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/office/close")
+def post_office_close(body: OfficeActionIn, request: Request):
+    scope = _scope_from_request(request)
+    emp = _office_subject(scope, body.employee_id)
+    _, name = _recorder_from_request(request)
+    try:
+        return hrm_worktime.office_close(emp, actor=name)
+    except hrm_worktime.OfficeCloseBlocked as e:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": str(e), "pending": e.pending},
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+# ── Leave (backup cover, no ownership change) ────────────────────────────────
+
+
+@router.get("/leaves")
+def get_leaves(
+    request: Request,
+    employee_id: Optional[int] = None,
+    department_id: Optional[int] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    include_cancelled: bool = False,
+):
+    scope = _scope_from_request(request)
+    emp_f, dept_f = _report_scope(scope, employee_id, department_id)
+    if emp_f == -1:
+        return []
+    return list_leaves(
+        employee_ids=scoped_employee_ids(employee_id=emp_f, department_id=dept_f),
+        from_date=from_date,
+        to_date=to_date,
+        include_cancelled=include_cancelled,
+    )
+
+
+@router.post("/leaves")
+def post_leave(body: LeaveIn, request: Request):
+    scope = _scope_from_request(request)
+    emp = _office_subject(scope, body.employee_id)
+    _, name = _recorder_from_request(request)
+    try:
+        return {"ok": True, **create_leave(emp, body.from_date, body.to_date, reason=body.reason or "", actor=name)}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/leaves/{leave_id}/cancel")
+def post_cancel_leave(leave_id: int, request: Request):
+    scope = _scope_from_request(request)
+    lv = get_leave(leave_id)
+    if not lv:
+        raise HTTPException(404, "Leave not found")
+    _office_subject(scope, int(lv["employee_id"]))
+    _, name = _recorder_from_request(request)
+    if not cancel_leave(leave_id, actor=name):
+        raise HTTPException(400, "Leave is already cancelled")
+    return {"ok": True}
+
+
+# ── Holidays (company calendar for schedule shifting) ────────────────────────
+
+
+@router.get("/holidays")
+def get_holidays(request: Request, year: Optional[int] = None):
+    _scope_from_request(request)
+    rows = list_holidays()
+    if year:
+        rows = [r for r in rows if str(r.get("holiday_date") or "").startswith(f"{int(year)}-")]
+    return rows
+
+
+@router.post("/holidays")
+def post_holiday(body: HolidayIn, request: Request):
+    scope = _scope_from_request(request)
+    if not scope.can_manage_org:
+        raise HTTPException(403, "Only Admin can manage holidays")
+    _, name = _recorder_from_request(request)
+    try:
+        d = upsert_holiday(body.holiday_date, body.name or "", actor=name)
+    except ValueError as e:
+        raise HTTPException(400, "Holiday date must be YYYY-MM-DD") from e
+    return {"ok": True, "holiday_date": d}
+
+
+@router.delete("/holidays/{holiday_date}")
+def del_holiday(holiday_date: str, request: Request):
+    scope = _scope_from_request(request)
+    if not scope.can_manage_org:
+        raise HTTPException(403, "Only Admin can manage holidays")
+    _, name = _recorder_from_request(request)
+    if not delete_holiday(holiday_date, actor=name):
+        raise HTTPException(404, "Holiday not found")
+    return {"ok": True}
+
+
+@router.post("/automations/run")
+def post_run_automations(request: Request):
+    """Admin: run auto-approve (2 days), hold auto-resume and leave restoration now."""
+    scope = _scope_from_request(request)
+    if not scope.can_manage_org:
+        raise HTTPException(403, "Admin only")
+    return run_hrm_automations()
 
 
 @router.get("/dashboard-stats")

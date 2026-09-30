@@ -3313,6 +3313,26 @@ async def _hrm_one_time_auto_pause_scheduler() -> None:
             log.exception("HRM one-time auto-pause failed")
 
 
+async def _hrm_automation_scheduler() -> None:
+    """2-day approval auto-closure, task hold auto-resume and leave ownership restoration."""
+    from .db.hrm_db import run_hrm_automations
+
+    await asyncio.sleep(90)
+    while True:
+        try:
+            result = await run_aux(run_hrm_automations)
+            if result and any(
+                int((v or {}).get(k) or 0) > 0
+                for v in result.values()
+                if isinstance(v, dict)
+                for k in ("auto_approved", "resumed", "restored")
+            ):
+                log.info("HRM automations: %s", result)
+        except Exception:
+            log.exception("HRM automations failed")
+        await asyncio.sleep(300)
+
+
 async def _data_health_scheduler() -> None:
     """Run the automated data-health suite shortly after boot, then every 6h."""
     from .services.data_health import run_data_health_checks
@@ -3376,6 +3396,7 @@ async def lifespan(app: FastAPI):
     health_task = asyncio.create_task(_data_health_scheduler())
     hrm_eod_task = asyncio.create_task(_hrm_end_of_day_scheduler())
     hrm_ot_pause_task = asyncio.create_task(_hrm_one_time_auto_pause_scheduler())
+    hrm_auto_task = asyncio.create_task(_hrm_automation_scheduler())
     yield
     task.cancel()
     rollup_task.cancel()
@@ -3383,6 +3404,7 @@ async def lifespan(app: FastAPI):
     health_task.cancel()
     hrm_eod_task.cancel()
     hrm_ot_pause_task.cancel()
+    hrm_auto_task.cancel()
     try:
         from .db.pg_pool import close_all_pools
 

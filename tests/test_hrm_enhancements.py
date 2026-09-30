@@ -223,7 +223,7 @@ def test_responsibility_timer_dwr_and_linked_person(hrm):
     assert not i2["started_at"]
     assert i2["linked_to_employee_name"] == ""
 
-    assert hrm.end_responsibility_timer(r1, day) is True
+    assert hrm.end_responsibility_timer(r1, day, break_decision="count") is True
     snap = get_employee_day_check(worker["id"], day)
     items = snap["worked_on"] + snap["not_worked"] + snap["other"]
     i1 = next(i for i in items if i["responsibility_id"] == r1)

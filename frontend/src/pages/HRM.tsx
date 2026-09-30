@@ -2,12 +2,16 @@ import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useAuth } from '../store/auth'
-import { FREQUENCIES, PRIORITIES, WEEKDAYS, MONTHS, priorityStyle } from './hrmConstants'
+import { FREQUENCIES, PRIORITIES, WEEKDAYS, MONTHS, priorityStyle, SCHEDULE_RULE_FREQS, todayIst } from './hrmConstants'
 import { loadHrmLang, saveHrmLang, t, type HrmLang } from './hrmI18n'
+import {
+  BreakConfirmModal, DwrReport, HolidayModal, HoldModal, OfficeTimeBar, ScheduleRuleInput, SlotList,
+  WorkingHoursReport, type BreakInfo,
+} from './hrmWorkTime'
 
 type Tab = 'dashboard' | 'check' | 'approvals' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'reports' | 'hierarchy'
 
-const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected'] as const
+const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected', 'On Hold'] as const
 const TASK_LOG_STATUSES = ['Done', 'Partial', 'Missed', 'Blocked', 'Leave', 'N/A'] as const
 const CATEGORIES = ['General', 'Quality', 'Production', 'Accounts', 'Purchase', 'Sales', 'Store', 'HR', 'Other']
 const ISSUE_TYPES = ['General', 'Discipline', 'Quality', 'Attendance', 'Behaviour', 'Task Failure', 'Dependency Missed', 'Policy Violation', 'Workplace Incident', 'Performance', 'Complaint']
@@ -139,6 +143,7 @@ export default function HRM() {
   const canEditAssignments = scope?.can_edit_assignments ?? (canManageOrg || userRole === 'HOD')
   const canMutateRecords = canManageOrg || userRole === 'HOD' || !!scope?.is_hod || (scope?.can_mutate_assignment_records ?? false)
   const canDeleteHrm = scope?.can_delete_hrm_records ?? canManageOrg
+  const canEditTaskRecords = scope?.can_mutate_assignment_records ?? canManageOrg
   const canUseEmployeeCheck = scope?.can_use_employee_check ?? (userRole === 'HOD' || userRole === 'Employee' || !canViewEmployeeList)
   const canViewDashboard = scope?.can_view_dashboard ?? (canManageOrg || userRole === 'HOD')
 
@@ -188,11 +193,17 @@ export default function HRM() {
   const [approvalModal, setApprovalModal] = useState<{ id: number; title: string; action: 'approve' | 'reject' } | null>(null)
   const [approvalNotes, setApprovalNotes] = useState('')
   const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks'>('responsibilities')
-  const [reportsSubTab, setReportsSubTab] = useState<'dwr' | 'performance'>('dwr')
-  const [dwrShowSlots, setDwrShowSlots] = useState(false)
+  const [reportsSubTab, setReportsSubTab] = useState<'dwr' | 'hours' | 'performance'>('dwr')
   const [reportsDept, setReportsDept] = useState<any>('')
   const [reportsEmp, setReportsEmp] = useState<any>('')
-  const [reportsDate, setReportsDate] = useState(today())
+  const [checkTitleFilter, setCheckTitleFilter] = useState('')
+  const [breakPrompt, setBreakPrompt] = useState<
+    | { kind: 'resp'; id: number; log_date: string; title: string; breaks: BreakInfo[] }
+    | { kind: 'task'; id: number; notes: string; title: string; breaks: BreakInfo[] }
+    | null
+  >(null)
+  const [holdTask, setHoldTask] = useState<{ id: number; title: string } | null>(null)
+  const [showHolidays, setShowHolidays] = useState(false)
   const [editDept, setEditDept] = useState<any>(null)
   const [editEmp, setEditEmp] = useState<any>(null)
   const [editResp, setEditResp] = useState<any>(null)
@@ -207,7 +218,7 @@ export default function HRM() {
   const [respForm, setRespForm] = useState({
     employee_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General',
     added_by: '', priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
-    schedule_month: 0, expected_time: '', kpi_weightage: '' as any, linked_to_employee_id: '' as any,
+    schedule_month: 0, schedule_rule: '', expected_time: '', kpi_weightage: '' as any, linked_to_employee_id: '' as any,
     backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
   })
   const [taskForm, setTaskForm] = useState({
@@ -251,7 +262,7 @@ export default function HRM() {
     employee_id: '' as any, department_id: '' as any, title: '', description: '',
     frequency: 'Daily', category: 'General', added_by: '', due_date: '',
     priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
-    schedule_month: 0, expected_time: '', kpi_weightage: '' as any, linked_to_employee_id: '' as any,
+    schedule_month: 0, schedule_rule: '', expected_time: '', kpi_weightage: '' as any, linked_to_employee_id: '' as any,
     backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
   })
   const [showQuickResp, setShowQuickResp] = useState(false)
@@ -370,18 +381,8 @@ export default function HRM() {
     queryFn: () => api.get(`/hrm/hod-dashboard/${hodDept}?from_date=${fromDate}&to_date=${toDate}${hodEmp ? `&employee_id=${hodEmp}` : ''}`).then(r => r.data),
     enabled: !!hodDept,
   })
-  const { data: dwrData } = useQuery({
-    queryKey: ['hrm-dwr', reportsDept, reportsEmp, reportsDate, scopeLevel, scope?.employee_id],
-    queryFn: () => {
-      const p = new URLSearchParams({ check_date: reportsDate || today() })
-      const empId = reportsEmp || (scopeLevel === 'self' ? scope?.employee_id : '')
-      const deptId = reportsDept || (scopeLevel === 'department' ? scope?.department_id : '')
-      if (empId) p.set('employee_id', String(empId))
-      if (deptId && !empId) p.set('department_id', String(deptId))
-      return api.get(`/hrm/dwr?${p}`).then(r => r.data)
-    },
-    enabled: tab === 'reports' && reportsSubTab === 'dwr',
-  })
+  const reportEmpId = reportsEmp || (scopeLevel === 'self' ? scope?.employee_id : '')
+  const reportDeptId = reportsDept || (scopeLevel === 'department' ? scope?.department_id : '')
   const { data: issues = [] } = useQuery({
     queryKey: ['hrm-issues', selDept, selEmp, fromDate, toDate, issueStatusFilter, issueQ],
     queryFn: () => {
@@ -440,7 +441,7 @@ export default function HRM() {
       const q = params.toString()
       return api.get(`/hrm/one-time-tasks${q ? `?${q}` : ''}`).then(r => r.data)
     },
-    enabled: tab === 'tasks' && !isEmployeeScope,
+    enabled: tab === 'tasks',
   })
   const { data: hodPendingTasks = [] } = useQuery({
     queryKey: ['hrm-hod-pending-tasks', hodDept],
@@ -552,9 +553,16 @@ export default function HRM() {
     onError: (err: any) => alert(err?.response?.data?.detail || 'Could not resume timer'),
   })
   const endRespMut = useMutation({
-    mutationFn: ({ id, log_date }: { id: number; log_date: string }) =>
-      api.post(`/hrm/tasks/${id}/end`, { log_date }),
-    onSuccess: invalidateDwr,
+    mutationFn: ({ id, log_date, break_decision }: { id: number; log_date: string; title?: string; break_decision?: 'count' | 'deduct' }) =>
+      api.post(`/hrm/tasks/${id}/end`, { log_date, break_decision }),
+    onSuccess: (res, vars) => {
+      if (res.data?.needs_break_confirmation) {
+        setBreakPrompt({ kind: 'resp', id: vars.id, log_date: vars.log_date, title: vars.title || '', breaks: res.data.breaks || [] })
+        return
+      }
+      setBreakPrompt(null)
+      invalidateDwr()
+    },
     onError: (err: any) => alert(err?.response?.data?.detail || 'Could not end timer'),
   })
   const manualRespTimeMut = useMutation({
@@ -772,12 +780,24 @@ export default function HRM() {
     onError: (err: any) => alert(err?.response?.data?.detail || 'Could not resume task'),
   })
   const completeOneTimeTaskMut = useMutation({
-    mutationFn: ({ id, notes }: { id: number; notes: string }) => api.post(`/hrm/one-time-tasks/${id}/complete`, { notes }),
-    onSuccess: () => {
-      invalidateTaskMetrics()
+    mutationFn: ({ id, notes, break_decision }: { id: number; notes: string; title?: string; break_decision?: 'count' | 'deduct' }) =>
+      api.post(`/hrm/one-time-tasks/${id}/complete`, { notes, break_decision }),
+    onSuccess: (res, vars) => {
       setCompleteModal(null)
       setCompleteNotes('')
+      if (res.data?.needs_break_confirmation) {
+        setBreakPrompt({ kind: 'task', id: vars.id, notes: vars.notes, title: vars.title || '', breaks: res.data.breaks || [] })
+        return
+      }
+      setBreakPrompt(null)
+      invalidateTaskMetrics()
     },
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not complete task'),
+  })
+  const unholdTaskMut = useMutation({
+    mutationFn: (id: number) => api.post(`/hrm/one-time-tasks/${id}/unhold`),
+    onSuccess: () => invalidateTaskMetrics(),
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not resume task'),
   })
   const approveOneTimeTaskMut = useMutation({
     mutationFn: ({ id, notes }: { id: number; notes: string }) => api.post(`/hrm/one-time-tasks/${id}/approve`, { notes }),
@@ -833,12 +853,13 @@ export default function HRM() {
         linked_to_employee_id: form.linked_to_employee_id ? +form.linked_to_employee_id : null,
       })
     } else {
-      if ((form.frequency === 'Weekly' || form.frequency === 'Fortnightly') && !form.schedule_weekday) {
-        alert('Select a weekday for Weekly/Fortnightly responsibilities')
+      const rule = SCHEDULE_RULE_FREQS.includes(form.frequency) ? (form.schedule_rule || '').trim() : ''
+      if ((form.frequency === 'Weekly' || (form.frequency === 'Fortnightly' && !rule)) && !form.schedule_weekday) {
+        alert('Select a weekday (or a Dynamic Schedule Rule) for Weekly/Fortnightly responsibilities')
         return
       }
-      if (form.frequency === 'Monthly' && !(form.schedule_month_day > 0)) {
-        alert('Select calendar day for Monthly responsibilities')
+      if (form.frequency === 'Monthly' && !rule && !(form.schedule_month_day > 0)) {
+        alert('Select calendar day or a Dynamic Schedule Rule for Monthly responsibilities')
         return
       }
       if (form.frequency === 'Quarterly' && !(form.schedule_month > 0)) {
@@ -858,6 +879,7 @@ export default function HRM() {
         schedule_weekday: form.schedule_weekday || '',
         schedule_month_day: form.schedule_month_day || 0,
         schedule_month: form.schedule_month || 0,
+        schedule_rule: rule,
         expected_time: form.expected_time || '',
         kpi_weightage: form.kpi_weightage === '' || form.kpi_weightage == null ? 0 : +form.kpi_weightage,
         linked_to_employee_id: form.linked_to_employee_id ? +form.linked_to_employee_id : null,
@@ -923,17 +945,20 @@ export default function HRM() {
 
   const dayCheckFiltered = useMemo(() => {
     if (!dayCheck) return dayCheck
-    const filterItems = (arr: any[]) => arr || []
+    const q = checkTitleFilter.trim().toLowerCase()
+    const filterItems = (arr: any[]) => (arr || []).filter(i => !q || String(i?.title || '').toLowerCase().includes(q))
     return {
       ...dayCheck,
       worked_on: filterItems(dayCheck.worked_on),
       not_worked: filterItems(dayCheck.not_worked),
       other: filterItems(dayCheck.other),
       whenever_required: filterItems(dayCheck.whenever_required || []),
-      additional_work: dayCheck.additional_work || [],
+      additional_work: filterItems(dayCheck.additional_work || []),
       submitted_for_approval: filterItems(dayCheck.submitted_for_approval || []),
+      one_time_tasks: filterItems(dayCheck.one_time_tasks || []),
+      one_time_awaiting_approval: filterItems(dayCheck.one_time_awaiting_approval || []),
     }
-  }, [dayCheck])
+  }, [dayCheck, checkTitleFilter])
 
   const openReassignModal = (task: { responsibility_id?: number; id?: number; title?: string; employee_id?: number }, date?: string) => {
     const rid = task.responsibility_id ?? task.id
@@ -1001,7 +1026,14 @@ export default function HRM() {
           <span className="text-[11px] text-gray-500">End: {fmtDateTime(t.completed_at || t.ended_at)}</span>
           <span className="text-[11px] font-semibold text-[#002B5B]">Active {fmtDuration(activeMin || t.duration_minutes)}</span>
           {pausedMin > 0 && <span className="text-[11px] text-amber-800">Paused {fmtDuration(pausedMin)}</span>}
+          {t.has_manual_slots && <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800">✎ Manual edit</span>}
         </div>
+        <SlotList
+          slots={t.time_slots || []}
+          canEdit={(isAssignee && t.status !== 'Approved') || canEditAssignments}
+          target={{ entity_type: 'one_time', task_id: t.id }}
+          onChanged={invalidateTaskMetrics}
+        />
         {canTime && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {(t.status === 'Pending' || t.status === 'Rejected') && (
@@ -1034,9 +1066,10 @@ export default function HRM() {
     const canTime = i.in_action_window !== false || canEditAssignments
     const canMark = showMark && (!i.marked || i.status === 'Pending' || canEditAssignments)
     const isAssignee = Number(scope?.employee_id) > 0 && Number(checkEmp) === Number(scope?.employee_id)
-    const canPause = i.can_pause !== false && ts !== 'Completed'
-    const canResume = i.can_resume !== false && ts === 'Paused'
+    const canPause = ts !== 'Completed'
+    const canResume = ts === 'Paused'
     const canEnd = i.can_complete !== false && (ts === 'Active' || ts === 'In Progress' || ts === 'Paused')
+    const endTimer = () => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate, title: i.title })
     const timeLocked = !!i.marked && i.status !== 'Pending'
     const openManual = () => {
       if (timeLocked && !canEditAssignments) { alert('Time cannot be edited after status has been submitted'); return }
@@ -1061,16 +1094,17 @@ export default function HRM() {
           <span className="text-[11px] text-gray-500">End: {fmtDateTime(i.ended_at)}</span>
           <span className="text-[11px] font-semibold text-[#002B5B]">Active {fmtDuration(activeMin || i.duration_minutes)}</span>
           {pausedMin > 0 && <span className="text-[11px] text-amber-800">Paused {fmtDuration(pausedMin)}</span>}
+          {i.has_manual_slots && <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800">✎ Manual edit</span>}
         </div>
-        {Array.isArray(i.work_sessions) && i.work_sessions.length > 0 && (
-          <div className="mt-1 text-[10px] text-gray-600 space-y-0.5">
-            {i.work_sessions.map((s: any) => (
-              <div key={s.index}>{s.index}{s.index === 1 ? 'st' : s.index === 2 ? 'nd' : s.index === 3 ? 'rd' : 'th'} Session: {fmtDateTime(s.started_at)} – {fmtDateTime(s.ended_at)}</div>
-            ))}
-            <div className="font-semibold text-[#002B5B]">Total Time: {i.total_work_label || fmtDuration(Math.floor((i.total_work_seconds || 0) / 60))}</div>
-          </div>
+        {i.responsibility_id && (
+          <SlotList
+            slots={i.time_slots || []}
+            canEdit={(isAssignee && canTime && !timeLocked) || canEditAssignments}
+            target={{ entity_type: 'responsibility', responsibility_id: i.responsibility_id, log_date: checkDate }}
+            onChanged={invalidateDwr}
+          />
         )}
-        {Array.isArray(i.daily_time) && i.daily_time.length > 0 && !i.work_sessions?.length && (
+        {Array.isArray(i.daily_time) && i.daily_time.length > 0 && !i.time_slots?.length && (
           <p className="text-[10px] text-gray-500 mt-0.5">
             Daily: {i.daily_time.map((d: any) => `${d.date} ${d.active_minutes || 0}m`).join(' · ')}
           </p>
@@ -1082,14 +1116,14 @@ export default function HRM() {
             )}
             {(ts === 'Active' || ts === 'In Progress') && (
               <>
-                <button type="button" disabled={!canPause} title={!canPause ? 'Maximum 3 pauses reached' : ''} className="text-xs px-2 py-0.5 bg-amber-500 text-white rounded disabled:opacity-40" onClick={() => pauseRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>⏸ Pause</button>
-                <button type="button" disabled={!canEnd} title={!canEnd ? 'Task already completed' : ''} className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded disabled:opacity-40" onClick={() => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>■ Complete</button>
+                <button type="button" disabled={!canPause || pauseRespMut.isPending} className="text-xs px-2 py-0.5 bg-amber-500 text-white rounded disabled:opacity-40" onClick={() => pauseRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>⏸ Pause</button>
+                <button type="button" disabled={!canEnd || endRespMut.isPending} title={!canEnd ? 'Task already completed' : ''} className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded disabled:opacity-40" onClick={endTimer}>■ Complete</button>
               </>
             )}
             {ts === 'Paused' && (
               <>
-                <button type="button" disabled={!canResume} title={!canResume ? 'Maximum 2 resumes reached' : ''} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded disabled:opacity-40" onClick={() => resumeRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Resume</button>
-                <button type="button" disabled={!canEnd} className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded disabled:opacity-40" onClick={() => endRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>■ Complete</button>
+                <button type="button" disabled={!canResume || resumeRespMut.isPending} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded disabled:opacity-40" onClick={() => resumeRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Resume</button>
+                <button type="button" disabled={!canEnd || endRespMut.isPending} className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded disabled:opacity-40" onClick={endTimer}>■ Complete</button>
               </>
             )}
             {dwrManualId === i.responsibility_id ? (
@@ -1508,6 +1542,9 @@ export default function HRM() {
                           className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
                       </div>
                     )}
+                    {SCHEDULE_RULE_FREQS.includes(quickResp.frequency) && (
+                      <ScheduleRuleInput value={quickResp.schedule_rule} onChange={v => setQuickResp(f => ({ ...f, schedule_rule: v }))} />
+                    )}
                     {quickResp.frequency === 'Quarterly' && (
                       <div><label className="text-xs text-gray-500">Anchor month *</label>
                         <select value={quickResp.schedule_month || ''} onChange={e => setQuickResp(f => ({ ...f, schedule_month: +e.target.value }))}
@@ -1657,6 +1694,12 @@ export default function HRM() {
             {!(isEmployeeScope || isHodSelfCheck) && (
               <button onClick={() => setCheckDate(today())} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600">Today</button>
             )}
+            <input
+              value={checkTitleFilter}
+              onChange={e => setCheckTitleFilter(e.target.value)}
+              placeholder="🔍 Search title…"
+              className="border rounded-lg px-3 py-1.5 text-sm min-w-[12rem]"
+            />
             <button onClick={() => setShowDailyGuide(v => !v)} className="text-xs px-3 py-1.5 border border-teal-700 text-teal-800 rounded-lg ml-auto">
               {showDailyGuide ? 'Hide daily guide' : 'Daily guide (Harsh / Sanjay)'}
             </button>
@@ -1715,6 +1758,19 @@ export default function HRM() {
                   </p>
                 </div>
               </div>
+
+              <OfficeTimeBar
+                employeeId={Number(checkEmp)}
+                summary={dayCheck.time_summary}
+                isToday={dayCheck.check_date === todayIst()}
+                canAct={(Number(scope?.employee_id) > 0 && Number(checkEmp) === Number(scope?.employee_id)) || canEditAssignments}
+                onChanged={() => { invalidateDwr(); invalidateTaskMetrics(); qc.invalidateQueries({ queryKey: ['hrm-working-hours'] }) }}
+              />
+              {dayCheck.on_leave && (
+                <div className="bg-slate-100 border border-slate-300 rounded-xl px-4 py-2 text-sm text-slate-700">
+                  🏖 On approved leave for {dayCheck.check_date}. Pending items are hidden; mandatory responsibilities are covered by their Backup Person.
+                </div>
+              )}
 
               <div className="grid md:grid-cols-2 gap-4">
                 {(dayCheckFiltered?.submitted_for_approval?.length || 0) > 0 && (
@@ -2042,6 +2098,9 @@ export default function HRM() {
                     const a = document.createElement('a'); a.href = url; a.download = 'hrm_responsibilities_import_template.csv'; a.click(); URL.revokeObjectURL(url)
                   } catch (e: any) { alert(e?.response?.data?.detail || 'Template download failed') }
                 }} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600 hover:bg-gray-50">📥 Template</button>
+                {canManageOrg && (
+                  <button type="button" onClick={() => setShowHolidays(true)} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600 hover:bg-gray-50">📅 Holidays</button>
+                )}
                 <button onClick={() => respImportRef.current?.click()} disabled={importRespMut.isPending}
                   className="px-4 py-2 border border-[#002B5B] text-[#002B5B] rounded-lg text-sm font-medium disabled:opacity-50">
                   {importRespMut.isPending ? 'Importing…' : '📥 Import Sheet'}
@@ -2082,6 +2141,9 @@ export default function HRM() {
                   <div><label className="text-xs text-gray-500">{t(lang, 'monthDay')} *</label>
                     <input type="number" min={1} max={31} value={respForm.schedule_month_day || ''} onChange={e => setRespForm(f => ({ ...f, schedule_month_day: +e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
                   </div>
+                )}
+                {SCHEDULE_RULE_FREQS.includes(respForm.frequency) && (
+                  <ScheduleRuleInput value={respForm.schedule_rule} onChange={v => setRespForm(f => ({ ...f, schedule_rule: v }))} />
                 )}
                 {respForm.frequency === 'Quarterly' && (
                   <div><label className="text-xs text-gray-500">Anchor month *</label>
@@ -2200,6 +2262,9 @@ export default function HRM() {
                                   <input type="number" min={1} max={31} value={editResp.schedule_month_day || ''} onChange={e => setEditResp((x: any) => ({ ...x, schedule_month_day: +e.target.value }))} className="w-full border rounded px-2 py-1 text-sm" />
                                 </div>
                               )}
+                              {SCHEDULE_RULE_FREQS.includes(editResp.frequency) && (
+                                <ScheduleRuleInput compact value={editResp.schedule_rule || ''} onChange={v => setEditResp((x: any) => ({ ...x, schedule_rule: v }))} />
+                              )}
                               {editResp.frequency === 'Quarterly' && (
                                 <div>
                                   <label className="text-[10px] text-gray-400">Anchor month *</label>
@@ -2256,12 +2321,13 @@ export default function HRM() {
                               </div>
                               <div className="flex gap-2 col-span-2">
                                 <button onClick={() => {
-                                  if ((editResp.frequency === 'Weekly' || editResp.frequency === 'Fortnightly') && !editResp.schedule_weekday) { alert('Select a weekday for Weekly/Fortnightly'); return }
-                                  if (editResp.frequency === 'Monthly' && !(editResp.schedule_month_day > 0)) { alert('Select calendar day for Monthly'); return }
+                                  const editRule = SCHEDULE_RULE_FREQS.includes(editResp.frequency) ? String(editResp.schedule_rule || '').trim() : ''
+                                  if ((editResp.frequency === 'Weekly' || (editResp.frequency === 'Fortnightly' && !editRule)) && !editResp.schedule_weekday) { alert('Select a weekday (or a Dynamic Schedule Rule) for Weekly/Fortnightly'); return }
+                                  if (editResp.frequency === 'Monthly' && !editRule && !(editResp.schedule_month_day > 0)) { alert('Select calendar day or a Dynamic Schedule Rule for Monthly'); return }
                                   if (editResp.frequency === 'Quarterly' && !(editResp.schedule_month > 0)) { alert('Select anchor month for Quarterly'); return }
                                   if (editResp.mandatory && !editResp.backup_employee_id) { alert('Backup person is required for mandatory responsibilities'); return }
                                   if (editResp.backup_employee_id && +editResp.backup_employee_id === +editResp.employee_id) { alert('Backup must differ from assignee'); return }
-                                  updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null, priority: editResp.priority || 'Medium', mandatory: !!editResp.mandatory, schedule_weekday: editResp.schedule_weekday || '', schedule_month_day: editResp.schedule_month_day || 0, schedule_month: editResp.schedule_month || 0, expected_time: editResp.expected_time || '', kpi_weightage: editResp.kpi_weightage === '' || editResp.kpi_weightage == null ? 0 : +editResp.kpi_weightage, backup_employee_id: editResp.backup_employee_id || null } })
+                                  updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null, priority: editResp.priority || 'Medium', mandatory: !!editResp.mandatory, schedule_weekday: editResp.schedule_weekday || '', schedule_month_day: editResp.schedule_month_day || 0, schedule_month: editResp.schedule_month || 0, schedule_rule: editRule, expected_time: editResp.expected_time || '', kpi_weightage: editResp.kpi_weightage === '' || editResp.kpi_weightage == null ? 0 : +editResp.kpi_weightage, backup_employee_id: editResp.backup_employee_id || null } })
                                 }} disabled={!editResp.title || updateRespMut.isPending} className="px-3 py-1 bg-green-600 text-white rounded text-xs">Save</button>
                                 <button onClick={() => setEditResp(null)} className="px-3 py-1 border rounded text-xs">Cancel</button>
                               </div>
@@ -2271,7 +2337,7 @@ export default function HRM() {
                           <>
                             <td className="px-4 py-2 font-medium">{r.title}{r.mandatory ? <span className="ml-1 text-[10px] text-red-600">*</span> : null}</td>
                             <td className="px-4 py-2 text-xs text-gray-500">{r.description || '—'}</td>
-                            <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.frequency === 'Daily' ? 'bg-blue-100 text-blue-700' : r.frequency === 'Weekly' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'}`}>{r.frequency}{r.schedule_weekday ? ` · ${r.schedule_weekday}` : ''}{r.schedule_month_day ? ` · D${r.schedule_month_day}` : ''}</span></td>
+                            <td className="px-4 py-2"><span className={`text-xs px-2 py-0.5 rounded-full font-medium ${r.frequency === 'Daily' ? 'bg-blue-100 text-blue-700' : r.frequency === 'Weekly' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'}`}>{r.frequency}{r.schedule_rule ? ` · ${r.schedule_rule}` : `${r.schedule_weekday ? ` · ${r.schedule_weekday}` : ''}${r.schedule_month_day ? ` · D${r.schedule_month_day}` : ''}`}</span></td>
                             <td className="px-4 py-2 text-xs text-indigo-800">{r.linked_to_employee_name || 'Self-complete'}</td>
                             <td className="px-4 py-2 text-xs text-violet-800">
                               {r.backup_employee_name || '—'}
@@ -2292,7 +2358,7 @@ export default function HRM() {
                                   )}
                                   {canMutateRecords && (
                                     <>
-                                      <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '', priority: r.priority || 'Medium', mandatory: !!r.mandatory, schedule_weekday: r.schedule_weekday || '', schedule_month_day: r.schedule_month_day || 0, schedule_month: r.schedule_month || 0, expected_time: r.expected_time || '', kpi_weightage: r.kpi_weightage ?? '', backup_employee_id: r.backup_employee_id || '', backup_allocation_value: r.backup_allocation_value || 1, backup_allocation_unit: r.backup_allocation_unit || 'days' })} className="text-xs text-blue-600">✏️</button>
+                                      <button onClick={() => setEditResp({ id: r.id, title: r.title, description: r.description || '', frequency: r.frequency, category: r.category, employee_id: r.employee_id, linked_to_employee_id: r.linked_to_employee_id || '', priority: r.priority || 'Medium', mandatory: !!r.mandatory, schedule_weekday: r.schedule_weekday || '', schedule_month_day: r.schedule_month_day || 0, schedule_month: r.schedule_month || 0, schedule_rule: r.schedule_rule || '', expected_time: r.expected_time || '', kpi_weightage: r.kpi_weightage ?? '', backup_employee_id: r.backup_employee_id || '', backup_allocation_value: r.backup_allocation_value || 1, backup_allocation_unit: r.backup_allocation_unit || 'days' })} className="text-xs text-blue-600">✏️</button>
                                       {canDeleteHrm && (
                                         <button onClick={() => { if (window.confirm('Remove?')) deleteRespMut.mutate(r.id) }} className="text-xs text-red-500">🗑️</button>
                                       )}
@@ -2319,7 +2385,7 @@ export default function HRM() {
       {tab === 'tasks' && (
         <div className="space-y-4">
           <div className="bg-blue-50 border border-blue-100 rounded-xl px-4 py-3 text-sm text-blue-900">
-            <b>Tasks</b> are one-time assignments with time tracking and HOD approval.
+            <b>Tasks</b> are one-time assignments with HOD approval. Start, pause and complete them in <b>Employee Check</b> (time slots).
             Recurring daily/weekly work stays under <b>Responsibilities</b> and the HOD view.
           </div>
           <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -2430,6 +2496,7 @@ export default function HRM() {
                     schedule_weekday: '',
                     schedule_month_day: 0,
                     schedule_month: 0,
+                    schedule_rule: '',
                     expected_time: '',
                     kpi_weightage: 0,
                     linked_to_employee_id: taskForm.linked_to_employee_id || '',
@@ -2506,12 +2573,22 @@ export default function HRM() {
                               ? (Number(t.auto_paused) ? 'Auto-paused' : 'Paused')
                               : t.status}
                           </span>
+                          {t.status === 'On Hold' && (
+                            <p className="text-[10px] text-orange-700 mt-0.5">Resumes {t.hold_until}{t.hold_reason ? ` · ${t.hold_reason}` : ''}</p>
+                          )}
+                          {Number(t.auto_approved) > 0 && (
+                            <p className="text-[10px] mt-0.5 inline-block px-1 rounded bg-purple-100 text-purple-800">Auto-approved</p>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-xs text-gray-500">
                           <p>Start: {fmtDateTime(t.started_at)}</p>
                           {t.paused_at && <p className="text-amber-700">Paused: {fmtDateTime(t.paused_at)}{Number(t.auto_paused) ? ' (auto)' : ''}</p>}
                           <p>End: {fmtDateTime(t.completed_at)}</p>
-                          <p className="font-semibold text-[#002B5B] mt-0.5">{fmtDuration(t.duration_minutes)}</p>
+                          <p className="font-semibold text-[#002B5B] mt-0.5">
+                            {t.time_slots?.length ? t.total_work_label : fmtDuration(t.duration_minutes)}
+                            {t.time_slots?.length ? <span className="font-normal text-gray-400"> · {t.time_slots.length} slot{t.time_slots.length === 1 ? '' : 's'}</span> : null}
+                            {t.has_manual_slots && <span className="ml-1 text-yellow-700">✎</span>}
+                          </p>
                           {manualTimeOpen === t.id ? (
                             <div className="flex gap-1 mt-1">
                               <input value={manualTimeVal} onChange={e => setManualTimeVal(e.target.value)} placeholder="HH:MM" className="border rounded px-1 w-16 text-xs" />
@@ -2524,28 +2601,14 @@ export default function HRM() {
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex flex-wrap gap-1 justify-end">
-                            {canMutateRecords && t.status !== 'Approved' && (
+                            {canEditTaskRecords && t.status !== 'Approved' && (
                               <button onClick={() => setEditTask({ id: t.id, title: t.title, description: t.description || '', due_date: t.due_date || '', employee_id: t.employee_id })} className="text-xs px-2 py-1 border rounded text-blue-600">✏️ Edit</button>
                             )}
-                            {(t.status === 'Pending' || t.status === 'Rejected') && (
-                              <button onClick={() => startOneTimeTaskMut.mutate(t.id)} disabled={startOneTimeTaskMut.isPending}
-                                className="text-xs px-2 py-1 bg-blue-600 text-white rounded">▶ Start</button>
+                            {canEditAssignments && ['Pending', 'In Progress', 'Rejected'].includes(t.status) && (
+                              <button onClick={() => setHoldTask({ id: t.id, title: t.title })} className="text-xs px-2 py-1 border border-orange-400 rounded text-orange-700">⏸ Hold</button>
                             )}
-                            {t.status === 'In Progress' && !t.paused_at && (
-                              <>
-                                <button onClick={() => pauseOneTimeTaskMut.mutate(t.id)} disabled={pauseOneTimeTaskMut.isPending}
-                                  className="text-xs px-2 py-1 bg-amber-500 text-white rounded">⏸ Pause</button>
-                                <button onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}
-                                  className="text-xs px-2 py-1 bg-amber-700 text-white rounded">✓ Mark Done</button>
-                              </>
-                            )}
-                            {t.status === 'In Progress' && !!t.paused_at && (
-                              <>
-                                <button onClick={() => resumeOneTimeTaskMut.mutate(t.id)} disabled={resumeOneTimeTaskMut.isPending}
-                                  className="text-xs px-2 py-1 bg-blue-600 text-white rounded">▶ Resume</button>
-                                <button onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}
-                                  className="text-xs px-2 py-1 bg-amber-700 text-white rounded">✓ Mark Done</button>
-                              </>
+                            {canEditAssignments && t.status === 'On Hold' && (
+                              <button onClick={() => unholdTaskMut.mutate(t.id)} disabled={unholdTaskMut.isPending} className="text-xs px-2 py-1 border border-blue-400 rounded text-blue-700">▶ Resume now</button>
                             )}
                             {t.status === 'Done' && canAssignTasks && (
                               <>
@@ -2556,8 +2619,8 @@ export default function HRM() {
                               </>
                             )}
                             {canDeleteHrm && t.status !== 'Approved' && (
-                              <button onClick={() => { if (window.confirm('Cancel this task?')) cancelOneTimeTaskMut.mutate(t.id) }}
-                                className="text-xs px-2 py-1 border rounded text-red-600">Cancel</button>
+                              <button onClick={() => { if (window.confirm('Delete this task?')) cancelOneTimeTaskMut.mutate(t.id) }}
+                                className="text-xs px-2 py-1 border rounded text-red-600">🗑 Delete</button>
                             )}
                           </div>
                         </td>
@@ -2653,50 +2716,6 @@ export default function HRM() {
                   </tbody>
                 </table>
               )}
-            </div>
-          )}
-          {hodDept && false /* dwr moved to Reports */ && (
-            <div className="bg-white rounded-xl border overflow-hidden">
-              <div className="px-4 py-3 bg-teal-800 text-white font-semibold">
-                Daily Work Report — {toDate}
-                {hodEmp ? ` · ${hodDeptEmployees.find((e: any) => e.id === hodEmp)?.name || ''}` : ' · all employees'}
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="text-gray-400 text-xs uppercase bg-gray-50">
-                    <tr>
-                      <th className="text-left px-3 py-2">Employee</th>
-                      <th className="text-left px-3 py-2">Responsibility</th>
-                      <th className="text-left px-3 py-2">Status</th>
-                      <th className="text-left px-3 py-2">Timer</th>
-                      <th className="text-left px-3 py-2">Start</th>
-                      <th className="text-left px-3 py-2">End</th>
-                      <th className="text-left px-3 py-2">Duration</th>
-                      <th className="text-left px-3 py-2">Linked Person</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(dwrData?.rows || []).map((row: any) => (
-                      <tr key={`${row.employee_id}-${row.responsibility_id}`} className="border-t">
-                        <td className="px-3 py-2">{row.employee_name}</td>
-                        <td className="px-3 py-2">
-                          <p className="font-medium">{row.title}</p>
-                          <p className="text-[10px] text-gray-400">{row.frequency}</p>
-                        </td>
-                        <td className="px-3 py-2">{row.status}</td>
-                        <td className="px-3 py-2"><span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${timerBadgeClass(row.timer_status)}`}>{row.timer_status}</span></td>
-                        <td className="px-3 py-2 text-xs">{fmtDateTime(row.started_at)}</td>
-                        <td className="px-3 py-2 text-xs">{fmtDateTime(row.ended_at)}</td>
-                        <td className="px-3 py-2 text-xs font-semibold">{fmtDuration(row.duration_minutes)}</td>
-                        <td className="px-3 py-2 text-xs text-indigo-800">{row.linked_person || row.linked_to_employee_name || 'Self-complete'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {!(dwrData?.rows || []).length && (
-                  <p className="text-center text-gray-400 py-8 text-sm">No DWR rows for this date. Select an employee and date, or ask the employee to start their responsibilities in Employee Check.</p>
-                )}
-              </div>
             </div>
           )}
           {hodDept && hodSubTab === 'responsibilities' && hodData && (
@@ -3281,94 +3300,37 @@ export default function HRM() {
               className={`px-3 py-1.5 rounded-md text-xs font-medium ${reportsSubTab === 'dwr' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
               Daily Working Report
             </button>
+            <button type="button" onClick={() => setReportsSubTab('hours')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium ${reportsSubTab === 'hours' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
+              Working Hours & Free Time
+            </button>
             <button type="button" onClick={() => setReportsSubTab('performance')}
               className={`px-3 py-1.5 rounded-md text-xs font-medium ${reportsSubTab === 'performance' ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500'}`}>
               Performance
             </button>
           </div>
 
-          {reportsSubTab === 'dwr' && (
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-end gap-2">
-                {!isEmployeeScope && (
-                  <>
-                    <div>
-                      <label className="text-[10px] text-gray-400 block">Department</label>
-                      <select value={reportsDept} onChange={e => setReportsDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
-                        <option value="">{isHodSelfCheck || userRole === 'HOD' ? 'My department' : 'All Departments'}</option>
-                        {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="text-[10px] text-gray-400 block">Employee</label>
-                      <select value={reportsEmp} onChange={e => setReportsEmp(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
-                        <option value="">All in scope</option>
-                        {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
-                      </select>
-                    </div>
-                  </>
-                )}
-                <div>
-                  <label className="text-[10px] text-gray-400 block">Date</label>
-                  <input type="date" value={reportsDate} onChange={e => setReportsDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
-                </div>
-                <button type="button" onClick={() => setDwrShowSlots(v => !v)}
-                  className="px-3 py-1.5 border rounded-lg text-xs font-medium text-[#002B5B] hover:bg-blue-50">
-                  {dwrShowSlots ? 'Hide time slots' : 'Show time slots'}
-                </button>
+          {(reportsSubTab === 'dwr' || reportsSubTab === 'hours') && !isEmployeeScope && (
+            <div className="flex flex-wrap items-end gap-2">
+              <div>
+                <label className="text-[10px] text-gray-400 block">Department</label>
+                <select value={reportsDept} onChange={e => setReportsDept(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                  <option value="">{isHodSelfCheck || userRole === 'HOD' ? 'My department' : 'All Departments'}</option>
+                  {(depts as any[]).map((d: any) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
               </div>
-              <div className="bg-white rounded-xl border overflow-hidden">
-                <div className="px-4 py-3 bg-teal-800 text-white font-semibold flex justify-between gap-2 flex-wrap">
-                  <span>Daily Working Report — {reportsDate}</span>
-                  <span className="text-teal-100 text-xs font-normal">From Employee Check responsibility updates</span>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="text-gray-400 text-xs uppercase bg-gray-50">
-                      <tr>
-                        <th className="text-left px-3 py-2">Employee</th>
-                        <th className="text-left px-3 py-2">Responsibility</th>
-                        <th className="text-left px-3 py-2">Status</th>
-                        <th className="text-left px-3 py-2">Timer</th>
-                        <th className="text-left px-3 py-2">Duration</th>
-                        <th className="text-left px-3 py-2">Linked Person</th>
-                        {dwrShowSlots && (
-                          <>
-                            <th className="text-left px-3 py-2">Start</th>
-                            <th className="text-left px-3 py-2">End</th>
-                          </>
-                        )}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(dwrData?.rows || []).map((row: any) => (
-                        <tr key={`${row.employee_id}-${row.responsibility_id}`} className="border-t">
-                          <td className="px-3 py-2">{row.employee_name}</td>
-                          <td className="px-3 py-2">
-                            <p className="font-medium">{row.title}</p>
-                            <p className="text-[10px] text-gray-400">{row.frequency}</p>
-                          </td>
-                          <td className="px-3 py-2">{row.status}</td>
-                          <td className="px-3 py-2"><span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${timerBadgeClass(row.timer_status)}`}>{row.timer_status}</span></td>
-                          <td className="px-3 py-2 text-xs font-semibold">{fmtDuration(row.duration_minutes)}</td>
-                          <td className="px-3 py-2 text-xs text-indigo-800">{row.linked_person || row.linked_to_employee_name || 'Self-complete'}</td>
-                          {dwrShowSlots && (
-                            <>
-                              <td className="px-3 py-2 text-xs">{fmtDateTime(row.started_at)}</td>
-                              <td className="px-3 py-2 text-xs">{fmtDateTime(row.ended_at)}</td>
-                            </>
-                          )}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {!(dwrData?.rows || []).length && (
-                    <p className="text-center text-gray-400 py-8 text-sm">No Daily Working Report rows for this date.</p>
-                  )}
-                </div>
+              <div>
+                <label className="text-[10px] text-gray-400 block">Employee</label>
+                <select value={reportsEmp} onChange={e => setReportsEmp(e.target.value ? +e.target.value : '')} className="border rounded-lg px-3 py-1.5 text-sm">
+                  <option value="">All in scope</option>
+                  {pickerEmps.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                </select>
               </div>
             </div>
           )}
+
+          {reportsSubTab === 'dwr' && <DwrReport employeeId={reportEmpId} departmentId={reportDeptId} />}
+          {reportsSubTab === 'hours' && <WorkingHoursReport employeeId={reportEmpId} departmentId={reportDeptId} />}
 
           {reportsSubTab === 'performance' && (
         <div className="space-y-4">
@@ -3485,7 +3447,7 @@ export default function HRM() {
                 className="w-full border rounded px-2 py-1.5 text-sm mt-1" placeholder="What was done?" />
             </div>
             <div className="flex gap-2">
-              <button onClick={() => completeOneTimeTaskMut.mutate({ id: completeModal.id, notes: completeNotes })}
+              <button onClick={() => completeOneTimeTaskMut.mutate({ id: completeModal.id, notes: completeNotes, title: completeModal.title })}
                 disabled={completeOneTimeTaskMut.isPending}
                 className="flex-1 py-2 bg-amber-500 text-white rounded-lg text-sm disabled:opacity-50">
                 {completeOneTimeTaskMut.isPending ? 'Saving…' : 'Submit for approval'}
@@ -3495,6 +3457,24 @@ export default function HRM() {
           </div>
         </div>
       )}
+
+      {breakPrompt && (
+        <BreakConfirmModal
+          title={breakPrompt.title}
+          breaks={breakPrompt.breaks}
+          busy={endRespMut.isPending || completeOneTimeTaskMut.isPending}
+          onCancel={() => setBreakPrompt(null)}
+          onDecide={decision => {
+            if (breakPrompt.kind === 'resp') {
+              endRespMut.mutate({ id: breakPrompt.id, log_date: breakPrompt.log_date, title: breakPrompt.title, break_decision: decision })
+            } else {
+              completeOneTimeTaskMut.mutate({ id: breakPrompt.id, notes: breakPrompt.notes, title: breakPrompt.title, break_decision: decision })
+            }
+          }}
+        />
+      )}
+      {holdTask && <HoldModal task={holdTask} onClose={() => setHoldTask(null)} onSaved={invalidateTaskMetrics} />}
+      {showHolidays && <HolidayModal onClose={() => setShowHolidays(false)} />}
 
       {/* ── APPROVAL MODAL ── */}
       {approvalModal && (

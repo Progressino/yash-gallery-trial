@@ -69,8 +69,7 @@ MONTH_NAMES = (
 HOD_STATUS_EDIT_GRACE_DAYS = 1
 # Employee may mark / Linked person may approve within task day + next 2 IST days.
 TASK_WINDOW_EXTRA_DAYS = 2
-MAX_TIMER_PAUSE_PER_DAY = 3
-MAX_TIMER_RESUME_PER_DAY = 2
+# Pause/resume are unlimited — each continuous work period is stored as a time slot.
 MAX_TIMER_COMPLETE_PER_DAY = 1
 
 
@@ -231,6 +230,45 @@ def _timer_payload(log: dict | None, *, events: list | None = None) -> dict:
     }
 
 
+def _apply_slots_to_payload(payload: dict, slots: list[dict], now: str | None = None) -> dict:
+    """Overlay slot-derived totals/sessions on a timer payload (slots are the source of truth)."""
+    if not slots:
+        payload["time_slots"] = []
+        return payload
+    now = now or _now_iso()
+    views = [_slot_view(s, now) for s in slots]
+    total = sum(v["net_seconds"] for v in views)
+    closed = [v for v in views if not v["is_open"]]
+    sessions = [
+        {
+            "index": i,
+            "slot_id": v["id"],
+            "started_at": v["started_at"],
+            "ended_at": v["ended_at"],
+            "duration_seconds": v["net_seconds"],
+            "duration_minutes": v["net_seconds"] // 60,
+            "duration_label": v["duration_label"],
+            "manual_edited": v["manual_edited"],
+            "notes": v.get("notes") or "",
+        }
+        for i, v in enumerate(closed, start=1)
+    ]
+    closed_total = sum(v["net_seconds"] for v in closed)
+    payload.update(
+        {
+            "time_slots": views,
+            "work_sessions": sessions,
+            "total_work_seconds": closed_total,
+            "total_work_label": _format_duration_hm(closed_total),
+            "active_seconds": total,
+            "active_minutes": total // 60,
+            "duration_minutes": total // 60,
+            "has_manual_slots": any(v["manual_edited"] for v in views),
+        }
+    )
+    return payload
+
+
 def _count_timer_events(events: list, *types: str) -> int:
     want = {t.lower() for t in types}
     return sum(1 for e in events if str(e.get("event_type") or "").lower() in want)
@@ -289,11 +327,11 @@ def _timer_limits_and_sessions(events: list, *, log_date: str) -> dict:
         "pause_count": pause_n,
         "resume_count": resume_n,
         "complete_count": complete_n,
-        "pause_limit": MAX_TIMER_PAUSE_PER_DAY,
-        "resume_limit": MAX_TIMER_RESUME_PER_DAY,
+        "pause_limit": None,
+        "resume_limit": None,
         "complete_limit": MAX_TIMER_COMPLETE_PER_DAY,
-        "can_pause": pause_n < MAX_TIMER_PAUSE_PER_DAY,
-        "can_resume": resume_n < MAX_TIMER_RESUME_PER_DAY,
+        "can_pause": True,
+        "can_resume": True,
         "can_complete": complete_n < MAX_TIMER_COMPLETE_PER_DAY,
     }
 
@@ -586,6 +624,17 @@ def init_db():
         "ALTER TABLE responsibilities ADD COLUMN expected_time TEXT DEFAULT ''",
         "ALTER TABLE responsibilities ADD COLUMN expected_minutes INTEGER DEFAULT 0",
         "ALTER TABLE responsibilities ADD COLUMN kpi_weightage REAL DEFAULT 0",
+        # Dynamic schedule rule (e.g. "2nd Saturday", "Last Working Day")
+        "ALTER TABLE responsibilities ADD COLUMN schedule_rule TEXT DEFAULT ''",
+        # Linked approval sent timestamp (2-day auto-approval clock)
+        "ALTER TABLE task_logs ADD COLUMN approval_sent_at TEXT DEFAULT ''",
+        # One-time task Hold + auto-approval flag
+        "ALTER TABLE one_time_tasks ADD COLUMN hold_until TEXT DEFAULT ''",
+        "ALTER TABLE one_time_tasks ADD COLUMN hold_prev_status TEXT DEFAULT ''",
+        "ALTER TABLE one_time_tasks ADD COLUMN hold_reason TEXT DEFAULT ''",
+        "ALTER TABLE one_time_tasks ADD COLUMN held_at TEXT DEFAULT ''",
+        "ALTER TABLE one_time_tasks ADD COLUMN held_by TEXT DEFAULT ''",
+        "ALTER TABLE one_time_tasks ADD COLUMN auto_approved INTEGER DEFAULT 0",
     ):
         try:
             conn.execute(sql)
@@ -649,8 +698,73 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_approval_notif_linked
             ON task_approval_notifications(linked_to_employee_id, is_read, id);
+        CREATE TABLE IF NOT EXISTS hrm_time_slots (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type           TEXT NOT NULL,
+            entity_id             INTEGER NOT NULL,
+            responsibility_id     INTEGER,
+            employee_id           INTEGER NOT NULL,
+            log_date              TEXT NOT NULL,
+            started_at            TEXT NOT NULL,
+            ended_at              TEXT DEFAULT '',
+            duration_seconds      INTEGER DEFAULT 0,
+            break_mode            TEXT DEFAULT '',
+            break_deduct_seconds  INTEGER DEFAULT 0,
+            notes                 TEXT DEFAULT '',
+            manual_edited         INTEGER DEFAULT 0,
+            original_started_at   TEXT DEFAULT '',
+            original_ended_at     TEXT DEFAULT '',
+            edited_by             TEXT DEFAULT '',
+            edited_at             TEXT DEFAULT '',
+            source                TEXT DEFAULT 'timer',
+            end_reason            TEXT DEFAULT '',
+            created_at            TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_slots_entity ON hrm_time_slots(entity_type, entity_id, id);
+        CREATE INDEX IF NOT EXISTS idx_slots_emp_start ON hrm_time_slots(employee_id, started_at);
+        CREATE INDEX IF NOT EXISTS idx_slots_emp_date ON hrm_time_slots(employee_id, log_date);
+        CREATE TABLE IF NOT EXISTS hrm_office_sessions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id     INTEGER NOT NULL,
+            work_date       TEXT NOT NULL,
+            office_start    TEXT DEFAULT '',
+            office_close    TEXT DEFAULT '',
+            started_by      TEXT DEFAULT '',
+            closed_by       TEXT DEFAULT '',
+            notes           TEXT DEFAULT '',
+            created_at      TEXT DEFAULT (datetime('now')),
+            updated_at      TEXT DEFAULT '',
+            UNIQUE(employee_id, work_date)
+        );
+        CREATE TABLE IF NOT EXISTS hrm_leaves (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id     INTEGER NOT NULL,
+            from_date       TEXT NOT NULL,
+            to_date         TEXT NOT NULL,
+            days            INTEGER DEFAULT 0,
+            reason          TEXT DEFAULT '',
+            status          TEXT DEFAULT 'Approved',
+            backup_clones   INTEGER DEFAULT 0,
+            restored_at     TEXT DEFAULT '',
+            created_by      TEXT DEFAULT '',
+            created_at      TEXT DEFAULT (datetime('now')),
+            cancelled_by    TEXT DEFAULT '',
+            cancelled_at    TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_leaves_emp ON hrm_leaves(employee_id, from_date, to_date);
+        CREATE TABLE IF NOT EXISTS hrm_holidays (
+            holiday_date    TEXT PRIMARY KEY,
+            name            TEXT DEFAULT '',
+            created_by      TEXT DEFAULT '',
+            created_at      TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS hrm_meta (
+            key     TEXT PRIMARY KEY,
+            value   TEXT DEFAULT ''
+        );
         """
     )
+    _backfill_time_slots(conn)
 
     # Lifecycle rename: Resolved → Resolve (keep legacy display mapping)
     try:
@@ -713,6 +827,382 @@ def write_task_audit(
     if owns:
         conn.commit()
         conn.close()
+
+
+# ── Time slots: single source of truth for working time ──────────────────────
+
+SLOT_RESP = "responsibility"
+SLOT_ONE_TIME = "one_time"
+SLOT_ENTITY_TYPES = frozenset({SLOT_RESP, SLOT_ONE_TIME})
+BREAK_WINDOWS = (
+    ("Lunch Break", "13:00:00", "13:30:00"),
+    ("Tea Break", "16:00:00", "16:15:00"),
+)
+_TS_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _ts(value: str) -> datetime:
+    return datetime.strptime(str(value)[:19], _TS_FMT)
+
+
+def _overlap_seconds(a0: datetime, a1: datetime, b0: datetime, b1: datetime) -> int:
+    lo = max(a0, b0)
+    hi = min(a1, b1)
+    return max(0, int((hi - lo).total_seconds()))
+
+
+def _fmt_clock_12h(t: str) -> str:
+    return datetime.strptime(t, "%H:%M:%S").strftime("%I:%M %p").lstrip("0")
+
+
+def break_overlaps(started_at: str, ended_at: str) -> list[dict]:
+    """Overlap of one interval with each configured break, per calendar day (midnight-safe)."""
+    if not started_at or not ended_at:
+        return []
+    try:
+        a, b = _ts(started_at), _ts(ended_at)
+    except ValueError:
+        return []
+    if b <= a:
+        return []
+    out: list[dict] = []
+    d = a.date()
+    while d <= b.date():
+        for name, s, e in BREAK_WINDOWS:
+            w0 = datetime.combine(d, datetime.strptime(s, "%H:%M:%S").time())
+            w1 = datetime.combine(d, datetime.strptime(e, "%H:%M:%S").time())
+            sec = _overlap_seconds(a, b, w0, w1)
+            if sec > 0:
+                out.append(
+                    {
+                        "name": name,
+                        "date": d.isoformat(),
+                        "window": f"{_fmt_clock_12h(s)} – {_fmt_clock_12h(e)}",
+                        "break_seconds": int((w1 - w0).total_seconds()),
+                        "overlap_seconds": sec,
+                    }
+                )
+        d += timedelta(days=1)
+    return out
+
+
+def _slot_view(slot: dict, now: str | None = None) -> dict:
+    d = dict(slot)
+    now = now or _now_iso()
+    is_open = not str(d.get("ended_at") or "").strip()
+    if is_open:
+        gross = _seconds_between(d.get("started_at") or "", now)
+        ded = 0
+    else:
+        gross = int(d.get("duration_seconds") or 0)
+        ded = int(d.get("break_deduct_seconds") or 0)
+    net = max(0, gross - ded)
+    d["is_open"] = is_open
+    d["gross_seconds"] = gross
+    d["net_seconds"] = net
+    d["duration_minutes"] = net // 60
+    d["duration_label"] = _format_duration_hm(net)
+    d["manual_edited"] = int(d.get("manual_edited") or 0)
+    d["break_deduct_seconds"] = ded
+    return d
+
+
+def _list_slots(conn, entity_type: str, entity_id: int) -> list[dict]:
+    rows = conn.execute(
+        """SELECT * FROM hrm_time_slots WHERE entity_type=? AND entity_id=?
+           ORDER BY started_at, id""",
+        (entity_type, int(entity_id)),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _slots_by_entity(conn, entity_type: str, entity_ids: list[int]) -> dict[int, list[dict]]:
+    out: dict[int, list[dict]] = {}
+    ids = [int(i) for i in entity_ids if i]
+    for i in range(0, len(ids), 500):
+        chunk = ids[i : i + 500]
+        marks = ",".join("?" * len(chunk))
+        rows = conn.execute(
+            f"""SELECT * FROM hrm_time_slots WHERE entity_type=? AND entity_id IN ({marks})
+                ORDER BY started_at, id""",
+            (entity_type, *chunk),
+        ).fetchall()
+        for r in rows:
+            out.setdefault(int(r["entity_id"]), []).append(dict(r))
+    return out
+
+
+def _close_open_slots(conn, entity_type: str, entity_id: int, ended_at: str, *, reason: str = "") -> int:
+    rows = conn.execute(
+        """SELECT id, started_at FROM hrm_time_slots
+           WHERE entity_type=? AND entity_id=? AND IFNULL(ended_at,'')=''""",
+        (entity_type, int(entity_id)),
+    ).fetchall()
+    for r in rows:
+        start = str(r["started_at"])
+        end = ended_at if ended_at and ended_at >= start else start
+        conn.execute(
+            """UPDATE hrm_time_slots SET ended_at=?, duration_seconds=?, end_reason=?
+               WHERE id=?""",
+            (end, _seconds_between(start, end), reason or "", int(r["id"])),
+        )
+    return len(rows)
+
+
+def _open_slot(
+    conn,
+    *,
+    entity_type: str,
+    entity_id: int,
+    employee_id: int,
+    log_date: str,
+    started_at: str,
+    responsibility_id: int | None = None,
+    source: str = "timer",
+) -> int:
+    _close_open_slots(conn, entity_type, entity_id, started_at, reason="superseded")
+    cur = conn.execute(
+        """INSERT INTO hrm_time_slots(
+            entity_type, entity_id, responsibility_id, employee_id, log_date, started_at, source
+        ) VALUES(?,?,?,?,?,?,?)""",
+        (
+            entity_type,
+            int(entity_id),
+            responsibility_id,
+            int(employee_id),
+            str(log_date)[:10],
+            started_at,
+            source,
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def _insert_closed_slot(
+    conn,
+    *,
+    entity_type: str,
+    entity_id: int,
+    employee_id: int,
+    log_date: str,
+    started_at: str,
+    ended_at: str,
+    responsibility_id: int | None = None,
+    source: str = "timer",
+    duration_seconds: int | None = None,
+    manual: bool = False,
+    notes: str = "",
+    actor: str = "",
+) -> int:
+    dur = _seconds_between(started_at, ended_at) if duration_seconds is None else int(duration_seconds)
+    edited_at = _now_iso() if manual else ""
+    cur = conn.execute(
+        """INSERT INTO hrm_time_slots(
+            entity_type, entity_id, responsibility_id, employee_id, log_date, started_at,
+            ended_at, duration_seconds, notes, manual_edited, edited_by, edited_at, source,
+            end_reason
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            entity_type,
+            int(entity_id),
+            responsibility_id,
+            int(employee_id),
+            str(log_date)[:10],
+            started_at,
+            ended_at,
+            max(0, dur),
+            notes or "",
+            1 if manual else 0,
+            actor if manual else "",
+            edited_at,
+            source,
+            "manual" if manual else "",
+        ),
+    )
+    return int(cur.lastrowid)
+
+
+def _recompute_entity_totals(conn, entity_type: str, entity_id: int) -> int | None:
+    """Store closed-slot net seconds on the parent row. No-op when the entity has no slots."""
+    has = conn.execute(
+        "SELECT 1 FROM hrm_time_slots WHERE entity_type=? AND entity_id=? LIMIT 1",
+        (entity_type, int(entity_id)),
+    ).fetchone()
+    if not has:
+        return None
+    row = conn.execute(
+        """SELECT COALESCE(SUM(MAX(0, duration_seconds - break_deduct_seconds)), 0) AS s
+           FROM hrm_time_slots
+           WHERE entity_type=? AND entity_id=? AND IFNULL(ended_at,'')!=''""",
+        (entity_type, int(entity_id)),
+    ).fetchone()
+    total = int(row["s"] or 0)
+    if entity_type == SLOT_RESP:
+        conn.execute(
+            "UPDATE task_logs SET active_seconds=?, duration_minutes=? WHERE id=?",
+            (total, total // 60, int(entity_id)),
+        )
+    else:
+        t = conn.execute(
+            "SELECT COALESCE(manual_duration_minutes,0) AS m FROM one_time_tasks WHERE id=?",
+            (int(entity_id),),
+        ).fetchone()
+        if t and int(t["m"] or 0) > 0:
+            conn.execute(
+                "UPDATE one_time_tasks SET active_seconds=? WHERE id=?",
+                (total, int(entity_id)),
+            )
+        else:
+            conn.execute(
+                "UPDATE one_time_tasks SET active_seconds=?, duration_minutes=? WHERE id=?",
+                (total, total // 60, int(entity_id)),
+            )
+    return total
+
+
+def entity_break_overlaps(conn, entity_type: str, entity_id: int, *, now: str | None = None) -> list[dict]:
+    """Aggregate break overlaps across the entity's slots (open slot counted up to now)."""
+    now = now or _now_iso()
+    agg: dict[tuple, dict] = {}
+    for s in _list_slots(conn, entity_type, entity_id):
+        end = str(s.get("ended_at") or "").strip() or now
+        for o in break_overlaps(str(s["started_at"]), end):
+            key = (o["name"], o["date"])
+            cur = agg.setdefault(key, {**o, "overlap_seconds": 0})
+            cur["overlap_seconds"] = min(o["break_seconds"], cur["overlap_seconds"] + o["overlap_seconds"])
+    out = sorted(agg.values(), key=lambda x: (x["date"], x["window"]))
+    for o in out:
+        o["break_minutes"] = o["break_seconds"] // 60
+        o["overlap_minutes"] = round(o["overlap_seconds"] / 60, 1)
+    return out
+
+
+def _apply_break_decision(conn, entity_type: str, entity_id: int, decision: str, *, actor: str = "") -> int:
+    """decision: 'count' keeps break as work; 'deduct' removes only the actual overlap."""
+    total = 0
+    for s in _list_slots(conn, entity_type, entity_id):
+        end = str(s.get("ended_at") or "").strip()
+        if not end:
+            continue
+        ov = sum(o["overlap_seconds"] for o in break_overlaps(str(s["started_at"]), end))
+        if ov <= 0:
+            continue
+        ded = min(ov, int(s.get("duration_seconds") or 0)) if decision == "deduct" else 0
+        total += ded
+        conn.execute(
+            "UPDATE hrm_time_slots SET break_mode=?, break_deduct_seconds=? WHERE id=?",
+            (decision, ded, int(s["id"])),
+        )
+    write_task_audit(
+        entity_type,
+        entity_id,
+        "break_deducted" if decision == "deduct" else "break_counted",
+        new_value=str(total),
+        actor=actor,
+        notes="Break overlap deducted from working time"
+        if decision == "deduct"
+        else "Break overlap counted as working time",
+        conn=conn,
+    )
+    return total
+
+
+def _backfill_time_slots(conn) -> None:
+    """One-time: derive slots from existing timer events / one-time session fields."""
+    if conn.execute("SELECT 1 FROM hrm_meta WHERE key='slots_backfill_v1'").fetchone():
+        return
+    logs = conn.execute(
+        """SELECT id, responsibility_id, employee_id, log_date,
+                  COALESCE(started_at,'') AS started_at, COALESCE(ended_at,'') AS ended_at,
+                  COALESCE(paused_at,'') AS paused_at
+           FROM task_logs WHERE IFNULL(started_at,'') != ''"""
+    ).fetchall()
+    for lg in logs:
+        lid = int(lg["id"])
+        if conn.execute(
+            "SELECT 1 FROM hrm_time_slots WHERE entity_type=? AND entity_id=? LIMIT 1",
+            (SLOT_RESP, lid),
+        ).fetchone():
+            continue
+        events = conn.execute(
+            "SELECT event_type, event_at FROM task_timer_events WHERE task_log_id=? ORDER BY id",
+            (lid,),
+        ).fetchall()
+        segs: list[tuple[str, str]] = []
+        open_at: str | None = None
+        for ev in events:
+            et = str(ev["event_type"] or "").lower()
+            at = str(ev["event_at"] or "").strip()
+            if et in ("start", "resume"):
+                open_at = at
+            elif et in ("pause", "end") and open_at and at:
+                segs.append((open_at, at))
+                open_at = None
+        started, ended, paused = lg["started_at"], lg["ended_at"], lg["paused_at"]
+        if not events:
+            if ended:
+                segs.append((started, ended))
+            elif paused:
+                segs.append((started, paused))
+            else:
+                open_at = started
+        common = dict(
+            entity_type=SLOT_RESP,
+            entity_id=lid,
+            employee_id=int(lg["employee_id"]),
+            log_date=str(lg["log_date"]),
+            responsibility_id=int(lg["responsibility_id"]),
+        )
+        for a, b in segs:
+            _insert_closed_slot(conn, started_at=a, ended_at=b, source="backfill", **common)
+        if open_at and not ended and not paused:
+            _open_slot(conn, started_at=open_at, source="backfill", **common)
+    tasks = conn.execute(
+        """SELECT * FROM one_time_tasks WHERE IFNULL(started_at,'') != ''"""
+    ).fetchall()
+    for t in tasks:
+        td = dict(t)
+        tid = int(td["id"])
+        if conn.execute(
+            "SELECT 1 FROM hrm_time_slots WHERE entity_type=? AND entity_id=? LIMIT 1",
+            (SLOT_ONE_TIME, tid),
+        ).fetchone():
+            continue
+        started = str(td.get("started_at") or "").strip()
+        active = int(td.get("active_seconds") or 0)
+        status = str(td.get("status") or "")
+        common = dict(
+            entity_type=SLOT_ONE_TIME,
+            entity_id=tid,
+            employee_id=int(td["employee_id"]),
+            log_date=started[:10],
+        )
+        if status == "In Progress":
+            paused = str(td.get("paused_at") or "").strip()
+            if paused:
+                _insert_closed_slot(
+                    conn, started_at=started, ended_at=paused, source="legacy",
+                    duration_seconds=active or None, **common,
+                )
+            else:
+                session = str(td.get("session_started_at") or "").strip() or started
+                if active > 0 and session > started:
+                    _insert_closed_slot(
+                        conn, started_at=started, ended_at=session, source="legacy",
+                        duration_seconds=active, **common,
+                    )
+                _open_slot(conn, started_at=session, source="legacy", **common)
+        else:
+            end = str(td.get("completed_at") or "").strip() or str(td.get("paused_at") or "").strip()
+            if end:
+                _insert_closed_slot(
+                    conn, started_at=started, ended_at=end, source="legacy",
+                    duration_seconds=active or None, **common,
+                )
+    conn.execute(
+        "INSERT OR REPLACE INTO hrm_meta(key, value) VALUES('slots_backfill_v1', ?)",
+        (_now_iso(),),
+    )
 
 
 def parse_duration_to_minutes(value) -> int:
@@ -820,6 +1310,9 @@ RESPONSIBILITY_IMPORT_COLUMNS = (
     "schedule_month",
     "backup_employee_code",
     "added_by",
+    "schedule_rule",
+    "linked_person_code",
+    "linked_person_name",
 )
 
 TASK_IMPORT_COLUMNS = (
@@ -836,8 +1329,10 @@ TASK_IMPORT_COLUMNS = (
 def responsibility_import_template_csv() -> str:
     header = ",".join(RESPONSIBILITY_IMPORT_COLUMNS)
     examples = [
-        "EMP001,Sample Employee,Morning stock check,Count warehouse,Daily,General,Medium,yes,30,10,,,,,Admin",
-        "EMP001,,Weekly review,,Weekly,General,High,no,1:00,5,Monday,,,,Admin",
+        "EMP001,Sample Employee,Morning stock check,Count warehouse,Daily,General,Medium,yes,30,10,,,,EMP002,Admin,,EMP003,",
+        "EMP001,,Weekly review,,Weekly,General,High,no,1:00,5,Monday,,,,Admin,,,",
+        "EMP001,,Month-end stock audit,,Monthly,General,High,no,2:00,5,,,,,Admin,Last Working Day,,Boss Name",
+        "EMP001,,Vendor follow-up,,Fortnightly,General,Medium,no,1:00,5,,,,,Admin,1st & 3rd Monday,EMP003,",
     ]
     return "\n".join([header, *examples]) + "\n"
 
@@ -1591,6 +2086,27 @@ def import_responsibilities(rows: list[dict]) -> dict:
                 if not backup_id:
                     errors.append(f"Row {idx}: backup employee not found")
                     continue
+            linked_id = None
+            linked_code = (
+                row.get("linked_person_code") or row.get("linked_to_code")
+                or row.get("linked_employee_code") or ""
+            )
+            linked_name = (
+                row.get("linked_person_name") or row.get("linked_person")
+                or row.get("linked_to") or row.get("supervisor") or row.get("approver") or ""
+            )
+            if linked_code or linked_name:
+                linked_id = _resolve_employee_id(
+                    conn, {"employee_code": linked_code, "employee_name": linked_name}
+                )
+                if not linked_id:
+                    errors.append(
+                        f"Row {idx}: linked person not found ({linked_code or linked_name})"
+                    )
+                    continue
+                if int(linked_id) == int(emp_id):
+                    errors.append(f"Row {idx}: linked person must differ from the employee")
+                    continue
             payload = {
                 "employee_id": emp_id,
                 "title": title,
@@ -1611,6 +2127,8 @@ def import_responsibilities(rows: list[dict]) -> dict:
                 "expected_minutes": expected_minutes,
                 "kpi_weightage": kpi_weightage,
                 "backup_employee_id": backup_id,
+                "linked_to_employee_id": linked_id,
+                "schedule_rule": row.get("schedule_rule") or row.get("dynamic_schedule_rule") or "",
             }
             try:
                 create_responsibility(payload)
@@ -1713,13 +2231,22 @@ def list_responsibilities(employee_id=None, department_id=None, active_only=True
     return [dict(r) for r in rows]
 
 
-def _validate_responsibility_schedule(freq: str, weekday: str, month_day: int, schedule_month: int):
+def _validate_responsibility_schedule(
+    freq: str, weekday: str, month_day: int, schedule_month: int, schedule_rule: str = ""
+):
+    rule = (schedule_rule or "").strip()
+    if rule:
+        if freq not in SCHEDULE_RULE_FREQUENCIES:
+            raise ValueError(
+                "Dynamic Schedule Rule is available for Monthly, Fortnightly and Yearly (fixed date) responsibilities"
+            )
+        parse_schedule_rule(rule)
     if freq == "Weekly" and not (weekday or "").strip():
         raise ValueError("Weekly responsibilities require a weekday")
-    if freq == "Fortnightly" and not (weekday or "").strip():
-        raise ValueError("Fortnightly responsibilities require a weekday (Mon–Sun)")
-    if freq == "Monthly" and month_day <= 0:
-        raise ValueError("Monthly responsibilities require a calendar day (1-31)")
+    if freq == "Fortnightly" and not (weekday or "").strip() and not rule:
+        raise ValueError("Fortnightly responsibilities require a weekday (Mon–Sun) or a schedule rule")
+    if freq == "Monthly" and month_day <= 0 and not rule:
+        raise ValueError("Monthly responsibilities require a calendar day (1-31) or a schedule rule")
     if freq == "Quarterly" and not (1 <= int(schedule_month or 0) <= 12):
         raise ValueError("Quarterly responsibilities require an anchor month (1–12)")
 
@@ -1743,7 +2270,8 @@ def create_responsibility(data: dict):
     if freq == "Quarterly" and schedule_month <= 0 and month_day > 0 and month_day <= 12:
         schedule_month = month_day  # tolerate older clients
     try:
-        _validate_responsibility_schedule(freq, weekday, month_day, schedule_month)
+        schedule_rule = normalize_schedule_rule(data.get("schedule_rule"))
+        _validate_responsibility_schedule(freq, weekday, month_day, schedule_month, schedule_rule)
     except ValueError:
         conn.close()
         raise
@@ -1787,9 +2315,9 @@ def create_responsibility(data: dict):
             priority,mandatory,schedule_weekday,schedule_month_day,time_period,
             schedule_month,linked_to_employee_id,
             backup_employee_id,backup_allocation_value,backup_allocation_unit,
-            expected_time,expected_minutes,kpi_weightage
+            expected_time,expected_minutes,kpi_weightage,schedule_rule
         )
-        VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             data["employee_id"],
             dept_id,
@@ -1811,6 +2339,7 @@ def create_responsibility(data: dict):
             expected_time,
             expected_minutes,
             kpi_weightage,
+            schedule_rule,
         ),
     )
     conn.commit()
@@ -1843,10 +2372,17 @@ def update_responsibility(rid: int, data: dict):
         "expected_time",
         "expected_minutes",
         "kpi_weightage",
+        "schedule_rule",
     ]
     payload = {k: data[k] for k in data if k in allowed}
     if "mandatory" in payload:
         payload["mandatory"] = 1 if payload["mandatory"] else 0
+    if "schedule_rule" in payload:
+        try:
+            payload["schedule_rule"] = normalize_schedule_rule(payload["schedule_rule"])
+        except ValueError:
+            conn.close()
+            raise
     if "expected_time" in payload or "expected_minutes" in payload:
         try:
             et, em = parse_optional_expected_time(payload.get("expected_time", ""))
@@ -1941,6 +2477,7 @@ def update_responsibility(rid: int, data: dict):
             "schedule_weekday",
             "schedule_month_day",
             "schedule_month",
+            "schedule_rule",
         )
     ):
         row = conn.execute("SELECT * FROM responsibilities WHERE id=?", (rid,)).fetchone()
@@ -1964,8 +2501,14 @@ def update_responsibility(rid: int, data: dict):
                 )
                 or 0
             )
+            rule = payload.get(
+                "schedule_rule",
+                row["schedule_rule"] if "schedule_rule" in row.keys() else "",
+            ) or ""
+            if freq not in SCHEDULE_RULE_FREQUENCIES and rule and "schedule_rule" not in payload:
+                payload["schedule_rule"] = rule = ""
             try:
-                _validate_responsibility_schedule(freq, weekday, month_day, schedule_month)
+                _validate_responsibility_schedule(freq, weekday, month_day, schedule_month, rule)
             except ValueError:
                 conn.close()
                 raise
@@ -2074,33 +2617,37 @@ def mark_task(
         ):
             conn.close()
             return "window_closed"
+        mark_now = _now_iso()
         conn.execute(
             """UPDATE task_logs
                SET status=?, remarks=?, marked_by=?, marked_at=?,
                    blocker_employee_id=?, blocker_reason=?,
-                   approval_status=?, approved_by=?, approved_at=?
+                   approval_status=?, approved_by=?, approved_at=?, approval_sent_at=?
                WHERE responsibility_id=? AND log_date=?""",
             (
                 status,
                 remarks,
                 marked_by,
-                _now_iso(),
+                mark_now,
                 blocker_employee_id,
                 blocker_reason,
                 approval_status,
                 approved_by,
                 approved_at,
+                mark_now if approval_status == "Pending" else "",
                 responsibility_id,
                 log_date,
             ),
         )
         task_log_id = existing
     else:
+        mark_now = _now_iso()
         conn.execute(
             """INSERT INTO task_logs(
                 responsibility_id,employee_id,log_date,status,remarks,marked_by,marked_at,
-                blocker_employee_id,blocker_reason,approval_status,approved_by,approved_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                blocker_employee_id,blocker_reason,approval_status,approved_by,approved_at,
+                approval_sent_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(responsibility_id,log_date) DO NOTHING
         """,
             (
@@ -2110,12 +2657,13 @@ def mark_task(
                 status,
                 remarks,
                 marked_by,
-                _now_iso(),
+                mark_now,
                 blocker_employee_id,
                 blocker_reason,
                 approval_status,
                 approved_by,
                 approved_at,
+                mark_now if approval_status == "Pending" else "",
             ),
         )
 
@@ -2373,7 +2921,15 @@ def _employee_has_active_one_time(conn, employee_id: int, *, exclude_task_id: in
     return conn.execute(q, params).fetchone() is not None
 
 
-def _pause_task_log_row(conn, row: dict, *, actor: str = "", notes: str = "") -> None:
+def _pause_task_log_row(
+    conn,
+    row: dict,
+    *,
+    actor: str = "",
+    notes: str = "",
+    reason: str = "auto_pause",
+    at: str | None = None,
+) -> None:
     """Pause an active responsibility timer row (must already be loaded as dict)."""
     started = str(row.get("started_at") or "").strip()
     ended = str(row.get("ended_at") or "").strip()
@@ -2381,7 +2937,7 @@ def _pause_task_log_row(conn, row: dict, *, actor: str = "", notes: str = "") ->
     if not started or ended or paused:
         return
     events = _list_timer_events(conn, int(row["id"]))
-    now = _now_iso()
+    now = at or _now_iso()
     seg = _last_active_segment_start(row, events)
     add = _seconds_between(seg, now)
     active = int(row.get("active_seconds") or 0) + add
@@ -2401,15 +2957,37 @@ def _pause_task_log_row(conn, row: dict, *, actor: str = "", notes: str = "") ->
         actor=actor,
         notes=notes,
     )
+    _close_open_slots(conn, SLOT_RESP, int(row["id"]), now, reason=reason)
+    _recompute_entity_totals(conn, SLOT_RESP, int(row["id"]))
+    if reason != "pause":
+        write_task_audit(
+            SLOT_RESP,
+            int(row["id"]),
+            reason,
+            old_value="Active",
+            new_value="Paused",
+            actor=actor,
+            notes=notes,
+            conn=conn,
+        )
 
 
-def _pause_one_time_row(conn, row: dict, *, actor: str = "", auto: bool = False) -> None:
+def _pause_one_time_row(
+    conn,
+    row: dict,
+    *,
+    actor: str = "",
+    auto: bool = False,
+    reason: str = "",
+    notes: str = "",
+    at: str | None = None,
+) -> None:
     """Pause an active one-time task row."""
     if str(row.get("status") or "") != "In Progress":
         return
     if str(row.get("paused_at") or "").strip():
         return
-    now = _now_iso()
+    now = at or _now_iso()
     session_start = str(row.get("session_started_at") or row.get("started_at") or now).strip()
     add = _seconds_between(session_start, now)
     active = int(row.get("active_seconds") or 0) + add
@@ -2420,14 +2998,17 @@ def _pause_one_time_row(conn, row: dict, *, actor: str = "", auto: bool = False)
            WHERE id=?""",
         (now, active, active // 60, 1 if auto else 0, now, int(row["id"])),
     )
+    action = reason or ("auto_pause" if auto else "pause")
+    _close_open_slots(conn, SLOT_ONE_TIME, int(row["id"]), now, reason=action)
+    _recompute_entity_totals(conn, SLOT_ONE_TIME, int(row["id"]))
     write_task_audit(
         "one_time_task",
         int(row["id"]),
-        "auto_pause" if auto else "pause",
+        action,
         old_value="In Progress",
         new_value="Paused",
         actor=actor or ("system-3h" if auto else ""),
-        notes="Auto-paused after 3 hours" if auto else "",
+        notes=notes or ("Auto-paused after 3 hours" if auto else ""),
         conn=conn,
     )
 
@@ -2533,6 +3114,15 @@ def start_responsibility_timer(
         event_at=now,
         actor=actor,
     )
+    _open_slot(
+        conn,
+        entity_type=SLOT_RESP,
+        entity_id=int(row["id"]),
+        employee_id=emp_id,
+        log_date=log_date,
+        started_at=now,
+        responsibility_id=responsibility_id,
+    )
     conn.commit()
     conn.close()
     return True
@@ -2572,29 +3162,7 @@ def pause_responsibility_timer(
     if paused:
         conn.close()
         return "already_paused"
-    events = _list_timer_events(conn, int(row["id"]))
-    if not allow_override and _count_timer_events(events, "pause") >= MAX_TIMER_PAUSE_PER_DAY:
-        conn.close()
-        return "pause_limit"
-    now = _now_iso()
-    seg = _last_active_segment_start(row, events)
-    add = _seconds_between(seg, now)
-    active = int(row.get("active_seconds") or 0) + add
-    conn.execute(
-        """UPDATE task_logs SET paused_at=?, active_seconds=?, duration_minutes=?
-           WHERE id=?""",
-        (now, active, active // 60, int(row["id"])),
-    )
-    _append_timer_event(
-        conn,
-        task_log_id=int(row["id"]),
-        responsibility_id=responsibility_id,
-        employee_id=int(resp["employee_id"]),
-        log_date=log_date,
-        event_type="pause",
-        event_at=now,
-        actor=actor,
-    )
+    _pause_task_log_row(conn, row, actor=actor, reason="pause")
     conn.commit()
     conn.close()
     return True
@@ -2635,10 +3203,6 @@ def resume_responsibility_timer(
     if not paused:
         conn.close()
         return "already_active"
-    events = _list_timer_events(conn, int(row["id"]))
-    if not allow_override and _count_timer_events(events, "resume") >= MAX_TIMER_RESUME_PER_DAY:
-        conn.close()
-        return "resume_limit"
     auto_pause_other_active_work(
         conn, emp_id, exclude_log_id=int(row["id"]), actor=actor or "auto"
     )
@@ -2659,6 +3223,15 @@ def resume_responsibility_timer(
         event_at=now,
         actor=actor,
     )
+    _open_slot(
+        conn,
+        entity_type=SLOT_RESP,
+        entity_id=int(row["id"]),
+        employee_id=emp_id,
+        log_date=log_date,
+        started_at=now,
+        responsibility_id=responsibility_id,
+    )
     conn.commit()
     conn.close()
     return True
@@ -2670,7 +3243,10 @@ def end_responsibility_timer(
     *,
     allow_override: bool = False,
     actor: str = "",
+    break_decision: str | None = None,
 ):
+    """Complete the day's timer. When slots overlap Lunch/Tea and no break_decision is
+    given, returns {"status": "break_confirm", "breaks": [...]} without completing."""
     if not allow_override and not in_task_action_window(log_date):
         return "window_closed"
     conn = _connect()
@@ -2701,6 +3277,11 @@ def end_responsibility_timer(
         conn.close()
         return "complete_limit"
     now = _now_iso()
+    if break_decision not in ("count", "deduct"):
+        breaks = entity_break_overlaps(conn, SLOT_RESP, int(row["id"]), now=now)
+        if breaks:
+            conn.close()
+            return {"status": "break_confirm", "breaks": breaks}
     active = int(row.get("active_seconds") or 0)
     paused_sec = int(row.get("paused_seconds") or 0)
     if paused:
@@ -2725,6 +3306,10 @@ def end_responsibility_timer(
         event_at=now,
         actor=actor,
     )
+    _close_open_slots(conn, SLOT_RESP, int(row["id"]), now, reason="end")
+    if break_decision in ("count", "deduct"):
+        _apply_break_decision(conn, SLOT_RESP, int(row["id"]), break_decision, actor=actor)
+    _recompute_entity_totals(conn, SLOT_RESP, int(row["id"]))
     conn.commit()
     conn.close()
     return True
@@ -2766,36 +3351,68 @@ def set_responsibility_manual_time(
         return "status_locked"
     mins = _duration_minutes(start, end) if start and end else 0
     active = mins * 60
+    lid = int(row["id"])
+    emp_id = int(resp["employee_id"])
+    old_value = f"{row.get('started_at') or ''} → {row.get('ended_at') or ''}"
     conn.execute(
         """UPDATE task_logs SET started_at=?, ended_at=?, paused_at='',
                active_seconds=?, paused_seconds=0, duration_minutes=?
            WHERE responsibility_id=? AND log_date=?""",
         (start, end, active, mins, responsibility_id, log_date),
     )
-    # Manual edit: replace event history with a clean start/(end) pair
-    conn.execute("DELETE FROM task_timer_events WHERE task_log_id=?", (int(row["id"]),))
+    # Non-destructive: timer events are kept; the day's time is carried by one manual slot.
+    slots = _list_slots(conn, SLOT_RESP, lid)
+    now = _now_iso()
     if start:
-        _append_timer_event(
-            conn,
-            task_log_id=int(row["id"]),
-            responsibility_id=responsibility_id,
-            employee_id=int(resp["employee_id"]),
-            log_date=log_date,
-            event_type="start",
-            event_at=start,
-            actor=actor or "manual",
-        )
-    if end:
-        _append_timer_event(
-            conn,
-            task_log_id=int(row["id"]),
-            responsibility_id=responsibility_id,
-            employee_id=int(resp["employee_id"]),
-            log_date=log_date,
-            event_type="end",
-            event_at=end,
-            actor=actor or "manual",
-        )
+        if slots:
+            first = slots[0]
+            conn.execute(
+                """UPDATE hrm_time_slots
+                   SET started_at=?, ended_at=?, duration_seconds=?, manual_edited=1,
+                       original_started_at=CASE WHEN IFNULL(original_started_at,'')='' THEN started_at ELSE original_started_at END,
+                       original_ended_at=CASE WHEN manual_edited=0 THEN IFNULL(ended_at,'') ELSE original_ended_at END,
+                       edited_by=?, edited_at=?
+                   WHERE id=?""",
+                (start, end, _seconds_between(start, end) if end else 0, actor or "manual", now, int(first["id"])),
+            )
+            for extra in slots[1:]:
+                conn.execute(
+                    """UPDATE hrm_time_slots SET duration_seconds=0, break_deduct_seconds=0,
+                           manual_edited=1, edited_by=?, edited_at=?,
+                           original_started_at=CASE WHEN IFNULL(original_started_at,'')='' THEN started_at ELSE original_started_at END,
+                           original_ended_at=CASE WHEN IFNULL(original_ended_at,'')='' THEN IFNULL(ended_at,'') ELSE original_ended_at END,
+                           ended_at=CASE WHEN IFNULL(ended_at,'')='' THEN started_at ELSE ended_at END,
+                           notes=TRIM(IFNULL(notes,'') || ' [merged into manual time]')
+                       WHERE id=?""",
+                    (actor or "manual", now, int(extra["id"])),
+                )
+        elif end:
+            _insert_closed_slot(
+                conn, entity_type=SLOT_RESP, entity_id=lid, employee_id=emp_id,
+                log_date=log_date, started_at=start, ended_at=end,
+                responsibility_id=responsibility_id, source="manual", manual=True,
+                actor=actor or "manual",
+            )
+        else:
+            sid = _open_slot(
+                conn, entity_type=SLOT_RESP, entity_id=lid, employee_id=emp_id,
+                log_date=log_date, started_at=start, responsibility_id=responsibility_id,
+                source="manual",
+            )
+            conn.execute(
+                "UPDATE hrm_time_slots SET manual_edited=1, edited_by=?, edited_at=? WHERE id=?",
+                (actor or "manual", now, sid),
+            )
+        _recompute_entity_totals(conn, SLOT_RESP, lid)
+    write_task_audit(
+        SLOT_RESP,
+        lid,
+        "manual_time",
+        old_value=old_value,
+        new_value=f"{start} → {end}",
+        actor=actor or "manual",
+        conn=conn,
+    )
     conn.commit()
     conn.close()
     return True
@@ -2812,8 +3429,12 @@ def get_responsibility_timer_detail(responsibility_id: int, log_date: str) -> di
         return None
     row = dict(row)
     events = _list_timer_events(conn, int(row["id"]))
+    slots = _list_slots(conn, SLOT_RESP, int(row["id"]))
     conn.close()
-    return {"task_log_id": row["id"], **_timer_payload(row, events=events)}
+    return {
+        "task_log_id": row["id"],
+        **_apply_slots_to_payload(_timer_payload(row, events=events), slots),
+    }
 
 
 def list_timer_events_for_log(task_log_id: int) -> list[dict]:
@@ -2869,9 +3490,16 @@ def approve_task_log(
         conn.close()
         return "not_pending"
     if not allow_override and not in_task_action_window(row["log_date"]):
-        # Outside window — auto-process will handle; still allow HOD override
-        conn.close()
-        return "window_closed"
+        # Linked person keeps the full 2-day approval period counted from when it was sent.
+        keys = row.keys()
+        sent = str(
+            (row["approval_sent_at"] if "approval_sent_at" in keys else "")
+            or (row["marked_at"] if "marked_at" in keys else "")
+            or ""
+        )
+        if not sent or sent < _approval_cutoff_ts():
+            conn.close()
+            return "window_closed"
 
     new_status = row["status"]
     if action == "Cancelled":
@@ -3125,39 +3753,9 @@ def process_auto_closures_ist(*, as_of: date | None = None, actor: str = "system
     # Example: task 01-Aug. Window: 1,2,3. On 4-Aug closed. as_of=4, d0 <= 4-3=1 → d0<=1. Yes.
     limit_date = (as_of - timedelta(days=TASK_WINDOW_EXTRA_DAYS + 1)).isoformat()
 
+    approved_n = int(process_approval_auto_closures(actor=actor).get("auto_approved") or 0)
     conn = _connect()
     missed_n = 0
-    approved_n = 0
-
-    # Auto-approve Pending Done/Partial
-    pending = conn.execute(
-        """
-        SELECT tl.id, tl.log_date, tl.status, tl.approval_status
-        FROM task_logs tl
-        WHERE tl.approval_status='Pending'
-          AND tl.status IN ('Done', 'Partial')
-          AND tl.log_date <= ?
-        """,
-        (limit_date,),
-    ).fetchall()
-    for p in pending:
-        if in_task_action_window(p["log_date"], as_of=as_of):
-            continue
-        conn.execute(
-            """UPDATE task_logs SET approval_status=?, approved_by=?, approved_at=? WHERE id=?""",
-            ("Auto-Approved", actor, _now_iso(), p["id"]),
-        )
-        write_task_audit(
-            "task_log",
-            p["id"],
-            "auto_approved",
-            old_value="Pending",
-            new_value="Auto-Approved",
-            actor=actor,
-            notes=f"linked approval timeout (window ended, log_date={p['log_date']})",
-            conn=conn,
-        )
-        approved_n += 1
 
     # Auto-Missed: due scheduled responsibilities with no log after window
     # Only scan last 14 days of candidate due dates that already expired
@@ -3165,11 +3763,14 @@ def process_auto_closures_ist(*, as_of: date | None = None, actor: str = "system
     resps = conn.execute(
         """
         SELECT r.id, r.employee_id, r.frequency, r.schedule_weekday, r.schedule_month_day,
-               COALESCE(r.schedule_month, 0) as schedule_month
+               COALESCE(r.schedule_month, 0) as schedule_month,
+               COALESCE(r.schedule_rule, '') as schedule_rule,
+               r.mandatory, r.backup_employee_id
         FROM responsibilities r
         WHERE r.active=1
         """
     ).fetchall()
+    due_ctx = DueContext(conn)
     cur = date.fromisoformat(scan_from)
     end = date.fromisoformat(limit_date)
     while cur <= end:
@@ -3178,13 +3779,9 @@ def process_auto_closures_ist(*, as_of: date | None = None, actor: str = "system
             cur += timedelta(days=1)
             continue
         for r in resps:
-            if not is_schedule_due(
-                r["frequency"] or "Daily",
-                dstr,
-                r["schedule_weekday"] or "",
-                int(r["schedule_month_day"] or 0),
-                int(r["schedule_month"] or 0),
-            ):
+            if not responsibility_due_on(dict(r), dstr, due_ctx):
+                continue
+            if dstr in due_ctx.leave_days(int(r["employee_id"])):
                 continue
             # Skip Whenever Required for auto-missed
             if (r["frequency"] or "") == "Whenever Required":
@@ -3916,6 +4513,9 @@ def get_hod_dashboard(
     """,
         (department_id, fd, td),
     ).fetchall()
+    due_ctx = DueContext(conn)
+    for r in resps:
+        due_ctx.leave_days(int(r["employee_id"]))
     conn.close()
 
     log_map = {}
@@ -3948,14 +4548,8 @@ def get_hod_dashboard(
         rd = dict(r)
         rd["dates"] = {}
         for d in dates:
-            # Hide weekly/monthly etc. when not scheduled for that calendar day
-            if not is_schedule_due(
-                rd.get("frequency") or "Daily",
-                d,
-                rd.get("schedule_weekday") or "",
-                int(rd.get("schedule_month_day") or 0),
-                int(rd.get("schedule_month") or 0),
-            ):
+            # Hide weekly/monthly etc. when not scheduled for that day (holiday/leave shifted)
+            if not responsibility_due_on(rd, d, due_ctx):
                 continue
             key = (r["id"], d)
             rd["dates"][d] = log_map.get(
@@ -4126,6 +4720,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     Additional Work holds one-day HOD reassignment clones.
     """
     day = check_date or today_ist().isoformat()
+    process_task_hold_resume()
     conn = _connect()
     emp = conn.execute(
         """
@@ -4138,12 +4733,16 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     if not emp:
         conn.close()
         return None
+    due_ctx = DueContext(conn)
+    due_ctx.leave_days(employee_id)
+    on_leave = employee_leave_on(employee_id, day, conn)
 
     resps = conn.execute(
         """
         SELECT r.id, r.title, r.description, r.frequency, r.category,
                r.priority, r.mandatory, r.schedule_weekday, r.schedule_month_day, r.time_period,
                COALESCE(r.schedule_month, 0) as schedule_month,
+               COALESCE(r.schedule_rule, '') as schedule_rule,
                r.linked_to_employee_id, le.name as linked_to_employee_name,
                r.backup_employee_id, be.name as backup_employee_name,
                COALESCE(r.backup_allocation_value, 0) as backup_allocation_value,
@@ -4286,7 +4885,10 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         lid = log.get("id")
         if lid:
             timer_events_by_log[int(lid)] = _list_timer_events(conn, int(lid))
+    slots_by_log = _slots_by_entity(conn, SLOT_RESP, list(timer_events_by_log.keys()))
+    slots_by_task = _slots_by_entity(conn, SLOT_ONE_TIME, [int(r["id"]) for r in ot_rows])
     conn.close()
+    slot_now = _now_iso()
 
     worked_on: list[dict] = []
     not_worked: list[dict] = []
@@ -4311,13 +4913,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     for r in resps:
         rid = int(r["id"])
         rdict = dict(r)
-        if not is_schedule_due(
-            rdict.get("frequency") or "Daily",
-            day,
-            rdict.get("schedule_weekday") or "",
-            int(rdict.get("schedule_month_day") or 0),
-            int(rdict.get("schedule_month") or 0),
-        ):
+        if not responsibility_due_on(rdict, day, due_ctx, employee_id=employee_id):
             skipped_schedule.append(
                 {
                     "responsibility_id": rid,
@@ -4326,6 +4922,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
                     "schedule_weekday": rdict.get("schedule_weekday") or "",
                     "schedule_month_day": rdict.get("schedule_month_day") or 0,
                     "schedule_month": rdict.get("schedule_month") or 0,
+                    "schedule_rule": rdict.get("schedule_rule") or "",
                 }
             )
             continue
@@ -4362,7 +4959,12 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             "in_action_window": in_task_action_window(day),
             "reassigned_out": bool(re_out),
             "reassigned_to_name": (re_out or {}).get("assignee_name") or "",
-            **_timer_payload({**(log or {}), "log_date": day}, events=events),
+            "schedule_rule": rdict.get("schedule_rule") or "",
+            **_apply_slots_to_payload(
+                _timer_payload({**(log or {}), "log_date": day}, events=events),
+                slots_by_log.get(lid, []) if lid else [],
+                slot_now,
+            ),
         }
         # Original still holds master — if reassigned for the day, don't force pending scoreboard
         if re_out and not log:
@@ -4391,6 +4993,16 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         )
 
     one_time = [_one_time_task_row(r) for r in ot_rows]
+    _overlay_one_time_slots(one_time, slots_by_task, slot_now)
+    if on_leave:
+        # Leave day: pending items leave the employee's actionable list (backup covers mandatory).
+        for item in not_worked + whenever_required:
+            item["status"] = "Leave"
+            item["on_leave"] = True
+            other.append(item)
+        not_worked = []
+        whenever_required = []
+        one_time = [t for t in one_time if t.get("status") == "Done"]
     one_time.sort(
         key=lambda t: (
             0 if t.get("timer_status") == "Active" else 1 if t.get("timer_status") == "Paused" else 2,
@@ -4418,9 +5030,13 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     pending_daily = sum(1 for i in expected_daily if i["status"] == "Pending")
     missed_daily = sum(1 for i in expected_daily if i["status"] == "Missed")
 
+    from .hrm_worktime import day_time_summary
+
     return {
         "employee": dict(emp),
         "check_date": day,
+        "on_leave": on_leave,
+        "time_summary": day_time_summary(employee_id, day),
         "worked_on": worked_on,
         "submitted_for_approval": submitted_for_approval,
         "not_worked": not_worked,
@@ -4465,51 +5081,34 @@ def list_dwr_rows(
     employee_id: int | None = None,
     department_id: int | None = None,
     check_date: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
 ) -> dict:
-    """Flat Daily Work Report rows for Admin/HOD (one row per responsibility that day)."""
-    day = check_date or today_ist().isoformat()
-    emp_ids: list[int] = []
-    if employee_id:
-        emp_ids = [int(employee_id)]
-    else:
-        conn = _connect()
-        q = "SELECT id FROM employees WHERE IFNULL(status,'Active') != 'Inactive'"
-        params: list = []
-        if department_id:
-            q += " AND department_id=?"
-            params.append(int(department_id))
-        emp_ids = [int(r["id"]) for r in conn.execute(q, params).fetchall()]
-        conn.close()
+    """Daily Work Report for a date or inclusive date range (responsibilities + one-time
+    tasks with their time slots), sorted by DWR duration descending."""
+    from .hrm_worktime import list_dwr_report
 
-    rows: list[dict] = []
-    for eid in emp_ids:
-        snap = get_employee_day_check(eid, day)
-        if not snap:
-            continue
-        emp = snap.get("employee") or {}
-        for bucket in ("worked_on", "not_worked", "other", "whenever_required"):
-            for item in snap.get(bucket) or []:
-                linked_name = item.get("linked_to_employee_name") or ""
-                rows.append(
-                    {
-                        "employee_id": eid,
-                        "employee_name": emp.get("name") or "",
-                        "department_name": emp.get("department_name") or "",
-                        "check_date": day,
-                        "responsibility_id": item.get("responsibility_id"),
-                        "title": item.get("title"),
-                        "frequency": item.get("frequency"),
-                        "status": item.get("status"),
-                        "timer_status": item.get("timer_status") or "Not Started",
-                        "started_at": item.get("started_at") or "",
-                        "ended_at": item.get("ended_at") or "",
-                        "duration_minutes": int(item.get("duration_minutes") or 0),
-                        "linked_to_employee_id": item.get("linked_to_employee_id"),
-                        "linked_to_employee_name": linked_name,
-                        "linked_person": linked_name or "Self-complete",
-                    }
-                )
-    return {"check_date": day, "rows": rows}
+    d0 = str(from_date or check_date or today_ist().isoformat())[:10]
+    d1 = str(to_date or from_date or check_date or d0)[:10]
+    return list_dwr_report(
+        employee_ids=scoped_employee_ids(employee_id=employee_id, department_id=department_id),
+        from_date=d0,
+        to_date=d1,
+    )
+
+
+def scoped_employee_ids(*, employee_id: int | None = None, department_id: int | None = None) -> list[int]:
+    if employee_id:
+        return [int(employee_id)]
+    conn = _connect()
+    q = "SELECT id FROM employees WHERE IFNULL(status,'Active') != 'Inactive'"
+    params: list = []
+    if department_id:
+        q += " AND department_id=?"
+        params.append(int(department_id))
+    ids = [int(r["id"]) for r in conn.execute(q + " ORDER BY name", params).fetchall()]
+    conn.close()
+    return ids
 
 
 def mark_unmarked_daily_as_missed(
@@ -4562,27 +5161,33 @@ def process_end_of_day_missed_ist(*, as_of: date | None = None, actor: str = "sy
             "as_of": as_of.isoformat(),
             "skipped": "sunday",
         }
+    if target_day in holiday_set():
+        return {
+            "ok": True,
+            "target_day": target_day,
+            "marked_missed": 0,
+            "as_of": as_of.isoformat(),
+            "skipped": "holiday",
+        }
     missed_n = 0
+    leave_n = 0
     conn = _connect()
     try:
         resps = conn.execute(
             """
             SELECT id, employee_id, frequency, schedule_weekday, schedule_month_day,
-                   COALESCE(schedule_month, 0) as schedule_month
+                   COALESCE(schedule_month, 0) as schedule_month,
+                   COALESCE(schedule_rule, '') as schedule_rule,
+                   mandatory, backup_employee_id
             FROM responsibilities WHERE active=1
             """
         ).fetchall()
+        due_ctx = DueContext(conn)
         for r in resps:
             freq = (r["frequency"] or "Daily").strip()
             if freq.lower() == "whenever required":
                 continue
-            if not is_schedule_due(
-                freq,
-                target_day,
-                r["schedule_weekday"] or "",
-                int(r["schedule_month_day"] or 0),
-                int(r["schedule_month"] or 0),
-            ):
+            if not responsibility_due_on(dict(r), target_day, due_ctx):
                 continue
             row = conn.execute(
                 "SELECT id, status FROM task_logs WHERE responsibility_id=? AND log_date=?",
@@ -4592,19 +5197,31 @@ def process_end_of_day_missed_ist(*, as_of: date | None = None, actor: str = "sy
                 st = str(row["status"] or "Pending").strip()
                 if st not in ("Pending",):
                     continue
+            on_leave = target_day in due_ctx.leave_days(int(r["employee_id"]))
             ok = mark_task(
                 int(r["id"]),
                 target_day,
-                "Missed",
+                "Leave" if on_leave else "Missed",
                 marked_by=actor,
-                remarks="Auto-missed: not updated by end of day (IST)",
+                remarks="Auto: employee on approved leave"
+                if on_leave
+                else "Auto-missed: not updated by end of day (IST)",
                 allow_override=True,
             )
             if ok is True:
-                missed_n += 1
+                if on_leave:
+                    leave_n += 1
+                else:
+                    missed_n += 1
     finally:
         conn.close()
-    return {"ok": True, "target_day": target_day, "marked_missed": missed_n, "as_of": as_of.isoformat()}
+    return {
+        "ok": True,
+        "target_day": target_day,
+        "marked_missed": missed_n,
+        "marked_leave": leave_n,
+        "as_of": as_of.isoformat(),
+    }
 
 
 def get_performance(department_id=None, from_date=None, to_date=None):
@@ -4979,6 +5596,9 @@ def _one_time_task_row(row) -> dict:
     elif status in ("Pending", "Rejected"):
         ts = "Not Started"
         ended = ""
+    elif status == "On Hold":
+        ts = "On Hold"
+        ended = ""
     else:
         ts = timer_status(started, completed, paused)
         ended = completed
@@ -5020,12 +5640,16 @@ def list_one_time_tasks(
     department_id=None,
     status: str | None = None,
     active_only=True,
+    include_hold: bool = False,
 ):
+    process_task_hold_resume()
     conn = _connect()
     conditions = []
     params: list = []
     if active_only:
         conditions.append("t.active=1")
+    if not include_hold and status != "On Hold":
+        conditions.append("t.status != 'On Hold'")
     if employee_id:
         conditions.append("t.employee_id=?")
         params.append(int(employee_id))
@@ -5060,8 +5684,23 @@ def list_one_time_tasks(
         """,
         params,
     ).fetchall()
+    slots_by_task = _slots_by_entity(conn, SLOT_ONE_TIME, [int(r["id"]) for r in rows])
     conn.close()
-    return [_one_time_task_row(r) for r in rows]
+    tasks = [_one_time_task_row(r) for r in rows]
+    _overlay_one_time_slots(tasks, slots_by_task)
+    return tasks
+
+
+def _overlay_one_time_slots(tasks: list[dict], slots_by_task: dict[int, list[dict]], now: str | None = None) -> None:
+    if not now and any(slots_by_task.values()):
+        now = _now_iso()
+    for t in tasks:
+        views = [_slot_view(s, now) for s in slots_by_task.get(int(t["id"]), [])]
+        total = sum(v["net_seconds"] for v in views)
+        t["time_slots"] = views
+        t["has_manual_slots"] = any(v["manual_edited"] for v in views)
+        t["total_work_seconds"] = total
+        t["total_work_label"] = _format_duration_hm(total)
 
 
 def create_one_time_task(data: dict) -> int:
@@ -5240,14 +5879,30 @@ def start_one_time_task(task_id: int, *, actor: str = "") -> bool | str:
         conn, emp_id, exclude_one_time_id=task_id, actor=actor or "auto"
     )
     now = _now_iso()
+    # Rework keeps earlier slots: first start time and slot history are preserved.
     conn.execute(
         """UPDATE one_time_tasks
-           SET status='In Progress', started_at=?, completed_at='', approved_at='',
-               paused_at='', active_seconds=0, paused_seconds=0, duration_minutes=0,
+           SET status='In Progress',
+               started_at=CASE WHEN IFNULL(started_at,'')='' THEN ? ELSE started_at END,
+               completed_at='', approved_at='',
+               paused_at='', paused_seconds=0,
                session_started_at=?, auto_paused=0, updated_at=?
            WHERE id=?""",
         (now, now, now, task_id),
     )
+    _open_slot(
+        conn,
+        entity_type=SLOT_ONE_TIME,
+        entity_id=task_id,
+        employee_id=emp_id,
+        log_date=now[:10],
+        started_at=now,
+    )
+    if _recompute_entity_totals(conn, SLOT_ONE_TIME, task_id) is None:
+        conn.execute(
+            "UPDATE one_time_tasks SET active_seconds=0, duration_minutes=0 WHERE id=?",
+            (task_id,),
+        )
     write_task_audit(
         "one_time_task",
         task_id,
@@ -5314,6 +5969,14 @@ def resume_one_time_task(task_id: int, *, actor: str = "") -> bool | str:
            WHERE id=?""",
         (paused_sec, now, now, task_id),
     )
+    _open_slot(
+        conn,
+        entity_type=SLOT_ONE_TIME,
+        entity_id=task_id,
+        employee_id=emp_id,
+        log_date=now[:10],
+        started_at=now,
+    )
     write_task_audit(
         "one_time_task",
         task_id,
@@ -5328,7 +5991,15 @@ def resume_one_time_task(task_id: int, *, actor: str = "") -> bool | str:
     return True
 
 
-def complete_one_time_task(task_id: int, completion_notes: str = "") -> bool:
+def complete_one_time_task(
+    task_id: int,
+    completion_notes: str = "",
+    *,
+    break_decision: str | None = None,
+    actor: str = "",
+) -> bool | dict:
+    """Mark Done. Returns {"status": "break_confirm", ...} when slots overlap a break and
+    no break_decision ('count' | 'deduct') was supplied."""
     conn = _connect()
     row = conn.execute(
         "SELECT * FROM one_time_tasks WHERE id=? AND active=1",
@@ -5339,6 +6010,11 @@ def complete_one_time_task(task_id: int, completion_notes: str = "") -> bool:
         return False
     row = dict(row)
     now = _now_iso()
+    if break_decision not in ("count", "deduct"):
+        breaks = entity_break_overlaps(conn, SLOT_ONE_TIME, task_id, now=now)
+        if breaks:
+            conn.close()
+            return {"status": "break_confirm", "breaks": breaks}
     active = int(row.get("active_seconds") or 0)
     paused_at = str(row.get("paused_at") or "").strip()
     if paused_at:
@@ -5358,6 +6034,10 @@ def complete_one_time_task(task_id: int, completion_notes: str = "") -> bool:
            WHERE id=?""",
         (now, mins, active, completion_notes or "", now, task_id),
     )
+    _close_open_slots(conn, SLOT_ONE_TIME, task_id, now, reason="end")
+    if break_decision in ("count", "deduct"):
+        _apply_break_decision(conn, SLOT_ONE_TIME, task_id, break_decision, actor=actor)
+    _recompute_entity_totals(conn, SLOT_ONE_TIME, task_id)
     conn.commit()
     conn.close()
     return True
@@ -5471,3 +6151,681 @@ def process_one_time_auto_pause(*, actor: str = "system-3h") -> dict:
     conn.commit()
     conn.close()
     return {"ok": True, "auto_paused": paused_n, "as_of": now}
+
+
+# ── Approval auto-closure (2 days after sent) ────────────────────────────────
+
+APPROVAL_AUTO_CLOSE_HOURS = 48
+AUTO_APPROVE_ACTOR = "system-auto-approve"
+
+
+def _approval_cutoff_ts(now: str | None = None) -> str:
+    base = _ts(now) if now else now_ist().replace(tzinfo=None)
+    return (base - timedelta(hours=APPROVAL_AUTO_CLOSE_HOURS)).strftime(_TS_FMT)
+
+
+def process_approval_auto_closures(*, now: str | None = None, actor: str = AUTO_APPROVE_ACTOR) -> dict:
+    """Auto-approve items the approver left untouched for 2 days after they were sent.
+
+    Only rows still awaiting approval are touched — manual Approved/Cancelled/Rejected
+    decisions are never overwritten.
+    """
+    cutoff = _approval_cutoff_ts(now)
+    stamp = now or _now_iso()
+    conn = _connect()
+    logs = conn.execute(
+        """
+        SELECT id, log_date,
+               COALESCE(NULLIF(approval_sent_at,''), marked_at, '') AS sent_at,
+               responsibility_id
+        FROM task_logs
+        WHERE approval_status='Pending' AND status IN ('Done','Partial')
+          AND COALESCE(NULLIF(approval_sent_at,''), marked_at, '') != ''
+          AND COALESCE(NULLIF(approval_sent_at,''), marked_at) <= ?
+        """,
+        (cutoff,),
+    ).fetchall()
+    for lg in logs:
+        conn.execute(
+            """UPDATE task_logs SET approval_status='Auto-Approved', approved_by=?, approved_at=?
+               WHERE id=? AND approval_status='Pending'""",
+            (actor, stamp, int(lg["id"])),
+        )
+        conn.execute(
+            "UPDATE task_approval_notifications SET is_read=1 WHERE task_log_id=?",
+            (int(lg["id"]),),
+        )
+        write_task_audit(
+            "task_log",
+            int(lg["id"]),
+            "auto_approved",
+            old_value="Pending",
+            new_value="Auto-Approved",
+            actor=actor,
+            notes=f"No action by linked person within 2 days (sent {lg['sent_at']}, log_date={lg['log_date']})",
+            conn=conn,
+        )
+    tasks = conn.execute(
+        """
+        SELECT id, completed_at FROM one_time_tasks
+        WHERE active=1 AND status IN ('Done','Completed')
+          AND IFNULL(completed_at,'') != '' AND completed_at <= ?
+        """,
+        (cutoff,),
+    ).fetchall()
+    for t in tasks:
+        conn.execute(
+            """UPDATE one_time_tasks
+               SET status='Approved', approved_at=?, approved_by=?, auto_approved=1,
+                   approval_notes='Auto-approved: no approver action within 2 days', updated_at=?
+               WHERE id=? AND status IN ('Done','Completed')""",
+            (stamp, actor, stamp, int(t["id"])),
+        )
+        write_task_audit(
+            "one_time_task",
+            int(t["id"]),
+            "auto_approved",
+            old_value="Done",
+            new_value="Approved",
+            actor=actor,
+            notes=f"No approver action within 2 days (sent {t['completed_at']})",
+            conn=conn,
+        )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "auto_approved": len(logs) + len(tasks), "task_logs": len(logs), "one_time_tasks": len(tasks)}
+
+
+# ── One-time task Hold / auto-resume ─────────────────────────────────────────
+
+HOLDABLE_STATUSES = frozenset({"Pending", "In Progress", "Rejected"})
+
+
+def hold_one_time_task(task_id: int, resume_date: str, *, reason: str = "", actor: str = "") -> bool | str:
+    try:
+        rd = date.fromisoformat(str(resume_date or "")[:10])
+    except ValueError:
+        return "invalid_date"
+    if rd <= today_ist():
+        return "resume_in_past"
+    conn = _connect()
+    row = conn.execute("SELECT * FROM one_time_tasks WHERE id=? AND active=1", (task_id,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    row = dict(row)
+    status = _normalize_one_time_status(row.get("status") or "")
+    if status not in HOLDABLE_STATUSES:
+        conn.close()
+        return "not_holdable"
+    if status == "In Progress" and not str(row.get("paused_at") or "").strip():
+        _pause_one_time_row(conn, row, actor=actor, reason="hold_pause", notes="Paused: task put on hold")
+    now = _now_iso()
+    conn.execute(
+        """UPDATE one_time_tasks
+           SET status='On Hold', hold_until=?, hold_prev_status=?, hold_reason=?,
+               held_at=?, held_by=?, updated_at=?
+           WHERE id=?""",
+        (rd.isoformat(), status, reason or "", now, actor or "", now, task_id),
+    )
+    write_task_audit(
+        "one_time_task",
+        task_id,
+        "hold",
+        old_value=status,
+        new_value="On Hold",
+        actor=actor,
+        notes=f"Resume on {rd.isoformat()}" + (f" — {reason}" if reason else ""),
+        conn=conn,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def _resume_held_row(conn, row: dict, *, actor: str, action: str) -> None:
+    prev = str(row.get("hold_prev_status") or "Pending")
+    if prev not in HOLDABLE_STATUSES:
+        prev = "Pending"
+    now = _now_iso()
+    # A task held mid-work comes back paused; the hold period is not counted as paused time.
+    conn.execute(
+        """UPDATE one_time_tasks
+           SET status=?, paused_at=CASE WHEN ?='In Progress' THEN ? ELSE paused_at END,
+               hold_until='', hold_prev_status='', updated_at=?
+           WHERE id=?""",
+        (prev, prev, now, now, int(row["id"])),
+    )
+    write_task_audit(
+        "one_time_task",
+        int(row["id"]),
+        action,
+        old_value="On Hold",
+        new_value=prev,
+        actor=actor,
+        notes=f"Hold until {row.get('hold_until') or ''} ended",
+        conn=conn,
+    )
+
+
+def process_task_hold_resume(*, as_of: date | None = None, actor: str = "system-hold-resume") -> dict:
+    day = (as_of or today_ist()).isoformat()
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM one_time_tasks
+               WHERE status='On Hold' AND IFNULL(hold_until,'') != '' AND hold_until <= ?""",
+            (day,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return {"ok": True, "resumed": 0}
+    for r in rows:
+        _resume_held_row(conn, dict(r), actor=actor, action="auto_resume")
+    if rows:
+        conn.commit()
+    conn.close()
+    return {"ok": True, "resumed": len(rows)}
+
+
+def resume_held_task_now(task_id: int, *, actor: str = "") -> bool:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM one_time_tasks WHERE id=? AND active=1 AND status='On Hold'", (task_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    _resume_held_row(conn, dict(row), actor=actor, action="resume_from_hold")
+    conn.commit()
+    conn.close()
+    return True
+
+
+# ── Holidays ─────────────────────────────────────────────────────────────────
+
+
+def holiday_set(conn=None) -> set[str]:
+    owns = conn is None
+    if owns:
+        conn = _connect()
+    try:
+        rows = conn.execute("SELECT holiday_date FROM hrm_holidays").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    if owns:
+        conn.close()
+    return {str(r["holiday_date"])[:10] for r in rows}
+
+
+def list_holidays() -> list[dict]:
+    conn = _connect()
+    rows = conn.execute("SELECT * FROM hrm_holidays ORDER BY holiday_date").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def upsert_holiday(holiday_date: str, name: str = "", *, actor: str = "") -> str:
+    d = date.fromisoformat(str(holiday_date)[:10]).isoformat()
+    conn = _connect()
+    conn.execute(
+        """INSERT INTO hrm_holidays(holiday_date, name, created_by) VALUES(?,?,?)
+           ON CONFLICT(holiday_date) DO UPDATE SET name=excluded.name""",
+        (d, name or "", actor or ""),
+    )
+    write_task_audit("holiday", None, "upsert", new_value=d, actor=actor, notes=name or "", conn=conn)
+    conn.commit()
+    conn.close()
+    return d
+
+
+def delete_holiday(holiday_date: str, *, actor: str = "") -> bool:
+    d = str(holiday_date)[:10]
+    conn = _connect()
+    cur = conn.execute("DELETE FROM hrm_holidays WHERE holiday_date=?", (d,))
+    write_task_audit("holiday", None, "delete", old_value=d, actor=actor, conn=conn)
+    conn.commit()
+    conn.close()
+    return bool(cur.rowcount)
+
+
+# ── Dynamic schedule rule + next-working-day shift ───────────────────────────
+
+_ORDINALS = {
+    "1st": 1, "first": 1, "2nd": 2, "second": 2, "3rd": 3, "third": 3,
+    "4th": 4, "fourth": 4, "5th": 5, "fifth": 5, "last": -1,
+}
+_ORDINAL_LABEL = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th", 5: "5th", -1: "Last"}
+SCHEDULE_RULE_FREQUENCIES = ("Monthly", "Fortnightly", "Yearly")
+SHIFTABLE_FREQUENCIES = frozenset({"Weekly", "Fortnightly", "Monthly", "Yearly"})
+SCHEDULE_RULE_EXAMPLES = (
+    "1st Monday", "2nd Monday", "1st Saturday", "2nd Saturday", "2nd & 4th Saturday",
+    "Last Friday", "Last Working Day", "First Working Day",
+)
+
+
+def parse_schedule_rule(rule: str | None) -> dict | None:
+    s = re.sub(r"\s+", " ", str(rule or "").strip().lower())
+    if not s:
+        return None
+    if s in ("last working day", "lwd"):
+        return {"kind": "last_working_day"}
+    if s in ("first working day", "fwd"):
+        return {"kind": "first_working_day"}
+    err = (
+        f"Invalid schedule rule '{rule}'. Use e.g. '1st Monday', '2nd & 4th Saturday', "
+        "'Last Friday', 'Last Working Day'"
+    )
+    m = re.fullmatch(r"(.+?) (monday|tuesday|wednesday|thursday|friday|saturday|sunday)", s)
+    if not m:
+        raise ValueError(err)
+    tokens = [t for t in re.split(r"\s*(?:,|&|/|\+|\band\b)\s*", m.group(1)) if t]
+    occ: list[int] = []
+    for t in tokens:
+        if t not in _ORDINALS:
+            raise ValueError(err)
+        occ.append(_ORDINALS[t])
+    wd = [w.lower() for w in WEEKDAYS].index(m.group(2))
+    return {"kind": "weekday", "occurrences": sorted(set(occ), key=lambda o: (o < 0, o)), "weekday": wd}
+
+
+def normalize_schedule_rule(rule: str | None) -> str:
+    p = parse_schedule_rule(rule)
+    if not p:
+        return ""
+    if p["kind"] == "last_working_day":
+        return "Last Working Day"
+    if p["kind"] == "first_working_day":
+        return "First Working Day"
+    labels = " & ".join(_ORDINAL_LABEL[o] for o in p["occurrences"])
+    return f"{labels} {WEEKDAYS[p['weekday']]}"
+
+
+def _is_company_working_day(d: date, holidays: set[str]) -> bool:
+    return d.weekday() != 6 and d.isoformat() not in holidays
+
+
+def _schedule_rule_matches(parsed: dict, d: date, *, holidays: set[str], frequency: str) -> bool:
+    kind = parsed["kind"]
+    if kind in ("last_working_day", "first_working_day"):
+        if kind == "last_working_day":
+            nxt = date(d.year + (d.month == 12), d.month % 12 + 1, 1)
+            cur = nxt - timedelta(days=1)
+            step = -1
+        else:
+            cur = date(d.year, d.month, 1)
+            step = 1
+        for _ in range(31):
+            if cur.month != d.month:
+                return False
+            if _is_company_working_day(cur, holidays):
+                return cur == d
+            cur += timedelta(days=step)
+        return False
+    if d.weekday() != parsed["weekday"]:
+        return False
+    wanted = list(parsed["occurrences"])
+    if frequency == "Fortnightly" and len(wanted) == 1 and wanted[0] in (1, 2, 3):
+        wanted.append(wanted[0] + 2)
+    occ = weekday_occurrence_in_month(d)
+    is_last = (d + timedelta(days=7)).month != d.month
+    return occ in wanted or (-1 in wanted and is_last)
+
+
+def nominal_schedule_due(r: dict, d: date, holidays: set[str] | None = None) -> bool:
+    """Calendar schedule only (no Sunday/holiday/leave shifting)."""
+    freq = (r.get("frequency") or "Daily").strip()
+    rule = str(r.get("schedule_rule") or "").strip()
+    if rule and freq in SCHEDULE_RULE_FREQUENCIES:
+        try:
+            parsed = parse_schedule_rule(rule)
+        except ValueError:
+            parsed = None
+        if parsed:
+            if freq == "Yearly":
+                sm = int(r.get("schedule_month") or 0)
+                if sm and d.month != sm:
+                    return False
+            return _schedule_rule_matches(parsed, d, holidays=holidays or set(), frequency=freq)
+    return is_schedule_due(
+        freq,
+        d.isoformat(),
+        r.get("schedule_weekday") or "",
+        int(r.get("schedule_month_day") or 0),
+        int(r.get("schedule_month") or 0),
+    )
+
+
+def _leave_day_set(conn, employee_id: int) -> set[str]:
+    try:
+        rows = conn.execute(
+            "SELECT from_date, to_date FROM hrm_leaves WHERE employee_id=? AND status='Approved'",
+            (int(employee_id),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    out: set[str] = set()
+    for r in rows:
+        try:
+            d0 = date.fromisoformat(str(r["from_date"])[:10])
+            d1 = date.fromisoformat(str(r["to_date"])[:10])
+        except ValueError:
+            continue
+        cur = d0
+        while cur <= d1 and (cur - d0).days <= 366:
+            out.add(cur.isoformat())
+            cur += timedelta(days=1)
+    return out
+
+
+class DueContext:
+    """Caches holidays and per-employee leave days for schedule evaluation."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.holidays = holiday_set(conn)
+        self._leave: dict[int, set[str]] = {}
+
+    def leave_days(self, employee_id: int) -> set[str]:
+        eid = int(employee_id or 0)
+        if eid not in self._leave:
+            self._leave[eid] = _leave_day_set(self.conn, eid) if eid else set()
+        return self._leave[eid]
+
+    def non_working(self, d: date, employee_id: int | None, *, backup_covers: bool = False) -> bool:
+        if not _is_company_working_day(d, self.holidays):
+            return True
+        if not backup_covers and employee_id and d.isoformat() in self.leave_days(employee_id):
+            return True
+        return False
+
+
+def responsibility_due_on(
+    r: dict, day: str, ctx: DueContext, *, employee_id: int | None = None
+) -> bool:
+    """Schedule check with Sunday/holiday/leave moved to the next working day (never skipped).
+
+    Daily / Quarterly / Whenever Required keep the calendar rule. Mandatory items with a
+    Backup Person are covered by the backup on leave days, so leave does not shift them.
+    """
+    freq = (r.get("frequency") or "Daily").strip()
+    try:
+        d = date.fromisoformat(str(day)[:10])
+    except ValueError:
+        return True
+    if freq not in SHIFTABLE_FREQUENCIES:
+        return nominal_schedule_due(r, d, ctx.holidays)
+    emp = employee_id or r.get("employee_id")
+    backup_covers = bool(int(r.get("mandatory") or 0)) and bool(r.get("backup_employee_id"))
+    if ctx.non_working(d, emp, backup_covers=backup_covers):
+        return False
+    if nominal_schedule_due(r, d, ctx.holidays):
+        return True
+    p = d - timedelta(days=1)
+    for _ in range(62):
+        if not ctx.non_working(p, emp, backup_covers=backup_covers):
+            return False
+        if nominal_schedule_due(r, p, ctx.holidays):
+            return True
+        p -= timedelta(days=1)
+    return False
+
+
+# ── Leave (Employee Check header) with Backup Person cover ───────────────────
+
+LEAVE_MAX_DAYS = 90
+
+
+def employee_leave_on(employee_id: int, day: str, conn=None) -> dict | None:
+    owns = conn is None
+    if owns:
+        conn = _connect()
+    try:
+        row = conn.execute(
+            """SELECT * FROM hrm_leaves WHERE employee_id=? AND status='Approved'
+               AND from_date<=? AND to_date>=? ORDER BY id DESC LIMIT 1""",
+            (int(employee_id), str(day)[:10], str(day)[:10]),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if owns:
+        conn.close()
+    return dict(row) if row else None
+
+
+def list_leaves(
+    *, employee_ids: list[int] | None = None, from_date: str | None = None, to_date: str | None = None,
+    include_cancelled: bool = False,
+) -> list[dict]:
+    conn = _connect()
+    q = """SELECT l.*, e.name AS employee_name, e.department_id
+           FROM hrm_leaves l LEFT JOIN employees e ON e.id=l.employee_id WHERE 1=1"""
+    params: list = []
+    if not include_cancelled:
+        q += " AND l.status='Approved'"
+    if employee_ids is not None:
+        if not employee_ids:
+            conn.close()
+            return []
+        q += f" AND l.employee_id IN ({','.join('?' * len(employee_ids))})"
+        params.extend(int(e) for e in employee_ids)
+    if from_date:
+        q += " AND l.to_date >= ?"
+        params.append(str(from_date)[:10])
+    if to_date:
+        q += " AND l.from_date <= ?"
+        params.append(str(to_date)[:10])
+    q += " ORDER BY l.from_date DESC, l.id DESC"
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _leave_marker(leave_id: int) -> str:
+    return f"Leave #{int(leave_id)}"
+
+
+def _assign_leave_backups(conn, leave_id: int, employee_id: int, d0: date, d1: date, actor: str) -> tuple[int, list[str]]:
+    resps = conn.execute(
+        """SELECT r.*, be.name AS backup_name FROM responsibilities r
+           LEFT JOIN employees be ON be.id=r.backup_employee_id
+           WHERE r.employee_id=? AND r.active=1 AND IFNULL(r.mandatory,0)=1""",
+        (int(employee_id),),
+    ).fetchall()
+    ctx = DueContext(conn)
+    created = 0
+    no_backup: list[str] = []
+    marker = _leave_marker(leave_id)
+    for r in resps:
+        rd = dict(r)
+        if (rd.get("frequency") or "").strip() == "Whenever Required":
+            continue
+        backup = rd.get("backup_employee_id")
+        if not backup or int(backup) == int(employee_id):
+            no_backup.append(str(rd.get("title") or ""))
+            continue
+        cur = d0
+        while cur <= d1:
+            ds = cur.isoformat()
+            if _is_company_working_day(cur, ctx.holidays) and responsibility_due_on(
+                rd, ds, ctx, employee_id=int(employee_id)
+            ):
+                exists = conn.execute(
+                    """SELECT id FROM day_reassignment_clones
+                       WHERE original_responsibility_id=? AND reassignment_date=?""",
+                    (int(rd["id"]), ds),
+                ).fetchone()
+                if not exists:
+                    cur_ins = conn.execute(
+                        """INSERT INTO day_reassignment_clones(
+                            original_responsibility_id, original_employee_id, assignee_employee_id,
+                            reassignment_date, title, status, assigned_by
+                        ) VALUES(?,?,?,?,?,'Pending',?)""",
+                        (
+                            int(rd["id"]),
+                            int(employee_id),
+                            int(backup),
+                            ds,
+                            f"{rd['title']} (leave cover)",
+                            marker,
+                        ),
+                    )
+                    write_task_audit(
+                        "reassignment",
+                        int(cur_ins.lastrowid),
+                        "leave_backup_assigned",
+                        old_value=str(employee_id),
+                        new_value=str(backup),
+                        actor=actor,
+                        notes=f"{marker} day={ds} resp={rd['id']}",
+                        conn=conn,
+                    )
+                    created += 1
+            cur += timedelta(days=1)
+    return created, no_backup
+
+
+def create_leave(
+    employee_id: int, from_date: str, to_date: str, *, reason: str = "", actor: str = ""
+) -> dict:
+    try:
+        d0 = date.fromisoformat(str(from_date)[:10])
+        d1 = date.fromisoformat(str(to_date)[:10])
+    except ValueError as e:
+        raise ValueError("Leave dates must be YYYY-MM-DD") from e
+    if d1 < d0:
+        raise ValueError("Leave To Date must be on or after Leave From Date")
+    days = (d1 - d0).days + 1
+    if days > LEAVE_MAX_DAYS:
+        raise ValueError(f"Leave cannot exceed {LEAVE_MAX_DAYS} days")
+    conn = _connect()
+    try:
+        emp = conn.execute("SELECT id FROM employees WHERE id=?", (int(employee_id),)).fetchone()
+        if not emp:
+            raise ValueError("Employee not found")
+        clash = conn.execute(
+            """SELECT id, from_date, to_date FROM hrm_leaves
+               WHERE employee_id=? AND status='Approved' AND from_date<=? AND to_date>=?""",
+            (int(employee_id), d1.isoformat(), d0.isoformat()),
+        ).fetchone()
+        if clash:
+            raise ValueError(
+                f"Leave overlaps existing leave {clash['from_date']} → {clash['to_date']}"
+            )
+        sundays = sum(1 for i in range(days) if (d0 + timedelta(days=i)).weekday() == 6)
+        cur = conn.execute(
+            """INSERT INTO hrm_leaves(employee_id, from_date, to_date, days, reason, status, created_by)
+               VALUES(?,?,?,?,?,'Approved',?)""",
+            (int(employee_id), d0.isoformat(), d1.isoformat(), days, reason or "", actor or ""),
+        )
+        leave_id = int(cur.lastrowid)
+        write_task_audit(
+            "leave",
+            leave_id,
+            "created",
+            new_value=f"{d0.isoformat()} → {d1.isoformat()} ({days} days incl. {sundays} Sunday)",
+            actor=actor,
+            notes=reason or "",
+            conn=conn,
+        )
+        clones, no_backup = _assign_leave_backups(conn, leave_id, int(employee_id), d0, d1, actor)
+        conn.execute("UPDATE hrm_leaves SET backup_clones=? WHERE id=?", (clones, leave_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "id": leave_id,
+        "from_date": d0.isoformat(),
+        "to_date": d1.isoformat(),
+        "days": days,
+        "sundays_included": sundays,
+        "backup_assignments": clones,
+        "mandatory_without_backup": no_backup,
+    }
+
+
+def get_leave(leave_id: int) -> dict | None:
+    conn = _connect()
+    row = conn.execute("SELECT * FROM hrm_leaves WHERE id=?", (int(leave_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def cancel_leave(leave_id: int, *, actor: str = "") -> bool:
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM hrm_leaves WHERE id=? AND status='Approved'", (int(leave_id),)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    today = today_ist().isoformat()
+    cur = conn.execute(
+        """DELETE FROM day_reassignment_clones
+           WHERE assigned_by=? AND status='Pending' AND reassignment_date>=?""",
+        (_leave_marker(leave_id), today),
+    )
+    conn.execute(
+        "UPDATE hrm_leaves SET status='Cancelled', cancelled_by=?, cancelled_at=? WHERE id=?",
+        (actor or "", _now_iso(), int(leave_id)),
+    )
+    write_task_audit(
+        "leave",
+        int(leave_id),
+        "cancelled",
+        old_value="Approved",
+        new_value="Cancelled",
+        actor=actor,
+        notes=f"Removed {cur.rowcount or 0} future backup assignment(s); owner restored",
+        conn=conn,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def process_leave_restorations(*, as_of: date | None = None, actor: str = "system-leave") -> dict:
+    """After a leave ends, backup cover is inactive (clones are per-day); record the restore."""
+    day = (as_of or today_ist()).isoformat()
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM hrm_leaves
+               WHERE status='Approved' AND to_date < ? AND IFNULL(restored_at,'')=''""",
+            (day,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return {"ok": True, "restored": 0}
+    now = _now_iso()
+    for r in rows:
+        leftover = conn.execute(
+            """DELETE FROM day_reassignment_clones
+               WHERE assigned_by=? AND status='Pending' AND reassignment_date>?""",
+            (_leave_marker(int(r["id"])), str(r["to_date"])),
+        ).rowcount
+        conn.execute("UPDATE hrm_leaves SET restored_at=? WHERE id=?", (now, int(r["id"])))
+        write_task_audit(
+            "leave",
+            int(r["id"]),
+            "responsibility_restored",
+            old_value="backup",
+            new_value=str(r["employee_id"]),
+            actor=actor,
+            notes=f"Leave ended {r['to_date']}; mandatory responsibilities back with owner"
+            + (f" (removed {leftover} stray clone(s))" if leftover else ""),
+            conn=conn,
+        )
+    if rows:
+        conn.commit()
+    conn.close()
+    return {"ok": True, "restored": len(rows)}
+
+
+def run_hrm_automations() -> dict:
+    """Scheduler entry: approval auto-closure, hold auto-resume, leave restoration."""
+    return {
+        "approvals": process_approval_auto_closures(),
+        "hold": process_task_hold_resume(),
+        "leave": process_leave_restorations(),
+    }

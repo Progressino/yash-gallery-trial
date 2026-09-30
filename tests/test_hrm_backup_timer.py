@@ -119,7 +119,7 @@ def test_pause_resume_excludes_paused_time(hrm, monkeypatch):
     assert start_responsibility_timer(rid, day) is True
     assert pause_responsibility_timer(rid, day) is True
     assert resume_responsibility_timer(rid, day) is True
-    assert end_responsibility_timer(rid, day) is True
+    assert end_responsibility_timer(rid, day, break_decision="count") is True
 
     detail = hrm.get_responsibility_timer_detail(rid, day)
     assert detail["timer_status"] == "Completed"

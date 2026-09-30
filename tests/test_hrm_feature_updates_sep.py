@@ -208,7 +208,7 @@ def test_employee_check_one_time_tasks_timer_controls(hrm, monkeypatch):
 
     assert pause_one_time_task(pending) is True
     assert resume_one_time_task(pending) is True
-    assert hrm_db.complete_one_time_task(pending, "done") is True
+    assert hrm_db.complete_one_time_task(pending, "done", break_decision="count") is True
     check3 = get_employee_day_check(a, day)
     actionable_ids = {int(t["id"]) for t in (check3.get("one_time_tasks") or [])}
     assert pending not in actionable_ids
