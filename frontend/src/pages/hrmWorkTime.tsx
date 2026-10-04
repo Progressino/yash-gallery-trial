@@ -80,13 +80,15 @@ export function SlotList({
   onChanged: () => void
 }) {
   const [editId, setEditId] = useState<number | null>(null)
+  const [noteId, setNoteId] = useState<number | null>(null)
+  const [noteText, setNoteText] = useState('')
   const [form, setForm] = useState({ start: '', end: '', notes: '' })
   const [adding, setAdding] = useState(false)
   const [open, setOpen] = useState(false)
 
   const saveMut = useMutation({
     mutationFn: ({ id, body }: { id: number; body: object }) => api.patch(`/hrm/time-slots/${id}`, body),
-    onSuccess: () => { setEditId(null); onChanged() },
+    onSuccess: () => { setEditId(null); setNoteId(null); onChanged() },
     onError: (e: any) => alert(errMsg(e, 'Could not save time slot')),
   })
   const addMut = useMutation({
@@ -102,13 +104,21 @@ export function SlotList({
 
   const beginEdit = (s: any) => {
     setAdding(false)
+    setNoteId(null)
     setEditId(s.id)
-    setForm({ start: hhmm(s.started_at), end: hhmm(s.ended_at), notes: s.notes || '' })
+    setForm({ start: hhmm(s.started_at), end: hhmm(s.ended_at), notes: '' })
+  }
+  const beginNote = (s: any) => {
+    setAdding(false)
+    setEditId(null)
+    setNoteId(s.id)
+    setNoteText(s.notes || '')
   }
   const submitEdit = (s: any) => {
-    const body: Record<string, string> = { notes: form.notes }
+    const body: Record<string, string> = {}
     if (form.start && form.start !== hhmm(s.started_at)) body.started_at = form.start
     if (!s.is_open && form.end && form.end !== hhmm(s.ended_at)) body.ended_at = form.end
+    if (!Object.keys(body).length) { setEditId(null); return }
     saveMut.mutate({ id: s.id, body })
   }
   const submitAdd = () => {
@@ -133,15 +143,26 @@ export function SlotList({
                   <input type="time" value={form.start} onChange={e => setForm(f => ({ ...f, start: e.target.value }))} className="border rounded px-1 py-0.5" />
                   <span>–</span>
                   <input type="time" value={form.end} disabled={s.is_open} onChange={e => setForm(f => ({ ...f, end: e.target.value }))} className="border rounded px-1 py-0.5 disabled:bg-gray-100" />
-                  <input value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} placeholder="Notes" className="border rounded px-1 py-0.5 flex-1 min-w-[8rem]" />
-                  <button type="button" disabled={saveMut.isPending} onClick={() => submitEdit(s)} className="px-2 py-0.5 bg-green-700 text-white rounded">Save</button>
+                  <button type="button" disabled={saveMut.isPending} onClick={() => submitEdit(s)} className="px-2 py-0.5 bg-green-700 text-white rounded">Save time</button>
                   <button type="button" onClick={() => setEditId(null)} className="text-gray-500">Cancel</button>
+                </div>
+              ) : noteId === s.id ? (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-gray-500">#{idx + 1}</span>
+                  <span className="font-medium text-gray-800">{clock12(s.started_at)} – {s.is_open ? 'running' : clock12(s.ended_at)}</span>
+                  <input autoFocus value={noteText} onChange={e => setNoteText(e.target.value)} placeholder="Note for this time slot"
+                    className="border rounded px-1 py-0.5 flex-1 min-w-[10rem]" />
+                  <button type="button" disabled={saveMut.isPending} onClick={() => saveMut.mutate({ id: s.id, body: { notes: noteText } })} className="px-2 py-0.5 bg-[#002B5B] text-white rounded">Save note</button>
+                  <button type="button" onClick={() => setNoteId(null)} className="text-gray-500">Cancel</button>
                 </div>
               ) : (
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-gray-500">#{idx + 1}</span>
                   <span className="font-medium text-gray-800">
-                    {clock12(s.started_at)} – {s.is_open ? <span className="text-blue-700">running</span> : clock12(s.ended_at)}
+                    {String(s.started_at).slice(5, 10)} {clock12(s.started_at)} – {s.is_open ? <span className="text-blue-700">running</span> : clock12(s.ended_at)}
+                    {!s.is_open && String(s.ended_at).slice(0, 10) !== String(s.started_at).slice(0, 10) && (
+                      <span className="text-gray-500"> ({String(s.ended_at).slice(5, 10)})</span>
+                    )}
                   </span>
                   <span className="text-[#002B5B] font-semibold">{s.duration_label || fmtHM(s.net_seconds)}</span>
                   {Number(s.break_deduct_seconds) > 0 && <span className="text-amber-700">−{fmtHM(s.break_deduct_seconds)} break</span>}
@@ -153,7 +174,12 @@ export function SlotList({
                   {s.end_reason === 'office_close' && <span className="text-gray-500">(auto-paused at Office Close)</span>}
                   {s.notes && <span className="text-gray-600 italic">“{s.notes}”</span>}
                   {canEdit && (
-                    <button type="button" onClick={() => beginEdit(s)} className="ml-auto text-blue-600 underline">Edit</button>
+                    <span className="ml-auto flex items-center gap-2">
+                      <button type="button" onClick={() => beginNote(s)} className="text-indigo-600 underline" title="Add or edit the note for this slot">
+                        📝 {s.notes ? 'Note' : 'Add note'}
+                      </button>
+                      <button type="button" onClick={() => beginEdit(s)} className="text-blue-600 underline" title="Edit start / end time">Edit time</button>
+                    </span>
                   )}
                 </div>
               )}
@@ -172,7 +198,7 @@ export function SlotList({
                   <button type="button" onClick={() => setAdding(false)} className="text-gray-500">Cancel</button>
                 </div>
               ) : (
-                <button type="button" onClick={() => { setEditId(null); setForm({ start: '', end: '', notes: '' }); setAdding(true) }} className="text-blue-600 underline">
+                <button type="button" onClick={() => { setEditId(null); setNoteId(null); setForm({ start: '', end: '', notes: '' }); setAdding(true) }} className="text-blue-600 underline">
                   + Add time slot
                 </button>
               )}
@@ -465,6 +491,33 @@ export function ScheduleRuleInput({ value, onChange, compact }: { value: string;
   )
 }
 
+const WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+/** "Twice a Week" schedule — two different weekdays stored as "Monday,Thursday". */
+export function WeekdayPairInput({ value, onChange, compact }: { value: string; onChange: (v: string) => void; compact?: boolean }) {
+  const parts = String(value || '').split(/[,/&]/).map(s => s.trim())
+  const [d1, d2] = [parts[0] || '', parts[1] || '']
+  const set = (a: string, b: string) => onChange([a, b].filter(Boolean).join(','))
+  const cls = `w-full border rounded px-2 ${compact ? 'py-1' : 'py-1.5 mt-1'} text-sm`
+  return (
+    <div>
+      <label className={compact ? 'text-[10px] text-gray-400' : 'text-xs text-gray-500'}>Weekdays (two) *</label>
+      <div className="flex gap-1">
+        <select value={d1} onChange={e => set(e.target.value, d2)} className={cls}>
+          <option value="">First</option>
+          {WEEK.map(d => <option key={d} value={d} disabled={d === d2}>{d}</option>)}
+        </select>
+        <select value={d2} onChange={e => set(d1, e.target.value)} className={cls}>
+          <option value="">Second</option>
+          {WEEK.map(d => <option key={d} value={d} disabled={d === d1}>{d}</option>)}
+        </select>
+      </div>
+    </div>
+  )
+}
+
+export const weekdayPairValid = (v: string) => new Set(String(v || '').split(/[,/&]/).map(s => s.trim()).filter(Boolean)).size === 2
+
 // ── Reports: Daily Working Report (date / range) ─────────────────────────────
 
 const typeBadge: Record<string, string> = {
@@ -474,11 +527,42 @@ const typeBadge: Record<string, string> = {
 }
 const typeLabel: Record<string, string> = { responsibility: 'Responsibility', one_time: 'One-time task', backup_cover: 'Backup cover' }
 
+const isoDay = (d: Date) => d.toISOString().slice(0, 10)
+const istNow = () => new Date(Date.now() + 330 * 60_000)
+
+/** Quick ranges in IST: Today, Yesterday, Previous Week (Mon–Sun), Previous Month. */
+export function quickRange(kind: 'today' | 'yesterday' | 'prev_week' | 'prev_month'): [string, string] {
+  const n = istNow()
+  const day = new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()))
+  const add = (d: Date, k: number) => new Date(d.getTime() + k * 86_400_000)
+  if (kind === 'today') return [isoDay(day), isoDay(day)]
+  if (kind === 'yesterday') return [isoDay(add(day, -1)), isoDay(add(day, -1))]
+  if (kind === 'prev_week') {
+    const mon = add(day, -((day.getUTCDay() + 6) % 7) - 7)
+    return [isoDay(mon), isoDay(add(mon, 6))]
+  }
+  const first = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth() - 1, 1))
+  const last = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), 0))
+  return [isoDay(first), isoDay(last)]
+}
+
+const itemKey = (r: any) => `${r.row_type}:${r.responsibility_id || r.task_id || r.title}:${r.employee_id}`
+const monthLabel = (ym: string) => {
+  const [y, m] = ym.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-IN', { month: 'short', year: 'numeric', timeZone: 'UTC' })
+}
+
+type DwrFilters = { date: string; employee: string; item: string; type: string; status: string; linked: string; minMinutes: string }
+const EMPTY_FILTERS: DwrFilters = { date: '', employee: '', item: '', type: '', status: '', linked: '', minMinutes: '' }
+
 export function DwrReport({ employeeId, departmentId }: { employeeId?: number | ''; departmentId?: number | '' }) {
   const [from, setFrom] = useState(todayIst())
   const [to, setTo] = useState(todayIst())
   const [sortDesc, setSortDesc] = useState(true)
   const [showSlots, setShowSlots] = useState(true)
+  const [f, setF] = useState<DwrFilters>(EMPTY_FILTERS)
+  const [focus, setFocus] = useState<string | null>(null)
+  const [showAllActivities, setShowAllActivities] = useState(false)
   const { data, isFetching, error } = useQuery({
     queryKey: ['hrm-dwr', employeeId || '', departmentId || '', from, to],
     queryFn: () => {
@@ -489,13 +573,49 @@ export function DwrReport({ employeeId, departmentId }: { employeeId?: number | 
     },
     enabled: !!from && !!to && to >= from,
   })
+  const allRows = (data?.rows as any[]) || []
+  const has = (v: any, q: string) => String(v || '').toLowerCase().includes(q.trim().toLowerCase())
   const rows = useMemo(() => {
-    const r = [...((data?.rows as any[]) || [])]
+    const minSec = Number(f.minMinutes || 0) * 60
+    const r = allRows.filter(row =>
+      (!f.date || row.check_date === f.date)
+      && (!f.employee || has(row.employee_name, f.employee))
+      && (!f.item || has(row.title, f.item) || has(row.remarks, f.item))
+      && (!f.type || row.row_type === f.type)
+      && (!f.status || row.status === f.status)
+      && (!f.linked || has(row.linked_person, f.linked))
+      && (!minSec || Number(row.duration_seconds || 0) >= minSec))
     r.sort((a, b) => (sortDesc ? 1 : -1) * (Number(b.duration_seconds || 0) - Number(a.duration_seconds || 0)))
     return r
-  }, [data, sortDesc])
-  const leaveRows = (data?.leave_rows as any[]) || []
+  }, [allRows, f, sortDesc])
+  const leaveRows = ((data?.leave_rows as any[]) || []).filter(r =>
+    (!f.date || r.check_date === f.date) && (!f.employee || has(r.employee_name, f.employee)) && !f.item && !f.type && !f.status)
   const multiDay = from !== to
+  const filtered = Object.values(f).some(Boolean)
+  const filteredTotal = rows.reduce((a, r) => a + Number(r.duration_seconds || 0), 0)
+  const opt = (k: string) => Array.from(new Set(allRows.map(r => String(r[k] || '')).filter(Boolean))).sort()
+
+  // Activity totals inside the selected range (and filters), split by calendar month
+  const activities = useMemo(() => {
+    type Activity = { key: string; title: string; employee: string; type: string; frequency: string; total: number; days: number; months: Record<string, number> }
+    const m = new Map<string, Activity>()
+    for (const r of rows) {
+      const k = itemKey(r)
+      const a: Activity = m.get(k) || { key: k, title: r.title, employee: r.employee_name, type: r.row_type, frequency: r.frequency || '', total: 0, days: 0, months: {} }
+      const secs = Number(r.duration_seconds || 0)
+      a.total += secs
+      a.days += secs > 0 ? 1 : 0
+      const ym = String(r.check_date || '').slice(0, 7)
+      a.months[ym] = (a.months[ym] || 0) + secs
+      m.set(k, a)
+    }
+    return Array.from(m.values()).sort((x, y) => y.total - x.total)
+  }, [rows])
+  const months = useMemo(() => Array.from(new Set(rows.map(r => String(r.check_date || '').slice(0, 7)))).sort(), [rows])
+  const topKey = activities.length && activities[0].total > 0 ? activities[0].key : null
+  const focused = focus ? activities.find(a => a.key === focus) : null
+  const setQuick = (k: Parameters<typeof quickRange>[0]) => { const [a, b] = quickRange(k); setFrom(a); setTo(b) }
+  const filterInput = 'w-full border rounded px-1.5 py-0.5 text-[11px] font-normal normal-case text-gray-700 bg-white'
 
   return (
     <div className="space-y-3">
@@ -506,19 +626,83 @@ export function DwrReport({ employeeId, departmentId }: { employeeId?: number | 
         <label className="text-[10px] text-gray-400">To
           <input type="date" value={to} min={from} onChange={e => setTo(e.target.value)} className="block border rounded-lg px-3 py-1.5 text-sm" />
         </label>
-        <button type="button" onClick={() => { setFrom(todayIst()); setTo(todayIst()) }} className="px-3 py-1.5 border rounded-lg text-xs">Today</button>
+        <div className="flex flex-wrap gap-1">
+          {([['today', 'Today'], ['yesterday', 'Yesterday'], ['prev_week', 'Previous Week'], ['prev_month', 'Previous Month']] as const).map(([k, label]) => (
+            <button key={k} type="button" onClick={() => setQuick(k)} className="px-3 py-1.5 border rounded-lg text-xs hover:bg-blue-50">{label}</button>
+          ))}
+        </div>
         <button type="button" onClick={() => setShowSlots(v => !v)} className="px-3 py-1.5 border rounded-lg text-xs font-medium text-[#002B5B] hover:bg-blue-50">
           {showSlots ? 'Hide time slots & notes' : 'Show time slots & notes'}
         </button>
+        {filtered && <button type="button" onClick={() => setF(EMPTY_FILTERS)} className="px-3 py-1.5 border border-red-200 text-red-700 rounded-lg text-xs">Clear filters</button>}
         {isFetching && <span className="text-xs text-gray-400">Loading…</span>}
       </div>
+      <p className="text-[10px] text-gray-400">Only time worked inside each date counts on that date. Up to 31 days for a team, 93 days for one employee.</p>
       {error && <p className="text-sm text-red-600">{errMsg(error, 'Could not load report')}</p>}
+
+      {focused && (
+        <div className="bg-white rounded-xl border border-teal-200 p-3 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-[#002B5B]">
+              {focused.title} <span className="text-xs font-normal text-gray-500">· {focused.employee} · {typeLabel[focused.type] || focused.type}{focused.frequency && focused.type !== 'one_time' ? ` · ${focused.frequency}` : ''}</span>
+            </p>
+            <button type="button" onClick={() => setFocus(null)} className="text-xs text-gray-500">Close ✕</button>
+          </div>
+          <p className="text-sm">Total in {from === to ? from : `${from} → ${to}`}: <b className="text-teal-800">{fmtHM(focused.total)}</b> across {focused.days} day{focused.days === 1 ? '' : 's'}</p>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(focused.months).sort().map(([ym, secs]) => (
+              <span key={ym} className="px-2 py-1 rounded-lg bg-teal-50 text-teal-900 text-xs">{monthLabel(ym)}: <b>{fmtHM(secs)}</b></span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activities.length > 1 && (
+        <div className="bg-white rounded-xl border overflow-hidden">
+          <div className="px-4 py-2 bg-gray-50 text-xs font-semibold text-gray-600 flex justify-between gap-2 flex-wrap">
+            <span>Time by activity (month-wise){filtered ? ' · filtered' : ''}</span>
+            <span className="font-normal text-gray-400">Click a row to see its total</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-gray-400 uppercase">
+                <tr>
+                  <th className="text-left px-3 py-1.5">Activity</th>
+                  {months.map(ym => <th key={ym} className="text-right px-3 py-1.5 whitespace-nowrap">{monthLabel(ym)}</th>)}
+                  <th className="text-right px-3 py-1.5">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(showAllActivities ? activities : activities.slice(0, 8)).map(a => (
+                  <tr key={a.key} onClick={() => setFocus(a.key)}
+                    className={`border-t cursor-pointer hover:bg-teal-50 ${a.key === topKey ? 'bg-amber-50 font-semibold' : ''} ${a.key === focus ? 'ring-1 ring-inset ring-teal-400' : ''}`}>
+                    <td className="px-3 py-1.5">
+                      {a.key === topKey && <span className="mr-1 px-1 rounded bg-amber-200 text-amber-900 text-[10px]">▲ Most time</span>}
+                      {a.title} <span className="text-gray-400 font-normal">· {a.employee}</span>
+                    </td>
+                    {months.map(ym => <td key={ym} className="text-right px-3 py-1.5 whitespace-nowrap">{a.months[ym] ? fmtHM(a.months[ym]) : '—'}</td>)}
+                    <td className="text-right px-3 py-1.5 whitespace-nowrap">{fmtHM(a.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {activities.length > 8 && (
+            <button type="button" onClick={() => setShowAllActivities(v => !v)} className="w-full py-1.5 text-xs text-blue-600 border-t">
+              {showAllActivities ? 'Show top 8' : `Show all ${activities.length}`}
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="bg-white rounded-xl border overflow-hidden">
         <div className="px-4 py-3 bg-teal-800 text-white font-semibold flex justify-between gap-2 flex-wrap">
           <span>Daily Working Report — {multiDay ? `${from} → ${to}` : from}</span>
           <span className="text-teal-100 text-xs font-normal">
-            Total {fmtHM(data?.total_seconds)} · <span className="px-1 rounded bg-yellow-200 text-yellow-900">manual edit</span>{' '}
-            <span className="px-1 rounded bg-purple-200 text-purple-900">auto-approved</span>
+            Total {fmtHM(data?.total_seconds)}{filtered ? ` · Filtered ${fmtHM(filteredTotal)} (${rows.length} rows)` : ''} ·{' '}
+            <span className="px-1 rounded bg-yellow-200 text-yellow-900">manual edit</span>{' '}
+            <span className="px-1 rounded bg-purple-200 text-purple-900">auto-approved</span>{' '}
+            <span className="px-1 rounded bg-blue-200 text-blue-900">HOD edited</span>
           </span>
         </div>
         <div className="overflow-x-auto">
@@ -534,45 +718,86 @@ export function DwrReport({ employeeId, departmentId }: { employeeId?: number | 
                 </th>
                 <th className="text-left px-3 py-2">Linked Person</th>
               </tr>
+              <tr className="bg-gray-50">
+                {multiDay && (
+                  <th className="px-2 pb-2">
+                    <select value={f.date} onChange={e => setF(x => ({ ...x, date: e.target.value }))} className={filterInput}>
+                      <option value="">All dates</option>
+                      {opt('check_date').map(d => <option key={d} value={d}>{d}</option>)}
+                    </select>
+                  </th>
+                )}
+                <th className="px-2 pb-2"><input value={f.employee} onChange={e => setF(x => ({ ...x, employee: e.target.value }))} placeholder="Filter…" className={filterInput} /></th>
+                <th className="px-2 pb-2">
+                  <div className="flex gap-1">
+                    <input value={f.item} onChange={e => setF(x => ({ ...x, item: e.target.value }))} placeholder="Item / remarks…" className={filterInput} />
+                    <select value={f.type} onChange={e => setF(x => ({ ...x, type: e.target.value }))} className={filterInput}>
+                      <option value="">All types</option>
+                      {Object.entries(typeLabel).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                    </select>
+                  </div>
+                </th>
+                <th className="px-2 pb-2">
+                  <select value={f.status} onChange={e => setF(x => ({ ...x, status: e.target.value }))} className={filterInput}>
+                    <option value="">All</option>
+                    {opt('status').map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </th>
+                <th className="px-2 pb-2"><input type="number" min={0} value={f.minMinutes} onChange={e => setF(x => ({ ...x, minMinutes: e.target.value }))} placeholder="≥ min" className={filterInput} /></th>
+                <th className="px-2 pb-2"><input value={f.linked} onChange={e => setF(x => ({ ...x, linked: e.target.value }))} placeholder="Filter…" className={filterInput} /></th>
+              </tr>
             </thead>
             <tbody>
-              {rows.map((row: any, idx: number) => (
-                <tr key={`${row.row_type}-${row.check_date}-${row.employee_id}-${row.responsibility_id || row.task_id}-${idx}`}
-                  className={`border-t align-top ${row.has_manual_slots ? 'bg-yellow-50' : row.auto_approved ? 'bg-purple-50' : ''}`}>
-                  {multiDay && <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">{row.check_date}</td>}
-                  <td className="px-3 py-2">{row.employee_name}</td>
-                  <td className="px-3 py-2">
-                    <p className="font-medium">{row.title}</p>
-                    <p className="text-[10px] mt-0.5 flex gap-1 flex-wrap">
-                      <span className={`px-1 rounded ${typeBadge[row.row_type] || 'bg-gray-50 text-gray-600'}`}>{typeLabel[row.row_type] || row.row_type}</span>
-                      {row.frequency && row.row_type !== 'one_time' && <span className="text-gray-400">{row.frequency}</span>}
-                      {row.has_manual_slots && <span className="px-1 rounded bg-yellow-200 text-yellow-900">✎ manual time</span>}
-                    </p>
-                    {row.remarks && <p className="text-[11px] text-gray-500 mt-0.5">{row.remarks}</p>}
-                    {showSlots && (row.slots || []).length > 0 && (
-                      <ul className="mt-1 space-y-0.5 text-[11px] text-gray-600">
-                        {(row.slots as any[]).map((s: any, i: number) => (
-                          <li key={s.id || i} className={Number(s.manual_edited) ? 'bg-yellow-100 rounded px-1' : ''}>
-                            {clock12(s.started_at)} – {s.is_open ? 'running' : clock12(s.ended_at)} · {s.duration_label || fmtHM(s.net_seconds)}
-                            {Number(s.manual_edited) ? ' · ✎ edited' : ''}
-                            {s.notes ? <span className="italic"> — {s.notes}</span> : null}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-xs">
-                    <p>{row.status}</p>
-                    {row.approval_status && (
-                      <p className={`mt-0.5 inline-block px-1 rounded ${row.auto_approved ? 'bg-purple-200 text-purple-900 font-semibold' : 'text-gray-500'}`}>
-                        {row.approval_status}
+              {rows.map((row: any, idx: number) => {
+                const key = itemKey(row)
+                const tone = row.hod_edited ? 'bg-blue-100' : row.has_manual_slots ? 'bg-yellow-50' : row.auto_approved ? 'bg-purple-50' : ''
+                const hodTip = row.hod_edited
+                  ? `Status corrected by ${row.hod_edited_by || 'HOD'}${row.hod_edited_role ? ` (${row.hod_edited_role})` : ''} at ${row.hod_edited_at} · original: ${row.hod_original_status || 'Pending'}${row.hod_edit_count > 1 ? ` · ${row.hod_edit_count} edits` : ''}`
+                  : undefined
+                return (
+                  <tr key={`${row.row_type}-${row.check_date}-${row.employee_id}-${row.responsibility_id || row.task_id}-${idx}`}
+                    className={`border-t align-top ${tone}`} title={hodTip}>
+                    {multiDay && <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">{row.check_date}</td>}
+                    <td className="px-3 py-2">{row.employee_name}</td>
+                    <td className="px-3 py-2">
+                      <button type="button" onClick={() => setFocus(focus === key ? null : key)} className="font-medium text-left hover:underline" title="Show total time for this item in the selected range">
+                        {row.title}
+                      </button>
+                      <p className="text-[10px] mt-0.5 flex gap-1 flex-wrap">
+                        <span className={`px-1 rounded ${typeBadge[row.row_type] || 'bg-gray-50 text-gray-600'}`}>{typeLabel[row.row_type] || row.row_type}</span>
+                        {row.frequency && row.row_type !== 'one_time' && <span className="text-gray-400">{row.frequency}</span>}
+                        {row.carried_from_date && <span className="px-1 rounded bg-slate-100 text-slate-700">work for {row.carried_from_date}</span>}
+                        {key === topKey && <span className="px-1 rounded bg-amber-200 text-amber-900">▲ Most time</span>}
+                        {row.has_manual_slots && <span className="px-1 rounded bg-yellow-200 text-yellow-900">✎ manual time</span>}
+                        {row.hod_edited && <span className="px-1 rounded bg-blue-200 text-blue-900">HOD edited · was {row.hod_original_status || 'Pending'}</span>}
                       </p>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-xs font-semibold whitespace-nowrap">{row.duration_label || fmtHM(row.duration_seconds)}</td>
-                  <td className="px-3 py-2 text-xs text-indigo-800">{row.linked_person || 'Self-complete'}</td>
-                </tr>
-              ))}
+                      {row.remarks && <p className="text-[11px] text-gray-500 mt-0.5">{row.remarks}</p>}
+                      {showSlots && (row.slots || []).length > 0 && (
+                        <ul className="mt-1 space-y-0.5 text-[11px] text-gray-600">
+                          {(row.slots as any[]).map((s: any, i: number) => (
+                            <li key={s.id || i} className={Number(s.manual_edited) ? 'bg-yellow-100 rounded px-1' : ''}>
+                              {clock12(s.started_at)} – {s.is_open ? 'running' : clock12(s.ended_at)} · {s.duration_label || fmtHM(s.net_seconds)}
+                              {s.crosses_day ? <span className="text-teal-700"> ({s.day_duration_label} on this date)</span> : null}
+                              {Number(s.manual_edited) ? ' · ✎ edited' : ''}
+                              {s.notes ? <span className="italic"> — {s.notes}</span> : null}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-xs">
+                      <p>{row.status}</p>
+                      {row.approval_status && (
+                        <p className={`mt-0.5 inline-block px-1 rounded ${row.auto_approved ? 'bg-purple-200 text-purple-900 font-semibold' : 'text-gray-500'}`}>
+                          {row.approval_status}
+                        </p>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-xs font-semibold whitespace-nowrap">{row.duration_label || fmtHM(row.duration_seconds)}</td>
+                    <td className="px-3 py-2 text-xs text-indigo-800">{row.linked_person || 'Self-complete'}</td>
+                  </tr>
+                )
+              })}
               {leaveRows.map((row: any) => (
                 <tr key={`leave-${row.employee_id}-${row.check_date}`} className="border-t bg-slate-50 text-slate-600">
                   {multiDay && <td className="px-3 py-2 text-xs">{row.check_date}</td>}
@@ -583,7 +808,7 @@ export function DwrReport({ employeeId, departmentId }: { employeeId?: number | 
             </tbody>
           </table>
           {!rows.length && !leaveRows.length && !isFetching && (
-            <p className="text-center text-gray-400 py-8 text-sm">No status updates for this date range.</p>
+            <p className="text-center text-gray-400 py-8 text-sm">{filtered ? 'No rows match these filters.' : 'No status updates for this date range.'}</p>
           )}
         </div>
       </div>

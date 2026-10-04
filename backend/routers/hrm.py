@@ -103,6 +103,7 @@ from ..db.hrm_db import (
     MONTH_NAMES,
     PERFORMANCE_CUTOVER_DATE,
 )
+from ..db import hrm_db as H
 from ..db import hrm_worktime
 from ..db.users_db import get_user_auth_profile, search_active_users, get_user_by_id
 from ..services.rbac import (
@@ -798,13 +799,31 @@ def del_responsibility(rid: int, request: Request):
     return {"ok": True}
 
 
+def _assert_blocker_allowed(scope: HrmScope, owner_employee_id: int, blocker_id: int) -> None:
+    """Blocker = anyone in the caller's scope, or an active peer in the item owner's department."""
+    try:
+        assert_employee_in_scope(scope, blocker_id)
+        return
+    except HTTPException:
+        pass
+    blocker_dept = employee_department_id(blocker_id)
+    if blocker_dept is not None and blocker_dept == employee_department_id(owner_employee_id):
+        if any(int(e["id"]) == blocker_id for e in list_employees(int(blocker_dept), "Active")):
+            return
+    raise HTTPException(403, "Blocker must be an active employee in the same department")
+
+
 @router.post("/tasks/mark")
 def post_mark_task(body: TaskMarkIn, request: Request):
     scope = _scope_from_request(request)
-    assert_responsibility_in_scope(scope, body.responsibility_id)
+    owner = assert_responsibility_in_scope(scope, body.responsibility_id)
     if body.blocker_employee_id:
-        assert_employee_in_scope(scope, body.blocker_employee_id)
+        _assert_blocker_allowed(scope, owner, int(body.blocker_employee_id))
     log_date = _enforce_self_check_today(scope, body.log_date)
+    editor = None
+    if scope.can_edit_assignments and (scope.employee_id is None or int(owner) != int(scope.employee_id)):
+        _, editor_name = _recorder_from_request(request)
+        editor = {"name": editor_name, "role": scope.role}
     ok = mark_task(
         body.responsibility_id,
         log_date,
@@ -814,6 +833,7 @@ def post_mark_task(body: TaskMarkIn, request: Request):
         body.blocker_employee_id,
         body.blocker_reason or "",
         allow_override=scope.can_edit_assignments,
+        editor=editor,
     )
     if ok is True:
         return {"ok": True}
@@ -847,12 +867,24 @@ def _clean_break_decision(value: Optional[str]) -> Optional[str]:
     return v
 
 
-def _assert_office_open_for_timer(scope: HrmScope) -> None:
-    """Employees cannot start/resume work after their Office Close (HOD/Admin may correct)."""
-    if scope.can_edit_assignments or not scope.employee_id:
+OFFICE_NOT_STARTED_MSG = "Please start Office Time before starting a Responsibility or Task."
+
+
+def _assert_office_open_for_timer(scope: HrmScope, owner_employee_id: Optional[int] = None) -> None:
+    """Starting/resuming your own work needs today's Office Time started and not closed.
+
+    HOD/Admin acting on someone else's item (corrections) is not gated; HOD/Admin may also
+    keep working on their own items after their Office Close.
+    """
+    if not scope.employee_id:
         return
+    if owner_employee_id is not None and int(owner_employee_id) != int(scope.employee_id):
+        if scope.can_edit_assignments:
+            return
     session = hrm_worktime.get_office_session(scope.employee_id, today_ist().isoformat())
-    if session and session.get("office_close"):
+    if not session or not str(session.get("office_start") or "").strip():
+        raise HTTPException(409, OFFICE_NOT_STARTED_MSG)
+    if session.get("office_close") and not scope.can_edit_assignments:
         raise HTTPException(
             409,
             "Office time is closed for today — work can't be started or resumed after Office Close",
@@ -908,7 +940,7 @@ def post_start_responsibility_timer(responsibility_id: int, body: Responsibility
     assert_responsibility_in_scope(scope, responsibility_id)
     _, name = _recorder_from_request(request)
     log_date = _enforce_self_check_today(scope, body.log_date)
-    _assert_office_open_for_timer(scope)
+    _assert_office_open_for_timer(scope, get_responsibility_owner(responsibility_id))
     return _timer_http_result(
         start_responsibility_timer(
             responsibility_id,
@@ -941,7 +973,7 @@ def post_resume_responsibility_timer(responsibility_id: int, body: Responsibilit
     assert_responsibility_in_scope(scope, responsibility_id)
     _, name = _recorder_from_request(request)
     log_date = _enforce_self_check_today(scope, body.log_date)
-    _assert_office_open_for_timer(scope)
+    _assert_office_open_for_timer(scope, get_responsibility_owner(responsibility_id))
     return _timer_http_result(
         resume_responsibility_timer(
             responsibility_id,
@@ -1721,7 +1753,7 @@ def post_start_one_time_task(task_id: int, request: Request):
     assert_employee_in_scope(scope, owner)
     if scope.is_employee and scope.employee_id != owner:
         raise HTTPException(403, "You can only start your own tasks")
-    _assert_office_open_for_timer(scope)
+    _assert_office_open_for_timer(scope, owner)
     _, name = _recorder_from_request(request)
     ok = start_one_time_task(task_id, actor=name)
     if ok is True:
@@ -1758,7 +1790,7 @@ def post_resume_one_time_task(task_id: int, request: Request):
     assert_employee_in_scope(scope, owner)
     if scope.is_employee and scope.employee_id != owner:
         raise HTTPException(403, "You can only resume your own tasks")
-    _assert_office_open_for_timer(scope)
+    _assert_office_open_for_timer(scope, owner)
     _, name = _recorder_from_request(request)
     ok = resume_one_time_task(task_id, actor=name)
     if ok is True:
@@ -1968,6 +2000,17 @@ def get_time_slot_audit(slot_id: int, request: Request):
     if not (scope.employee_id and int(scope.employee_id) == int(slot["employee_id"])):
         assert_employee_in_scope(scope, int(slot["employee_id"]))
     return {"slot": slot, "audit": hrm_worktime.slot_audit(slot_id)}
+
+
+@router.get("/task-logs/{task_log_id}/status-audit")
+def get_task_log_status_audit(task_log_id: int, request: Request):
+    scope = _scope_from_request(request)
+    emp = H.get_task_log_employee(task_log_id)
+    if emp is None:
+        raise HTTPException(404, "Status record not found")
+    if not (scope.employee_id and int(scope.employee_id) == int(emp)):
+        assert_employee_in_scope(scope, emp)
+    return {"task_log_id": task_log_id, "employee_id": emp, "audit": H.task_log_status_audit(task_log_id)}
 
 
 # ── Office time (independent of work time) ───────────────────────────────────

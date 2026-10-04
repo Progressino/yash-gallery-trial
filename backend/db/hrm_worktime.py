@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 from . import hrm_db as H
 
 DWR_MAX_DAYS = 31
+DWR_MAX_DAYS_SINGLE = 93  # one employee: up to ~3 months for month-wise comparison
 REPORT_MAX_DAYS = 62
 
 
@@ -540,21 +541,35 @@ def slot_audit(slot_id: int) -> list[dict]:
 # ── Daily Working Report (date / range) ──────────────────────────────────────
 
 
-def _one_time_slots_for_day(employee_id: int, d0: str, d1: str, now: str) -> list[tuple[dict, list[dict]]]:
+def _day_slot_views(employee_id: int, d0: str, d1: str, now: str) -> tuple[dict[int, list[dict]], dict[int, list[dict]]]:
+    """Slots intersecting [d0, d1) grouped by entity, each with its in-day net seconds.
+
+    Returns (responsibility slots by task_log id, one-time slots by task id).
+    """
     conn = H._connect()
     try:
-        slots = conn.execute(
-            """SELECT * FROM hrm_time_slots
-               WHERE employee_id=? AND entity_type=? AND started_at>=? AND started_at<?
-               ORDER BY started_at, id""",
-            (int(employee_id), H.SLOT_ONE_TIME, d0, d1),
-        ).fetchall()
-        by_task: dict[int, list[dict]] = {}
-        for s in slots:
-            by_task.setdefault(int(s["entity_id"]), []).append(H._slot_view(dict(s), now))
-        if not by_task:
-            return []
-        ids = list(by_task)
+        raw = _employee_slots_between(conn, employee_id, d0, d1)
+    finally:
+        conn.close()
+    resp: dict[int, list[dict]] = {}
+    ot: dict[int, list[dict]] = {}
+    for s in raw:
+        secs = _slot_net_in_window(s, d0, d1, now)
+        v = H._slot_view(s, now)
+        v["day_net_seconds"] = secs
+        v["day_duration_label"] = H._format_duration_hm(secs)
+        v["crosses_day"] = str(s["started_at"]) < d0 or (str(s.get("ended_at") or "") or now) > d1
+        bucket = resp if s["entity_type"] == H.SLOT_RESP else ot
+        bucket.setdefault(int(s["entity_id"]), []).append(v)
+    return resp, ot
+
+
+def _one_time_rows_for_slots(by_task: dict[int, list[dict]]) -> list[tuple[dict, list[dict]]]:
+    if not by_task:
+        return []
+    ids = list(by_task)
+    conn = H._connect()
+    try:
         tasks = conn.execute(
             f"""SELECT t.*, le.name AS linked_to_employee_name FROM one_time_tasks t
                 LEFT JOIN employees le ON le.id=t.linked_to_employee_id
@@ -571,6 +586,51 @@ def _one_time_slots_for_day(employee_id: int, d0: str, d1: str, now: str) -> lis
     return out
 
 
+def _carried_resp_rows(by_log: dict[int, list[dict]]) -> list[tuple[dict, list[dict]]]:
+    """Responsibility logs of another date whose time was worked on this date."""
+    if not by_log:
+        return []
+    ids = list(by_log)
+    conn = H._connect()
+    try:
+        logs = conn.execute(
+            f"""SELECT l.id, l.responsibility_id, l.log_date, l.status, l.remarks,
+                       COALESCE(l.approval_status,'') AS approval_status,
+                       COALESCE(l.hod_edited,0) AS hod_edited,
+                       COALESCE(l.hod_original_status,'') AS hod_original_status,
+                       COALESCE(l.hod_edited_by,'') AS hod_edited_by,
+                       COALESCE(l.hod_edited_role,'') AS hod_edited_role,
+                       COALESCE(l.hod_edited_at,'') AS hod_edited_at,
+                       COALESCE(l.hod_edit_count,0) AS hod_edit_count,
+                       r.title, r.frequency, r.linked_to_employee_id, le.name AS linked_to_employee_name
+                FROM task_logs l
+                JOIN responsibilities r ON r.id=l.responsibility_id
+                LEFT JOIN employees le ON le.id=r.linked_to_employee_id
+                WHERE l.id IN ({','.join('?' * len(ids))})""",
+            ids,
+        ).fetchall()
+    finally:
+        conn.close()
+    return [(dict(l), by_log.get(int(l["id"]), [])) for l in logs]
+
+
+def _hod_fields(src: dict) -> dict:
+    return {
+        "hod_edited": bool(int(src.get("hod_edited") or 0)),
+        "hod_edit_count": int(src.get("hod_edit_count") or 0),
+        "hod_original_status": src.get("hod_original_status") or "",
+        "hod_edited_by": src.get("hod_edited_by") or "",
+        "hod_edited_role": src.get("hod_edited_role") or "",
+        "hod_edited_at": src.get("hod_edited_at") or "",
+    }
+
+
+def _slot_span(day_slots: list[dict]) -> tuple[str, str]:
+    if not day_slots:
+        return "", ""
+    return str(day_slots[0]["started_at"]), str(day_slots[-1].get("ended_at") or "")
+
+
 def _user_updated(item: dict) -> bool:
     by = str(item.get("marked_by") or "").lower()
     marked = str(item.get("status") or "Pending") not in ("Pending", "", "Reassigned") and not by.startswith("system")
@@ -578,7 +638,7 @@ def _user_updated(item: dict) -> bool:
 
 
 def list_dwr_report(*, employee_ids: list[int], from_date: str, to_date: str) -> dict:
-    days = _date_range(from_date, to_date, DWR_MAX_DAYS)
+    days = _date_range(from_date, to_date, DWR_MAX_DAYS_SINGLE if len(employee_ids) == 1 else DWR_MAX_DAYS)
     now = H._now_iso()
     rows: list[dict] = []
     leave_rows: list[dict] = []
@@ -622,12 +682,19 @@ def list_dwr_report(*, employee_ids: list[int], from_date: str, to_date: str) ->
                 *[i for i in (snap.get("whenever_required") or []) if _user_updated(i)],
             ]
             d0, d1 = _day_bounds(day)
-            ot_items = _one_time_slots_for_day(int(eid), d0, d1, now)
+            resp_slots_by_log, ot_slots_by_task = _day_slot_views(int(eid), d0, d1, now)
+            ot_items = _one_time_rows_for_slots(ot_slots_by_task)
             clone_items = [
                 c for c in (snap.get("additional_work") or [])
                 if str(c.get("status") or "Pending") != "Pending"
             ]
-            updated = any(_user_updated(i) for i in resp_items) or bool(ot_items) or bool(clone_items)
+            snap_log_ids = {int(i["task_log_id"]) for i in resp_items if i.get("task_log_id")}
+            carried = _carried_resp_rows(
+                {lid: v for lid, v in resp_slots_by_log.items() if lid not in snap_log_ids}
+            )
+            updated = (
+                any(_user_updated(i) for i in resp_items) or bool(ot_items) or bool(clone_items) or bool(carried)
+            )
             if not updated:
                 continue
             base = {
@@ -637,25 +704,30 @@ def list_dwr_report(*, employee_ids: list[int], from_date: str, to_date: str) ->
                 "check_date": day,
             }
             for i in resp_items:
-                slots = i.get("time_slots") or []
-                secs = sum(int(s.get("net_seconds") or 0) for s in slots)
-                if not slots:
-                    secs = int(i.get("active_seconds") or 0)
+                lid = int(i["task_log_id"]) if i.get("task_log_id") else None
+                slots = resp_slots_by_log.get(lid, []) if lid else []
+                if i.get("time_slots"):
+                    # Only time actually worked within this calendar date counts
+                    secs = sum(int(s["day_net_seconds"]) for s in slots)
+                else:
+                    secs = int(i.get("active_seconds") or 0)  # legacy rows without slots
                 linked = i.get("linked_to_employee_name") or ""
+                s0, s1 = _slot_span(slots)
                 rows.append(
                     {
                         **base,
                         "row_type": "responsibility",
                         "responsibility_id": i.get("responsibility_id"),
                         "task_log_id": i.get("task_log_id"),
+                        "log_date": day,
                         "title": i.get("title"),
                         "frequency": i.get("frequency"),
                         "status": i.get("status"),
                         "approval_status": i.get("approval_status") or "",
                         "auto_approved": (i.get("approval_status") or "") == "Auto-Approved",
                         "timer_status": i.get("timer_status") or "Not Started",
-                        "started_at": slots[0]["started_at"] if slots else i.get("started_at") or "",
-                        "ended_at": (slots[-1].get("ended_at") or "") if slots else i.get("ended_at") or "",
+                        "started_at": s0 or (i.get("started_at") or "" if not i.get("time_slots") else ""),
+                        "ended_at": s1 or (i.get("ended_at") or "" if not i.get("time_slots") else ""),
                         "duration_seconds": secs,
                         "duration_minutes": secs // 60,
                         "duration_label": H._format_duration_hm(secs),
@@ -665,6 +737,39 @@ def list_dwr_report(*, employee_ids: list[int], from_date: str, to_date: str) ->
                         "remarks": i.get("remarks") or "",
                         "slots": slots,
                         "has_manual_slots": any(int(s.get("manual_edited") or 0) for s in slots),
+                        **_hod_fields(i),
+                    }
+                )
+            for log, slots in carried:
+                secs = sum(int(s["day_net_seconds"]) for s in slots)
+                linked = log.get("linked_to_employee_name") or ""
+                s0, s1 = _slot_span(slots)
+                rows.append(
+                    {
+                        **base,
+                        "row_type": "responsibility",
+                        "responsibility_id": log.get("responsibility_id"),
+                        "task_log_id": log.get("id"),
+                        "log_date": log.get("log_date") or "",
+                        "carried_from_date": log.get("log_date") or "",
+                        "title": log.get("title"),
+                        "frequency": log.get("frequency"),
+                        "status": log.get("status") or "Pending",
+                        "approval_status": log.get("approval_status") or "",
+                        "auto_approved": (log.get("approval_status") or "") == "Auto-Approved",
+                        "timer_status": "",
+                        "started_at": s0,
+                        "ended_at": s1,
+                        "duration_seconds": secs,
+                        "duration_minutes": secs // 60,
+                        "duration_label": H._format_duration_hm(secs),
+                        "linked_to_employee_id": log.get("linked_to_employee_id"),
+                        "linked_to_employee_name": linked,
+                        "linked_person": linked or "Self-complete",
+                        "remarks": log.get("remarks") or "",
+                        "slots": slots,
+                        "has_manual_slots": any(int(s.get("manual_edited") or 0) for s in slots),
+                        **_hod_fields(log),
                     }
                 )
             for c in clone_items:
@@ -691,7 +796,7 @@ def list_dwr_report(*, employee_ids: list[int], from_date: str, to_date: str) ->
                     }
                 )
             for t, day_slots in ot_items:
-                secs = sum(_slot_net_in_window(s, d0, d1, now) for s in day_slots)
+                secs = sum(int(s["day_net_seconds"]) for s in day_slots)
                 linked = t.get("linked_to_employee_name") or ""
                 rows.append(
                     {

@@ -1,5 +1,6 @@
 export const FREQUENCIES = [
   'Daily',
+  'Twice a Week',
   'Weekly',
   'Fortnightly',
   'Monthly',

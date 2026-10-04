@@ -6,13 +6,16 @@ import { FREQUENCIES, PRIORITIES, WEEKDAYS, MONTHS, priorityStyle, SCHEDULE_RULE
 import { loadHrmLang, saveHrmLang, t, type HrmLang } from './hrmI18n'
 import {
   BreakConfirmModal, DwrReport, HolidayModal, HoldModal, OfficeTimeBar, ScheduleRuleInput, SlotList,
-  WorkingHoursReport, type BreakInfo,
+  WeekdayPairInput, weekdayPairValid, WorkingHoursReport, type BreakInfo,
 } from './hrmWorkTime'
 
 type Tab = 'dashboard' | 'check' | 'approvals' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'reports' | 'hierarchy'
 
 const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected', 'On Hold'] as const
-const TASK_LOG_STATUSES = ['Done', 'Partial', 'Missed', 'Blocked', 'Leave', 'N/A'] as const
+// Leave is set from the Employee Check header (Leave button), not per item.
+const TASK_LOG_STATUSES = ['Done', 'Partial', 'Missed', 'Blocked', 'N/A'] as const
+const TIMED_STATUSES = ['Done', 'Partial']
+const OFFICE_FIRST_MSG = 'Please start Office Time before starting a Responsibility or Task.'
 const CATEGORIES = ['General', 'Quality', 'Production', 'Accounts', 'Purchase', 'Sales', 'Store', 'HR', 'Other']
 const ISSUE_TYPES = ['General', 'Discipline', 'Quality', 'Attendance', 'Behaviour', 'Task Failure', 'Dependency Missed', 'Policy Violation', 'Workplace Incident', 'Performance', 'Complaint']
 const SEVERITIES = ['Minor', 'Moderate', 'Major']
@@ -37,7 +40,7 @@ const issueStatusStyle = (s: string) => {
   return 'bg-gray-100 text-gray-600'
 }
 
-const today = () => new Date().toISOString().split('T')[0]
+const today = () => todayIst()
 const fmt7Days = () => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().split('T')[0] }
 const fmtMonth = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01` }
 
@@ -366,6 +369,12 @@ export default function HRM() {
     queryKey: ['hrm-pickers-emps', selDept],
     queryFn: () => api.get(`/hrm/employees/for-pickers${selDept ? `?department_id=${selDept}` : ''}`).then(r => r.data),
   })
+  // Blocked → who is responsible: own scope plus department peers (employees otherwise only see themselves)
+  const blockerChoices = useMemo(() => {
+    const m = new Map<number, any>()
+    for (const e of [...(allEmps as any[]), ...(pickersEmps as any[])]) m.set(Number(e.id), e)
+    return Array.from(m.values()).sort((a, b) => String(a.name).localeCompare(String(b.name)))
+  }, [allEmps, pickersEmps])
   const { data: pendingApprovals, refetch: refetchPendingApprovals } = useQuery({
     queryKey: ['hrm-pending-approvals', scope?.employee_id],
     queryFn: () => api.get('/hrm/approvals/pending').then(r => r.data),
@@ -858,6 +867,10 @@ export default function HRM() {
         alert('Select a weekday for Weekly/Fortnightly responsibilities (or set a Dynamic Schedule Rule for Fortnightly)')
         return
       }
+      if (form.frequency === 'Twice a Week' && !weekdayPairValid(form.schedule_weekday)) {
+        alert('Select two different weekdays for Twice a Week responsibilities')
+        return
+      }
       if (form.frequency === 'Monthly' && !rule && !(form.schedule_month_day > 0)) {
         alert('Select calendar day or a Dynamic Schedule Rule for Monthly responsibilities')
         return
@@ -975,7 +988,7 @@ export default function HRM() {
 
   const handleStatusSelect = (respId: number, logDate: string, status: string, item?: any) => {
     if (!status) return
-    if (status !== 'Leave' && status !== 'N/A') {
+    if (TIMED_STATUSES.includes(status) && !canEditAssignments) {
       const started = String(item?.started_at || '').trim()
       const active = Number(item?.active_seconds || 0)
       if (!started && active <= 0) {
@@ -992,6 +1005,12 @@ export default function HRM() {
   }
 
   const officeClosed = !canEditAssignments && !!dayCheck?.time_summary?.office_close
+  const isOwnCheck = Number(scope?.employee_id) > 0 && Number(checkEmp) === Number(scope?.employee_id)
+  const officeNotStarted = isOwnCheck && checkDate === todayIst() && !dayCheck?.time_summary?.office_start
+  const officeGate = (fn: () => void) => () => {
+    if (officeNotStarted) { alert(OFFICE_FIRST_MSG); return }
+    fn()
+  }
 
   const renderOneTimeCheck = (t: any) => {
     const ts = t.timer_status || (t.status === 'In Progress' && t.paused_at ? 'Paused' : t.status === 'In Progress' ? 'Active' : t.status === 'Done' || t.status === 'Approved' ? 'Completed' : 'Not Started')
@@ -1027,6 +1046,11 @@ export default function HRM() {
           {t.paused_at && <span className="text-[11px] text-amber-700">Paused: {fmtDateTime(t.paused_at)}{Number(t.auto_paused) ? ' (auto)' : ''}</span>}
           <span className="text-[11px] text-gray-500">End: {fmtDateTime(t.completed_at || t.ended_at)}</span>
           <span className="text-[11px] font-semibold text-[#002B5B]">Active {fmtDuration(activeMin || t.duration_minutes)}</span>
+          {t.day_work_seconds != null && Number(t.day_work_seconds) !== Number(t.total_work_seconds || 0) && (
+            <span className="text-[11px] font-semibold text-teal-700" title="Only time worked on this date counts toward this date's working hours">
+              This date {Number(t.day_work_seconds) >= 60 ? fmtDuration(Math.floor(Number(t.day_work_seconds) / 60)) : '0m'}
+            </span>
+          )}
           {pausedMin > 0 && <span className="text-[11px] text-amber-800">Paused {fmtDuration(pausedMin)}</span>}
           {t.has_manual_slots && <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-800">✎ Manual edit</span>}
         </div>
@@ -1039,7 +1063,7 @@ export default function HRM() {
         {canTime && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {(t.status === 'Pending' || t.status === 'Rejected') && !officeClosed && (
-              <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" disabled={startOneTimeTaskMut.isPending} onClick={() => startOneTimeTaskMut.mutate(t.id)}>▶ Start</button>
+              <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" disabled={startOneTimeTaskMut.isPending} onClick={officeGate(() => startOneTimeTaskMut.mutate(t.id))}>▶ Start</button>
             )}
             {t.status === 'In Progress' && ts === 'Active' && (
               <>
@@ -1049,7 +1073,7 @@ export default function HRM() {
             )}
             {t.status === 'In Progress' && ts === 'Paused' && (
               <>
-                {!officeClosed && <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" disabled={resumeOneTimeTaskMut.isPending} onClick={() => resumeOneTimeTaskMut.mutate(t.id)}>▶ Resume</button>}
+                {!officeClosed && <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" disabled={resumeOneTimeTaskMut.isPending} onClick={officeGate(() => resumeOneTimeTaskMut.mutate(t.id))}>▶ Resume</button>}
                 <button type="button" className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded" onClick={() => { setCompleteModal({ id: t.id, title: t.title }); setCompleteNotes('') }}>■ Complete</button>
               </>
             )}
@@ -1087,6 +1111,11 @@ export default function HRM() {
         <p className="text-xs text-gray-400">
           {i.frequency} · {i.status}{i.approval_status ? ` · ${i.approval_status}` : ''}{i.marked_by ? ` · ${i.marked_by}` : ''}{i.blocker_reason ? ` — ${i.blocker_reason}` : ''}
         </p>
+        {i.hod_edited && (
+          <p className="text-[10px] mt-0.5 inline-block px-1.5 py-0.5 rounded bg-blue-100 text-blue-800" title={i.hod_edited_at ? `Last edited ${i.hod_edited_at}` : ''}>
+            Status corrected by {i.hod_edited_by || 'HOD'}{i.hod_edited_role ? ` (${i.hod_edited_role})` : ''} · was {i.hod_original_status || 'Pending'}
+          </p>
+        )}
         <LinkedPersonLine item={i} />
         <BackupPersonLine item={i} />
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
@@ -1114,7 +1143,7 @@ export default function HRM() {
         {canTime && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {ts === 'Not Started' && !officeClosed && (
-              <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" onClick={() => startRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Start</button>
+              <button type="button" className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded" onClick={officeGate(() => startRespMut.mutate({ id: i.responsibility_id, log_date: checkDate }))}>▶ Start</button>
             )}
             {(ts === 'Active' || ts === 'In Progress') && (
               <>
@@ -1124,7 +1153,7 @@ export default function HRM() {
             )}
             {ts === 'Paused' && (
               <>
-                {!officeClosed && <button type="button" disabled={!canResume || resumeRespMut.isPending} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded disabled:opacity-40" onClick={() => resumeRespMut.mutate({ id: i.responsibility_id, log_date: checkDate })}>▶ Resume</button>}
+                {!officeClosed && <button type="button" disabled={!canResume || resumeRespMut.isPending} className="text-xs px-2 py-0.5 bg-blue-600 text-white rounded disabled:opacity-40" onClick={officeGate(() => resumeRespMut.mutate({ id: i.responsibility_id, log_date: checkDate }))}>▶ Resume</button>}
                 <button type="button" disabled={!canEnd || endRespMut.isPending} className="text-xs px-2 py-0.5 bg-amber-700 text-white rounded disabled:opacity-40" onClick={endTimer}>■ Complete</button>
               </>
             )}
@@ -1529,6 +1558,9 @@ export default function HRM() {
                         {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
                       </select>
                     </div>
+                    {quickResp.frequency === 'Twice a Week' && (
+                      <WeekdayPairInput value={quickResp.schedule_weekday} onChange={v => setQuickResp(f => ({ ...f, schedule_weekday: v }))} />
+                    )}
                     {(quickResp.frequency === 'Weekly' || quickResp.frequency === 'Fortnightly') && (
                       <div><label className="text-xs text-gray-500">Weekday *</label>
                         <select value={quickResp.schedule_weekday} onChange={e => setQuickResp(f => ({ ...f, schedule_weekday: e.target.value }))}
@@ -2099,7 +2131,8 @@ export default function HRM() {
                     const url = URL.createObjectURL(new Blob([res.data], { type: 'text/csv' }))
                     const a = document.createElement('a'); a.href = url; a.download = 'hrm_responsibilities_import_template.csv'; a.click(); URL.revokeObjectURL(url)
                   } catch (e: any) { alert(e?.response?.data?.detail || 'Template download failed') }
-                }} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600 hover:bg-gray-50">📥 Template</button>
+                }} title="Schedule columns: Frequency | Schedule Value | Occurrence Day (e.g. Monthly | 3rd | Thursday, Monthly | Fixed Date | 25, Fortnightly | 2nd | Monday) + Linked Person"
+                  className="text-xs px-2 py-1.5 border rounded-lg text-gray-600 hover:bg-gray-50">📥 Template</button>
                 {canManageOrg && (
                   <button type="button" onClick={() => setShowHolidays(true)} className="text-xs px-2 py-1.5 border rounded-lg text-gray-600 hover:bg-gray-50">📅 Holidays</button>
                 )}
@@ -2131,6 +2164,9 @@ export default function HRM() {
                     {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
                   </select>
                 </div>
+                {respForm.frequency === 'Twice a Week' && (
+                  <WeekdayPairInput value={respForm.schedule_weekday} onChange={v => setRespForm(f => ({ ...f, schedule_weekday: v }))} />
+                )}
                 {(respForm.frequency === 'Weekly' || respForm.frequency === 'Fortnightly') && (
                   <div><label className="text-xs text-gray-500">{t(lang, 'weekday')} *</label>
                     <select value={respForm.schedule_weekday} onChange={e => setRespForm(f => ({ ...f, schedule_weekday: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
@@ -2249,6 +2285,9 @@ export default function HRM() {
                                   {FREQUENCIES.map(f => <option key={f}>{f}</option>)}
                                 </select>
                               </div>
+                              {editResp.frequency === 'Twice a Week' && (
+                                <WeekdayPairInput compact value={editResp.schedule_weekday || ''} onChange={v => setEditResp((x: any) => ({ ...x, schedule_weekday: v }))} />
+                              )}
                               {(editResp.frequency === 'Weekly' || editResp.frequency === 'Fortnightly') && (
                                 <div>
                                   <label className="text-[10px] text-gray-400">Weekday *</label>
@@ -2325,6 +2364,7 @@ export default function HRM() {
                                 <button onClick={() => {
                                   const editRule = SCHEDULE_RULE_FREQS.includes(editResp.frequency) ? String(editResp.schedule_rule || '').trim() : ''
                                   if ((editResp.frequency === 'Weekly' || (editResp.frequency === 'Fortnightly' && !editRule)) && !editResp.schedule_weekday) { alert('Select a weekday for Weekly/Fortnightly (or set a Dynamic Schedule Rule for Fortnightly)'); return }
+                                  if (editResp.frequency === 'Twice a Week' && !weekdayPairValid(editResp.schedule_weekday)) { alert('Select two different weekdays for Twice a Week'); return }
                                   if (editResp.frequency === 'Monthly' && !editRule && !(editResp.schedule_month_day > 0)) { alert('Select calendar day or a Dynamic Schedule Rule for Monthly'); return }
                                   if (editResp.frequency === 'Quarterly' && !(editResp.schedule_month > 0)) { alert('Select anchor month for Quarterly'); return }
                                   if (editResp.mandatory && !editResp.backup_employee_id) { alert('Backup person is required for mandatory responsibilities'); return }
@@ -2756,15 +2796,19 @@ export default function HRM() {
                           const s = dayData.status
                           const locked = !!dayData.marked
                           const hodCanEdit = canEditAssignments && locked && (dayData.editable !== false)
+                          const opts: string[] = s && !(TASK_LOG_STATUSES as readonly string[]).includes(s) ? [s, ...TASK_LOG_STATUSES] : [...TASK_LOG_STATUSES]
+                          const hodNote = dayData.hod_edited
+                            ? `Corrected by ${dayData.hod_edited_by || 'HOD'}${dayData.hod_edited_role ? ` (${dayData.hod_edited_role})` : ''} at ${dayData.hod_edited_at} · original ${dayData.hod_original_status || 'Pending'}`
+                            : ''
                           return (
-                            <td key={d} className="px-1 py-2 text-center">
+                            <td key={d} className={`px-1 py-2 text-center ${dayData.hod_edited ? 'bg-blue-100' : ''}`} title={hodNote || undefined}>
                               {hodCanEdit ? (
                                 <select
                                   value={s}
                                   onChange={e => handleStatusSelect(r.id, d, e.target.value)}
                                   className={`text-[10px] border rounded px-0.5 py-0.5 max-w-[4.5rem] font-bold ${statusBg(s)}`}
-                                  title="HOD/Admin can change saved status">
-                                  {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
+                                  title={hodNote || 'HOD/Admin can change saved status'}>
+                                  {opts.map(st => <option key={st} value={st}>{st}</option>)}
                                 </select>
                               ) : locked ? (
                                 <span
@@ -2792,7 +2836,7 @@ export default function HRM() {
                 </table>
               </div>
               <div className="px-4 py-2 border-t bg-gray-50 text-xs text-gray-500">
-                Select a status for each day. Employees cannot change after save; HOD/Admin can update a saved status if needed. Use Leave or N/A for absent employees.
+                Select a status for each day. Employees cannot change after save; HOD/Admin can update a saved status if needed (corrected cells are shaded blue and audited). Leave is applied from the Employee Check header; use N/A for not-applicable days.
               </div>
             </div>
           )}
@@ -3561,7 +3605,7 @@ export default function HRM() {
                 <select value={blockedForm.blocker_employee_id} onChange={e => setBlockedForm(f => ({ ...f, blocker_employee_id: e.target.value }))}
                   className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                   <option value="">Select employee</option>
-                  {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
+                  {blockerChoices.map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
                 </select>
               </div>
               <div><label className="text-xs text-gray-500">Reason *</label>

@@ -24,6 +24,8 @@ _DB = os.environ.get("HRM_DB_PATH", _default_db_path())
 
 TASK_LOG_STATUSES = frozenset({"Done", "Partial", "Missed", "Blocked", "Leave", "N/A"})
 NEUTRAL_TASK_STATUSES = frozenset({"Leave", "N/A"})
+# Statuses that claim work done — require Start/Complete (or manual) time first
+TIMED_TASK_STATUSES = frozenset({"Done", "Partial"})
 # Performance only after Approved / Self-complete (Done without Linked To) / Auto-Approved
 PERF_CREDIT_STATUSES = frozenset({"Done", "Partial"})  # Done only if approval satisfied
 
@@ -31,8 +33,10 @@ PERF_CREDIT_STATUSES = frozenset({"Done", "Partial"})  # Done only if approval s
 ISSUE_STATUSES = frozenset({"Open", "Resolve", "Hold", "Cancel"})
 ISSUE_STATUS_ALIASES = {"Resolved": "Resolve", "Closed": "Resolve", "Cancelled": "Cancel"}
 
+TWICE_A_WEEK = "Twice a Week"
 FREQUENCIES = (
     "Daily",
+    TWICE_A_WEEK,
     "Weekly",
     "Fortnightly",
     "Monthly",
@@ -765,6 +769,20 @@ def init_db():
         """
     )
     _backfill_time_slots(conn)
+    for sql in (
+        # HOD/Admin status correction marker (blue rows in reports) + editor role in audit
+        "ALTER TABLE task_logs ADD COLUMN hod_edited INTEGER DEFAULT 0",
+        "ALTER TABLE task_logs ADD COLUMN hod_edit_count INTEGER DEFAULT 0",
+        "ALTER TABLE task_logs ADD COLUMN hod_original_status TEXT DEFAULT ''",
+        "ALTER TABLE task_logs ADD COLUMN hod_edited_by TEXT DEFAULT ''",
+        "ALTER TABLE task_logs ADD COLUMN hod_edited_role TEXT DEFAULT ''",
+        "ALTER TABLE task_logs ADD COLUMN hod_edited_at TEXT DEFAULT ''",
+        "ALTER TABLE hrm_task_audit ADD COLUMN actor_role TEXT DEFAULT ''",
+    ):
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError:
+            pass
 
     # Lifecycle rename: Resolved → Resolve (keep legacy display mapping)
     try:
@@ -805,14 +823,16 @@ def write_task_audit(
     new_value: str = "",
     actor: str = "",
     notes: str = "",
+    actor_role: str = "",
     conn=None,
 ) -> None:
     owns = conn is None
     if owns:
         conn = _connect()
     conn.execute(
-        """INSERT INTO hrm_task_audit(entity_type, entity_id, action, old_value, new_value, actor, notes, created_at)
-           VALUES(?,?,?,?,?,?,?,?)""",
+        """INSERT INTO hrm_task_audit(entity_type, entity_id, action, old_value, new_value, actor, notes,
+                                      created_at, actor_role)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
         (
             entity_type,
             entity_id,
@@ -822,6 +842,7 @@ def write_task_audit(
             actor or "",
             notes or "",
             _now_iso(),
+            actor_role or "",
         ),
     )
     if owns:
@@ -1294,25 +1315,24 @@ def count_working_days_ist(from_date: str, to_date: str) -> int:
     return n
 
 
+# Simplified template. Legacy columns (schedule_weekday, schedule_month_day, schedule_month,
+# schedule_rule, linked_person_code, linked_person_name) are still accepted on import.
 RESPONSIBILITY_IMPORT_COLUMNS = (
     "employee_code",
     "employee_name",
     "title",
     "description",
-    "frequency",
+    "Frequency",
+    "Schedule Value",
+    "Occurrence Day",
+    "Linked Person",
     "category",
     "priority",
     "mandatory",
     "expected_time",
     "kpi_weightage",
-    "schedule_weekday",
-    "schedule_month_day",
-    "schedule_month",
     "backup_employee_code",
     "added_by",
-    "schedule_rule",
-    "linked_person_code",
-    "linked_person_name",
 )
 
 TASK_IMPORT_COLUMNS = (
@@ -1329,10 +1349,14 @@ TASK_IMPORT_COLUMNS = (
 def responsibility_import_template_csv() -> str:
     header = ",".join(RESPONSIBILITY_IMPORT_COLUMNS)
     examples = [
-        "EMP001,Sample Employee,Morning stock check,Count warehouse,Daily,General,Medium,yes,30,10,,,,EMP002,Admin,,EMP003,",
-        "EMP001,,Weekly review,,Weekly,General,High,no,1:00,5,Monday,,,,Admin,,,",
-        "EMP001,,Month-end stock audit,,Monthly,General,High,no,2:00,5,,,,,Admin,Last Working Day,,Boss Name",
-        "EMP001,,Vendor follow-up,,Fortnightly,General,Medium,no,1:00,5,,,,,Admin,1st & 3rd Monday,EMP003,",
+        "EMP001,Sample Employee,Morning stock check,Count warehouse,Daily,Daily,N/A,,General,Medium,yes,30,10,EMP002,Admin",
+        "EMP001,,Supplier calls,,Twice in a week,Monday/Thursday,N/A,EMP003,General,Medium,no,0:30,5,,Admin",
+        "EMP001,,Weekly review,,Weekly,All,Monday,,General,High,no,1:00,5,,Admin",
+        "EMP001,,Vendor follow-up,,Fortnightly,2nd,Monday,EMP003,General,Medium,no,1:00,5,,Admin",
+        "EMP001,,Stock reconciliation,,Monthly,3rd,Thursday,,General,High,no,2:00,5,,Admin",
+        "EMP001,,Salary sheet,,Monthly,Fixed Date,25,Boss Name,General,High,no,2:00,5,,Admin",
+        "EMP001,,Quarterly GST review,,Quarterly,March,N/A,,General,High,no,3:00,5,,Admin",
+        "EMP001,,Annual audit prep,,Yearly,April,N/A,,General,High,no,4:00,5,,Admin",
     ]
     return "\n".join([header, *examples]) + "\n"
 
@@ -1368,6 +1392,8 @@ def is_schedule_due(
     wd_name = WEEKDAYS[d.weekday()] if d.weekday() < len(WEEKDAYS) else ""
     if freq == "Daily":
         return True
+    if freq == TWICE_A_WEEK:
+        return wd_name in parse_weekday_list(weekday)
     if freq == "Weekly":
         wanted = (weekday or "").strip()
         if not wanted:
@@ -1979,6 +2005,8 @@ def _normalize_import_row(row: dict) -> dict:
     out: dict = {}
     for k, v in row.items():
         key = str(k).strip().lower().replace(" ", "_")
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)  # pandas reads 25 as 25.0 when the column has blanks
         out[key] = "" if v is None else str(v).strip()
     return out
 
@@ -2053,7 +2081,18 @@ def import_responsibilities(rows: list[dict]) -> dict:
                     f"({row.get('employee_name') or row.get('employee_code') or row.get('emp_code') or '?'})"
                 )
                 continue
-            freq = row.get("frequency") or "Daily"
+            schedule: dict | None = None
+            if row.get("schedule_value") or row.get("occurrence_day"):
+                try:
+                    schedule = resolve_template_schedule(
+                        row.get("frequency"), row.get("schedule_value"), row.get("occurrence_day")
+                    )
+                except ValueError as e:
+                    errors.append(f"Row {idx}: {e}")
+                    continue
+            freq = schedule["frequency"] if schedule else (
+                _FREQUENCY_ALIASES.get((row.get("frequency") or "").strip().lower()) or row.get("frequency") or "Daily"
+            )
             dup_id = _find_duplicate_responsibility(conn, emp_id, title, freq)
             if dup_id:
                 skipped += 1
@@ -2087,12 +2126,13 @@ def import_responsibilities(rows: list[dict]) -> dict:
                     errors.append(f"Row {idx}: backup employee not found")
                     continue
             linked_id = None
+            linked_any = row.get("linked_person") or ""  # code or name
             linked_code = (
                 row.get("linked_person_code") or row.get("linked_to_code")
-                or row.get("linked_employee_code") or ""
+                or row.get("linked_employee_code") or linked_any
             )
             linked_name = (
-                row.get("linked_person_name") or row.get("linked_person")
+                row.get("linked_person_name") or linked_any
                 or row.get("linked_to") or row.get("supervisor") or row.get("approver") or ""
             )
             if linked_code or linked_name:
@@ -2130,6 +2170,8 @@ def import_responsibilities(rows: list[dict]) -> dict:
                 "linked_to_employee_id": linked_id,
                 "schedule_rule": row.get("schedule_rule") or row.get("dynamic_schedule_rule") or "",
             }
+            if schedule:
+                payload.update(schedule)
             try:
                 create_responsibility(payload)
                 created += 1
@@ -2241,6 +2283,8 @@ def _validate_responsibility_schedule(
                 "Dynamic Schedule Rule is available for Monthly, Fortnightly and Yearly (fixed date) responsibilities"
             )
         parse_schedule_rule(rule)
+    if freq == TWICE_A_WEEK and len(parse_weekday_list(weekday, strict=True)) != 2:
+        raise ValueError("Twice a Week responsibilities require two different weekdays (e.g. Monday/Thursday)")
     if freq == "Weekly" and not (weekday or "").strip():
         raise ValueError("Weekly responsibilities require a weekday")
     if freq == "Fortnightly" and not (weekday or "").strip() and not rule:
@@ -2275,6 +2319,8 @@ def create_responsibility(data: dict):
     except ValueError:
         conn.close()
         raise
+    if freq == TWICE_A_WEEK:
+        weekday = ",".join(parse_weekday_list(weekday))
     priority = data.get("priority") or "Medium"
     if priority not in PRIORITIES:
         priority = "Medium"
@@ -2512,6 +2558,8 @@ def update_responsibility(rid: int, data: dict):
             except ValueError:
                 conn.close()
                 raise
+            if freq == TWICE_A_WEEK:
+                payload["schedule_weekday"] = ",".join(parse_weekday_list(weekday))
     sets = ", ".join(f"{k}=?" for k in payload)
     vals = list(payload.values())
     if sets:
@@ -2529,6 +2577,59 @@ def delete_responsibility(rid: int):
     conn.close()
 
 
+def _record_hod_status_edit(
+    conn,
+    task_log_id: int,
+    *,
+    employee_id: int,
+    original: str,
+    updated: str,
+    editor_name: str,
+    editor_role: str,
+    at: str,
+) -> None:
+    """Flag a supervisor status correction (kept across repeat edits) and write the audit row."""
+    conn.execute(
+        """UPDATE task_logs
+           SET hod_edited=1,
+               hod_edit_count=COALESCE(hod_edit_count,0)+1,
+               hod_original_status=CASE WHEN IFNULL(hod_original_status,'')='' THEN ? ELSE hod_original_status END,
+               hod_edited_by=?, hod_edited_role=?, hod_edited_at=?
+           WHERE id=?""",
+        (original, editor_name, editor_role, at, int(task_log_id)),
+    )
+    write_task_audit(
+        "task_log",
+        int(task_log_id),
+        "hod_status_edit",
+        old_value=original,
+        new_value=updated,
+        actor=editor_name,
+        actor_role=editor_role,
+        notes=f"employee_id={int(employee_id)}",
+        conn=conn,
+    )
+
+
+def get_task_log_employee(task_log_id: int) -> int | None:
+    conn = _connect()
+    row = conn.execute("SELECT employee_id FROM task_logs WHERE id=?", (int(task_log_id),)).fetchone()
+    conn.close()
+    return int(row["employee_id"]) if row else None
+
+
+def task_log_status_audit(task_log_id: int) -> list[dict]:
+    conn = _connect()
+    rows = conn.execute(
+        """SELECT id, entity_id AS task_log_id, action, old_value, new_value, actor,
+                  IFNULL(actor_role,'') AS actor_role, notes, created_at
+           FROM hrm_task_audit WHERE entity_type='task_log' AND entity_id=? ORDER BY id""",
+        (int(task_log_id),),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def mark_task(
     responsibility_id: int,
     log_date: str,
@@ -2539,7 +2640,9 @@ def mark_task(
     blocker_reason: str = "",
     *,
     allow_override: bool = False,
+    editor: dict | None = None,
 ):
+    """editor={"name","role"} marks a supervisor (HOD/Admin) correcting someone else's status."""
     if status not in TASK_LOG_STATUSES:
         return "invalid_status"
 
@@ -2595,9 +2698,18 @@ def mark_task(
         (responsibility_id, log_date),
     ).fetchone()
 
-    # Mandatory time tracking before quality status (Leave / N/A exempt).
+    if (
+        existing
+        and not allow_override
+        and (str(existing["status"] or "Pending").strip() or "Pending") != "Pending"
+    ):
+        conn.close()
+        return "locked"
+
+    # Mandatory time tracking only for statuses that claim work (Done / Partial).
+    # Missed / Blocked / Leave / N/A need no Start/Complete time.
     # HOD/Admin overrides and system auto-marks may skip the timer gate.
-    if status not in NEUTRAL_TASK_STATUSES and not allow_override:
+    if status in TIMED_TASK_STATUSES and not allow_override:
         started = str(existing["started_at"] or "").strip() if existing else ""
         active_secs = int(existing["active_seconds"] or 0) if existing else 0
         if not started and active_secs <= 0:
@@ -2671,6 +2783,19 @@ def mark_task(
             "SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?",
             (responsibility_id, log_date),
         ).fetchone()
+
+    prev_status = (str(existing["status"] or "Pending").strip() or "Pending") if existing else "Pending"
+    if editor and task_log_id and prev_status != status:
+        _record_hod_status_edit(
+            conn,
+            int(task_log_id["id"]),
+            employee_id=int(resp["employee_id"]),
+            original=prev_status,
+            updated=status,
+            editor_name=str(editor.get("name") or marked_by or ""),
+            editor_role=str(editor.get("role") or ""),
+            at=mark_now,
+        )
 
     if status == "Blocked" and blocker_employee_id:
         blocker = conn.execute(
@@ -4505,7 +4630,13 @@ def get_hod_dashboard(
                COALESCE(tl.approval_status,'') as approval_status,
                COALESCE(tl.started_at,'') as started_at,
                COALESCE(tl.ended_at,'') as ended_at,
-               COALESCE(tl.duration_minutes,0) as duration_minutes
+               COALESCE(tl.duration_minutes,0) as duration_minutes,
+               tl.id as task_log_id,
+               COALESCE(tl.hod_edited,0) as hod_edited,
+               COALESCE(tl.hod_original_status,'') as hod_original_status,
+               COALESCE(tl.hod_edited_by,'') as hod_edited_by,
+               COALESCE(tl.hod_edited_role,'') as hod_edited_role,
+               COALESCE(tl.hod_edited_at,'') as hod_edited_at
         FROM task_logs tl
         JOIN responsibilities r ON r.id=tl.responsibility_id
         LEFT JOIN employees be ON be.id=tl.blocker_employee_id
@@ -4541,6 +4672,12 @@ def get_hod_dashboard(
             "marked": quality_marked,
             "editable": hod_status_editable(mat),
             **_timer_payload(ld),
+            "task_log_id": l["task_log_id"],
+            "hod_edited": bool(int(l["hod_edited"] or 0)),
+            "hod_original_status": l["hod_original_status"] or "",
+            "hod_edited_by": l["hod_edited_by"] or "",
+            "hod_edited_role": l["hod_edited_role"] or "",
+            "hod_edited_at": l["hod_edited_at"] or "",
         }
 
     result = []
@@ -4754,6 +4891,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         ORDER BY
           CASE r.frequency
             WHEN 'Daily' THEN 0
+            WHEN 'Twice a Week' THEN 1
             WHEN 'Weekly' THEN 1
             WHEN 'Fortnightly' THEN 2
             WHEN 'Monthly' THEN 3
@@ -4818,7 +4956,13 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
                COALESCE(paused_at,'') as paused_at,
                COALESCE(duration_minutes,0) as duration_minutes,
                COALESCE(active_seconds,0) as active_seconds,
-               COALESCE(paused_seconds,0) as paused_seconds
+               COALESCE(paused_seconds,0) as paused_seconds,
+               COALESCE(hod_edited,0) as hod_edited,
+               COALESCE(hod_edit_count,0) as hod_edit_count,
+               COALESCE(hod_original_status,'') as hod_original_status,
+               COALESCE(hod_edited_by,'') as hod_edited_by,
+               COALESCE(hod_edited_role,'') as hod_edited_role,
+               COALESCE(hod_edited_at,'') as hod_edited_at
         FROM task_logs
         WHERE employee_id=? AND log_date=?
         """,
@@ -4955,6 +5099,12 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             "remarks": (log or {}).get("remarks") or "",
             "marked_by": (log or {}).get("marked_by") or "",
             "blocker_reason": (log or {}).get("blocker_reason") or "",
+            "hod_edited": bool(int((log or {}).get("hod_edited") or 0)),
+            "hod_edit_count": int((log or {}).get("hod_edit_count") or 0),
+            "hod_original_status": (log or {}).get("hod_original_status") or "",
+            "hod_edited_by": (log or {}).get("hod_edited_by") or "",
+            "hod_edited_role": (log or {}).get("hod_edited_role") or "",
+            "hod_edited_at": (log or {}).get("hod_edited_at") or "",
             "editable": hod_status_editable((log or {}).get("marked_at")),
             "in_action_window": in_task_action_window(day),
             "reassigned_out": bool(re_out),
@@ -4994,6 +5144,13 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
 
     one_time = [_one_time_task_row(r) for r in ot_rows]
     _overlay_one_time_slots(one_time, slots_by_task, slot_now)
+    from .hrm_worktime import _day_bounds, _slot_net_in_window
+
+    day0, day1 = _day_bounds(day)
+    for it in [*one_time, *worked_on, *not_worked, *other, *whenever_required]:
+        secs = sum(_slot_net_in_window(s, day0, day1, slot_now) for s in it.get("time_slots") or [])
+        it["day_work_seconds"] = secs
+        it["day_work_label"] = _format_duration_hm(secs)
     if on_leave:
         # Leave day: pending items leave the employee's actionable list (backup covers mandatory).
         for item in not_worked + whenever_required:
@@ -5353,7 +5510,8 @@ def get_performance(department_id=None, from_date=None, to_date=None):
         expected = (
             total_days
             if r["frequency"] == "Daily"
-            else (total_days // 7 if r["frequency"] == "Weekly" else 1)
+            else (total_days // 7 if r["frequency"] == "Weekly"
+                  else (total_days // 7) * 2 if r["frequency"] == TWICE_A_WEEK else 1)
         )
         weight = float(r["kpi_weightage"] or 0) if "kpi_weightage" in r.keys() else 0.0
         unit_w = weight if weight > 0 else 1.0
@@ -6397,7 +6555,7 @@ _ORDINALS = {
 }
 _ORDINAL_LABEL = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th", 5: "5th", -1: "Last"}
 SCHEDULE_RULE_FREQUENCIES = ("Monthly", "Fortnightly", "Yearly")
-SHIFTABLE_FREQUENCIES = frozenset({"Weekly", "Fortnightly", "Monthly", "Yearly"})
+SHIFTABLE_FREQUENCIES = frozenset({TWICE_A_WEEK, "Weekly", "Fortnightly", "Monthly", "Yearly"})
 SCHEDULE_RULE_EXAMPLES = (
     "1st Monday", "2nd Monday", "1st Saturday", "2nd Saturday", "2nd & 4th Saturday",
     "Last Friday", "Last Working Day", "First Working Day",
@@ -6439,6 +6597,178 @@ def normalize_schedule_rule(rule: str | None) -> str:
         return "First Working Day"
     labels = " & ".join(_ORDINAL_LABEL[o] for o in p["occurrences"])
     return f"{labels} {WEEKDAYS[p['weekday']]}"
+
+
+# ── Simplified import template: Frequency | Schedule Value | Occurrence Day ──
+
+_NA_TOKENS = frozenset({"", "n/a", "na", "-", "none", "nil"})
+_FREQUENCY_ALIASES = {
+    "daily": "Daily",
+    "twice in a week": TWICE_A_WEEK,
+    "twice a week": TWICE_A_WEEK,
+    "twice weekly": TWICE_A_WEEK,
+    "weekly": "Weekly",
+    "fortnightly": "Fortnightly",
+    "monthly": "Monthly",
+    "quarterly": "Quarterly",
+    "yearly": "Yearly",
+    "annually": "Yearly",
+    "annual": "Yearly",
+    "whenever required": "Whenever Required",
+}
+_FORTNIGHT_PAIR = {1: "1st & 3rd", 2: "2nd & 4th", 3: "3rd & 5th"}
+
+
+def _is_na(value) -> bool:
+    return str(value or "").strip().lower() in _NA_TOKENS
+
+
+def _weekday_name(token: str) -> str | None:
+    t = str(token or "").strip().lower()
+    if len(t) < 3:
+        return None
+    for w in WEEKDAYS:
+        if w.lower() == t or w.lower().startswith(t):
+            return w
+    return None
+
+
+def parse_weekday_list(raw, *, strict: bool = False) -> list[str]:
+    """'Monday/Thursday', 'Mon, Thu', 'Monday & Thursday' → ['Monday', 'Thursday'] (week order, unique)."""
+    tokens = [t for t in re.split(r"\s*(?:,|/|&|\+|\band\b)\s*", str(raw or "").strip(), flags=re.I) if t]
+    names: list[str] = []
+    for t in tokens:
+        w = _weekday_name(t)
+        if not w:
+            if strict:
+                raise ValueError(f"'{t}' is not a weekday")
+            continue
+        if w not in names:
+            names.append(w)
+    return sorted(names, key=WEEKDAYS.index)
+
+
+def _month_number(raw) -> int | None:
+    t = str(raw or "").strip().lower()
+    if t.isdigit() and 1 <= int(t) <= 12:
+        return int(t)
+    if len(t) >= 3:
+        for i, m in enumerate(MONTH_NAMES, start=1):
+            if m.lower() == t or m.lower().startswith(t):
+                return i
+    return None
+
+
+def _ordinal_number(raw) -> int | None:
+    t = str(raw or "").strip().lower()
+    if t in _ORDINALS:
+        return _ORDINALS[t]
+    if t.isdigit() and 1 <= int(t) <= 5:
+        return int(t)
+    return None
+
+
+def resolve_template_schedule(frequency, schedule_value, occurrence_day) -> dict:
+    """Single source of truth for the import template schedule columns.
+
+    Returns {frequency, schedule_weekday, schedule_month_day, schedule_month, schedule_rule}
+    or raises ValueError with a message that names the invalid combination.
+    """
+    raw_freq = str(frequency or "").strip()
+    freq = _FREQUENCY_ALIASES.get(raw_freq.lower())
+    if not freq:
+        raise ValueError(
+            f"Unknown Frequency '{raw_freq}'. Use Daily, Twice in a week, Weekly, Fortnightly, "
+            "Monthly, Quarterly, Yearly or Whenever Required"
+        )
+    value = str(schedule_value or "").strip()
+    occ = str(occurrence_day or "").strip()
+    out = {"frequency": freq, "schedule_weekday": "", "schedule_month_day": 0, "schedule_month": 0, "schedule_rule": ""}
+    combo = f"{freq} | Schedule Value '{value or 'blank'}' | Occurrence Day '{occ or 'blank'}'"
+
+    if freq in ("Daily", "Whenever Required"):
+        if not (_is_na(value) or value.lower() == freq.lower()) or not _is_na(occ):
+            raise ValueError(f"{combo}: use Schedule Value '{freq}' and Occurrence Day 'N/A'")
+        return out
+
+    if freq == TWICE_A_WEEK:
+        try:
+            days = parse_weekday_list(value, strict=True)
+        except ValueError as e:
+            raise ValueError(f"{combo}: {e}. Use two weekdays like 'Monday/Thursday'") from e
+        if len(days) != 2 or not _is_na(occ):
+            raise ValueError(f"{combo}: Schedule Value must be two different weekdays (e.g. 'Monday/Thursday') and Occurrence Day 'N/A'")
+        out["schedule_weekday"] = ",".join(days)
+        return out
+
+    if freq == "Weekly":
+        wd = _weekday_name(occ) if not _is_na(occ) else None
+        if wd and (_is_na(value) or value.lower() == "all"):
+            out["schedule_weekday"] = wd
+            return out
+        if not wd and _is_na(occ) and _weekday_name(value):
+            out["schedule_weekday"] = _weekday_name(value)
+            return out
+        raise ValueError(f"{combo}: use Schedule Value 'All' and a weekday in Occurrence Day (e.g. Monday)")
+
+    if freq == "Fortnightly":
+        wd = _weekday_name(occ) if not _is_na(occ) else None
+        if not wd:
+            raise ValueError(f"{combo}: Occurrence Day must be a weekday (e.g. Monday)")
+        if _is_na(value) or value.lower() == "all":
+            out["schedule_weekday"] = wd  # legacy fortnightly = 2nd & 4th occurrence
+            return out
+        n = _ordinal_number(value)
+        if n not in _FORTNIGHT_PAIR:
+            raise ValueError(
+                f"{combo}: Fortnightly Schedule Value must be 1st, 2nd or 3rd "
+                "(paired two weeks later: 1st→1st & 3rd, 2nd→2nd & 4th, 3rd→3rd & 5th)"
+            )
+        out["schedule_weekday"] = wd
+        out["schedule_rule"] = normalize_schedule_rule(f"{_ORDINAL_LABEL[n]} {wd}")
+        return out
+
+    if freq == "Monthly":
+        v = value.lower()
+        if v in ("fixed date", "fixed", "date", "day of month"):
+            if not occ.isdigit() or not 1 <= int(occ) <= 31:
+                raise ValueError(f"{combo}: Fixed Date needs a day number 1–31 in Occurrence Day")
+            out["schedule_month_day"] = int(occ)
+            return out
+        if v in ("last working day", "lwd", "first working day", "fwd"):
+            if not _is_na(occ):
+                raise ValueError(f"{combo}: '{value}' needs Occurrence Day 'N/A'")
+            out["schedule_rule"] = normalize_schedule_rule(value)
+            return out
+        n = _ordinal_number(value)
+        wd = _weekday_name(occ) if not _is_na(occ) else None
+        if n is None or not wd:
+            raise ValueError(
+                f"{combo}: use an ordinal (1st–5th or Last) with a weekday (e.g. 3rd | Thursday), "
+                "'Fixed Date' with a day number, or 'Last Working Day'"
+            )
+        out["schedule_rule"] = normalize_schedule_rule(f"{_ORDINAL_LABEL[n]} {wd}")
+        return out
+
+    month = _month_number(value)
+    if not month:
+        raise ValueError(f"{combo}: Schedule Value must be a month name (e.g. March)")
+    out["schedule_month"] = month
+    if freq == "Quarterly":
+        if not _is_na(occ):
+            raise ValueError(f"{combo}: Quarterly uses the anchor month only — set Occurrence Day 'N/A'")
+        return out
+    # Yearly: N/A → 1st of the month; a day number; or a rule like '1st Monday' / 'Last Working Day'
+    if _is_na(occ):
+        out["schedule_month_day"] = 1
+    elif occ.isdigit() and 1 <= int(occ) <= 31:
+        out["schedule_month_day"] = int(occ)
+    else:
+        try:
+            out["schedule_rule"] = normalize_schedule_rule(occ)
+        except ValueError as e:
+            raise ValueError(f"{combo}: Yearly Occurrence Day must be N/A, a day number or e.g. '1st Monday'") from e
+    return out
 
 
 def _is_company_working_day(d: date, holidays: set[str]) -> bool:

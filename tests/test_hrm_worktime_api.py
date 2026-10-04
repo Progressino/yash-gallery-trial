@@ -92,6 +92,7 @@ def test_no_timer_start_or_resume_after_office_close(env):
 def test_break_confirmation_over_http(env):
     c, a, clock = env["client"], env["a"], env["clock"]
     rid = hrm_db.create_responsibility({"employee_id": a, "title": "Lunch overlap", "frequency": "Daily"})
+    assert c.post("/api/hrm/office/start", json={}).status_code == 200
     clock.t = f"{DAY} 12:50:00"
     assert c.post(f"/api/hrm/tasks/{rid}/start", json={"log_date": DAY}).status_code == 200
     clock.t = f"{DAY} 13:40:00"
@@ -110,6 +111,8 @@ def test_slot_edit_rbac(env):
     other = hrm_db.create_one_time_task({"employee_id": b, "title": "Theirs"})
     for t, emp in ((tid, a), (other, b)):
         env["as_employee"](emp)
+        clock.t = f"{DAY} 09:00:00"
+        assert c.post("/api/hrm/office/start", json={}).status_code == 200
         clock.t = f"{DAY} 10:00:00"
         assert c.post(f"/api/hrm/one-time-tasks/{t}/start").status_code == 200
         clock.t = f"{DAY} 10:30:00"
