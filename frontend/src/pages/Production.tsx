@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
+import { useAuth } from '../store/auth'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
 import { brandLogoDataUrl, brandPrintHeaderHtml, BRAND_PRINT_CSS } from '../lib/printBrand'
@@ -826,6 +827,168 @@ function GreyInlineAllocPanel({
   )
 }
 
+function PrintedInlineAllocPanel({
+  materialCode,
+  mat,
+  onSaved,
+}: {
+  materialCode: string
+  mat: any
+  onSaved: () => void
+}) {
+  const userName = useAuth(s => s.user?.username || '')
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState('')
+  const unit = String(mat.unit || 'MTR')
+  const freeQty = Number(mat.printed_free_qty || 0)
+  const inChecked = Boolean(mat.printed_in_checked_stock)
+  const breakdown = Array.isArray(mat.breakdown) ? mat.breakdown : []
+  const r3 = (n: number) => Math.round(n * 1000) / 1000
+  const rowKey = (b: any, i: number) => `${b.so_no || b.so_number || ''}|${b.sku || b.fg_sku || ''}|${i}`
+  const rowRemaining = (b: any) => Math.max(0, r3(Number(b.qty_req || 0) - Number(b.allocated_qty || 0)))
+  const rowLocked = (b: any) => String(b.status || '') === 'Locked-Cut'
+  const alreadyTotal = breakdown.reduce((s: number, b: any) => s + (Number(b.allocated_qty) || 0), 0)
+  const draftTotal = r3(breakdown.reduce((s: number, b: any, i: number) => s + (Number(drafts[rowKey(b, i)]) || 0), 0))
+  const remainingFree = r3(freeQty - draftTotal)
+  const over = draftTotal > freeQty + 0.001
+  const overRow = breakdown.find((b: any, i: number) => (Number(drafts[rowKey(b, i)]) || 0) > rowRemaining(b) + 0.001)
+
+  const fillRemaining = () => {
+    let pool = freeQty
+    const next: Record<string, string> = {}
+    breakdown.forEach((b: any, i: number) => {
+      if (rowLocked(b) || pool <= 0) return
+      const take = r3(Math.min(rowRemaining(b), pool))
+      if (take > 0) {
+        next[rowKey(b, i)] = String(take)
+        pool = r3(pool - take)
+      }
+    })
+    setDrafts(next)
+    setMsg(Object.keys(next).length ? '' : 'Nothing left to allocate — requirements are covered or no free stock')
+  }
+
+  const save = async () => {
+    const rows = breakdown
+      .map((b: any, i: number) => ({
+        qty: Number(drafts[rowKey(b, i)]) || 0,
+        so_number: String(b.so_no || b.so_number || ''),
+        fg_sku: String(b.sku || b.fg_sku || ''),
+      }))
+      .filter((r: { qty: number }) => r.qty > 0)
+    if (!rows.length) { setMsg('Enter allocation qty on at least one SO/SKU'); return }
+    if (over) { setMsg(`Total allocation ${draftTotal} exceeds free printed stock ${freeQty} ${unit}`); return }
+    if (overRow) { setMsg(`Allocation for ${overRow.sku || overRow.fg_sku} exceeds its remaining requirement`); return }
+    setSaving(true)
+    setMsg('')
+    try {
+      await api.post('/grey/planning/allocate-printed-bulk', {
+        printed_code: materialCode,
+        rows,
+        reason: 'MRP printed allocation',
+        user_name: userName,
+      })
+      setDrafts({})
+      setMsg(`Allocated ${draftTotal} ${unit} across ${rows.length} SKU${rows.length === 1 ? '' : 's'} — now in Ready to Cut`)
+      onSaved()
+    } catch (e: unknown) {
+      setMsg(apiErrorMessage(e, 'Allocate failed'))
+    }
+    setSaving(false)
+  }
+
+  return (
+    <div className="py-2 space-y-2">
+      <p className="text-xs font-semibold text-gray-500 uppercase mb-1">
+        Printed Fabric — allocate free checked stock to SO / SKU (moves to Ready to Cut):
+      </p>
+      <div className="flex flex-wrap gap-3 text-xs bg-white border border-blue-100 rounded-lg px-3 py-2">
+        <span>Free checked printed stock: <b className="font-mono text-[#002B5B]">{freeQty} {unit}</b></span>
+        <span>Already allocated: <b>{r3(alreadyTotal)} {unit}</b></span>
+        <span>This session: <b className={over ? 'text-red-600' : 'text-green-700'}>{draftTotal} {unit}</b></span>
+        <span>Free after save: <b className={remainingFree < 0 ? 'text-red-600' : 'text-gray-800'}>{remainingFree} {unit}</b></span>
+      </div>
+      {!inChecked && (
+        <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+          {materialCode} has no checked printed stock yet. Receive and check it (Printing JO → Receive → Check) before allocating.
+        </p>
+      )}
+      {over && <p className="text-[11px] text-red-700">Total allocation exceeds free printed stock — reduce quantities before saving.</p>}
+      {overRow && <p className="text-[11px] text-red-700">An allocation is larger than that SKU's remaining requirement.</p>}
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-gray-400">
+            <th className="text-left py-1 pr-3">SO Number</th>
+            <th className="text-left py-1 pr-3">FG SKU</th>
+            <th className="text-right py-1 pr-3">Required Qty</th>
+            <th className="text-right py-1 pr-3">Already Allocated</th>
+            <th className="text-right py-1 pr-3">Remaining</th>
+            <th className="text-right py-1 pr-3">Allocate Qty</th>
+            <th className="text-left py-1">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {breakdown.map((b: any, i: number) => {
+            const status = String(b.status || 'Pending')
+            const statusColor =
+              status === 'Allocated' ? 'text-green-700 bg-green-50'
+                : status === 'Partial' ? 'text-amber-700 bg-amber-50'
+                  : status === 'Locked-Cut' ? 'text-blue-700 bg-blue-100'
+                    : 'text-red-700 bg-red-50'
+            const key = rowKey(b, i)
+            const rem = rowRemaining(b)
+            const disabled = !inChecked || rowLocked(b) || rem <= 0
+            return (
+              <tr key={i} className="border-t border-blue-100">
+                <td className="py-1 pr-3 font-semibold text-[#002B5B]">{b.so_no}</td>
+                <td className="py-1 pr-3 font-mono text-gray-700">{b.sku || b.fg_sku || '—'}</td>
+                <td className="py-1 pr-3 text-right font-semibold">{b.qty_req} {unit}</td>
+                <td className="py-1 pr-3 text-right font-semibold text-gray-700">{Number(b.allocated_qty || 0)} {unit}</td>
+                <td className="py-1 pr-3 text-right text-gray-700">{rem} {unit}</td>
+                <td className="py-1 pr-3 text-right" onClick={e => e.stopPropagation()}>
+                  <input
+                    type="number"
+                    min={0}
+                    step="0.001"
+                    disabled={disabled}
+                    value={drafts[key] ?? ''}
+                    placeholder={disabled ? '—' : '0'}
+                    onChange={e => setDrafts(d => ({ ...d, [key]: e.target.value }))}
+                    className="w-24 border border-gray-200 rounded px-1.5 py-0.5 text-right font-mono disabled:bg-gray-50"
+                  />
+                </td>
+                <td className="py-1">
+                  <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] font-semibold ${statusColor}`}>{status}</span>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      <div className="flex flex-wrap items-center gap-2" onClick={e => e.stopPropagation()}>
+        <button
+          type="button"
+          disabled={saving || !inChecked || freeQty <= 0}
+          onClick={fillRemaining}
+          className="text-xs px-3 py-1.5 rounded-lg border border-[#002B5B] text-[#002B5B] font-medium hover:bg-blue-50 disabled:opacity-40"
+        >
+          Fill remaining from free stock
+        </button>
+        <button
+          type="button"
+          disabled={saving || over || !!overRow || draftTotal <= 0}
+          onClick={save}
+          className="text-xs px-3 py-1.5 rounded-lg bg-[#002B5B] text-white font-medium hover:bg-blue-900 disabled:opacity-40"
+        >
+          {saving ? 'Allocating…' : 'Allocate printed fabric'}
+        </button>
+        {msg && <span className={`text-xs ${/fail|exceed|nothing|enter|no checked|already exists|does not/i.test(msg) ? 'text-red-600' : 'text-green-700'}`}>{msg}</span>}
+      </div>
+    </div>
+  )
+}
+
 type MRPTabProps = {
   onCreateJO?: (p: { so_number: string; fabric_code: string; fabric_name: string; fabric_qty: number }) => void
 }
@@ -1061,7 +1224,14 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
                     </td>
                     <td className="px-4 py-2 text-right font-semibold">{mat.total_req}</td>
                     <td className="px-4 py-2 text-right">{mat.stock || 0}</td>
-                    <td className="px-4 py-2 text-right text-green-600">{mat.available || 0}</td>
+                    <td className="px-4 py-2 text-right text-green-600">
+                      {mat.available || 0}
+                      {mat.printed_free_qty != null && (
+                        <span className="block text-[10px] text-gray-500" title="Checked printed fabric not yet allocated to any SO/SKU">
+                          free checked {mat.printed_free_qty}
+                        </span>
+                      )}
+                    </td>
                     <td className={`px-4 py-2 text-right font-bold ${netReq > 0 ? 'text-red-600' : 'text-green-600'}`}>
                       {netReq || 0}
                     </td>
@@ -1103,6 +1273,21 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
                             onSaved={async () => {
                               qc.invalidateQueries({ queryKey: ['mrp-last'] })
                               qc.invalidateQueries({ queryKey: ['grey-planning-stock'] })
+                              try {
+                                const res = await api.get('/production/mrp/last')
+                                setMrpResult(res.data)
+                              } catch { /* keep current MRP rows */ }
+                            }}
+                          />
+                        ) : isPrintedMaterial(mat, code) ? (
+                          <PrintedInlineAllocPanel
+                            materialCode={code}
+                            mat={mat}
+                            onSaved={async () => {
+                              qc.invalidateQueries({ queryKey: ['mrp-last'] })
+                              qc.invalidateQueries({ queryKey: ['ready-to-process'] })
+                              qc.invalidateQueries({ queryKey: ['printed-ready-to-cut'] })
+                              qc.invalidateQueries({ queryKey: ['printed-fabric-checked'] })
                               try {
                                 const res = await api.get('/production/mrp/last')
                                 setMrpResult(res.data)

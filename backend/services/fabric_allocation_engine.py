@@ -397,17 +397,20 @@ def allocate_printed(data: dict[str, Any]) -> dict[str, Any]:
         "sku": (data.get("fg_sku") or data.get("sku") or "").strip(),
         "qty": float(data.get("qty") or 0),
         "remarks": data.get("remarks") or data.get("reason") or "",
+        "per_fabric": bool(data.get("per_fabric")),
     }
-    gdb.reserve_printed_fabric(payload)
+    rid = gdb.reserve_printed_fabric(payload)
+    payload.pop("per_fabric", None)
     conn = _conn()
     try:
-        row = conn.execute(
-            """SELECT id FROM printed_fabric_reservations
-               WHERE status='Active' AND TRIM(fabric_code)=? AND TRIM(so_number)=? AND TRIM(sku)=?
-               ORDER BY id DESC LIMIT 1""",
-            (payload["fabric_code"], payload["so_number"], payload["sku"]),
-        ).fetchone()
-        rid = int(row["id"]) if row else None
+        if not rid:
+            row = conn.execute(
+                """SELECT id FROM printed_fabric_reservations
+                   WHERE status='Active' AND TRIM(fabric_code)=? AND TRIM(so_number)=? AND TRIM(sku)=?
+                   ORDER BY id DESC LIMIT 1""",
+                (payload["fabric_code"], payload["so_number"], payload["sku"]),
+            ).fetchone()
+            rid = int(row["id"]) if row else None
         if rid:
             conn.execute(
                 "UPDATE printed_fabric_reservations SET stage=? WHERE id=?",
@@ -430,6 +433,84 @@ def allocate_printed(data: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "reservation_id": rid, "stage": STAGE_PF_ALLOC, **payload}
     finally:
         conn.close()
+
+
+def allocate_printed_bulk(data: dict[str, Any]) -> dict[str, Any]:
+    """MRP: allocate free checked printed fabric to several SO/SKU rows at once.
+
+    Every row is validated before any stock moves, so a bad row never leaves a
+    half-applied allocation. Each row then goes through ``allocate_printed``.
+    """
+    printed_code = str(data.get("printed_code") or data.get("fabric_code") or "").strip()
+    if not printed_code:
+        raise FabricAllocationError("printed_code is required")
+    rows = []
+    for r in data.get("rows") or []:
+        qty = round(float(r.get("qty") or 0), 3)
+        if qty <= 0:
+            continue
+        so = str(r.get("so_number") or "").strip()
+        sku = str(r.get("fg_sku") or r.get("sku") or "").strip()
+        if not so or not sku:
+            raise FabricAllocationError("Each allocation row needs so_number and SKU")
+        rows.append({"so_number": so, "fg_sku": sku, "qty": qty})
+    if not rows:
+        raise FabricAllocationError("Enter allocation qty on at least one SO/SKU")
+
+    conn = _conn()
+    try:
+        st = conn.execute(
+            "SELECT available_qty FROM printed_fabric_checked_stock WHERE TRIM(fabric_code)=?",
+            (printed_code,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not st:
+        raise FabricAllocationError(
+            f"{printed_code} has no checked printed stock — receive and check it before allocating"
+        )
+    free = float(st["available_qty"] or 0)
+    total = round(sum(r["qty"] for r in rows), 3)
+    if total > free + 0.001:
+        raise FabricAllocationError(
+            f"Total allocation {total} exceeds free checked {printed_code} stock ({round(free, 3)})"
+        )
+
+    jo_planned = gdb._cutting_jo_planned_by_so_sku()
+    try:
+        from .fabric_sku_matching import sku_uses_fabric, skus_using_fabric
+
+        mapped = bool(skus_using_fabric(printed_code))
+    except Exception:
+        sku_uses_fabric = None
+        mapped = False
+    for r in rows:
+        if jo_planned.get((r["so_number"], r["fg_sku"]), 0) > 0:
+            raise FabricAllocationError(
+                f"A Cutting job order already exists for {r['fg_sku']} on {r['so_number']} — "
+                "allocate additional fabric from Ready to Cut instead"
+            )
+        if mapped and sku_uses_fabric and not sku_uses_fabric(r["fg_sku"], printed_code):
+            raise FabricAllocationError(
+                f"SKU {r['fg_sku']} does not use fabric {printed_code} per BOM / Set BOM"
+            )
+
+    results = []
+    for r in rows:
+        results.append(
+            allocate_printed(
+                {
+                    "printed_code": printed_code,
+                    "so_number": r["so_number"],
+                    "fg_sku": r["fg_sku"],
+                    "qty": r["qty"],
+                    "reason": data.get("reason") or "MRP printed allocation",
+                    "user_name": data.get("user_name") or "",
+                    "per_fabric": True,
+                }
+            )
+        )
+    return {"ok": True, "printed_code": printed_code, "allocated_total": total, "allocations": results}
 
 
 def reallocate_printed(data: dict[str, Any]) -> dict[str, Any]:
@@ -1142,6 +1223,13 @@ def annotate_mrp_breakdown_with_allocations(materials: dict[str, Any] | None) ->
             unit = str(mat.get("unit") or "")
             is_printed = _material_is_printed(mat_type, mat_code)
             is_fabric = is_printed or _material_is_grey_or_fabric(mat_type, mat_code, unit)
+            if is_printed and conn is not None:
+                st = conn.execute(
+                    "SELECT available_qty FROM printed_fabric_checked_stock WHERE TRIM(fabric_code)=?",
+                    (str(mat_code).strip(),),
+                ).fetchone()
+                mat["printed_free_qty"] = round(float(st[0] or 0), 3) if st else 0.0
+                mat["printed_in_checked_stock"] = bool(st)
             breakdown = mat.get("breakdown") or []
             if not isinstance(breakdown, list):
                 continue

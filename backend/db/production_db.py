@@ -2155,6 +2155,56 @@ def validate_jo_creation(process: str, so_number: str, sku: str, planned_qty: in
     return {'ok': True, 'available': available, 'message': ''}
 
 
+def _with_component_traceability(data: dict) -> dict:
+    """Non-Cutting JO payload: keep set-component SKUs, tag main SKU + component code."""
+    from ..services.set_components import parse_component_sku
+
+    payload = dict(data)
+    process = str(payload.get("process") or payload.get("stage") or "").strip()
+    so_number = str(payload.get("so_number") or "").strip()
+    active_lines = [
+        dict(ln)
+        for ln in (payload.get("lines") or [])
+        if int(ln.get("planned_qty") or 0) > 0 and str(ln.get("sku") or "").strip()
+    ]
+    if active_lines:
+        normalized = []
+        for ln in active_lines:
+            s = str(ln.get("sku") or "").strip().upper()
+            main_sku, comp = parse_component_sku(s)
+            row = {**ln, "sku": s, "planned_qty": int(ln.get("planned_qty") or 0)}
+            if comp:
+                row["parent_sku"] = main_sku
+                row["component_code"] = comp
+                row["sku_role"] = "COMPONENT"
+            normalized.append(row)
+        if len(normalized) > 1:
+            # Never validate summed qty against the header SKU.
+            if so_number:
+                for ln in normalized:
+                    v = validate_jo_creation(process, so_number, ln["sku"], ln["planned_qty"])
+                    if not v.get("ok"):
+                        raise ValueError(v.get("message") or "Insufficient Ready qty for a selected size.")
+            payload["planned_qty"] = sum(ln["planned_qty"] for ln in normalized)
+            first = normalized[0]
+            payload["sku"] = first["sku"]
+            payload["sku_name"] = str(first.get("sku_name") or payload.get("sku_name") or "").strip()
+        payload["lines"] = normalized
+
+    header = str(payload.get("sku") or "").strip().upper()
+    main_sku, comp = parse_component_sku(header)
+    line_comps = {
+        (ln.get("parent_sku"), ln.get("component_code"))
+        for ln in payload.get("lines") or []
+        if ln.get("sku_role") == "COMPONENT"
+    }
+    if comp and all(ln.get("sku_role") == "COMPONENT" for ln in payload.get("lines") or []) and len(line_comps) <= 1:
+        payload["main_sku"] = main_sku
+        payload["component_code"] = comp
+        payload["sku_role"] = "COMPONENT"
+    return payload
+
+
 def create_jo(data: dict) -> str | list[str]:
     """Create one JO, or multiple component Cutting JOs when Set BOM applies."""
     from ..services.component_bom import (
@@ -2172,6 +2222,11 @@ def create_jo(data: dict) -> str | list[str]:
         and data.get("create_component_jos") is False
     ):
         return _create_single_jo(data)
+
+    process = str(data.get("process") or data.get("stage") or "Cutting").strip() or "Cutting"
+    if process != "Cutting":
+        # Set components (…-TOP / …-PANT) continue from their own Ready-To stock.
+        return _create_single_jo(_with_component_traceability(data))
 
     main = resolve_cutting_main_sku(data)
     if main:
@@ -3941,8 +3996,9 @@ def create_next_process_jo(parent_joid: int) -> dict:
     conn.execute("""INSERT INTO job_orders(
         jo_number, jo_date, so_number, so_source, sku, sku_name, process, stage,
         exec_type, vendor_name, vendor_rate, so_qty, planned_qty, balance_qty, status,
-        expected_completion, fabric_code, parent_jo_id, production_mode, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
+        expected_completion, fabric_code, parent_jo_id, production_mode,
+        main_sku, component_code, sku_role, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
         (num, datetime.now().strftime('%Y-%m-%d'),
          so_number, parent_so_source, sku, parent.get('sku_name',''),
          next_process, next_process,
@@ -3951,7 +4007,9 @@ def create_next_process_jo(parent_joid: int) -> dict:
          float(parent.get('vendor_rate') or 0),
          parent.get('so_qty',0), available, available,
          'Created', parent.get('expected_completion',''),
-         parent.get('fabric_code',''), parent_joid, parent.get('production_mode') or ''))
+         parent.get('fabric_code',''), parent_joid, parent.get('production_mode') or '',
+         parent.get('main_sku') or '', parent.get('component_code') or '',
+         parent.get('sku_role') or 'MAIN'))
     new_joid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     # Copy lines from parent with available qty
@@ -3960,12 +4018,14 @@ def create_next_process_jo(parent_joid: int) -> dict:
         pl = dict(pl)
         line_avail = get_process_stock(so_number, pl.get('sku', sku), current_process)
         if line_avail > 0:
-            conn.execute("""INSERT INTO jo_lines(jo_id,so_number,sku,sku_name,style,planned_qty,balance_qty,vendor_rate,remarks)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
+            conn.execute("""INSERT INTO jo_lines(jo_id,so_number,sku,sku_name,style,planned_qty,balance_qty,vendor_rate,remarks,parent_sku,sku_role,component_code)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (new_joid, pl.get('so_number', so_number),
                  pl.get('sku', sku), pl.get('sku_name',''),
                  pl.get('style',''), line_avail, line_avail,
-                 pl.get('vendor_rate',0), ''))
+                 pl.get('vendor_rate',0), '',
+                 pl.get('parent_sku') or '', pl.get('sku_role') or 'MAIN',
+                 pl.get('component_code') or ''))
 
     conn.execute("UPDATE job_orders SET next_stage_jo_id=?, updated_at=datetime('now') WHERE id=?",
                  (new_joid, parent_joid))

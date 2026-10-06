@@ -1373,8 +1373,11 @@ def reserve_printed_fabric(data: dict):
     except Exception:
         pass
 
+    # per_fabric (MRP allocation): one Active row per SO + SKU + fabric, so a set SKU
+    # can hold TOP and PANT fabrics; a repeat allocation tops up the same row.
+    per_fabric = bool(data.get("per_fabric"))
     key = (so_number, sku)
-    if key in _active_printed_reserve_so_sku():
+    if not per_fabric and key in _active_printed_reserve_so_sku():
         raise ValueError(
             f"{sku} is already reserved on {so_number}. Use Ready to Cut to create a job order."
         )
@@ -1397,21 +1400,43 @@ def reserve_printed_fabric(data: dict):
         conn.close()
         raise ValueError(f"Cannot reserve {qty}m — only {available:.1f}m available")
 
+    existing = None
+    if per_fabric:
+        existing = conn.execute(
+            """SELECT id FROM printed_fabric_reservations
+               WHERE status='Active' AND TRIM(fabric_code)=? AND TRIM(so_number)=? AND TRIM(sku)=?
+               ORDER BY id DESC LIMIT 1""",
+            (fabric_code, so_number, sku),
+        ).fetchone()
+
     fabric_name = data.get("fabric_name") or row["fabric_name"] or ""
-    conn.execute(
+    cur = conn.execute(
         """UPDATE printed_fabric_checked_stock
         SET reserved_qty = COALESCE(reserved_qty, 0) + ?,
             available_qty = available_qty - ?
-        WHERE fabric_code = ?""",
-        (qty, qty, fabric_code)
+        WHERE fabric_code = ? AND available_qty >= ? - 0.001""",
+        (qty, qty, fabric_code, qty)
     )
-    conn.execute(
-        """INSERT INTO printed_fabric_reservations(fabric_code, fabric_name, so_number, sku, qty, unit, status, remarks)
-        VALUES (?,?,?,?,?,?,?,?)""",
-        (fabric_code, fabric_name, so_number, sku, qty, 'MTR', 'Active', data.get('remarks', ''))
-    )
+    if cur.rowcount != 1:
+        conn.rollback()
+        conn.close()
+        raise ValueError(f"Cannot reserve {qty}m of {fabric_code} — free stock changed, refresh and retry")
+    if existing:
+        rid = int(existing["id"])
+        conn.execute(
+            "UPDATE printed_fabric_reservations SET qty = qty + ? WHERE id=?",
+            (qty, rid),
+        )
+    else:
+        cur = conn.execute(
+            """INSERT INTO printed_fabric_reservations(fabric_code, fabric_name, so_number, sku, qty, unit, status, remarks)
+            VALUES (?,?,?,?,?,?,?,?)""",
+            (fabric_code, fabric_name, so_number, sku, qty, 'MTR', 'Active', data.get('remarks', ''))
+        )
+        rid = int(cur.lastrowid)
     conn.commit()
     conn.close()
+    return rid
 
 
 def list_printed_fabric_ready_to_cut():

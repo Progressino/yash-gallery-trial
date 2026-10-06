@@ -389,6 +389,20 @@ class PrintedReleaseIn(BaseModel):
     reason: str = ""
 
 
+class PrintedBulkRowIn(BaseModel):
+    so_number: str
+    fg_sku: str = ""
+    sku: str = ""
+    qty: float = 0
+
+
+class PrintedBulkAllocateIn(BaseModel):
+    printed_code: str
+    rows: list[PrintedBulkRowIn] = Field(default_factory=list)
+    reason: str = ""
+    user_name: str = ""
+
+
 @router.get("/planning/tree")
 def planning_tree(so_numbers: Optional[str] = None):
     """MRP tree: Grey → Printed (P-Code/SFG) → FG SKU → Sales Order."""
@@ -442,6 +456,17 @@ def planning_allocate_printed(body: PrintedAllocateIn):
         return allocate_printed(body.model_dump())
     except FabricAllocationError as e:
         raise HTTPException(400, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/planning/allocate-printed-bulk")
+def planning_allocate_printed_bulk(body: PrintedBulkAllocateIn):
+    """MRP → free checked printed fabric → SO/SKU reservations (Ready to Cut)."""
+    from ..services.fabric_allocation_engine import allocate_printed_bulk
+
+    try:
+        return allocate_printed_bulk(body.model_dump())
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
