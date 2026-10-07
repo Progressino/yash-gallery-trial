@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.db import grey_db, production_db, sales_db
+from backend.db import grey_db, item_db, production_db, sales_db
 from backend.services import fabric_allocation_engine as fae
 from backend.services.fabric_allocation_engine import FabricAllocationError
 
@@ -20,9 +20,11 @@ def iso(tmp_path, monkeypatch):
     monkeypatch.setattr(grey_db, "_DB", grey)
     monkeypatch.setattr(grey_db, "_PRODUCTION_DB", prod)
     monkeypatch.setattr(sales_db, "_DB", sales)
+    monkeypatch.setattr(item_db, "DB_PATH", str(tmp_path / "items.db"))
     production_db.init_db()
     grey_db.init_db()
     sales_db.init_db()
+    item_db.init_db()
     # No BOM mapping in the isolated item DB → every SKU may use the fabric.
     monkeypatch.setattr("backend.services.fabric_sku_matching.skus_using_fabric", lambda code: set())
     yield
@@ -33,6 +35,16 @@ def _seed_printed(code: str, qty: float) -> None:
     grey_db.do_printed_fabric_qc(
         {"fabric_code": code, "fabric_name": code, "jwo_ref": f"J-{code}", "passed_qty": qty, "qc_by": "QC"}
     )
+
+
+def _item_with_opening(code: str, *adjustments: tuple[str, float, str]) -> int:
+    conn = item_db._connect()
+    sfg = conn.execute("SELECT id FROM item_types WHERE code='SFG'").fetchone()[0]
+    conn.close()
+    iid = item_db.create_item(code, code, sfg, uom="MTR")
+    for direction, qty, reason in adjustments:
+        item_db.adjust_item_stock(iid, qty, direction, entry_date="2026-04-01", reason=reason)
+    return iid
 
 
 def _free(code: str) -> float:
@@ -179,3 +191,106 @@ def test_bulk_endpoint(client):
         json={"printed_code": "P900", "rows": [{"so_number": "SO-8", "fg_sku": "G-L", "qty": 31}]},
     )
     assert bad.status_code == 400 and "exceeds free" in bad.json()["detail"]
+
+
+# ── Opening / migration printed stock (Item Master → Stock Adjustment) ──────
+
+
+def test_opening_only_fabric_allocates_to_ready_to_cut():
+    iid = _item_with_opening("P1173", ("IN", 1319, "Opening Stock"))
+    materials = {"P1173": {"type": "SFG", "unit": "MTR", "breakdown": [{"so_no": "SO-10", "sku": "H-M", "qty_req": 300}]}}
+    fae.annotate_mrp_breakdown_with_allocations(materials)
+    assert materials["P1173"]["printed_free_qty"] == 0
+    assert materials["P1173"]["printed_opening_qty"] == 1319
+
+    res = fae.allocate_printed_bulk(
+        {"printed_code": "P1173", "rows": [{"so_number": "SO-10", "fg_sku": "H-M", "qty": 300}], "user_name": "planner"}
+    )
+    assert res["opening_converted"] == 300
+    assert _free("P1173") == 0
+    assert [(r["sku"], r["qty"]) for r in _active("P1173")] == [("H-M", 300)]
+    assert fae.printed_opening_allocatable("P1173")["allocatable"] == 1019
+    assert item_db.get_item(iid)["stock"] == 1319
+
+    events = {h["event_type"]: h for h in fae.list_allocation_history()}
+    assert events["PF_OPENING_CHECKED"]["qty"] == 300 and events["PF_OPENING_CHECKED"]["user_name"] == "planner"
+    ready = production_db.get_ready_to_process("Cutting")
+    assert ("SO-10", "H-M", "P1173") in {(r["so_number"], r["sku"], r["fabric_code"]) for r in ready}
+
+    fae.annotate_mrp_breakdown_with_allocations(materials)
+    assert materials["P1173"]["printed_opening_qty"] == 1019
+    assert materials["P1173"]["breakdown"][0]["status"] == "Allocated"
+
+
+def test_checked_stock_used_before_opening():
+    iid = _item_with_opening("P752", ("IN", 700, "Opening Stock"))
+    item_db.apply_document_stock_delta(iid, 3363, "IN")
+    _seed_printed("P752", 3363)
+    assert fae.printed_opening_allocatable("P752")["allocatable"] == 700
+
+    res = fae.allocate_printed_bulk({"printed_code": "P752", "rows": [{"so_number": "SO-11", "fg_sku": "J-M", "qty": 3500}]})
+    assert res["opening_converted"] == 137
+    assert _free("P752") == 0
+    assert fae.printed_opening_allocatable("P752")["allocatable"] == 563
+
+    with pytest.raises(FabricAllocationError, match="exceeds free"):
+        fae.allocate_printed_bulk({"printed_code": "P752", "rows": [{"so_number": "SO-11", "fg_sku": "J-L", "qty": 564}]})
+    assert fae.printed_opening_allocatable("P752")["allocatable"] == 563
+
+
+def test_regular_flow_without_opening_is_unchanged():
+    iid = _item_with_opening("P500", ("IN", 40, "physical count correction"))
+    item_db.apply_document_stock_delta(iid, 100, "IN")
+    _seed_printed("P500", 100)
+    assert fae.printed_opening_allocatable("P500")["allocatable"] == 0
+    with pytest.raises(FabricAllocationError, match="exceeds free"):
+        fae.allocate_printed_bulk({"printed_code": "P500", "rows": [{"so_number": "SO-12", "fg_sku": "K-M", "qty": 101}]})
+
+
+def test_unchecked_receipts_are_not_treated_as_opening():
+    iid = _item_with_opening("P554", ("IN", 200, "Opening"))
+    item_db.apply_document_stock_delta(iid, 500, "IN")
+    grey_db.insert_printed_fabric_unchecked("P554", 500, fabric_name="P554", jwo_ref="J-P554", grn_ref="G-P554")
+    assert fae.printed_opening_allocatable("P554")["allocatable"] == 200
+
+
+def test_opening_capped_when_checked_stock_already_covers_item_stock():
+    _item_with_opening("P501", ("IN", 459, "Opening"), ("OUT", 229.5, "old"))
+    _seed_printed("P501", 2339.25)
+    assert fae.printed_opening_allocatable("P501")["allocatable"] == 0
+
+
+def test_opening_out_adjustment_reduces_allocatable():
+    _item_with_opening("P2051", ("IN", 918, "Opening Stock"), ("OUT", 118, "Opening stock correction"))
+    assert fae.printed_opening_allocatable("P2051")["allocatable"] == 800
+
+
+def test_rejected_allocation_converts_nothing(monkeypatch):
+    _item_with_opening("P1192", ("IN", 100, "Opening Stock"))
+    with pytest.raises(FabricAllocationError, match="exceeds free"):
+        fae.allocate_printed_bulk({"printed_code": "P1192", "rows": [{"so_number": "SO-13", "fg_sku": "L-M", "qty": 101}]})
+    monkeypatch.setattr(grey_db, "_cutting_jo_planned_by_so_sku", lambda: {("SO-13", "L-M"): 5.0})
+    with pytest.raises(FabricAllocationError, match="Cutting job order"):
+        fae.allocate_printed_bulk({"printed_code": "P1192", "rows": [{"so_number": "SO-13", "fg_sku": "L-M", "qty": 50}]})
+    assert fae.printed_opening_allocatable("P1192")["allocatable"] == 100
+    conn = grey_db._connect()
+    assert conn.execute("SELECT COUNT(*) FROM printed_fabric_checked_stock WHERE fabric_code='P1192'").fetchone()[0] == 0
+    conn.close()
+
+
+def test_cannot_convert_more_than_opening():
+    _item_with_opening("P924", ("IN", 50, "Opening Stock"))
+    fae.convert_printed_opening_to_checked("P924", 50)
+    with pytest.raises(FabricAllocationError, match="opening stock can be treated as checked"):
+        fae.convert_printed_opening_to_checked("P924", 1)
+    assert _free("P924") == 50
+
+
+def test_bulk_endpoint_reports_opening_used(client):
+    _item_with_opening("P916", ("IN", 200, "Opening Stock"))
+    r = client.post(
+        "/api/grey/planning/allocate-printed-bulk",
+        json={"printed_code": "P916", "rows": [{"so_number": "SO-14", "fg_sku": "M-M", "qty": 120}]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["opening_converted"] == 120

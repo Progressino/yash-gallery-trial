@@ -435,6 +435,114 @@ def allocate_printed(data: dict[str, Any]) -> dict[str, Any]:
         conn.close()
 
 
+EVENT_PF_OPENING = "PF_OPENING_CHECKED"
+
+
+def _printed_opening_snapshot(conn: sqlite3.Connection, printed_code: str) -> dict[str, float]:
+    """Item Master opening stock for a printed fabric that is not yet in checked stock.
+
+    Allocatable opening = min(net Opening/Existing Stock Adjustments − already converted,
+    Item Master stock − (checked free + reserved) − unchecked receipts), never below 0.
+    """
+    from ..db.item_db import opening_stock_for_code
+
+    code = str(printed_code or "").strip()
+    snap = {"opening_net": 0.0, "converted": 0.0, "item_stock": 0.0, "untracked": 0.0, "allocatable": 0.0}
+    try:
+        im = opening_stock_for_code(code)
+    except Exception:
+        return snap
+    if not im.get("found"):
+        return snap
+    st = conn.execute(
+        """SELECT COALESCE(available_qty,0), COALESCE(reserved_qty,0)
+           FROM printed_fabric_checked_stock WHERE TRIM(fabric_code)=?""",
+        (code,),
+    ).fetchone()
+    tracked = (float(st[0]) + float(st[1])) if st else 0.0
+    unchecked = conn.execute(
+        """SELECT COALESCE(SUM(qty),0) FROM printed_fabric_stock
+           WHERE TRIM(fabric_code)=? AND status='Unchecked'""",
+        (code,),
+    ).fetchone()[0]
+    converted = conn.execute(
+        "SELECT COALESCE(SUM(qty),0) FROM printed_fabric_opening_conversions WHERE TRIM(fabric_code)=?",
+        (code,),
+    ).fetchone()[0]
+    snap["opening_net"] = float(im["opening_net"])
+    snap["converted"] = round(float(converted or 0), 3)
+    snap["item_stock"] = float(im["stock"])
+    snap["untracked"] = round(snap["item_stock"] - tracked - float(unchecked or 0), 3)
+    snap["allocatable"] = round(
+        max(0.0, min(snap["opening_net"] - snap["converted"], snap["untracked"])), 3
+    )
+    return snap
+
+
+def printed_opening_allocatable(printed_code: str) -> dict[str, float]:
+    conn = _conn()
+    try:
+        return _printed_opening_snapshot(conn, printed_code)
+    finally:
+        conn.close()
+
+
+def convert_printed_opening_to_checked(
+    printed_code: str, qty: float, *, user_name: str = "", reason: str = ""
+) -> dict[str, Any]:
+    """Move Item Master opening stock into free checked printed stock (migration only)."""
+    code = str(printed_code or "").strip()
+    qty = round(float(qty or 0), 3)
+    if not code or qty <= 0:
+        raise FabricAllocationError("Printed fabric code and a positive qty are required")
+    conn = _conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        snap = _printed_opening_snapshot(conn, code)
+        if qty > snap["allocatable"] + 0.001:
+            raise FabricAllocationError(
+                f"Only {snap['allocatable']} of {code} opening stock can be treated as checked"
+            )
+        name_row = conn.execute(
+            "SELECT fabric_name FROM printed_fabric_checked_stock WHERE TRIM(fabric_code)=?", (code,)
+        ).fetchone()
+        conn.execute(
+            """INSERT INTO printed_fabric_checked_stock(
+                fabric_code, fabric_name, checked_qty, passed_qty, available_qty)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(fabric_code) DO UPDATE SET
+               checked_qty = checked_qty + excluded.checked_qty,
+               passed_qty = passed_qty + excluded.passed_qty,
+               available_qty = available_qty + excluded.passed_qty""",
+            (code, (name_row[0] if name_row else "") or code, qty, qty, qty),
+        )
+        why = reason or "Opening stock treated as checked"
+        cur = conn.execute(
+            """INSERT INTO printed_fabric_opening_conversions(
+                fabric_code, qty, opening_net_qty, item_stock_qty, user_name, reason)
+               VALUES (?,?,?,?,?,?)""",
+            (code, qty, snap["opening_net"], snap["item_stock"], user_name or "", why),
+        )
+        _audit(
+            conn,
+            event_type=EVENT_PF_OPENING,
+            entity_type="printed_opening",
+            entity_id=int(cur.lastrowid),
+            printed_code=code,
+            qty=qty,
+            new_status="Checked",
+            user_name=user_name or "",
+            reason=why,
+        )
+        conn.commit()
+        return {"ok": True, "printed_code": code, "converted_qty": qty}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def allocate_printed_bulk(data: dict[str, Any]) -> dict[str, Any]:
     """MRP: allocate free checked printed fabric to several SO/SKU rows at once.
 
@@ -463,17 +571,20 @@ def allocate_printed_bulk(data: dict[str, Any]) -> dict[str, Any]:
             "SELECT available_qty FROM printed_fabric_checked_stock WHERE TRIM(fabric_code)=?",
             (printed_code,),
         ).fetchone()
+        opening = _printed_opening_snapshot(conn, printed_code)["allocatable"]
     finally:
         conn.close()
-    if not st:
+    if not st and opening <= 0:
         raise FabricAllocationError(
             f"{printed_code} has no checked printed stock — receive and check it before allocating"
         )
-    free = float(st["available_qty"] or 0)
+    free = float(st["available_qty"] or 0) if st else 0.0
     total = round(sum(r["qty"] for r in rows), 3)
-    if total > free + 0.001:
+    if total > free + opening + 0.001:
         raise FabricAllocationError(
-            f"Total allocation {total} exceeds free checked {printed_code} stock ({round(free, 3)})"
+            f"Total allocation {total} exceeds free checked {printed_code} stock ({round(free, 3)}"
+            + (f" + {round(opening, 3)} opening" if opening > 0 else "")
+            + ")"
         )
 
     jo_planned = gdb._cutting_jo_planned_by_so_sku()
@@ -495,6 +606,15 @@ def allocate_printed_bulk(data: dict[str, Any]) -> dict[str, Any]:
                 f"SKU {r['fg_sku']} does not use fabric {printed_code} per BOM / Set BOM"
             )
 
+    opening_used = round(max(0.0, total - free), 3)
+    if opening_used > 0:
+        convert_printed_opening_to_checked(
+            printed_code,
+            opening_used,
+            user_name=data.get("user_name") or "",
+            reason="Opening stock treated as checked (MRP allocation)",
+        )
+
     results = []
     for r in rows:
         results.append(
@@ -510,7 +630,13 @@ def allocate_printed_bulk(data: dict[str, Any]) -> dict[str, Any]:
                 }
             )
         )
-    return {"ok": True, "printed_code": printed_code, "allocated_total": total, "allocations": results}
+    return {
+        "ok": True,
+        "printed_code": printed_code,
+        "allocated_total": total,
+        "opening_converted": opening_used,
+        "allocations": results,
+    }
 
 
 def reallocate_printed(data: dict[str, Any]) -> dict[str, Any]:
@@ -1230,6 +1356,11 @@ def annotate_mrp_breakdown_with_allocations(materials: dict[str, Any] | None) ->
                 ).fetchone()
                 mat["printed_free_qty"] = round(float(st[0] or 0), 3) if st else 0.0
                 mat["printed_in_checked_stock"] = bool(st)
+                try:
+                    opening = _printed_opening_snapshot(conn, str(mat_code))["allocatable"]
+                except Exception:
+                    opening = 0.0
+                mat["printed_opening_qty"] = opening
             breakdown = mat.get("breakdown") or []
             if not isinstance(breakdown, list):
                 continue

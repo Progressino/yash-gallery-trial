@@ -841,10 +841,12 @@ function PrintedInlineAllocPanel({
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
   const unit = String(mat.unit || 'MTR')
-  const freeQty = Number(mat.printed_free_qty || 0)
-  const inChecked = Boolean(mat.printed_in_checked_stock)
-  const breakdown = Array.isArray(mat.breakdown) ? mat.breakdown : []
   const r3 = (n: number) => Math.round(n * 1000) / 1000
+  const checkedFree = Number(mat.printed_free_qty || 0)
+  const openingQty = Number(mat.printed_opening_qty || 0)
+  const freeQty = r3(checkedFree + openingQty)
+  const inChecked = Boolean(mat.printed_in_checked_stock) || openingQty > 0
+  const breakdown = Array.isArray(mat.breakdown) ? mat.breakdown : []
   const rowKey = (b: any, i: number) => `${b.so_no || b.so_number || ''}|${b.sku || b.fg_sku || ''}|${i}`
   const rowRemaining = (b: any) => Math.max(0, r3(Number(b.qty_req || 0) - Number(b.allocated_qty || 0)))
   const rowLocked = (b: any) => String(b.status || '') === 'Locked-Cut'
@@ -883,14 +885,19 @@ function PrintedInlineAllocPanel({
     setSaving(true)
     setMsg('')
     try {
-      await api.post('/grey/planning/allocate-printed-bulk', {
+      const res = await api.post('/grey/planning/allocate-printed-bulk', {
         printed_code: materialCode,
         rows,
         reason: 'MRP printed allocation',
         user_name: userName,
       })
+      const fromOpening = Number(res.data?.opening_converted || 0)
       setDrafts({})
-      setMsg(`Allocated ${draftTotal} ${unit} across ${rows.length} SKU${rows.length === 1 ? '' : 's'} — now in Ready to Cut`)
+      setMsg(
+        `Allocated ${draftTotal} ${unit} across ${rows.length} SKU${rows.length === 1 ? '' : 's'}`
+        + (fromOpening > 0 ? ` (${fromOpening} ${unit} from opening stock)` : '')
+        + ' — now in Ready to Cut',
+      )
       onSaved()
     } catch (e: unknown) {
       setMsg(apiErrorMessage(e, 'Allocate failed'))
@@ -904,14 +911,20 @@ function PrintedInlineAllocPanel({
         Printed Fabric — allocate free checked stock to SO / SKU (moves to Ready to Cut):
       </p>
       <div className="flex flex-wrap gap-3 text-xs bg-white border border-blue-100 rounded-lg px-3 py-2">
-        <span>Free checked printed stock: <b className="font-mono text-[#002B5B]">{freeQty} {unit}</b></span>
+        <span>Free checked printed stock: <b className="font-mono text-[#002B5B]">{checkedFree} {unit}</b></span>
+        {openingQty > 0 && (
+          <span title="Item Master Opening Stock not yet received/checked — treated as checked when allocated">
+            + Opening stock (treated as checked): <b className="font-mono text-[#002B5B]">{openingQty} {unit}</b>
+          </span>
+        )}
+        {openingQty > 0 && <span>Allocatable: <b className="font-mono">{freeQty} {unit}</b></span>}
         <span>Already allocated: <b>{r3(alreadyTotal)} {unit}</b></span>
         <span>This session: <b className={over ? 'text-red-600' : 'text-green-700'}>{draftTotal} {unit}</b></span>
         <span>Free after save: <b className={remainingFree < 0 ? 'text-red-600' : 'text-gray-800'}>{remainingFree} {unit}</b></span>
       </div>
       {!inChecked && (
         <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
-          {materialCode} has no checked printed stock yet. Receive and check it (Printing JO → Receive → Check) before allocating.
+          {materialCode} has no checked printed stock yet. Receive and check it (Printing JO → Receive → Check), or enter existing stock in Item Master → Stock Adjustment with reason "Opening Stock", before allocating.
         </p>
       )}
       {over && <p className="text-[11px] text-red-700">Total allocation exceeds free printed stock — reduce quantities before saving.</p>}
@@ -1229,6 +1242,7 @@ function MRPTab({ onCreateJO }: MRPTabProps) {
                       {mat.printed_free_qty != null && (
                         <span className="block text-[10px] text-gray-500" title="Checked printed fabric not yet allocated to any SO/SKU">
                           free checked {mat.printed_free_qty}
+                          {Number(mat.printed_opening_qty || 0) > 0 && ` + opening ${mat.printed_opening_qty}`}
                         </span>
                       )}
                     </td>

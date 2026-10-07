@@ -815,6 +815,45 @@ def list_stock_adjustments(
     return [dict(r) for r in rows]
 
 
+_OPENING_REASON_WORDS = ("opening", "existing")
+
+
+def opening_stock_for_code(item_code: str) -> dict:
+    """Net manual Opening/Existing Stock Adjustments + current stock for one exact item code."""
+    code = str(item_code or "").strip()
+    out = {"item_code": code, "found": False, "stock": 0.0, "opening_net": 0.0}
+    if not code:
+        return out
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT stock FROM items WHERE TRIM(item_code) = ? LIMIT 1", (code,)
+        ).fetchone()
+        if row is None:
+            return out
+        out["found"] = True
+        out["stock"] = round(float(row["stock"] or 0), 3)
+        net = 0.0
+        for adj in conn.execute(
+            """SELECT direction, qty, reason, reference_no FROM item_stock_adjustments
+               WHERE TRIM(item_code) = ?""",
+            (code,),
+        ).fetchall():
+            reason = str(adj["reason"] or "").strip().lower()
+            if is_document_auto_adjustment(reason, adj["reference_no"] or ""):
+                continue
+            if not any(w in reason for w in _OPENING_REASON_WORDS):
+                continue
+            qty = float(adj["qty"] or 0)
+            net += qty if str(adj["direction"] or "").upper() == "IN" else -qty
+        out["opening_net"] = round(max(0.0, net), 3)
+        return out
+    except sqlite3.Error:
+        return out
+    finally:
+        conn.close()
+
+
 def book_stock_for_code(item_code: str) -> float:
     """Authoritative on-hand stock from items.stock (exact code + size variants)."""
     code = str(item_code or "").strip()

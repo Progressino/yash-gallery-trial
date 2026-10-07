@@ -246,6 +246,17 @@ def init_db():
             document_ref TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now'))
         );
+        CREATE TABLE IF NOT EXISTS printed_fabric_opening_conversions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fabric_code TEXT NOT NULL,
+            qty REAL NOT NULL,
+            opening_net_qty REAL DEFAULT 0,
+            item_stock_qty REAL DEFAULT 0,
+            user_name TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_pfoc_code ON printed_fabric_opening_conversions(fabric_code);
         CREATE INDEX IF NOT EXISTS idx_gfa_grey ON grey_fabric_allocations(grey_code, status);
         CREATE INDEX IF NOT EXISTS idx_gfa_printed ON grey_fabric_allocations(printed_code, status);
         CREATE INDEX IF NOT EXISTS idx_fah_printed ON fabric_allocation_history(printed_code, id DESC);
