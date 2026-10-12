@@ -60,7 +60,9 @@ def _sync_item_master_stock(
             _log.warning("Item Master stock %s failed for %s: %s", dir_u, code, exc)
 
 
-def _post_min_grey_ledger(note: dict, lines: list[dict], *, reverse: bool = False) -> None:
+def _post_min_grey_ledger(
+    note: dict, lines: list[dict], *, reverse: bool = False, txn: str | None = None
+) -> None:
     """Grey-fabric tracker ledger — only when a confirmed MIN is posted or reversed."""
     jwo_ref = str(note.get("jwo_reference") or "").strip()
     so_ref = str(note.get("so_reference") or "").strip()
@@ -81,26 +83,26 @@ def _post_min_grey_ledger(note: dict, lines: list[dict], *, reverse: bool = Fals
             ).fetchone()
             if not tracker:
                 continue
-            txn = "Reverse: MIN Cancelled" if reverse else "MIN Confirmed - Material Issue"
+            txn_type = txn or ("Reverse: MIN Cancelled" if reverse else "MIN Confirmed - Material Issue")
             gconn.execute(
                 """INSERT INTO grey_ledger(entry_date,tracker_id,material_code,
                    material_name,transaction_type,qty,unit,from_location,to_location,reference_no,remarks)
                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    note.get("min_date") or datetime.now().strftime("%Y-%m-%d"),
+                    datetime.now().strftime("%Y-%m-%d") if txn else (note.get("min_date") or datetime.now().strftime("%Y-%m-%d")),
                     tracker["id"],
                     tracker["material_code"],
                     tracker["material_name"],
-                    txn,
+                    txn_type,
                     qty,
                     str(ln.get("unit") or "MTR"),
                     "Factory/Warehouse",
                     note.get("to_location") or "Processor",
                     min_num,
-                    f"MIN: {min_num}" + (" (reversed)" if reverse else ""),
+                    f"MIN: {min_num}" + (f" — {txn}" if txn else (" (reversed)" if reverse else "")),
                 ),
             )
-            if not reverse:
+            if not reverse and not txn:
                 gconn.execute(
                     """UPDATE grey_tracker SET status=?, updated_at=? WHERE id=?""",
                     (
@@ -484,9 +486,35 @@ def init_db():
         "ALTER TABLE po_headers ADD COLUMN ship_to_phone TEXT DEFAULT ''",
         "ALTER TABLE po_headers ADD COLUMN ship_to_gst TEXT DEFAULT ''",
         "ALTER TABLE grn_headers ADD COLUMN gin_id INTEGER",
+        "ALTER TABLE jwo_lines ADD COLUMN original_input_qty REAL",
+        "ALTER TABLE jwo_lines ADD COLUMN original_output_qty REAL",
+        "ALTER TABLE jwo_lines ADD COLUMN variance_reason TEXT DEFAULT ''",
+        "ALTER TABLE jwo_lines ADD COLUMN variance_remarks TEXT DEFAULT ''",
     ]:
         try: conn.execute(sql)
         except: pass
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS min_qty_adjustments (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        min_id           INTEGER NOT NULL,
+        min_number       TEXT DEFAULT '',
+        jwo_id           INTEGER,
+        jwo_number       TEXT DEFAULT '',
+        material_code    TEXT DEFAULT '',
+        output_material  TEXT DEFAULT '',
+        phase            TEXT NOT NULL,
+        old_issue_qty    REAL DEFAULT 0,
+        new_issue_qty    REAL DEFAULT 0,
+        delta_qty        REAL DEFAULT 0,
+        old_output_qty   REAL DEFAULT 0,
+        new_output_qty   REAL DEFAULT 0,
+        reason           TEXT DEFAULT '',
+        remarks          TEXT DEFAULT '',
+        stock_posted     INTEGER DEFAULT 0,
+        user_name        TEXT DEFAULT '',
+        created_at       TEXT DEFAULT (datetime('now'))
+    )
+    """)
     conn.execute("""
     CREATE TABLE IF NOT EXISTS gin_headers (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -525,6 +553,9 @@ def init_db():
         jo_receipt_id        INTEGER
     )
     """)
+    from ..services.jwo_min_notes import _ensure_min_schema
+
+    _ensure_min_schema(conn)
     conn.commit()
     conn.close()
 
@@ -1024,11 +1055,13 @@ def create_jwo(data: dict):
     for ln in lines:
         _patch_jwo_line_with_bom(ln)
         amt = ln.get('amount') if ln.get('amount') is not None else ln.get('output_qty',0)*ln.get('rate',0)
-        conn.execute("""INSERT INTO jwo_lines(jwo_id,input_material,input_qty,input_unit,output_material,output_qty,output_unit,process_type,rate,amount,remarks)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        conn.execute("""INSERT INTO jwo_lines(jwo_id,input_material,input_qty,input_unit,output_material,output_qty,output_unit,process_type,rate,amount,remarks,
+            original_input_qty,original_output_qty)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (jwoid, ln['input_material'], ln.get('input_qty',0), ln.get('input_unit','MTR'),
             ln['output_material'], ln.get('output_qty',0), ln.get('output_unit','MTR'),
-            ln.get('process_type','Printing'), ln.get('rate',0), amt, ln.get('remarks','')))
+            ln.get('process_type','Printing'), ln.get('rate',0), amt, ln.get('remarks',''),
+            ln.get('input_qty',0), ln.get('output_qty',0)))
     if lines:
         try:
             import os as _os
@@ -1099,20 +1132,55 @@ def update_jwo(jwoid: int, data: dict):
     vals = [data[k] for k in data if k in allowed]
     if sets:
         conn.execute(f"UPDATE jwo_headers SET {sets} WHERE id=? AND status='Draft'", vals + [jwoid])
+    revisions: list[dict] = []
     if 'lines' in data:
-        conn.execute("DELETE FROM jwo_lines WHERE jwo_id=?", (jwoid,))
-        total = 0
+        from ..services.jwo_issue_variance import carry_jwo_line_variance
+
+        old_lines = [dict(r) for r in conn.execute("SELECT * FROM jwo_lines WHERE jwo_id=?", (jwoid,)).fetchall()]
+        old_by_out = {str(o['output_material'] or '').strip(): o for o in old_lines}
         for ln in data['lines']:
             _patch_jwo_line_with_bom(ln)
+        try:
+            prepared = [
+                carry_jwo_line_variance(ln, old_by_out.get(str(ln.get('output_material') or '').strip()))
+                for ln in data['lines']
+            ]
+            min_row = conn.execute(
+                "SELECT status FROM material_issue_notes WHERE jwo_id=? ORDER BY id DESC LIMIT 1", (jwoid,)
+            ).fetchone()
+        except ValueError:
+            conn.close()
+            raise
+        if min_row and str(min_row['status'] or '') == 'Confirmed':
+            def _qty_key(rows):
+                return sorted(
+                    (str(r.get('output_material') or '').strip(), round(float(r.get('output_qty') or 0), 3),
+                     round(float(r.get('input_qty') or 0), 3))
+                    for r in rows
+                )
+            if _qty_key(old_lines) != _qty_key(prepared):
+                conn.close()
+                raise ValueError(
+                    "Material Issue is confirmed — quantities can't be edited directly. "
+                    "Use Issue Qty Correction on the Material Issue Note."
+                )
+        conn.execute("DELETE FROM jwo_lines WHERE jwo_id=?", (jwoid,))
+        total = 0
+        for ln in prepared:
             out_qty = ln.get('output_qty', 0); rate = ln.get('rate', 0)
-            amt = ln.get('amount') if ln.get('amount') is not None else out_qty * rate
+            amt = out_qty * rate if ln.get('_revised') or ln.get('amount') is None else ln.get('amount')
             total += amt
             conn.execute("""INSERT INTO jwo_lines(jwo_id,input_material,input_qty,input_unit,
-                output_material,output_qty,output_unit,process_type,rate,amount,remarks)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                output_material,output_qty,output_unit,process_type,rate,amount,remarks,
+                original_input_qty,original_output_qty,variance_reason,variance_remarks)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (jwoid, ln['input_material'], ln.get('input_qty',0), ln.get('input_unit','MTR'),
                 ln['output_material'], out_qty, ln.get('output_unit','MTR'),
-                ln.get('process_type','Printing'), rate, amt, ln.get('remarks','')))
+                ln.get('process_type','Printing'), rate, amt, ln.get('remarks',''),
+                ln.get('original_input_qty'), ln.get('original_output_qty'),
+                ln.get('variance_reason') or '', ln.get('variance_remarks') or ''))
+            if ln.get('_revised'):
+                revisions.append(ln)
         conn.execute("UPDATE jwo_headers SET total=? WHERE id=?", (total, jwoid))
     jwo_header = dict(conn.execute("SELECT * FROM jwo_headers WHERE id=?", (jwoid,)).fetchone())
     jwo_num = jwo_header.get("jwo_number", "")
@@ -1126,6 +1194,13 @@ def update_jwo(jwoid: int, data: dict):
             from ..services.jwo_min_notes import create_min_for_jwo
 
             create_min_for_jwo(jwoid, jwo_num, jwo_header, line_snapshots)
+        except Exception:
+            pass
+    if revisions:
+        try:
+            from ..services.jwo_issue_variance import log_jwo_form_revisions
+
+            log_jwo_form_revisions(jwoid, jwo_num, revisions, user_name=str(data.get('user_name') or data.get('issued_by') or ''))
         except Exception:
             pass
     return

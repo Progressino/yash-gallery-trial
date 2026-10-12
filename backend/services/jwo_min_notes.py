@@ -23,6 +23,13 @@ def _ensure_min_schema(conn) -> None:
         "ALTER TABLE min_lines ADD COLUMN output_material_name TEXT DEFAULT ''",
         "ALTER TABLE min_lines ADD COLUMN output_qty REAL DEFAULT 0",
         "ALTER TABLE min_lines ADD COLUMN bom_qty_per_unit REAL DEFAULT 0",
+        "ALTER TABLE min_lines ADD COLUMN bom_issue_qty REAL",
+        "ALTER TABLE min_lines ADD COLUMN original_output_qty REAL",
+        "ALTER TABLE min_lines ADD COLUMN expected_output_qty REAL",
+        "ALTER TABLE min_lines ADD COLUMN variance_reason TEXT DEFAULT ''",
+        "ALTER TABLE min_lines ADD COLUMN variance_remarks TEXT DEFAULT ''",
+        "ALTER TABLE min_lines ADD COLUMN revised_by TEXT DEFAULT ''",
+        "ALTER TABLE min_lines ADD COLUMN revised_at TEXT DEFAULT ''",
     ):
         try:
             conn.execute(sql)
@@ -107,7 +114,16 @@ def create_min_for_jwo(jwoid: int, jwo_number: str, jwo: dict, jwo_lines: list[d
     seen: set[tuple[str, str]] = set()
 
     for ln in jwo_lines:
+        out_qty = float(ln.get("output_qty") or 0)
+        orig_out = ln.get("original_output_qty")
+        orig_out = float(orig_out) if orig_out is not None else out_qty
+        revised = abs(out_qty - orig_out) > 0.0005
         for m in _material_lines_from_jwo_line(ln):
+            issue = float(m["required_qty"])
+            if revised and m["material_code"] == str(ln.get("input_material") or "").strip():
+                issue = round(float(ln.get("input_qty") or 0), 3)
+            per_unit = float(m["required_qty"]) / out_qty if out_qty else 0.0
+            bom_issue = round(per_unit * orig_out, 3) if revised else float(m["required_qty"])
             key = (m["finished_item_code"], m["material_code"])
             if key in seen:
                 for ex in material_lines:
@@ -115,9 +131,8 @@ def create_min_for_jwo(jwoid: int, jwo_number: str, jwo: dict, jwo_lines: list[d
                         ex["output_material"] == m["finished_item_code"]
                         and ex["material_code"] == m["material_code"]
                     ):
-                        ex["issue_qty"] = round(
-                            float(ex["issue_qty"]) + float(m["required_qty"]), 3
-                        )
+                        ex["issue_qty"] = round(float(ex["issue_qty"]) + issue, 3)
+                        ex["bom_issue_qty"] = round(float(ex["bom_issue_qty"]) + bom_issue, 3)
                         break
                 continue
             seen.add(key)
@@ -126,12 +141,17 @@ def create_min_for_jwo(jwoid: int, jwo_number: str, jwo: dict, jwo_lines: list[d
                     "material_code": m["material_code"],
                     "material_name": m["material_name"],
                     "material_type": m.get("material_type") or "GF",
-                    "issue_qty": float(m["required_qty"]),
+                    "issue_qty": issue,
                     "unit": m.get("unit") or "MTR",
                     "output_material": m["finished_item_code"],
                     "output_material_name": m["finished_item_name"],
                     "output_qty": float(m["finished_planned_qty"]),
                     "bom_qty_per_unit": float(m.get("bom_qty_per_unit") or 0),
+                    "bom_issue_qty": bom_issue,
+                    "original_output_qty": orig_out,
+                    "expected_output_qty": out_qty,
+                    "variance_reason": (ln.get("variance_reason") or "") if revised else "",
+                    "variance_remarks": (ln.get("variance_remarks") or "") if revised else "",
                     "remarks": f"For {m['finished_item_name']} ({m['finished_item_code']})",
                 }
             )
@@ -216,8 +236,9 @@ def create_min_for_jwo(jwoid: int, jwo_number: str, jwo: dict, jwo_lines: list[d
             """INSERT INTO min_lines(
                 min_id, line_no, material_code, material_name, material_type,
                 issue_qty, unit, rate, amount, output_material, output_material_name,
-                output_qty, bom_qty_per_unit, remarks)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                output_qty, bom_qty_per_unit, remarks, bom_issue_qty, original_output_qty,
+                expected_output_qty, variance_reason, variance_remarks)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 min_id,
                 i,
@@ -233,6 +254,11 @@ def create_min_for_jwo(jwoid: int, jwo_number: str, jwo: dict, jwo_lines: list[d
                 m.get("output_qty", 0),
                 m.get("bom_qty_per_unit", 0),
                 m.get("remarks", ""),
+                m.get("bom_issue_qty", qty),
+                m.get("original_output_qty", m.get("output_qty", 0)),
+                m.get("expected_output_qty", m.get("output_qty", 0)),
+                m.get("variance_reason", ""),
+                m.get("variance_remarks", ""),
             ),
         )
 

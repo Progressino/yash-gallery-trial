@@ -1,5 +1,5 @@
 """Purchase Module router — Suppliers, Processors, PR, PO, JWO, GRN,list_mins, create_min, update_min_status, get_min_by_number, create_gate_pass, list_gate_passes, get_gate_pass_by_number,"""
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List
 from ..db.purchase_db import (
@@ -16,6 +16,14 @@ from ..db.purchase_db import (
 )
 
 router = APIRouter()
+
+
+def _auth(request: Request) -> dict:
+    return getattr(request.state, "auth", None) or {}
+
+
+def _actor(request: Request) -> str:
+    return str(_auth(request).get("sub", "") or "")
 
 class SupplierIn(BaseModel):
     supplier_code: Optional[str] = None
@@ -126,6 +134,8 @@ class JWOLineIn(BaseModel):
     rate: float = 0
     amount: Optional[float] = None
     remarks: Optional[str] = ''
+    variance_reason: Optional[str] = ''
+    variance_remarks: Optional[str] = ''
 
 class JWOIn(BaseModel):
     jwo_date: Optional[str] = None
@@ -328,8 +338,9 @@ def patch_jwo_status(jwoid: int, body: StatusUpdate):
 
 # ── NEW: Update JWO (header + lines) — mirrors PATCH /po/{poid} ──────────────
 @router.patch("/jwo/{jwoid}")
-def patch_jwo(jwoid: int, body: JWOUpdateIn):
+def patch_jwo(jwoid: int, body: JWOUpdateIn, request: Request):
     data = {k: v for k, v in body.model_dump().items() if v is not None}
+    data["user_name"] = _actor(request)
     if "lines" in data:
         # Compute amount for each line before saving
         for ln in data["lines"]:
@@ -453,6 +464,61 @@ def regenerate_jwo_issue_note(jwoid: int):
         raise HTTPException(status_code=404, detail="JWO not found")
     note = create_min_for_jwo(jwoid, jwo["jwo_number"], jwo, jwo.get("lines") or [])
     return {"ok": True, "issue_note": note}
+
+
+# ── Grey issue variance (revise before issue / authorized correction after) ──
+class IssueQtyChangeIn(BaseModel):
+    issue_qty: float
+    reason: Optional[str] = ''
+    remarks: Optional[str] = ''
+
+
+@router.get("/variance-reasons")
+def variance_reasons():
+    from ..services.jwo_issue_variance import VARIANCE_REASONS
+
+    return list(VARIANCE_REASONS)
+
+
+@router.post("/min/{minid}/lines/{line_id}/revise")
+def revise_min_line(minid: int, line_id: int, body: IssueQtyChangeIn, request: Request):
+    from ..services.jwo_issue_variance import revise_issue_qty
+
+    try:
+        return revise_issue_qty(minid, line_id, body.issue_qty, reason=body.reason or "",
+                                remarks=body.remarks or "", user_name=_actor(request))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/min/{minid}/lines/{line_id}/correct")
+def correct_min_line(minid: int, line_id: int, body: IssueQtyChangeIn, request: Request):
+    from ..services.jwo_issue_variance import correct_confirmed_issue
+    from ..services.permissions import may_access_erp_admin
+
+    if not may_access_erp_admin(str(_auth(request).get("role", "") or "")):
+        raise HTTPException(status_code=403, detail="Only Admin / Manager can correct a confirmed Material Issue.")
+    try:
+        return correct_confirmed_issue(minid, line_id, body.issue_qty, reason=body.reason or "",
+                                       remarks=body.remarks or "", user_name=_actor(request))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/min/{minid}/adjustments")
+def min_adjustments(minid: int):
+    from ..services.jwo_issue_variance import list_adjustments
+
+    return list_adjustments(minid)
+
+
+@router.get("/reports/printing-variance")
+def printing_variance(from_date: str = "", to_date: str = "", processor: str = "",
+                      reason: str = "", only_variance: bool = False):
+    from ..services.jwo_issue_variance import printing_variance_report
+
+    return printing_variance_report(from_date=from_date, to_date=to_date, processor=processor,
+                                    reason=reason, only_variance=only_variance)
 # ── GRN ───────────────────────────────────────────────────────────────────────
 @router.get("/grn")
 def get_grns(status: Optional[str] = None):

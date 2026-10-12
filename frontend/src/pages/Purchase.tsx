@@ -1,11 +1,11 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { Fragment, useState, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
 import { YASH_GALLERY, brandLogoDataUrl, brandPrintHeaderHtml, BRAND_PRINT_CSS } from '../lib/printBrand'
 
-type Tab = 'dashboard' | 'suppliers' | 'processors' | 'pr' | 'po' | 'jwo' | 'grn' | 'min' | 'gate-pass' | 'audit'
+type Tab = 'dashboard' | 'suppliers' | 'processors' | 'pr' | 'po' | 'jwo' | 'grn' | 'min' | 'gate-pass' | 'audit' | 'variance'
 type PRSubTab = 'list' | 'new' | 'from-mrp'
 
 interface Stats { open_prs: number; open_pos: number; open_jwos: number; pending_grns: number; total_suppliers: number; total_processors: number }
@@ -38,7 +38,7 @@ interface PO {
 }
 interface POLine { id: number; material_code: string; material_name: string; material_type: string; po_qty: number; unit: string; rate: number; gst_pct: number; amount: number }
 interface JWO { id: number; jwo_number: string; jwo_date: string; processor_name: string; processor_id?: number; status: string; total: number; expected_return_date: string; pr_reference?: string; so_reference?: string; issued_by?: string; remarks?: string; lines: JWOLine[] }
-interface JWOLine { id: number; input_material: string; input_qty?: number; output_material: string; output_qty: number; output_unit?: string; process_type: string; rate: number; amount: number; unit?: string }
+interface JWOLine { id: number; input_material: string; input_qty?: number; output_material: string; output_qty: number; output_unit?: string; process_type: string; rate: number; amount: number; unit?: string; original_input_qty?: number | null; original_output_qty?: number | null; variance_reason?: string; variance_remarks?: string }
 interface MINLine {
   id?: number
   material_code: string
@@ -51,6 +51,13 @@ interface MINLine {
   output_qty?: number
   bom_qty_per_unit?: number
   remarks?: string
+  bom_issue_qty?: number | null
+  original_output_qty?: number | null
+  expected_output_qty?: number | null
+  variance_reason?: string
+  variance_remarks?: string
+  revised_by?: string
+  revised_at?: string
 }
 interface IssueNote {
   id: number
@@ -449,8 +456,310 @@ const buildMINPrintHTML = async (min: any, barcodeHtml = '') => {
     </div>`
 }
 
+const r3 = (n: number) => Math.round(n * 1000) / 1000
+const apiDetail = (e: unknown, fallback: string) =>
+  (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || fallback
+
+function useVarianceReasons() {
+  const { data = [] } = useQuery<string[]>({
+    queryKey: ['variance-reasons'],
+    queryFn: () => api.get('/purchase/variance-reasons').then(r => r.data),
+    staleTime: 3_600_000,
+  })
+  return data
+}
+
+function minLineBasis(ln: MINLine) {
+  const bomIssue = Number(ln.bom_issue_qty ?? ln.issue_qty ?? 0)
+  const origOut = Number(ln.original_output_qty ?? ln.output_qty ?? 0)
+  const expected = Number(ln.expected_output_qty ?? ln.output_qty ?? 0)
+  return { bomIssue, origOut, expected }
+}
+
+function IssueQtyEditor({
+  note,
+  line,
+  onDone,
+}: {
+  note: IssueNote
+  line: MINLine
+  onDone: () => void
+}) {
+  const reasons = useVarianceReasons()
+  const confirmed = note.status === 'Confirmed'
+  const { bomIssue, origOut } = minLineBasis(line)
+  const [qty, setQty] = useState(String(line.issue_qty))
+  const [reason, setReason] = useState(line.variance_reason || '')
+  const [remarks, setRemarks] = useState(line.variance_remarks || '')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const n = Number(qty) || 0
+  const canReverse = bomIssue > 0 && origOut > 0 && Boolean(line.output_material)
+  const expected = canReverse ? r3((n * origOut) / bomIssue) : null
+  const vsBom = r3(n - bomIssue)
+  const vsBomPct = bomIssue ? r3((vsBom / bomIssue) * 100) : 0
+  const delta = r3(n - Number(line.issue_qty || 0))
+  const needReason = confirmed || Math.abs(vsBom) > 0.0005
+
+  const save = async () => {
+    if (n <= 0 && !confirmed) { setErr('Issue qty must be greater than zero'); return }
+    if (Math.abs(delta) <= 0.0005) { setErr('Issue qty is unchanged'); return }
+    if (needReason && !reason) { setErr('Select a reason'); return }
+    if (reason === 'Other' && !remarks.trim()) { setErr('Remarks are required for Other'); return }
+    if (confirmed && !window.confirm(
+      `Post-issue correction: ${delta > 0 ? `issue ${delta} more` : `return ${-delta}`} ${line.unit || 'MTR'} of ${line.material_code}. ` +
+      'Item Master stock will be corrected and the change audited. Continue?',
+    )) return
+    setBusy(true)
+    setErr('')
+    try {
+      await api.post(`/purchase/min/${note.id}/lines/${line.id}/${confirmed ? 'correct' : 'revise'}`, {
+        issue_qty: n, reason: needReason ? reason : '', remarks: needReason ? remarks : '',
+      })
+      onDone()
+    } catch (e) {
+      setErr(apiDetail(e, 'Could not update issue qty'))
+    }
+    setBusy(false)
+  }
+
+  return (
+    <div className={`rounded-lg border p-2 space-y-2 ${confirmed ? 'border-amber-300 bg-amber-50' : 'border-sky-300 bg-white'}`}>
+      <p className="text-[11px] font-semibold text-gray-700">
+        {confirmed ? 'Issue Qty Correction (authorized — posts stock correction)' : 'Adjust Grey Issue Qty (before confirmation)'}
+      </p>
+      <div className="flex flex-wrap items-end gap-3 text-xs">
+        <label className="text-gray-600">New issue qty
+          <input type="number" min={0} step="0.001" value={qty} onChange={e => setQty(e.target.value)}
+            className="block w-28 border border-gray-300 rounded px-1.5 py-1 text-right font-mono mt-0.5" />
+        </label>
+        <div>
+          <span className="text-gray-500 block">BOM requirement</span>
+          <b className="font-mono">{bomIssue}</b>
+        </div>
+        <div>
+          <span className="text-gray-500 block">vs BOM</span>
+          <b className={`font-mono ${vsBom > 0 ? 'text-orange-700' : vsBom < 0 ? 'text-blue-700' : ''}`}>
+            {vsBom > 0 ? '+' : ''}{vsBom} ({vsBomPct > 0 ? '+' : ''}{vsBomPct}%)
+          </b>
+        </div>
+        {expected != null && (
+          <div>
+            <span className="text-gray-500 block">Expected printed output</span>
+            <b className="font-mono">{expected}</b>
+            <span className="text-gray-500"> (planned {origOut})</span>
+          </div>
+        )}
+        {needReason && (
+          <label className="text-gray-600">Reason *
+            <select value={reason} onChange={e => setReason(e.target.value)}
+              className="block border border-gray-300 rounded px-1.5 py-1 mt-0.5">
+              <option value="">Select…</option>
+              {reasons.map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+          </label>
+        )}
+        {needReason && (
+          <label className="text-gray-600 flex-1 min-w-[160px]">Remarks{reason === 'Other' ? ' *' : ''}
+            <input value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="e.g. bundle of 500 m"
+              className="block w-full border border-gray-300 rounded px-1.5 py-1 mt-0.5" />
+          </label>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={save} disabled={busy}
+          className={`text-xs px-3 py-1 rounded text-white disabled:opacity-50 ${confirmed ? 'bg-amber-600 hover:bg-amber-700' : 'bg-sky-700 hover:bg-sky-800'}`}>
+          {busy ? 'Saving…' : confirmed ? 'Post correction' : 'Save revised qty'}
+        </button>
+        {!confirmed && Math.abs(Number(line.issue_qty) - bomIssue) > 0.0005 && (
+          <button type="button" onClick={() => { setQty(String(bomIssue)); setReason(''); setRemarks('') }}
+            className="text-xs px-2 py-1 rounded border border-gray-300 bg-white">Reset to BOM</button>
+        )}
+        <button type="button" onClick={onDone} className="text-xs px-2 py-1 rounded border border-gray-300 bg-white">Close</button>
+        {err && <span className="text-xs text-red-600">{err}</span>}
+      </div>
+    </div>
+  )
+}
+
+function MinAdjustmentHistory({ minId }: { minId: number }) {
+  const { data = [] } = useQuery<any[]>({
+    queryKey: ['min-adjustments', minId],
+    queryFn: () => api.get(`/purchase/min/${minId}/adjustments`).then(r => r.data),
+  })
+  if (!data.length) return null
+  return (
+    <details className="text-xs">
+      <summary className="cursor-pointer text-sky-800 font-medium">Issue qty change history ({data.length})</summary>
+      <table className="w-full mt-1">
+        <thead>
+          <tr className="text-gray-500 border-b border-sky-200">
+            <th className="text-left py-1">When</th><th className="text-left py-1">Stage</th>
+            <th className="text-left py-1">Material</th><th className="text-right py-1">Issue qty</th>
+            <th className="text-right py-1">Expected output</th><th className="text-left py-1 pl-2">Reason</th>
+            <th className="text-left py-1">Stock</th><th className="text-left py-1">By</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.map(a => (
+            <tr key={a.id} className="border-t border-sky-100">
+              <td className="py-1 whitespace-nowrap">{a.created_at}</td>
+              <td className="py-1">{a.phase === 'POST_ISSUE' ? 'Correction after issue' : 'Before issue'}</td>
+              <td className="py-1 font-mono">{a.material_code}</td>
+              <td className="py-1 text-right font-mono">{a.old_issue_qty} → {a.new_issue_qty}</td>
+              <td className="py-1 text-right font-mono">{a.old_output_qty} → {a.new_output_qty}</td>
+              <td className="py-1 pl-2">{a.reason || '—'}{a.remarks ? ` · ${a.remarks}` : ''}</td>
+              <td className="py-1">{a.stock_posted ? `${a.delta_qty > 0 ? 'OUT' : 'IN'} ${Math.abs(a.delta_qty)}` : '—'}</td>
+              <td className="py-1">{a.user_name || '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </details>
+  )
+}
+
+function PrintingVarianceReport() {
+  const reasons = useVarianceReasons()
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const [processor, setProcessor] = useState('')
+  const [reason, setReason] = useState('')
+  const [onlyVariance, setOnlyVariance] = useState(true)
+  const params = { from_date: from, to_date: to, processor, reason, only_variance: onlyVariance }
+  const { data, isLoading } = useQuery<any>({
+    queryKey: ['printing-variance', params],
+    queryFn: () => api.get('/purchase/reports/printing-variance', { params }).then(r => r.data),
+  })
+  const rows: any[] = data?.rows || []
+  const s = data?.summary || {}
+  const sign = (n: number | null | undefined) => (n == null ? '—' : `${n > 0 ? '+' : ''}${n}`)
+  const pct = (n: number | null | undefined) => (n == null ? '' : ` (${n > 0 ? '+' : ''}${n}%)`)
+  const tone = (n: number) => (n > 0.0005 ? 'text-orange-700' : n < -0.0005 ? 'text-blue-700' : 'text-gray-500')
+
+  const exportCsv = () => {
+    const cols: [string, string][] = [
+      ['jwo_number', 'JWO'], ['jwo_date', 'JWO Date'], ['processor_name', 'Processor'], ['so_reference', 'SO'],
+      ['min_number', 'MIN'], ['min_status', 'MIN Status'], ['grey_code', 'Grey / Material'], ['printed_code', 'Printed Fabric'],
+      ['mrp_requirement_qty', 'MRP Requirement'], ['original_planned_output', 'Original Planned Output'],
+      ['bom_grey_requirement', 'BOM Grey Requirement'], ['revised_grey_issue', 'Revised Grey Issue'],
+      ['revised_expected_output', 'Revised Expected Output'], ['actual_received_qty', 'Actual Received'],
+      ['excess_grey_qty', 'Excess Grey Qty'], ['excess_grey_pct', 'Excess Grey %'],
+      ['excess_output_qty', 'Additional Output Qty'], ['excess_output_pct', 'Additional Output %'],
+      ['output_vs_mrp_qty', 'Output vs MRP Qty'], ['output_vs_mrp_pct', 'Output vs MRP %'],
+      ['received_vs_original_qty', 'Received vs Original'], ['reason', 'Reason'], ['remarks', 'Remarks'], ['revised_by', 'Revised By'],
+    ]
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+    const csv = [cols.map(c => esc(c[1])).join(','), ...rows.map(r => cols.map(c => esc(r[c[0]])).join(','))].join('\n')
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
+    a.download = `printing-variance-${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+        <div>
+          <h3 className="font-semibold text-[#002B5B]">Printing JWO — Grey issue vs MRP requirement</h3>
+          <p className="text-xs text-gray-500">Original MRP requirement and BOM plan vs revised grey issue, expected output and actual receipt — with reasons for excess / shortage.</p>
+        </div>
+        <div className="flex flex-wrap items-end gap-3 text-xs">
+          <label>From<input type="date" value={from} onChange={e => setFrom(e.target.value)} className="block border rounded px-2 py-1 mt-0.5" /></label>
+          <label>To<input type="date" value={to} onChange={e => setTo(e.target.value)} className="block border rounded px-2 py-1 mt-0.5" /></label>
+          <label>Processor<input value={processor} onChange={e => setProcessor(e.target.value)} placeholder="Any" className="block border rounded px-2 py-1 mt-0.5" /></label>
+          <label>Reason
+            <select value={reason} onChange={e => setReason(e.target.value)} className="block border rounded px-2 py-1 mt-0.5">
+              <option value="">All</option>
+              {reasons.map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5 pb-1">
+            <input type="checkbox" checked={onlyVariance} onChange={e => setOnlyVariance(e.target.checked)} /> Only lines with variance
+          </label>
+          <button type="button" onClick={exportCsv} disabled={!rows.length}
+            className="ml-auto px-3 py-1.5 rounded border border-[#002B5B] text-[#002B5B] disabled:opacity-40">Export CSV</button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        {[
+          ['MRP requirement (printed)', s.mrp_requirement, s.mrp_requirement ? `output vs MRP ${sign(s.output_vs_mrp_qty)}${pct(s.output_vs_mrp_pct)}` : ''],
+          ['BOM grey requirement', s.bom_grey, ''],
+          ['Grey issued (revised)', s.issued_grey, `${sign(s.excess_grey_qty)}${pct(s.excess_grey_pct)}`],
+          ['Original planned output', s.original_output, ''],
+          ['Expected output (revised)', s.expected_output, `${sign(s.excess_output_qty)}${pct(s.excess_output_pct)}`],
+        ].map(([label, val, sub]) => (
+          <div key={label as string} className="bg-white rounded-xl border border-gray-200 p-3">
+            <p className="text-[11px] uppercase text-gray-400 font-semibold">{label}</p>
+            <p className="text-lg font-bold text-[#002B5B]">{val ?? 0}</p>
+            {sub && <p className="text-xs text-orange-700">{sub}</p>}
+          </div>
+        ))}
+      </div>
+      <p className="text-xs text-gray-500">
+        Actual received: <b>{s.received ?? 0}</b> · Lines: {s.lines ?? 0} · With variance: {s.lines_with_variance ?? 0}
+      </p>
+
+      {(data?.by_reason || []).length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-3">
+          <p className="text-xs font-semibold text-gray-600 mb-2">Excess by reason</p>
+          <table className="w-full text-xs">
+            <thead><tr className="text-gray-400 border-b"><th className="text-left py-1">Reason</th><th className="text-right py-1">Lines</th><th className="text-right py-1">Extra grey</th><th className="text-right py-1">Additional output</th></tr></thead>
+            <tbody>
+              {data.by_reason.map((b: any) => (
+                <tr key={b.reason} className="border-t border-gray-50">
+                  <td className="py-1 font-medium">{b.reason}</td><td className="py-1 text-right">{b.lines}</td>
+                  <td className={`py-1 text-right ${tone(b.excess_grey_qty)}`}>{sign(b.excess_grey_qty)}</td>
+                  <td className={`py-1 text-right ${tone(b.excess_output_qty)}`}>{sign(b.excess_output_qty)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="bg-white rounded-xl border border-gray-200 overflow-x-auto">
+        {isLoading ? <p className="p-4 text-sm text-gray-400">Loading…</p> : rows.length === 0 ? (
+          <p className="p-4 text-sm text-gray-400">No printing JWO lines{onlyVariance ? ' with variance' : ''} for these filters.</p>
+        ) : (
+          <table className="w-full text-xs">
+            <thead className="bg-gray-50">
+              <tr className="text-gray-500">
+                {['JWO / MIN', 'Processor · SO', 'Grey → Printed', 'MRP Req.', 'Orig. Planned Output', 'BOM Grey Req.', 'Revised Grey Issue', 'Extra Grey', 'Revised Exp. Output', 'Additional Output', 'Output vs MRP', 'Actual Received', 'Reason'].map(h => (
+                  <th key={h} className="text-left px-2 py-2 whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} className="border-t border-gray-100 align-top">
+                  <td className="px-2 py-1.5 whitespace-nowrap"><b>{r.jwo_number}</b><span className="block text-gray-500">{r.min_number} · {r.min_status}</span><span className="block text-gray-400">{r.jwo_date}</span></td>
+                  <td className="px-2 py-1.5">{r.processor_name || '—'}<span className="block text-gray-500">{r.so_reference || '—'}</span></td>
+                  <td className="px-2 py-1.5 font-mono">{r.grey_code}<span className="block text-gray-500">→ {r.printed_code}</span></td>
+                  <td className="px-2 py-1.5 text-right">{r.mrp_requirement_qty ?? '—'}</td>
+                  <td className="px-2 py-1.5 text-right">{r.original_planned_output}</td>
+                  <td className="px-2 py-1.5 text-right">{r.bom_grey_requirement}</td>
+                  <td className="px-2 py-1.5 text-right font-semibold">{r.revised_grey_issue}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${tone(r.excess_grey_qty)}`}>{sign(r.excess_grey_qty)}{pct(r.excess_grey_pct)}</td>
+                  <td className="px-2 py-1.5 text-right font-semibold">{r.revised_expected_output}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${tone(r.excess_output_qty)}`}>{sign(r.excess_output_qty)}{pct(r.excess_output_pct)}</td>
+                  <td className={`px-2 py-1.5 text-right whitespace-nowrap ${tone(r.output_vs_mrp_qty ?? 0)}`}>{sign(r.output_vs_mrp_qty)}{pct(r.output_vs_mrp_pct)}</td>
+                  <td className="px-2 py-1.5 text-right">{r.actual_received_qty}<span className={`block text-[10px] ${tone(r.received_vs_original_qty)}`}>{sign(r.received_vs_original_qty)} vs plan</span></td>
+                  <td className="px-2 py-1.5">{r.reason || '—'}{r.remarks && <span className="block text-gray-500">{r.remarks}</span>}{r.revised_by && <span className="block text-gray-400">by {r.revised_by}</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string }) {
   const qc = useQueryClient()
+  const [editingLine, setEditingLine] = useState<number | null>(null)
   const { data: note, isLoading, refetch } = useQuery<IssueNote | null>({
     queryKey: ['jwo-issue-note', jwoId],
     queryFn: async () => {
@@ -565,33 +874,86 @@ function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string })
               <th className="text-left py-1">Material to issue</th>
               <th className="text-left py-1">For (finished item)</th>
               <th className="text-right py-1">BOM/unit</th>
+              <th className="text-right py-1">BOM req.</th>
               <th className="text-right py-1">Issue qty</th>
+              <th className="text-right py-1">Variance</th>
+              <th className="text-right py-1">Expected output</th>
               <th className="text-right py-1">Unit</th>
+              <th className="py-1"></th>
             </tr>
           </thead>
           <tbody>
-            {note.lines.map(ln => (
-              <tr key={ln.id ?? `${ln.material_code}-${ln.output_material}`} className="border-t border-sky-100">
-                <td className="py-1.5">
-                  <span className="font-medium">{ln.material_code}</span>
-                  {ln.material_name && ln.material_name !== ln.material_code && (
-                    <span className="text-gray-500 block">{ln.material_name}</span>
+            {note.lines.map(ln => {
+              const { bomIssue, origOut, expected } = minLineBasis(ln)
+              const diff = r3(Number(ln.issue_qty || 0) - bomIssue)
+              const pct = bomIssue ? r3((diff / bomIssue) * 100) : 0
+              const open = editingLine === ln.id
+              return (
+                <Fragment key={ln.id ?? `${ln.material_code}-${ln.output_material}`}>
+                  <tr className="border-t border-sky-100">
+                    <td className="py-1.5">
+                      <span className="font-medium">{ln.material_code}</span>
+                      {ln.material_name && ln.material_name !== ln.material_code && (
+                        <span className="text-gray-500 block">{ln.material_name}</span>
+                      )}
+                    </td>
+                    <td className="py-1.5">
+                      <span className="font-medium">{ln.output_material_name || ln.output_material || '—'}</span>
+                      {origOut > 0 && <span className="text-gray-500 block">{origOut} planned</span>}
+                    </td>
+                    <td className="py-1.5 text-right">{ln.bom_qty_per_unit ?? '—'}</td>
+                    <td className="py-1.5 text-right text-gray-600">{bomIssue}</td>
+                    <td className="py-1.5 text-right font-semibold">{ln.issue_qty}</td>
+                    <td className={`py-1.5 text-right ${diff > 0 ? 'text-orange-700' : diff < 0 ? 'text-blue-700' : 'text-gray-400'}`}>
+                      {Math.abs(diff) > 0.0005 ? (
+                        <>
+                          {diff > 0 ? '+' : ''}{diff} ({pct > 0 ? '+' : ''}{pct}%)
+                          {ln.variance_reason && <span className="block text-[10px] text-gray-600">{ln.variance_reason}</span>}
+                        </>
+                      ) : '—'}
+                    </td>
+                    <td className="py-1.5 text-right">
+                      {expected > 0 ? expected : '—'}
+                      {Math.abs(expected - origOut) > 0.0005 && origOut > 0 && (
+                        <span className="block text-[10px] text-gray-500">was {origOut}</span>
+                      )}
+                    </td>
+                    <td className="py-1.5 text-right">{ln.unit || 'MTR'}</td>
+                    <td className="py-1.5 text-right">
+                      {ln.id != null && note.status !== 'Cancelled' && (
+                        <button type="button" onClick={() => setEditingLine(open ? null : ln.id!)}
+                          className={`text-[11px] px-2 py-0.5 rounded border ${note.status === 'Confirmed' ? 'border-amber-300 text-amber-800' : 'border-sky-300 text-sky-800'} bg-white`}>
+                          {note.status === 'Confirmed' ? 'Correct' : 'Adjust'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                  {open && (
+                    <tr>
+                      <td colSpan={9} className="py-1">
+                        <IssueQtyEditor note={note} line={ln} onDone={() => {
+                          setEditingLine(null)
+                          void refetch()
+                          qc.invalidateQueries({ queryKey: ['jwos'] })
+                          qc.invalidateQueries({ queryKey: ['mins'] })
+                          qc.invalidateQueries({ queryKey: ['min-adjustments', note.id] })
+                          qc.invalidateQueries({ queryKey: ['printing-variance'] })
+                        }} />
+                      </td>
+                    </tr>
                   )}
-                </td>
-                <td className="py-1.5">
-                  <span className="font-medium">{ln.output_material_name || ln.output_material || '—'}</span>
-                  {ln.output_qty != null && ln.output_qty > 0 && (
-                    <span className="text-gray-500 block">{ln.output_qty} planned</span>
-                  )}
-                </td>
-                <td className="py-1.5 text-right">{ln.bom_qty_per_unit ?? '—'}</td>
-                <td className="py-1.5 text-right font-semibold">{ln.issue_qty}</td>
-                <td className="py-1.5 text-right">{ln.unit || 'MTR'}</td>
-              </tr>
-            ))}
+                </Fragment>
+              )
+            })}
           </tbody>
         </table>
       )}
+      {note.status === 'Confirmed' && (
+        <p className="text-[11px] text-gray-600">
+          Issue confirmed — quantities are locked. Use <b>Correct</b> (Admin / Manager) to post a stock correction with reason.
+        </p>
+      )}
+      <MinAdjustmentHistory minId={note.id} />
     </div>
   )
 }
@@ -698,7 +1060,12 @@ export default function Purchase() {
   // ── NEW: Edit Draft JWO ────────────────────────────────────────────────────
   const [editingJWO, setEditingJWO] = useState<number | null>(null)
   const [editJWOForm, setEditJWOForm] = useState({ processor_id: undefined as number | undefined, processor_name: '', expected_return_date: '', pr_reference: '', so_reference: '', issued_by: '', remarks: '' })
-  const [editJWOLines, setEditJWOLines] = useState<{ input_material: string; input_qty: number; output_material: string; output_qty: number; process_type: string; rate: number }[]>([])
+  const [editJWOLines, setEditJWOLines] = useState<{
+    input_material: string; input_qty: number; output_material: string; output_qty: number; process_type: string; rate: number
+    original_input_qty?: number | null; original_output_qty?: number | null; loaded_input_qty?: number; loaded_output_qty?: number
+    variance_reason?: string; variance_remarks?: string
+  }[]>([])
+  const varianceReasons = useVarianceReasons()
 
   // ── GRN Auto-fill / GIN Scanner state ────────────────────────────────────
   const [grnAutoRef, setGrnAutoRef] = useState('')
@@ -790,8 +1157,11 @@ export default function Purchase() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['jwos'] })
       qc.invalidateQueries({ queryKey: ['mins'] })
+      qc.invalidateQueries({ queryKey: ['jwo-issue-note'] })
+      qc.invalidateQueries({ queryKey: ['printing-variance'] })
       setEditingJWO(null)
     },
+    onError: (e: unknown) => alert(apiDetail(e, 'Could not update JWO')),
   })
 
   const createGRNMut = useMutation({ mutationFn: (b: object) => api.post('/purchase/grn', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['grns'] }); invalidate(); setShowGRNForm(false); setGRNLines([]) } })
@@ -829,6 +1199,7 @@ export default function Purchase() {
     ['min', '📋 Issue Notes'],
     ['gate-pass', '🚪 Gate Pass'],
     ['audit', '🔗 Document Audit'],
+    ['variance', '📐 Printing Variance'],
   ]
 
   // ── From MRP helpers ──────────────────────────────────────────────────────
@@ -1997,7 +2368,34 @@ export default function Purchase() {
                               {editJWOLines.map((ln, i) => (
                                 <tr key={i} className="border-t border-gray-50">
                                   <td className="py-1"><input value={ln.input_material} onChange={e => setEditJWOLines(l => l.map((x, j) => j === i ? { ...x, input_material: e.target.value } : x))} className="w-full border rounded px-1.5 py-1" placeholder="Input" /></td>
-                                  <td className="py-1"><input type="number" value={ln.input_qty} onChange={e => setEditJWOLines(l => l.map((x, j) => j === i ? { ...x, input_qty: +e.target.value } : x))} className="w-16 border rounded px-1.5 py-1 text-right" /></td>
+                                  <td className="py-1 align-top">
+                                    <input type="number" value={ln.input_qty} onChange={e => setEditJWOLines(l => l.map((x, j) => j === i ? { ...x, input_qty: +e.target.value } : x))} className="w-20 border rounded px-1.5 py-1 text-right" />
+                                    {(() => {
+                                      const oIn = Number(ln.original_input_qty || 0)
+                                      const oOut = Number(ln.original_output_qty || 0)
+                                      const inputChanged = ln.loaded_input_qty != null && Math.abs(ln.input_qty - ln.loaded_input_qty) > 0.0005
+                                      const outputSame = ln.loaded_output_qty == null || Math.abs(ln.output_qty - ln.loaded_output_qty) <= 0.0005
+                                      if (!oIn || !oOut || !outputSame || (!inputChanged && Math.abs(ln.input_qty - oIn) <= 0.0005)) return null
+                                      const exp = r3((ln.input_qty * oOut) / oIn)
+                                      const diff = r3(ln.input_qty - oIn)
+                                      return (
+                                        <div className="mt-1 text-[10px] text-gray-600 space-y-1 min-w-[150px]">
+                                          <div>BOM {oIn} → {diff > 0 ? '+' : ''}{diff} · expected output <b>{exp}</b></div>
+                                          {Math.abs(diff) > 0.0005 && (
+                                            <>
+                                              <select value={ln.variance_reason || ''} onChange={e => setEditJWOLines(l => l.map((x, j) => j === i ? { ...x, variance_reason: e.target.value } : x))}
+                                                className="w-full border rounded px-1 py-0.5">
+                                                <option value="">Reason…</option>
+                                                {varianceReasons.map(r => <option key={r} value={r}>{r}</option>)}
+                                              </select>
+                                              <input value={ln.variance_remarks || ''} placeholder="Remarks" onChange={e => setEditJWOLines(l => l.map((x, j) => j === i ? { ...x, variance_remarks: e.target.value } : x))}
+                                                className="w-full border rounded px-1 py-0.5" />
+                                            </>
+                                          )}
+                                        </div>
+                                      )
+                                    })()}
+                                  </td>
                                   <td className="py-1"><input value={ln.output_material} onChange={e => setEditJWOLines(l => l.map((x, j) => j === i ? { ...x, output_material: e.target.value } : x))} className="w-full border rounded px-1.5 py-1" placeholder="Output" /></td>
                                   <td className="py-1"><input type="number" value={ln.output_qty} onChange={e => setEditJWOLines(l => l.map((x, j) => j === i ? { ...x, output_qty: +e.target.value } : x))} className="w-16 border rounded px-1.5 py-1 text-right" /></td>
                                   <td className="py-1"><select value={ln.process_type} onChange={e => setEditJWOLines(l => l.map((x, j) => j === i ? { ...x, process_type: e.target.value } : x))} className="w-full border rounded px-1.5 py-1">{PROC_TYPES2.map(t => <option key={t}>{t}</option>)}</select></td>
@@ -2035,7 +2433,11 @@ export default function Purchase() {
                               setEditJWOLines(jwo.lines.map(l => ({
                                 input_material: l.input_material, input_qty: l.input_qty || 0,
                                 output_material: l.output_material, output_qty: l.output_qty,
-                                process_type: l.process_type, rate: l.rate
+                                process_type: l.process_type, rate: l.rate,
+                                original_input_qty: l.original_input_qty ?? l.input_qty ?? 0,
+                                original_output_qty: l.original_output_qty ?? l.output_qty,
+                                loaded_input_qty: l.input_qty || 0, loaded_output_qty: l.output_qty,
+                                variance_reason: l.variance_reason || '', variance_remarks: l.variance_remarks || '',
                               })))
                             }} className="text-xs px-3 py-1 border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50">✏️ Edit</button>
                           </div>
@@ -2047,20 +2449,34 @@ export default function Purchase() {
                         </div>
                         <table className="w-full text-xs">
                           <thead><tr className="text-gray-400 uppercase border-b">
-                            <th className="text-left pb-1">Input Material</th><th className="text-left pb-1">Output Material</th>
+                            <th className="text-left pb-1">Input Material</th><th className="text-right pb-1">Input Qty</th>
+                            <th className="text-left pb-1 pl-3">Output Material</th>
                             <th className="text-left pb-1">Process</th><th className="text-right pb-1">Output Qty</th>
                             <th className="text-right pb-1">Rate</th><th className="text-right pb-1">Amount</th>
                           </tr></thead>
-                          <tbody>{jwo.lines.map(l => (
+                          <tbody>{jwo.lines.map(l => {
+                            const oIn = l.original_input_qty
+                            const oOut = l.original_output_qty
+                            const inRev = oIn != null && Math.abs(Number(l.input_qty || 0) - oIn) > 0.0005
+                            const outRev = oOut != null && Math.abs(l.output_qty - oOut) > 0.0005
+                            return (
                             <tr key={l.id} className="border-t border-gray-50">
                               <td className="py-1.5 font-medium">{l.input_material}</td>
-                              <td className="py-1.5">{l.output_material}</td>
+                              <td className="py-1.5 text-right">
+                                {l.input_qty ?? '—'}
+                                {inRev && <span className="block text-[10px] text-orange-700">BOM {oIn}{l.variance_reason ? ` · ${l.variance_reason}` : ''}</span>}
+                              </td>
+                              <td className="py-1.5 pl-3">{l.output_material}</td>
                               <td className="py-1.5 text-gray-500">{l.process_type}</td>
-                              <td className="py-1.5 text-right">{l.output_qty}</td>
+                              <td className="py-1.5 text-right">
+                                {l.output_qty}
+                                {outRev && <span className="block text-[10px] text-gray-500">planned {oOut}</span>}
+                              </td>
                               <td className="py-1.5 text-right">{fmt(l.rate)}</td>
                               <td className="py-1.5 text-right font-medium">{fmt(l.output_qty * l.rate)}</td>
                             </tr>
-                          ))}</tbody>
+                            )
+                          })}</tbody>
                         </table>
                         <JWOMinPanel jwoId={jwo.id} jwoNumber={jwo.jwo_number} />
                       </div>
@@ -2434,6 +2850,8 @@ export default function Purchase() {
           </div>
         </div>
       )}
+
+      {tab === 'variance' && <PrintingVarianceReport />}
 
       {tab === 'audit' && (
         <div className="bg-white rounded-xl border p-4 space-y-4 max-w-4xl">
