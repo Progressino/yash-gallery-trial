@@ -14,6 +14,7 @@ import {
   Legend,
 } from 'recharts'
 import api from '../api/client'
+import { useTrackTab } from '../lib/usageTracker'
 
 class ChartBoundary extends Component<{ children: ReactNode; label?: string }, { err: boolean }> {
   constructor(props: { children: ReactNode; label?: string }) {
@@ -173,6 +174,7 @@ export default function StitchingCosting({ karigarOnly = false }: { karigarOnly?
   const authUser = useAuth(s => s.user)
   const lockedKarigarId = karigarOnly ? authUser?.karigar_id || '' : ''
   const [tab, setTab] = useState<TabId>(karigarOnly ? 'production' : 'dashboard')
+  useTrackTab(tab)
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
 

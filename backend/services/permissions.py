@@ -46,6 +46,8 @@ def karigar_may_access_api(path: str, method: str) -> bool:
         return True
     if path == "/api/health":
         return True
+    if path == "/api/usage/track":
+        return True
     if not path.startswith("/api/stitching/"):
         return False
     return any(path.startswith(prefix) for prefix in _KARIGAR_STITCHING_PREFIXES)

@@ -5,6 +5,7 @@ import {
   Legend, ResponsiveContainer, Cell,
 } from 'recharts'
 import api from '../api/client'
+import { useTrackTab } from '../lib/usageTracker'
 import { GlSalesNotesContent } from '../components/finance/GlSalesNotesContent'
 import { FinanceUserGuideContent } from '../components/finance/FinanceUserGuideContent'
 
@@ -587,6 +588,7 @@ export default function Finance() {
   }, [])
 
   const [activeTab,    setActiveTab]    = useState<FinanceTab>('dashboard')
+  useTrackTab(pinUnlocked ? activeTab : null)
   const [cronusMegaOpen, setCronusMegaOpen] = useState<CronusMega>(null)
   const [voucherPreset, setVoucherPreset] = useState<{ n: number; type: string } | null>(null)
   const [mastersJump, setMastersJump] = useState<{ n: number; sub: MastersSubTab; ledgerSearch?: string } | null>(null)

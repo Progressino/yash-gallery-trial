@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
+import { useTrackTab } from '../lib/usageTracker'
 
 type Tab =
   | 'dashboard'
@@ -132,6 +133,7 @@ export default function GreyFabric() {
       return 'dashboard'
     }
   })
+  useTrackTab(tab)
   const [filterStatus, setFilterStatus] = useState('')
   const [editEntry, setEditEntry] = useState<GreyEntry | null>(null)
   const [editData, setEditData] = useState<Record<string, string | number>>({})

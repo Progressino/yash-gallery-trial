@@ -135,7 +135,7 @@ def _login_payload(user: dict) -> dict:
     }
 
 
-def _complete_login(request: Request, response: Response, user: dict) -> dict:
+def _complete_login(request: Request, response: Response, user: dict, *, method: str = "password") -> dict:
     role = user.get("role_name") or user.get("role") or "Clerk"
     username = user.get("username") or ""
     token = create_token(
@@ -147,6 +147,16 @@ def _complete_login(request: Request, response: Response, user: dict) -> dict:
     )
     _set_auth_cookie(request, response, token)
     _reset_session_cookie(request, response)
+    from ..services.usage_analytics import record_login
+
+    fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    record_login(
+        username,
+        role,
+        method=method,
+        ip=request.headers.get("cf-connecting-ip") or fwd or (request.client.host if request.client else ""),
+        user_agent=request.headers.get("user-agent") or "",
+    )
     return _login_payload(user)
 
 
@@ -306,7 +316,7 @@ def otp_verify(body: OtpVerifyRequest, request: Request, response: Response):
             username=username,
         )
 
-    return _complete_login(request, response, user)
+    return _complete_login(request, response, user, method="otp")
 
 
 @router.post("/logout")

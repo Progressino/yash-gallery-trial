@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
+import { useTrackTab } from '../lib/usageTracker'
 import { useAuth } from '../store/auth'
 import { FREQUENCIES, PRIORITIES, WEEKDAYS, MONTHS, priorityStyle, SCHEDULE_RULE_FREQS, todayIst } from './hrmConstants'
 import { loadHrmLang, saveHrmLang, t, type HrmLang } from './hrmI18n'
@@ -154,6 +155,7 @@ export default function HRM() {
   const setLangPersist = (l: HrmLang) => { setLang(l); saveHrmLang(l) }
 
   const [tab, setTab] = useState<Tab>('dashboard')
+  useTrackTab(tab)
   const [selDept, setSelDept] = useState<number | ''>('')
   const [selEmp, setSelEmp] = useState<number | ''>('')
   const [hodDept, setHodDept] = useState<number | ''>('')

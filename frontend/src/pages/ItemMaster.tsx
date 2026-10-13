@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import api from '../api/client'
+import { useTrackTab } from '../lib/usageTracker'
 import { mayAccessErpAdmin, useAuth } from '../store/auth'
 import SetBomPanel, { parentStyleKeyFromSku } from '../components/SetBomPanel'
 import { itemImageUrl } from '../lib/itemImage'
@@ -97,6 +98,7 @@ export default function ItemMaster() {
   const canAdjustStock = mayAccessErpAdmin(authUser)
   const [stockItem, setStockItem] = useState<{ id: number; code: string; name: string } | null>(null)
   const [activeTab, setActiveTab] = useState<'dashboard' | 'items' | 'bom' | 'sets' | 'routing' | 'import' | 'merchants' | 'packaging'>('items')
+  useTrackTab(activeTab)
 
   // ── Meta query ────────────────────────────────────────────────────────────
   const { data: meta } = useQuery({

@@ -1,6 +1,7 @@
 import { Fragment, useState, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
+import { useTrackTab } from '../lib/usageTracker'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
 import { YASH_GALLERY, brandLogoDataUrl, brandPrintHeaderHtml, BRAND_PRINT_CSS } from '../lib/printBrand'
@@ -1006,6 +1007,7 @@ void buildGatePasePrintHTML
 export default function Purchase() {
   const qc = useQueryClient()
   const [tab, setTab] = useState<Tab>('dashboard')
+  useTrackTab(tab)
   const [expanded, setExpanded] = useState<number | null>(null)
   const [expandedMin, setExpandedMin] = useState<number | null>(null)
   const [filterStatus, setFilterStatus] = useState('')

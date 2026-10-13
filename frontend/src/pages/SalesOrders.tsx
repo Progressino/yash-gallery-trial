@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
+import { useTrackTab } from '../lib/usageTracker'
 import { resetErpModuleData } from '../api/client'
 import { mayAccessErpAdmin, mayDeleteUploadData, useAuth } from '../store/auth'
 
@@ -213,6 +214,7 @@ export default function SalesOrders() {
   const qc = useQueryClient()
   const authUser = useAuth(s => s.user)
   const [tab, setTab] = useState<Tab>('dashboard')
+  useTrackTab(tab)
   const [showNewDemand, setShowNewDemand] = useState(false)
   const [showNewSO, setShowNewSO] = useState(false)
   const [expandedDemand, setExpandedDemand] = useState<number | null>(null)

@@ -12,6 +12,7 @@ import CoverageProvider from './components/CoverageProvider'
 import PoHydrationGate from './components/PoHydrationGate'
 import { canSkipHeavyServerRestore, poOperationalReady, poOperationalLoaded, poPageHydrationReady, PO_OPERATIONAL_TOTAL, readLocalSessionHint } from './lib/localSessionHint'
 import { isErpModulePath } from './lib/erpModulePaths'
+import { useUsageTracking } from './lib/usageTracker'
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
 import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
@@ -41,6 +42,7 @@ const InventoryHistory         = lazy(() => import('./pages/InventoryHistory'))
 const SalesHistory             = lazy(() => import('./pages/SalesHistory'))
 const Admin                  = lazy(() => import('./pages/Admin'))
 const AdminPerformance       = lazy(() => import('./pages/AdminPerformance'))
+const AdminUsage             = lazy(() => import('./pages/AdminUsage'))
 const MarketplaceConnections = lazy(() => import('./pages/MarketplaceConnections'))
 const SKUDeepDive            = lazy(() => import('./pages/SKUDeepDive'))
 const DocumentAudit          = lazy(() => import('./pages/DocumentAudit'))
@@ -154,6 +156,7 @@ function ProtectedRoute() {
   const activeUser = data ?? (authUnreachable ? cachedUser : null) ?? cachedUser
   const isKarigar = isKarigarUser(activeUser)
   const hrmOnly = isHrmOnlyUser(activeUser)
+  useUsageTracking(Boolean(activeUser) && !authUnauthorized)
 
   const coverageEmpty = (c: Awaited<ReturnType<typeof getCoverage>>) =>
     !c.mtr && !c.sales && !c.myntra && !c.meesho && !c.flipkart && !c.snapdeal
@@ -354,6 +357,7 @@ export default function App() {
               <Route path="sales-history" element={<SalesHistory />} />
               <Route path="admin"       element={<Admin />} />
               <Route path="admin/performance" element={<AdminPerformance />} />
+              <Route path="admin/usage" element={<AdminUsage />} />
               <Route path="marketplace-connections" element={<MarketplaceConnections />} />
               <Route path="sku-deepdive" element={<SKUDeepDive />} />
               </Route>

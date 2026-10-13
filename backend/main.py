@@ -24,6 +24,7 @@ from .concurrency import run_aux, run_auth, run_heavy, _UPLOAD_MEMORY_LOCK
 from .session import store
 from .routers import upload, data, cache, po, shipment, auth as auth_router
 from .routers.admin_performance import router as admin_performance_router
+from .routers.usage import report_router as usage_report_router, track_router as usage_track_router
 from .routers.auth import verify_token, decode_token
 from .services.permissions import karigar_may_access_api, may_access_erp_admin, KARIGAR_ROLE
 from .routers.finance import router as finance_router
@@ -3639,7 +3640,12 @@ async def auth_middleware(request: Request, call_next):
 
             return JSONResponse(status_code=403, content={"detail": blocked})
 
-    return await call_next(request)
+    response = await call_next(request)
+    if request.method != "GET":
+        from .services.usage_analytics import record_api_action
+
+        record_api_action(_uname, role, request.method, path, response.status_code)
+    return response
 
 
 # ── Session cookie middleware ─────────────────────────────────
@@ -3824,6 +3830,8 @@ app.include_router(stitching_router,   prefix="/api/stitching",  tags=["stitchin
 app.include_router(hrm_router,         prefix="/api/hrm",        tags=["hrm"])
 app.include_router(erp_admin_router,   prefix="/api/erp-admin",  tags=["erp-admin"])
 app.include_router(admin_performance_router, prefix="/api/admin", tags=["admin-performance"])
+app.include_router(usage_report_router, prefix="/api/admin", tags=["admin-usage"])
+app.include_router(usage_track_router, prefix="/api/usage", tags=["usage"])
 app.include_router(marketplace_router, prefix="/api/marketplace", tags=["marketplace"])
 app.include_router(myntra_partner_router, prefix="/api/myntra/partner", tags=["myntra-partner"])
 app.include_router(gate_router,        prefix="/api/gate",       tags=["gate"])

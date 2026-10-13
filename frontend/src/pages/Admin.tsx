@@ -3,6 +3,7 @@ import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
+import { useTrackTab } from '../lib/usageTracker'
 import { resetErpModuleData, clearPlatform } from '../api/client'
 import { ALL_MODULE_KEYS, MODULE_LABELS } from '../lib/modules'
 import { mayAccessErpAdmin, mayClearPlatformData, mayDeleteUploadData, mayManageErpDepartments, useAuth } from '../store/auth'
@@ -64,6 +65,7 @@ export default function Admin() {
   const authUser = useAuth(s => s.user)
   const qc = useQueryClient()
   const [tab, setTab] = useState<Tab>('dashboard')
+  useTrackTab(tab)
   const [showUserForm, setShowUserForm] = useState(false)
   const [showRoleForm, setShowRoleForm] = useState(false)
   const [editUser, setEditUser] = useState<ERPUser | null>(null)
@@ -305,6 +307,12 @@ export default function Admin() {
             </div>
           </div>
           <div className="flex gap-3 flex-wrap">
+            {(authUser?.role === 'Super Admin' || authUser?.role === 'Admin') && (
+              <Link to="/admin/usage"
+                className="px-4 py-2 bg-indigo-700 text-white rounded-lg text-sm font-medium hover:bg-indigo-800">
+                User usage report
+              </Link>
+            )}
             <Link to="/admin/performance"
               className="px-4 py-2 bg-emerald-700 text-white rounded-lg text-sm font-medium hover:bg-emerald-800">
               Performance dashboard

@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
+import { useTrackTab } from '../lib/usageTracker'
 import { useAuth } from '../store/auth'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
@@ -1440,6 +1441,7 @@ export default function Production() {
   const qc = useQueryClient()
   const [activeProcess, setActiveProcess] = useState('Cutting')
   const [tab, setTab] = useState<'process' | 'tracker' | 'issue-notes' | 'reports' | 'mrp' | 'sets'>('process')
+  useTrackTab(tab)
   const [expandedIssueNote, setExpandedIssueNote] = useState<number | null>(null)
   const [expanded, setExpanded] = useState<number | null>(null)
   const [filterStatus, setFilterStatus] = useState('')
