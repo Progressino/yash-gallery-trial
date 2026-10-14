@@ -1,5 +1,6 @@
 """HRM Module Router — task tracking, issues, appraisal (RBAC-scoped)."""
 import io
+from contextlib import contextmanager
 
 import pandas as pd
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
@@ -358,12 +359,14 @@ class ResponsibilityTimerIn(BaseModel):
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
     break_decision: Optional[str] = None  # count | deduct (Lunch/Tea overlap on Complete)
+    resolve_overlap: bool = False
 
 
 class TimeSlotEditIn(BaseModel):
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
     notes: Optional[str] = None
+    resolve_overlap: bool = False
 
 
 class TimeSlotAddIn(BaseModel):
@@ -374,6 +377,7 @@ class TimeSlotAddIn(BaseModel):
     started_at: str
     ended_at: str
     notes: Optional[str] = ""
+    resolve_overlap: bool = False
 
 
 class OfficeActionIn(BaseModel):
@@ -1026,16 +1030,19 @@ def post_responsibility_manual_time(responsibility_id: int, body: Responsibility
     assert_responsibility_in_scope(scope, responsibility_id)
     _, name = _recorder_from_request(request)
     log_date = _enforce_self_check_today(scope, body.log_date)
-    return _timer_http_result(
-        set_responsibility_manual_time(
+    with _overlap_http():
+        res = set_responsibility_manual_time(
             responsibility_id,
             log_date,
             body.started_at,
             body.ended_at,
             allow_override=scope.can_edit_assignments,
             actor=name,
+            resolve_overlap=body.resolve_overlap,
         )
-    )
+    if res == "overlap_running":
+        _slot_result(res)
+    return _timer_http_result(res)
 
 
 @router.post("/tasks/logs/{log_id}/approve")
@@ -1914,7 +1921,18 @@ _SLOT_ERRORS = {
     "invalid_range": (400, "End time must be after start time"),
     "future_time": (400, "Time cannot be in the future"),
     "invalid_entity": (400, "entity_type must be responsibility or one_time"),
+    "overlap_running": (409, "This time overlaps a timer that is still running — pause it first, then enter the time"),
 }
+
+
+@contextmanager
+def _overlap_http():
+    try:
+        yield
+    except hrm_worktime.SlotOverlap as e:
+        raise HTTPException(
+            409, {"code": "overlap", "message": str(e), "conflicts": e.conflicts}
+        ) from e
 
 
 def _slot_result(res):
@@ -1945,16 +1963,17 @@ def patch_time_slot(slot_id: int, body: TimeSlotEditIn, request: Request):
         raise HTTPException(404, "Time slot not found")
     allow = _assert_slot_access(scope, int(slot["employee_id"]), str(slot.get("log_date") or ""))
     _, name = _recorder_from_request(request)
-    return _slot_result(
-        hrm_worktime.edit_time_slot(
+    with _overlap_http():
+        res = hrm_worktime.edit_time_slot(
             slot_id,
             started_at=body.started_at,
             ended_at=body.ended_at,
             notes=body.notes,
             actor=name,
             allow_override=allow,
+            resolve_overlap=body.resolve_overlap,
         )
-    )
+    return _slot_result(res)
 
 
 @router.post("/time-slots")
@@ -1976,8 +1995,8 @@ def post_time_slot(body: TimeSlotAddIn, request: Request):
     _, name = _recorder_from_request(request)
     started = body.started_at if len(body.started_at) > 5 else f"{log_date} {body.started_at}"
     ended = body.ended_at if len(body.ended_at) > 5 else f"{log_date} {body.ended_at}"
-    return _slot_result(
-        hrm_worktime.add_manual_slot(
+    with _overlap_http():
+        res = hrm_worktime.add_manual_slot(
             entity_type=body.entity_type,
             entity_id=body.task_id,
             responsibility_id=body.responsibility_id,
@@ -1987,8 +2006,9 @@ def post_time_slot(body: TimeSlotAddIn, request: Request):
             notes=body.notes or "",
             actor=name,
             allow_override=allow,
+            resolve_overlap=body.resolve_overlap,
         )
-    )
+    return _slot_result(res)
 
 
 @router.get("/time-slots/{slot_id}/audit")

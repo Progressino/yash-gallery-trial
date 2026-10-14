@@ -13,7 +13,25 @@ const clock12 = (ts?: string) => {
   return `${((h + 11) % 12) + 1}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`
 }
 
-const errMsg = (e: any, fallback: string) => e?.response?.data?.detail || fallback
+const errMsg = (e: any, fallback: string) => {
+  const d = e?.response?.data?.detail
+  return (typeof d === 'string' ? d : d?.message) || fallback
+}
+
+/** Manual time entry: on overlap the server answers 409; ask Yes/No and resend with resolve_overlap. */
+export async function sendWithOverlapConfirm<T>(send: (resolve: boolean) => Promise<T>): Promise<T | null> {
+  try {
+    return await send(false)
+  } catch (e: any) {
+    const d = e?.response?.data?.detail
+    if (e?.response?.status !== 409 || d?.code !== 'overlap') throw e
+    const lines = (d.conflicts || [])
+      .map((c: any) => `• ${c.title || 'Item'}: ${clock12(c.started_at)} – ${clock12(c.ended_at)}`)
+      .join('\n')
+    if (!window.confirm(`${d.message}\n\n${lines}\n\nContinue?`)) return null
+    return send(true)
+  }
+}
 
 // ── Lunch / Tea break confirmation ───────────────────────────────────────────
 
@@ -87,13 +105,15 @@ export function SlotList({
   const [open, setOpen] = useState(false)
 
   const saveMut = useMutation({
-    mutationFn: ({ id, body }: { id: number; body: object }) => api.patch(`/hrm/time-slots/${id}`, body),
-    onSuccess: () => { setEditId(null); setNoteId(null); onChanged() },
+    mutationFn: ({ id, body }: { id: number; body: object }) =>
+      sendWithOverlapConfirm(resolve => api.patch(`/hrm/time-slots/${id}`, { ...body, resolve_overlap: resolve })),
+    onSuccess: (res) => { if (!res) return; setEditId(null); setNoteId(null); onChanged() },
     onError: (e: any) => alert(errMsg(e, 'Could not save time slot')),
   })
   const addMut = useMutation({
-    mutationFn: (body: object) => api.post('/hrm/time-slots', body),
-    onSuccess: () => { setAdding(false); onChanged() },
+    mutationFn: (body: object) =>
+      sendWithOverlapConfirm(resolve => api.post('/hrm/time-slots', { ...body, resolve_overlap: resolve })),
+    onSuccess: (res) => { if (!res) return; setAdding(false); onChanged() },
     onError: (e: any) => alert(errMsg(e, 'Could not add time slot')),
   })
 
@@ -270,6 +290,7 @@ export function OfficeTimeBar({
           <Stat label="Total Office Time" value={fmtHM(s.office_seconds)} strong />
           <Stat label="Actual Working" value={fmtHM(s.working_seconds)} strong tone="text-[#002B5B]" />
           <Stat label="Free Time" value={fmtHM(s.free_seconds)} tone="text-amber-700" />
+          {Number(s.break_seconds) > 0 && <Stat label="Lunch/Tea Break" value={fmtHM(s.break_seconds)} />}
         </div>
         {(s.free_gaps || []).length > 0 && (
           <button type="button" onClick={() => setShowGaps(v => !v)} className="text-xs text-blue-600 underline">
@@ -348,6 +369,7 @@ export function LeaveModal({ employeeId, onClose, onSaved }: { employeeId: numbe
             {(result.mandatory_without_backup || []).length > 0 && (
               <p className="text-amber-700 text-xs">No backup set for: {result.mandatory_without_backup.join(', ')}</p>
             )}
+            <p className="text-gray-500 text-xs">If a responsibility is marked Mandatory or given a Backup Person later during this leave, the backup is assigned automatically for the remaining days.</p>
             <button type="button" onClick={onClose} className="w-full py-2 bg-[#002B5B] text-white rounded-lg text-sm">Done</button>
           </div>
         ) : (
@@ -852,6 +874,10 @@ export function WorkingHoursReport({ employeeId, departmentId }: { employeeId?: 
         <Stat label="Actual Working Hours" value={fmtHM(totals.working_seconds)} strong tone="text-[#002B5B]" />
         <Stat label="Total Free Time" value={fmtHM(totals.free_seconds)} strong tone="text-amber-700" />
       </div>
+      <p className="text-[11px] text-gray-500">
+        Working Hours count each minute once (overlapping items are not double-counted) and never exceed Office Time.
+        Free Time = Office Time − Working Hours − Lunch/Tea break (45 min) not spent working.
+      </p>
       {emps.length > 1 && (
         <div className="bg-white rounded-xl border overflow-x-auto">
           <table className="w-full text-sm">

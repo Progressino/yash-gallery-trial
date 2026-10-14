@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -34,6 +34,11 @@ def env(tmp_path, monkeypatch, client):
     monkeypatch.setattr(hrm_db, "_now_iso", clock)
     monkeypatch.setattr(hrm_db, "today_ist", lambda: date.fromisoformat(clock.t[:10]))
     monkeypatch.setattr("backend.routers.hrm.today_ist", lambda: date.fromisoformat(clock.t[:10]))
+    editable = hrm_db.hod_status_editable
+    monkeypatch.setattr(
+        hrm_db, "hod_status_editable",
+        lambda marked_at, *, now=None: editable(marked_at, now=now or datetime.fromisoformat(clock.t)),
+    )
 
     hrm_db.create_department({"name": f"D-{uuid.uuid4().hex[:6]}"})
     hrm_db.create_department({"name": f"X-{uuid.uuid4().hex[:6]}"})

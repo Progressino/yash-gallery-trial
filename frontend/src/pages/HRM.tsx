@@ -7,10 +7,25 @@ import { FREQUENCIES, PRIORITIES, WEEKDAYS, MONTHS, priorityStyle, SCHEDULE_RULE
 import { loadHrmLang, saveHrmLang, t, type HrmLang } from './hrmI18n'
 import {
   BreakConfirmModal, DwrReport, HolidayModal, HoldModal, OfficeTimeBar, ScheduleRuleInput, SlotList,
-  WeekdayPairInput, weekdayPairValid, WorkingHoursReport, type BreakInfo,
+  WeekdayPairInput, weekdayPairValid, WorkingHoursReport, sendWithOverlapConfirm, type BreakInfo,
 } from './hrmWorkTime'
 
 type Tab = 'dashboard' | 'check' | 'approvals' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'reports' | 'hierarchy'
+
+const FREQ_HEADING_ORDER = ['Daily', 'Twice a Week', 'Weekly', 'Fortnightly', 'Monthly', 'Quarterly', 'Yearly']
+
+/** Employee Check lists: one heading per frequency (Daily, Weekly, Fortnightly, …). */
+function withFrequencyHeadings(items: any[], renderItem: (i: any) => ReactNode, keyPrefix: string): ReactNode[] {
+  const groups: Record<string, any[]> = {}
+  items.forEach(i => { (groups[i.frequency || 'Other'] ||= []).push(i) })
+  const rank = (f: string) => { const k = FREQ_HEADING_ORDER.indexOf(f); return k < 0 ? 99 : k }
+  return Object.keys(groups).sort((a, b) => rank(a) - rank(b)).flatMap(f => [
+    <li key={`${keyPrefix}-h-${f}`} className="px-4 py-1.5 bg-gray-50 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+      {f} Responsibilities ({groups[f].length})
+    </li>,
+    ...groups[f].map(renderItem),
+  ])
+}
 
 const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected', 'On Hold'] as const
 // Leave is set from the Employee Check header (Leave button), not per item.
@@ -578,8 +593,10 @@ export default function HRM() {
   })
   const manualRespTimeMut = useMutation({
     mutationFn: ({ id, log_date, started_at, ended_at }: { id: number; log_date: string; started_at: string; ended_at: string }) =>
-      api.post(`/hrm/tasks/${id}/manual-time`, { log_date, started_at, ended_at }),
-    onSuccess: () => {
+      sendWithOverlapConfirm(resolve =>
+        api.post(`/hrm/tasks/${id}/manual-time`, { log_date, started_at, ended_at, resolve_overlap: resolve })),
+    onSuccess: (res) => {
+      if (!res) return
       invalidateDwr()
       setDwrManualId(null)
     },
@@ -1113,6 +1130,11 @@ export default function HRM() {
         <p className="text-xs text-gray-400">
           {i.frequency} · {i.status}{i.approval_status ? ` · ${i.approval_status}` : ''}{i.marked_by ? ` · ${i.marked_by}` : ''}{i.blocker_reason ? ` — ${i.blocker_reason}` : ''}
         </p>
+        {i.carried_forward && i.pending_since && (
+          <p className="text-[10px] mt-0.5 inline-block px-1.5 py-0.5 rounded bg-red-100 text-red-800">
+            ↻ Reassigned after rejection · Pending since {i.pending_since}
+          </p>
+        )}
         {i.hod_edited && (
           <p className="text-[10px] mt-0.5 inline-block px-1.5 py-0.5 rounded bg-blue-100 text-blue-800" title={i.hod_edited_at ? `Last edited ${i.hod_edited_at}` : ''}>
             Status corrected by {i.hod_edited_by || 'HOD'}{i.hod_edited_role ? ` (${i.hod_edited_role})` : ''} · was {i.hod_original_status || 'Pending'}
@@ -1813,14 +1835,14 @@ export default function HRM() {
                   <div className="bg-white rounded-xl border overflow-hidden md:col-span-2">
                     <div className="px-4 py-2.5 bg-indigo-600 text-white font-semibold text-sm">Submitted for approval ({dayCheckFiltered?.submitted_for_approval?.length || 0})</div>
                     <ul className="divide-y">
-                      {(dayCheckFiltered?.submitted_for_approval || []).map((i: any) => (
+                      {withFrequencyHeadings(dayCheckFiltered?.submitted_for_approval || [], (i: any) => (
                         <li key={`sub-${i.responsibility_id}`} className="px-4 py-3">
                           <div className="flex items-start gap-2">
                             <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
                             {renderRespCheck(i, { showMark: false })}
                           </div>
                         </li>
-                      ))}
+                      ), 'sub')}
                     </ul>
                   </div>
                 )}
@@ -1830,14 +1852,14 @@ export default function HRM() {
                     <p className="p-4 text-sm text-gray-400">No approved Done/Partial marks for this date yet.</p>
                   ) : (
                     <ul className="divide-y">
-                      {(dayCheckFiltered?.worked_on || []).filter((i: any) => i.approval_status !== 'Pending').map((i: any) => (
+                      {withFrequencyHeadings((dayCheckFiltered?.worked_on || []).filter((i: any) => i.approval_status !== 'Pending'), (i: any) => (
                         <li key={i.responsibility_id} className="px-4 py-3">
                           <div className="flex items-start gap-2">
                             <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
                             {renderRespCheck(i, { showMark: canEditAssignments })}
                           </div>
                         </li>
-                      ))}
+                      ), 'worked')}
                     </ul>
                   )}
                 </div>
@@ -1847,14 +1869,14 @@ export default function HRM() {
                     <p className="p-4 text-sm text-gray-400">Nothing pending or missed — good.</p>
                   ) : (
                     <ul className="divide-y">
-                      {(dayCheckFiltered?.not_worked || []).map((i: any) => (
+                      {withFrequencyHeadings(dayCheckFiltered?.not_worked || [], (i: any) => (
                         <li key={i.responsibility_id} className="px-4 py-3">
                           <div className="flex items-start gap-2">
                             <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
                             {renderRespCheck(i)}
                           </div>
                         </li>
-                      ))}
+                      ), 'pending')}
                     </ul>
                   )}
                 </div>

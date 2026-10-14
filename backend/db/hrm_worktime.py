@@ -224,7 +224,62 @@ def free_time_gaps(window_start: str, window_end: str, busy: list[tuple[str, str
     return [g for g in gaps if g["seconds"] > 0]
 
 
+def _slot_interval(slot: dict, now: str) -> tuple[str, str]:
+    """Worked span of a slot; legacy rows whose stored duration is shorter than the span end early."""
+    start = str(slot["started_at"])
+    end = str(slot.get("ended_at") or "").strip() or now
+    if slot.get("ended_at"):
+        span = H._seconds_between(start, end)
+        stored = int(slot.get("duration_seconds") or 0)
+        if 0 <= stored < span:
+            end = (H._ts(start) + timedelta(seconds=stored)).strftime(H._TS_FMT)
+    return start, end
+
+
+def _break_intervals(w0: str, w1: str) -> list[tuple[str, str]]:
+    if not w0 or not w1 or w1 <= w0:
+        return []
+    out: list[tuple[str, str]] = []
+    d, last = H._ts(w0).date(), H._ts(w1).date()
+    while d <= last:
+        for _name, s, e in H.BREAK_WINDOWS:
+            a, b = max(f"{d.isoformat()} {s}", w0), min(f"{d.isoformat()} {e}", w1)
+            if b > a:
+                out.append((a, b))
+        d += timedelta(days=1)
+    return out
+
+
+def _subtract(intervals: list[tuple[str, str]], holes: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for a, b in intervals:
+        pieces = [(a, b)]
+        for h0, h1 in holes:
+            nxt = []
+            for p0, p1 in pieces:
+                if h1 <= p0 or h0 >= p1:
+                    nxt.append((p0, p1))
+                    continue
+                if h0 > p0:
+                    nxt.append((p0, h0))
+                if h1 < p1:
+                    nxt.append((h1, p1))
+            pieces = nxt
+        out.extend(pieces)
+    return out
+
+
+def _union_seconds(intervals: list[tuple[str, str]]) -> int:
+    return sum(H._seconds_between(a, b) for a, b in _merge_intervals(intervals))
+
+
 def day_time_summary(employee_id: int, day: str, *, conn=None, now: str | None = None) -> dict:
+    """Office window, actual working and free time for one date.
+
+    Working = union of slot time (one minute counts once even if two items overlap), inside the
+    office window when one exists, so it never exceeds Total Office Time. Free = office window
+    minus working minus the Lunch/Tea windows not spent working.
+    """
     owns = conn is None
     if owns:
         conn = H._connect()
@@ -238,7 +293,7 @@ def day_time_summary(employee_id: int, day: str, *, conn=None, now: str | None =
     finally:
         if owns:
             conn.close()
-    working = sum(_slot_net_in_window(s, d0, d1, now) for s in slots)
+    spans = [_slot_interval(s, now) for s in slots]
     o_start = str(session.get("office_start") or "")
     o_close = str(session.get("office_close") or "")
     office_open = bool(o_start and not o_close)
@@ -248,14 +303,28 @@ def day_time_summary(employee_id: int, day: str, *, conn=None, now: str | None =
         elif day == H.today_ist().isoformat():
             o_end = max(o_start, min(now, d1))
         else:
-            ends = [str(s.get("ended_at") or "") for s in slots if s.get("ended_at")]
-            o_end = max([o_start, *[e for e in ends if e <= d1]])
+            o_end = max([o_start, *[min(e, d1) for _, e in spans]])
     else:
         o_end = ""
     office_seconds = H._seconds_between(o_start, o_end) if o_start and o_end else 0
-    busy = [(str(s["started_at"]), str(s.get("ended_at") or "") or now) for s in slots]
-    gaps = free_time_gaps(o_start, o_end, busy) if office_seconds else []
+    w0, w1 = (max(o_start, d0), min(o_end, d1)) if o_start else (d0, d1)
+    plain: list[tuple[str, str]] = []
+    deduct: list[tuple[str, str]] = []
+    for s, (a, b) in zip(slots, spans):
+        lo, hi = max(a, w0), min(b, w1)
+        if hi <= lo:
+            continue
+        is_deduct = str(s.get("break_mode") or "") == "deduct" and s.get("ended_at")
+        (deduct if is_deduct else plain).append((lo, hi))
+    busy = plain + deduct
+    working = _union_seconds(plain + _subtract(deduct, _break_intervals(w0, w1)))
+    if office_seconds:
+        working = min(working, office_seconds)
+    gaps = (
+        free_time_gaps(o_start, o_end, busy + _break_intervals(o_start, o_end)) if office_seconds else []
+    )
     free_seconds = sum(g["seconds"] for g in gaps)
+    break_seconds = max(0, office_seconds - working - free_seconds)
     return {
         "employee_id": int(employee_id),
         "work_date": day,
@@ -268,6 +337,8 @@ def day_time_summary(employee_id: int, day: str, *, conn=None, now: str | None =
         "working_label": H._format_duration_hm(working),
         "free_seconds": free_seconds,
         "free_label": H._format_duration_hm(free_seconds),
+        "break_seconds": break_seconds,
+        "break_label": H._format_duration_hm(break_seconds),
         "free_gaps": gaps,
         "slot_count": len(slots),
         "on_leave": bool(leave),
@@ -330,6 +401,141 @@ def working_hours_report(employee_ids: list[int], from_date: str, to_date: str) 
     }
 
 
+# ── Overlap resolution for manual time entries ───────────────────────────────
+
+OVERLAP_MESSAGE = (
+    "Selected time slot overlaps an existing Responsibility/Task time slot. "
+    "On confirmation, the overlapping duration will be removed from the previous entry."
+)
+
+
+class SlotOverlap(Exception):
+    """Manual entry overlaps other slots of the same employee; caller must confirm."""
+
+    def __init__(self, conflicts: list[dict]):
+        super().__init__(OVERLAP_MESSAGE)
+        self.conflicts = conflicts
+
+
+def _slot_title(conn, slot: dict) -> str:
+    if slot["entity_type"] == H.SLOT_RESP:
+        row = conn.execute(
+            """SELECT r.title FROM task_logs l JOIN responsibilities r ON r.id=l.responsibility_id
+               WHERE l.id=?""",
+            (int(slot["entity_id"]),),
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT title FROM one_time_tasks WHERE id=?", (int(slot["entity_id"]),)).fetchone()
+    return str(row["title"]) if row and row["title"] else ""
+
+
+def _set_slot_span(conn, slot: dict, start: str, end: str, actor: str, now: str) -> None:
+    span = H._seconds_between(str(slot["started_at"]), str(slot["ended_at"]))
+    stored = int(slot.get("duration_seconds") or 0)
+    new_span = H._seconds_between(start, end)
+    dur = int(new_span * stored / span) if span > 0 and 0 <= stored < span else new_span
+    ded = 0
+    if str(slot.get("break_mode") or "") == "deduct":
+        ded = min(dur, sum(o["overlap_seconds"] for o in H.break_overlaps(start, end)))
+    first_edit = not int(slot.get("manual_edited") or 0)
+    conn.execute(
+        """UPDATE hrm_time_slots
+           SET started_at=?, ended_at=?, duration_seconds=?, break_deduct_seconds=?,
+               manual_edited=1, edited_by=?, edited_at=?,
+               original_started_at=CASE WHEN ?=1 THEN started_at ELSE original_started_at END,
+               original_ended_at=CASE WHEN ?=1 THEN IFNULL(ended_at,'') ELSE original_ended_at END
+           WHERE id=?""",
+        (start, end, dur, ded, actor or "", now, 1 if first_edit else 0, 1 if first_edit else 0, int(slot["id"])),
+    )
+
+
+def _copy_slot(conn, slot: dict) -> int:
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(hrm_time_slots)").fetchall() if r[1] not in ("id", "created_at")]
+    cur = conn.execute(
+        f"INSERT INTO hrm_time_slots({','.join(cols)}) SELECT {','.join(cols)} FROM hrm_time_slots WHERE id=?",
+        (int(slot["id"]),),
+    )
+    return int(cur.lastrowid)
+
+
+def resolve_slot_overlaps(
+    conn,
+    employee_id: int,
+    start: str,
+    end: str,
+    *,
+    exclude_slot_id: int | None = None,
+    exclude_entity: tuple[str, int] | None = None,
+    resolve: bool = False,
+    actor: str = "",
+) -> set[tuple[str, int]] | str:
+    """Make [start, end) exclusive to the new entry: one minute counts for one item only.
+
+    Without ``resolve`` an overlap raises SlotOverlap (UI asks Yes/No). With it, older slots are
+    trimmed, split (notes carried to both parts) or removed when fully covered. Returns the
+    entities whose totals must be recomputed, or "overlap_running" if a live timer overlaps.
+    """
+    if not start or not end or end <= start:
+        return set()
+    others = [
+        s for s in _employee_slots_between(conn, employee_id, start, end)
+        if int(s["id"]) != int(exclude_slot_id or 0)
+        and (str(s["entity_type"]), int(s["entity_id"])) != exclude_entity
+    ]
+    if not others:
+        return set()
+    if any(not str(s.get("ended_at") or "").strip() for s in others):
+        return "overlap_running"
+    if not resolve:
+        raise SlotOverlap([
+            {
+                "slot_id": int(s["id"]),
+                "entity_type": s["entity_type"],
+                "title": _slot_title(conn, s),
+                "started_at": s["started_at"],
+                "ended_at": s["ended_at"],
+            }
+            for s in others
+        ])
+    now = H._now_iso()
+    touched: set[tuple[str, int]] = set()
+    for s in others:
+        a, b = str(s["started_at"]), str(s["ended_at"])
+        old = f"{a} → {b}"
+        if a >= start and b <= end:
+            conn.execute("DELETE FROM hrm_time_slots WHERE id=?", (int(s["id"]),))
+            action, new = "overlap_removed", ""
+        elif a < start and b > end:
+            tail_id = _copy_slot(conn, s)
+            _set_slot_span(conn, s, a, start, actor, now)
+            tail = dict(conn.execute("SELECT * FROM hrm_time_slots WHERE id=?", (tail_id,)).fetchone())
+            _set_slot_span(conn, tail, end, b, actor, now)
+            action, new = "overlap_split", f"{a} → {start} + {end} → {b}"
+        elif a < start:
+            _set_slot_span(conn, s, a, start, actor, now)
+            action, new = "overlap_trimmed", f"{a} → {start}"
+        else:
+            _set_slot_span(conn, s, end, b, actor, now)
+            action, new = "overlap_trimmed", f"{end} → {b}"
+        H.write_task_audit(
+            "time_slot", int(s["id"]), action, old_value=old, new_value=new, actor=actor,
+            notes=f"Overlap moved to manual entry {start} → {end}", conn=conn,
+        )
+        touched.add((str(s["entity_type"]), int(s["entity_id"])))
+    return touched
+
+
+def _sync_touched(conn, touched: set[tuple[str, int]]) -> None:
+    for etype, eid in touched:
+        if H._recompute_entity_totals(conn, etype, eid) is None:
+            if etype == H.SLOT_RESP:
+                conn.execute("UPDATE task_logs SET active_seconds=0, duration_minutes=0 WHERE id=?", (eid,))
+            else:
+                conn.execute("UPDATE one_time_tasks SET active_seconds=0, duration_minutes=0 WHERE id=?", (eid,))
+        else:
+            _sync_parent_after_slot_change(conn, etype, eid)
+
+
 # ── Time-slot manual edit / notes / add ──────────────────────────────────────
 
 
@@ -383,6 +589,7 @@ def edit_time_slot(
     notes: str | None = None,
     actor: str = "",
     allow_override: bool = False,
+    resolve_overlap: bool = False,
 ) -> dict | str:
     conn = H._connect()
     try:
@@ -413,6 +620,12 @@ def edit_time_slot(
             limit = (H._ts(now) + timedelta(minutes=1)).strftime(H._TS_FMT)
             if new_start > limit or (new_end and new_end > limit):
                 return "future_time"
+            touched = resolve_slot_overlaps(
+                conn, int(slot["employee_id"]), new_start, new_end,
+                exclude_slot_id=int(slot_id), resolve=resolve_overlap, actor=actor,
+            )
+            if isinstance(touched, str):
+                return touched
             first_edit = not int(slot.get("manual_edited") or 0)
             dur = H._seconds_between(new_start, new_end) if new_end else 0
             ded = int(slot.get("break_deduct_seconds") or 0)
@@ -439,6 +652,7 @@ def edit_time_slot(
                 conn=conn,
             )
             _sync_parent_after_slot_change(conn, slot["entity_type"], int(slot["entity_id"]))
+            _sync_touched(conn, touched)
         if notes is not None and str(notes) != str(slot.get("notes") or ""):
             conn.execute("UPDATE hrm_time_slots SET notes=? WHERE id=?", (str(notes)[:2000], int(slot_id)))
             H.write_task_audit(
@@ -468,6 +682,7 @@ def add_manual_slot(
     notes: str = "",
     actor: str = "",
     allow_override: bool = False,
+    resolve_overlap: bool = False,
 ) -> dict | str:
     if entity_type not in H.SLOT_ENTITY_TYPES:
         return "invalid_entity"
@@ -501,6 +716,9 @@ def add_manual_slot(
             eid, emp_id, rid, day = int(t["id"]), int(t["employee_id"]), None, start[:10]
         if not allow_override and _entity_time_locked(conn, entity_type, eid):
             return "status_locked"
+        touched = resolve_slot_overlaps(conn, emp_id, start, end, resolve=resolve_overlap, actor=actor)
+        if isinstance(touched, str):
+            return touched
         sid = H._insert_closed_slot(
             conn, entity_type=entity_type, entity_id=eid, employee_id=emp_id, log_date=day,
             started_at=start, ended_at=end, responsibility_id=rid, source="manual",
@@ -521,6 +739,7 @@ def add_manual_slot(
             notes=f"{entity_type}#{eid}", conn=conn,
         )
         _sync_parent_after_slot_change(conn, entity_type, eid)
+        _sync_touched(conn, touched - {(entity_type, eid)})
         conn.commit()
         out = conn.execute("SELECT * FROM hrm_time_slots WHERE id=?", (sid,)).fetchone()
         return H._slot_view(dict(out))

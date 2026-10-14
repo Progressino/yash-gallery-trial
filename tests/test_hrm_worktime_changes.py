@@ -217,7 +217,7 @@ def test_working_hours_report(hrm, clock):
     rep = hrm_worktime.working_hours_report([a], DAY, DAY)
     assert rep["totals"]["office_seconds"] == 8 * 3600
     assert rep["totals"]["working_seconds"] == 2 * 3600
-    assert rep["totals"]["free_seconds"] == 6 * 3600
+    assert rep["totals"]["free_seconds"] == 6 * 3600 - 45 * 60
 
 
 # ── Approval auto-closure ────────────────────────────────────────────────────

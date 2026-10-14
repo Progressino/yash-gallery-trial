@@ -673,6 +673,20 @@ def init_db():
             created_at                  TEXT DEFAULT (datetime('now')),
             UNIQUE(original_responsibility_id, reassignment_date)
         );
+        CREATE TABLE IF NOT EXISTS hrm_resp_carry_forward (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            responsibility_id   INTEGER NOT NULL REFERENCES responsibilities(id),
+            employee_id         INTEGER NOT NULL,
+            source_log_id       INTEGER,
+            pending_since       TEXT NOT NULL,
+            carry_date          TEXT NOT NULL,
+            status              TEXT DEFAULT 'Open',
+            closed_log_id       INTEGER,
+            closed_on           TEXT DEFAULT '',
+            created_by          TEXT DEFAULT '',
+            created_at          TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_carry_emp ON hrm_resp_carry_forward(employee_id, status, carry_date);
         CREATE TABLE IF NOT EXISTS task_timer_events (
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
             task_log_id         INTEGER NOT NULL REFERENCES task_logs(id),
@@ -2391,6 +2405,8 @@ def create_responsibility(data: dict):
     conn.commit()
     rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.close()
+    if is_mandatory and backup_id:
+        sync_leave_backups_for_responsibility(int(rid), actor=data.get("added_by", "") or "")
     return rid
 
 
@@ -2568,6 +2584,8 @@ def update_responsibility(rid: int, data: dict):
         conn.execute(f"UPDATE responsibilities SET {sets}, updated_at=? WHERE id=?", vals)
         conn.commit()
     conn.close()
+    if any(k in payload for k in ("mandatory", "backup_employee_id", "employee_id", "active", "frequency")):
+        sync_leave_backups_for_responsibility(rid, actor=str(data.get("added_by") or ""))
 
 
 def delete_responsibility(rid: int):
@@ -2575,6 +2593,7 @@ def delete_responsibility(rid: int):
     conn.execute("UPDATE responsibilities SET active=0 WHERE id=?", (rid,))
     conn.commit()
     conn.close()
+    sync_leave_backups_for_responsibility(rid)
 
 
 def _record_hod_status_edit(
@@ -2783,6 +2802,9 @@ def mark_task(
             "SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?",
             (responsibility_id, log_date),
         ).fetchone()
+
+    if status in ("Done", "Partial") and task_log_id:
+        _close_carry_forward(conn, responsibility_id, log_date, int(task_log_id["id"]))
 
     prev_status = (str(existing["status"] or "Pending").strip() or "Pending") if existing else "Pending"
     if editor and task_log_id and prev_status != status:
@@ -3448,6 +3470,7 @@ def set_responsibility_manual_time(
     *,
     allow_override: bool = False,
     actor: str = "",
+    resolve_overlap: bool = False,
 ):
     """Set or edit DWR start/end times. End cannot be earlier than start. Clears pause state."""
     if not allow_override and not in_task_action_window(log_date):
@@ -3478,6 +3501,18 @@ def set_responsibility_manual_time(
     active = mins * 60
     lid = int(row["id"])
     emp_id = int(resp["employee_id"])
+    from .hrm_worktime import resolve_slot_overlaps, _sync_touched
+
+    try:
+        touched = resolve_slot_overlaps(
+            conn, emp_id, start, end, exclude_entity=(SLOT_RESP, lid), resolve=resolve_overlap, actor=actor,
+        )
+    except Exception:
+        conn.close()
+        raise
+    if isinstance(touched, str):
+        conn.close()
+        return touched
     old_value = f"{row.get('started_at') or ''} → {row.get('ended_at') or ''}"
     conn.execute(
         """UPDATE task_logs SET started_at=?, ended_at=?, paused_at='',
@@ -3529,6 +3564,7 @@ def set_responsibility_manual_time(
                 (actor or "manual", now, sid),
             )
         _recompute_entity_totals(conn, SLOT_RESP, lid)
+    _sync_touched(conn, touched)
     write_task_audit(
         SLOT_RESP,
         lid,
@@ -3569,6 +3605,82 @@ def list_timer_events_for_log(task_log_id: int) -> list[dict]:
     return ev
 
 
+# Rejected non-daily responsibilities come back on the next working day until done.
+CARRY_FORWARD_EXEMPT = frozenset({"Daily", "Whenever Required"})
+
+
+def _next_working_day(conn, d: date) -> date:
+    holidays = holiday_set(conn)
+    n = d + timedelta(days=1)
+    for _ in range(30):
+        if _is_company_working_day(n, holidays):
+            break
+        n += timedelta(days=1)
+    return n
+
+
+def _carry_forward_rejected(conn, row, actor: str) -> dict | None:
+    """Linked person rejected a Weekly/Fortnightly/Monthly/... mark → reassign next working day."""
+    freq = str(row["frequency"] or "Daily").strip()
+    if freq.lower() in {f.lower() for f in CARRY_FORWARD_EXEMPT}:
+        return None
+    rid, log_id, log_date = int(row["responsibility_id"]), int(row["id"]), str(row["log_date"])[:10]
+    prior = conn.execute(
+        """SELECT pending_since FROM hrm_resp_carry_forward
+           WHERE responsibility_id=? AND (status='Open' OR closed_log_id=?)
+           ORDER BY pending_since LIMIT 1""",
+        (rid, log_id),
+    ).fetchone()
+    pending_since = str(prior["pending_since"]) if prior else log_date
+    today = today_ist()
+    nxt = _next_working_day(conn, date.fromisoformat(log_date))
+    if nxt < today:
+        nxt = today if _is_company_working_day(today, holiday_set(conn)) else _next_working_day(conn, today)
+    carry_date = nxt.isoformat()
+    conn.execute(
+        """UPDATE hrm_resp_carry_forward SET status='Closed', closed_on=?
+           WHERE responsibility_id=? AND status='Open'""",
+        (today.isoformat(), rid),
+    )
+    cur = conn.execute(
+        """INSERT INTO hrm_resp_carry_forward(
+            responsibility_id, employee_id, source_log_id, pending_since, carry_date, created_by
+        ) VALUES(?,?,?,?,?,?)""",
+        (rid, int(row["employee_id"]), log_id, pending_since, carry_date, actor or ""),
+    )
+    write_task_audit(
+        "task_log", log_id, "carried_forward", old_value=log_date, new_value=carry_date, actor=actor,
+        notes=f"Rejected {freq} responsibility reassigned; pending since {pending_since}", conn=conn,
+    )
+    return {"id": int(cur.lastrowid), "carry_date": carry_date, "pending_since": pending_since}
+
+
+def _close_carry_forward(conn, responsibility_id: int, log_date: str, log_id: int) -> None:
+    conn.execute(
+        """UPDATE hrm_resp_carry_forward SET status='Closed', closed_log_id=?, closed_on=?
+           WHERE responsibility_id=? AND status='Open' AND carry_date<=?""",
+        (int(log_id), str(log_date)[:10], int(responsibility_id), str(log_date)[:10]),
+    )
+
+
+def carried_forward_for_day(conn, employee_id: int, day: str) -> dict[int, dict]:
+    """Responsibilities carried onto ``day`` (open, or closed on/after it) → pending-since info."""
+    try:
+        rows = conn.execute(
+            """SELECT responsibility_id, pending_since, carry_date, status FROM hrm_resp_carry_forward
+               WHERE employee_id=? AND carry_date<=? AND (status='Open' OR closed_on>=?)
+               ORDER BY id""",
+            (int(employee_id), str(day)[:10], str(day)[:10]),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    out: dict[int, dict] = {}
+    for r in rows:
+        if str(r["pending_since"]) < str(day)[:10]:
+            out.setdefault(int(r["responsibility_id"]), dict(r))
+    return out
+
+
 def approve_task_log(
     task_log_id: int,
     *,
@@ -3584,7 +3696,7 @@ def approve_task_log(
     conn = _connect()
     row = conn.execute(
         """
-        SELECT tl.*, r.linked_to_employee_id, r.title
+        SELECT tl.*, r.linked_to_employee_id, r.title, r.frequency
         FROM task_logs tl
         JOIN responsibilities r ON r.id=tl.responsibility_id
         WHERE tl.id=?
@@ -3669,9 +3781,14 @@ def approve_task_log(
     if action == "Cancelled":
         assignee_id = int(row["employee_id"])
         title = str(row["title"] if "title" in row.keys() and row["title"] else "Task")
+        carry = _carry_forward_rejected(conn, row, actor)
         msg = (
             f"Your mark on '{title}' ({row['log_date']}) was rejected by {actor or 'linked approver'}. "
-            f"Please rework and update the task."
+            + (
+                f"It is reassigned to you on {carry['carry_date']} (pending since {carry['pending_since']})."
+                if carry
+                else "Please rework and update the task."
+            )
         )
         conn.execute(
             """INSERT INTO task_approval_notifications(
@@ -4873,6 +4990,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     due_ctx = DueContext(conn)
     due_ctx.leave_days(employee_id)
     on_leave = employee_leave_on(employee_id, day, conn)
+    carried = carried_forward_for_day(conn, employee_id, day)
 
     resps = conn.execute(
         """
@@ -5057,7 +5175,8 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     for r in resps:
         rid = int(r["id"])
         rdict = dict(r)
-        if not responsibility_due_on(rdict, day, due_ctx, employee_id=employee_id):
+        carry = carried.get(rid)
+        if not carry and not responsibility_due_on(rdict, day, due_ctx, employee_id=employee_id):
             skipped_schedule.append(
                 {
                     "responsibility_id": rid,
@@ -5110,6 +5229,8 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             "reassigned_out": bool(re_out),
             "reassigned_to_name": (re_out or {}).get("assignee_name") or "",
             "schedule_rule": rdict.get("schedule_rule") or "",
+            "carried_forward": bool(carry),
+            "pending_since": (carry or {}).get("pending_since") or "",
             **_apply_slots_to_payload(
                 _timer_payload({**(log or {}), "log_date": day}, events=events),
                 slots_by_log.get(lid, []) if lid else [],
@@ -6955,13 +7076,18 @@ def _leave_marker(leave_id: int) -> str:
     return f"Leave #{int(leave_id)}"
 
 
-def _assign_leave_backups(conn, leave_id: int, employee_id: int, d0: date, d1: date, actor: str) -> tuple[int, list[str]]:
-    resps = conn.execute(
-        """SELECT r.*, be.name AS backup_name FROM responsibilities r
+def _assign_leave_backups(
+    conn, leave_id: int, employee_id: int, d0: date, d1: date, actor: str,
+    *, responsibility_id: int | None = None,
+) -> tuple[int, list[str]]:
+    q = """SELECT r.*, be.name AS backup_name FROM responsibilities r
            LEFT JOIN employees be ON be.id=r.backup_employee_id
-           WHERE r.employee_id=? AND r.active=1 AND IFNULL(r.mandatory,0)=1""",
-        (int(employee_id),),
-    ).fetchall()
+           WHERE r.employee_id=? AND r.active=1 AND IFNULL(r.mandatory,0)=1"""
+    params: list = [int(employee_id)]
+    if responsibility_id is not None:
+        q += " AND r.id=?"
+        params.append(int(responsibility_id))
+    resps = conn.execute(q, params).fetchall()
     ctx = DueContext(conn)
     created = 0
     no_backup: list[str] = []
@@ -7072,6 +7198,75 @@ def create_leave(
         "backup_assignments": clones,
         "mandatory_without_backup": no_backup,
     }
+
+
+def sync_leave_backups_for_responsibility(rid: int, *, actor: str = "") -> dict:
+    """Keep leave cover in step when a responsibility changes during an approved leave.
+
+    Leave cover used to be computed only when the leave was saved, so marking a responsibility
+    Mandatory (or setting/changing its Backup Person) after that left the backup unassigned.
+    Remaining leave days (today onward) are re-synced: new cover created, pending cover moved to
+    the current backup, and pending cover removed if the item is no longer mandatory/active.
+    """
+    today = today_ist()
+    conn = _connect()
+    try:
+        r = conn.execute("SELECT * FROM responsibilities WHERE id=?", (int(rid),)).fetchone()
+        if not r:
+            return {"created": 0, "moved": 0, "removed": 0}
+        r = dict(r)
+        try:
+            leaves = conn.execute(
+                """SELECT * FROM hrm_leaves WHERE employee_id=? AND status='Approved' AND to_date>=?""",
+                (int(r["employee_id"]), today.isoformat()),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {"created": 0, "moved": 0, "removed": 0}
+        backup = int(r["backup_employee_id"]) if r.get("backup_employee_id") else None
+        covered = (
+            int(r.get("active") or 0) == 1
+            and int(r.get("mandatory") or 0) == 1
+            and backup is not None
+            and backup != int(r["employee_id"])
+            and (r.get("frequency") or "").strip() != "Whenever Required"
+        )
+        created = moved = removed = 0
+        for lv in leaves:
+            marker = _leave_marker(int(lv["id"]))
+            start = max(date.fromisoformat(str(lv["from_date"])[:10]), today)
+            end = date.fromisoformat(str(lv["to_date"])[:10])
+            if not covered:
+                removed += conn.execute(
+                    """DELETE FROM day_reassignment_clones
+                       WHERE original_responsibility_id=? AND assigned_by=? AND status='Pending'
+                         AND reassignment_date>=?""",
+                    (int(rid), marker, start.isoformat()),
+                ).rowcount or 0
+                continue
+            moved += conn.execute(
+                """UPDATE day_reassignment_clones SET assignee_employee_id=?
+                   WHERE original_responsibility_id=? AND assigned_by=? AND status='Pending'
+                     AND reassignment_date>=? AND assignee_employee_id<>?""",
+                (backup, int(rid), marker, start.isoformat(), backup),
+            ).rowcount or 0
+            n, _ = _assign_leave_backups(
+                conn, int(lv["id"]), int(r["employee_id"]), start, end, actor, responsibility_id=int(rid)
+            )
+            if n:
+                conn.execute(
+                    "UPDATE hrm_leaves SET backup_clones=IFNULL(backup_clones,0)+? WHERE id=?",
+                    (n, int(lv["id"])),
+                )
+            created += n
+        if created or moved or removed:
+            write_task_audit(
+                "responsibility", int(rid), "leave_cover_synced",
+                new_value=f"created={created} moved={moved} removed={removed}", actor=actor, conn=conn,
+            )
+        conn.commit()
+        return {"created": created, "moved": moved, "removed": removed}
+    finally:
+        conn.close()
 
 
 def get_leave(leave_id: int) -> dict | None:
