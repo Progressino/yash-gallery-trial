@@ -254,9 +254,17 @@ export default function Admin() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-xl font-bold text-gray-800">Admin</h1>
-        <p className="text-sm text-gray-500">Users, roles (Admin / Sir / HOD / Employee), HRM links, and module access</p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-gray-800">Admin</h1>
+          <p className="text-sm text-gray-500">Users, roles (Admin / Sir / HOD / Employee), HRM links, and module access</p>
+        </div>
+        {(authUser?.role === 'Super Admin' || authUser?.role === 'Admin') && (
+          <Link to="/admin/usage"
+            className="px-4 py-2 bg-indigo-700 text-white rounded-lg text-sm font-medium hover:bg-indigo-800">
+            📊 User usage report
+          </Link>
+        )}
       </div>
 
       <div className="flex gap-1 bg-gray-100 p-1 rounded-lg w-fit">
@@ -307,12 +315,6 @@ export default function Admin() {
             </div>
           </div>
           <div className="flex gap-3 flex-wrap">
-            {(authUser?.role === 'Super Admin' || authUser?.role === 'Admin') && (
-              <Link to="/admin/usage"
-                className="px-4 py-2 bg-indigo-700 text-white rounded-lg text-sm font-medium hover:bg-indigo-800">
-                User usage report
-              </Link>
-            )}
             <Link to="/admin/performance"
               className="px-4 py-2 bg-emerald-700 text-white rounded-lg text-sm font-medium hover:bg-emerald-800">
               Performance dashboard

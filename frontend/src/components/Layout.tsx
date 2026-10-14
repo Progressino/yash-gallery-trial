@@ -12,7 +12,7 @@ import { clearLocalSessionHint, formatLocalHintAge, readLocalSessionHint } from 
 import { isErpModulePath } from '../lib/erpModulePaths'
 import { formatBuildDeployedAt } from '../lib/reportingDates'
 
-type NavItem = { to: string; label: string; module: ModuleKey; short?: string }
+type NavItem = { to: string; label: string; module: ModuleKey; short?: string; roles?: string[] }
 
 const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
@@ -48,6 +48,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { to: '/inventory', module: 'inventory', label: 'Inventory', short: '📦' },
       { to: '/po-fresh', module: 'po', label: 'PO Engine', short: '🎯' },
       { to: '/admin', module: 'admin', label: 'Admin', short: '🔐' },
+      { to: '/admin/usage', module: 'admin', label: 'Usage Report', short: '📊', roles: ['Super Admin', 'Admin'] },
       { to: '/marketplace-connections', module: 'marketplace', label: 'Marketplace API', short: '🔗' },
     ],
   },
@@ -59,7 +60,9 @@ const TOOLS_PANEL_KEY = 'erp_sidebar_tools_open'
 function filterNavGroups(user: ReturnType<typeof useAuth.getState>['user']) {
   return NAV_GROUPS.map(g => ({
     ...g,
-    items: g.items.filter(item => canAccessModule(user, item.module)),
+    items: g.items.filter(item =>
+      canAccessModule(user, item.module) && (!item.roles || item.roles.includes(user?.role ?? '')),
+    ),
   })).filter(g => g.items.length > 0)
 }
 
@@ -511,7 +514,7 @@ export default function Layout() {
                     <li key={to}>
                       <NavLink
                         to={to}
-                        end={to === '/'}
+                        end={to === '/' || to === '/admin'}
                         onClick={closeSidebar}
                         title={navLabel}
                         className={({ isActive }) =>
