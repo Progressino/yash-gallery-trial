@@ -201,6 +201,13 @@ def test_api_login_track_and_report_access(usage_env):
     ua.reset_buffers_for_tests()
 
 
+def test_usage_endpoints_skip_heavy_session_restore():
+    from backend import main
+
+    assert "/api/usage/track" in main._SESSION_LIGHTWEIGHT
+    assert "/api/admin/usage" in main._SESSION_LIGHTWEIGHT
+
+
 def test_karigar_may_post_usage_track():
     from backend.services.permissions import karigar_may_access_api
 

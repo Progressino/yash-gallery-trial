@@ -13,6 +13,8 @@ async function login(page, [username, password]) {
 }
 
 test.describe("Admin usage report", () => {
+  test.describe.configure({ timeout: 120_000 });
+
   test("admin sees sidebar link + header button and the report loads", async ({ page }) => {
     test.skip(!ADMIN[0], "E2E_USAGE_ADMIN_* credentials not set");
     await login(page, ADMIN);

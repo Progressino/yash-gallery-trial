@@ -23,7 +23,7 @@ class TrackBody(BaseModel):
 
 
 @track_router.post("/track")
-def track(body: TrackBody, request: Request):
+async def track(body: TrackBody, request: Request):
     auth = getattr(request.state, "auth", None) or {}
     n = record_client_events(
         auth.get("sub") or "",

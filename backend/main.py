@@ -3578,6 +3578,8 @@ _SESSION_LIGHTWEIGHT = frozenset({
     "/api/data/job-status",
     "/api/myntra/partner/webhook",
     "/api/myntra/partner/webhook/health",
+    "/api/usage/track",
+    "/api/admin/usage",
 })
 
 @app.middleware("http")
