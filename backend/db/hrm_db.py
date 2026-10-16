@@ -2710,6 +2710,9 @@ def mark_task(
         approved_by = ""
         approved_at = ""
 
+    log_emp = _timer_employee_id(conn, responsibility_id, log_date)
+    cover = _day_cover_clone(conn, responsibility_id, log_date)
+
     existing = conn.execute(
         """SELECT id, marked_at, approval_status, status, started_at, ended_at,
                   COALESCE(active_seconds,0) as active_seconds
@@ -2777,13 +2780,13 @@ def mark_task(
             """INSERT INTO task_logs(
                 responsibility_id,employee_id,log_date,status,remarks,marked_by,marked_at,
                 blocker_employee_id,blocker_reason,approval_status,approved_by,approved_at,
-                approval_sent_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                approval_sent_at, is_reassignment, reassignment_clone_id, reassigned_from_employee_id)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(responsibility_id,log_date) DO NOTHING
         """,
             (
                 responsibility_id,
-                resp["employee_id"],
+                log_emp,
                 log_date,
                 status,
                 remarks,
@@ -2795,6 +2798,9 @@ def mark_task(
                 approved_by,
                 approved_at,
                 mark_now if approval_status == "Pending" else "",
+                1 if cover else 0,
+                int(cover["id"]) if cover else 0,
+                int(cover["original_employee_id"]) if cover else None,
             ),
         )
 
@@ -2802,6 +2808,9 @@ def mark_task(
             "SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?",
             (responsibility_id, log_date),
         ).fetchone()
+
+    if cover:
+        _sync_cover_clone_status(conn, responsibility_id, log_date, status, marked_by)
 
     if status in ("Done", "Partial") and task_log_id:
         _close_carry_forward(conn, responsibility_id, log_date, int(task_log_id["id"]))
@@ -2981,23 +2990,97 @@ def _responsibility_owner(conn, responsibility_id: int):
     ).fetchone()
 
 
+def _day_cover_clone(conn, responsibility_id: int, log_date: str) -> dict | None:
+    """Leave/HOD one-day cover row for this responsibility on log_date, if any."""
+    row = conn.execute(
+        """SELECT * FROM day_reassignment_clones
+           WHERE original_responsibility_id=? AND reassignment_date=?""",
+        (int(responsibility_id), str(log_date)[:10]),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def cover_assignee_for_day(responsibility_id: int, log_date: str) -> int | None:
+    conn = _connect()
+    try:
+        c = _day_cover_clone(conn, responsibility_id, log_date)
+        return int(c["assignee_employee_id"]) if c else None
+    finally:
+        conn.close()
+
+
+def _timer_employee_id(conn, responsibility_id: int, log_date: str) -> int:
+    """Who earns working time / DWR for this responsibility on log_date (cover backup when assigned)."""
+    cover = _day_cover_clone(conn, responsibility_id, log_date)
+    if cover:
+        return int(cover["assignee_employee_id"])
+    owner = _responsibility_owner(conn, responsibility_id)
+    if not owner:
+        raise ValueError("Responsibility not found")
+    return int(owner["employee_id"])
+
+
 def _ensure_task_log_row(conn, responsibility_id: int, employee_id: int, log_date: str) -> dict:
     row = conn.execute(
         "SELECT * FROM task_logs WHERE responsibility_id=? AND log_date=?",
         (responsibility_id, log_date),
     ).fetchone()
     if row:
-        return dict(row)
+        rd = dict(row)
+        # Leave cover: keep the single daily log on the backup (assignee), not the owner.
+        if int(rd.get("employee_id") or 0) != int(employee_id) and not str(rd.get("started_at") or "").strip():
+            cover = _day_cover_clone(conn, responsibility_id, log_date)
+            if cover and int(employee_id) == int(cover["assignee_employee_id"]):
+                conn.execute(
+                    """UPDATE task_logs
+                       SET employee_id=?, is_reassignment=1, reassignment_clone_id=?,
+                           reassigned_from_employee_id=?
+                       WHERE id=?""",
+                    (
+                        int(employee_id),
+                        int(cover["id"]),
+                        int(cover["original_employee_id"]),
+                        int(rd["id"]),
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM task_logs WHERE id=?", (int(rd["id"]),)
+                ).fetchone()
+                return dict(row)
+        return rd
+    cover = _day_cover_clone(conn, responsibility_id, log_date)
+    is_re = 1 if cover and int(employee_id) == int(cover["assignee_employee_id"]) else 0
     conn.execute(
-        """INSERT INTO task_logs(responsibility_id, employee_id, log_date, status)
-           VALUES(?,?,?,'Pending')""",
-        (responsibility_id, employee_id, log_date),
+        """INSERT INTO task_logs(
+               responsibility_id, employee_id, log_date, status,
+               is_reassignment, reassignment_clone_id, reassigned_from_employee_id)
+           VALUES(?,?,?,'Pending',?,?,?)""",
+        (
+            responsibility_id,
+            employee_id,
+            log_date,
+            is_re,
+            int(cover["id"]) if is_re else 0,
+            int(cover["original_employee_id"]) if is_re else None,
+        ),
     )
     row = conn.execute(
         "SELECT * FROM task_logs WHERE responsibility_id=? AND log_date=?",
         (responsibility_id, log_date),
     ).fetchone()
     return dict(row)
+
+
+def _sync_cover_clone_status(conn, responsibility_id: int, log_date: str, status: str, marked_by: str = "") -> None:
+    cover = _day_cover_clone(conn, responsibility_id, log_date)
+    if not cover:
+        return
+    conn.execute(
+        """UPDATE day_reassignment_clones
+           SET status=?, marked_by=?, marked_at=?
+           WHERE id=?""",
+        (status, marked_by, _now_iso(), int(cover["id"])),
+    )
 
 
 def _list_timer_events(conn, task_log_id: int) -> list[dict]:
@@ -3225,7 +3308,7 @@ def start_responsibility_timer(
     if not resp:
         conn.close()
         return "not_found"
-    emp_id = int(resp["employee_id"])
+    emp_id = _timer_employee_id(conn, responsibility_id, log_date)
     row = _ensure_task_log_row(conn, responsibility_id, emp_id, log_date)
     started = str(row.get("started_at") or "").strip()
     ended = str(row.get("ended_at") or "").strip()
@@ -3329,7 +3412,7 @@ def resume_responsibility_timer(
     if not resp:
         conn.close()
         return "not_found"
-    emp_id = int(resp["employee_id"])
+    emp_id = _timer_employee_id(conn, responsibility_id, log_date)
     row = conn.execute(
         "SELECT * FROM task_logs WHERE responsibility_id=? AND log_date=?",
         (responsibility_id, log_date),
@@ -3447,7 +3530,7 @@ def end_responsibility_timer(
         conn,
         task_log_id=int(row["id"]),
         responsibility_id=responsibility_id,
-        employee_id=int(resp["employee_id"]),
+        employee_id=int(row.get("employee_id") or resp["employee_id"]),
         log_date=log_date,
         event_type="end",
         event_at=now,
@@ -3491,7 +3574,8 @@ def set_responsibility_manual_time(
     if not resp:
         conn.close()
         return "not_found"
-    row = _ensure_task_log_row(conn, responsibility_id, int(resp["employee_id"]), log_date)
+    emp_id = _timer_employee_id(conn, responsibility_id, log_date)
+    row = _ensure_task_log_row(conn, responsibility_id, emp_id, log_date)
     # Lock time edits once a quality status has been submitted (Pending timer-only still editable)
     st = str(row.get("status") or "Pending").strip() or "Pending"
     if st not in ("Pending",) and not allow_override:
@@ -3500,7 +3584,6 @@ def set_responsibility_manual_time(
     mins = _duration_minutes(start, end) if start and end else 0
     active = mins * 60
     lid = int(row["id"])
-    emp_id = int(resp["employee_id"])
     from .hrm_worktime import resolve_slot_overlaps, _sync_touched
 
     try:
@@ -3891,6 +3974,8 @@ def reassign_mandatory_for_day(
         notes=f"day={day} resp={original_responsibility_id} backup={backup_id}",
         conn=conn,
     )
+    # Pending DWR row on the backup so Start/Pause and performance credit go to them.
+    _ensure_task_log_row(conn, original_responsibility_id, assignee, day)
     conn.commit()
     conn.close()
     return cid
@@ -3950,12 +4035,16 @@ def mark_reassignment_clone(
            WHERE id=?""",
         (status, remarks, marked_by, _now_iso(), clone_id),
     )
-    # Also mirror onto original responsibility log for the day if empty
+    # Credit the backup assignee (not the person on leave) for DWR / performance / time.
+    day = str(row["reassignment_date"])[:10]
+    rid = int(row["original_responsibility_id"])
+    assignee = int(row["assignee_employee_id"])
     log_exists = conn.execute(
-        """SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?""",
-        (row["original_responsibility_id"], row["reassignment_date"]),
+        """SELECT id, employee_id, started_at FROM task_logs
+           WHERE responsibility_id=? AND log_date=?""",
+        (rid, day),
     ).fetchone()
-    if not log_exists and status in ("Done", "Partial", "Missed", "Leave", "N/A"):
+    if not log_exists and status in ("Done", "Partial", "Missed", "Leave", "N/A", "Pending"):
         conn.execute(
             """INSERT INTO task_logs(
                 responsibility_id, employee_id, log_date, status, remarks, marked_by, marked_at,
@@ -3963,9 +4052,9 @@ def mark_reassignment_clone(
                 reassigned_from_employee_id, reassignment_clone_id)
                VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?)""",
             (
-                row["original_responsibility_id"],
-                row["original_employee_id"],
-                row["reassignment_date"],
+                rid,
+                assignee,
+                day,
                 status,
                 remarks or f"Covered by reassignment assignee (clone {clone_id})",
                 marked_by,
@@ -3973,8 +4062,33 @@ def mark_reassignment_clone(
                 "Self" if status in ("Done", "Partial") else "",
                 marked_by if status in ("Done", "Partial") else "",
                 _now_iso() if status in ("Done", "Partial") else "",
-                row["original_employee_id"],
+                int(row["original_employee_id"]),
                 clone_id,
+            ),
+        )
+    elif log_exists:
+        appr = "Self" if status in ("Done", "Partial") else ""
+        conn.execute(
+            """UPDATE task_logs
+               SET status=?, remarks=?, marked_by=?, marked_at=?,
+                   employee_id=?, is_reassignment=1, reassignment_clone_id=?,
+                   reassigned_from_employee_id=?,
+                   approval_status=CASE WHEN ? != '' THEN ? ELSE approval_status END,
+                   approved_by=CASE WHEN ? != '' THEN ? ELSE approved_by END
+               WHERE id=?""",
+            (
+                status,
+                remarks or f"Covered by reassignment assignee (clone {clone_id})",
+                marked_by,
+                _now_iso(),
+                assignee,
+                clone_id,
+                int(row["original_employee_id"]),
+                appr,
+                appr,
+                appr,
+                marked_by if appr else "",
+                int(log_exists["id"]),
             ),
         )
     conn.commit()
@@ -5247,28 +5361,42 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     additional_work = []
     for c in additional:
         cd = dict(c)
-        additional_work.append(
-            {
-                "clone_id": cd["id"],
-                "responsibility_id": cd["original_responsibility_id"],
-                "title": cd.get("title") or "",
-                "original_employee_name": cd.get("original_employee_name") or "",
-                "assigned_by": cd.get("assigned_by") or "",
-                "status": cd.get("status") or "Pending",
-                "remarks": cd.get("remarks") or "",
-                "frequency": cd.get("frequency") or "Daily",
-                "priority": cd.get("priority") or "Medium",
-                "section": "Additional Work (Assigned by HOD)",
-                "in_action_window": in_task_action_window(day),
-            }
-        )
+        rid = int(cd["original_responsibility_id"])
+        log = log_map.get(rid) or {}
+        lid = int(log["id"]) if log.get("id") else None
+        events = timer_events_by_log.get(lid, []) if lid else []
+        status = (log.get("status") if log else None) or cd.get("status") or "Pending"
+        item = {
+            "clone_id": cd["id"],
+            "responsibility_id": rid,
+            "task_log_id": lid,
+            "title": cd.get("title") or "",
+            "original_employee_name": cd.get("original_employee_name") or "",
+            "assigned_by": cd.get("assigned_by") or "",
+            "status": status,
+            "remarks": (log.get("remarks") if log else None) or cd.get("remarks") or "",
+            "frequency": cd.get("frequency") or "Daily",
+            "priority": cd.get("priority") or "Medium",
+            "section": "Additional Work (Assigned by HOD)",
+            "cover_work": True,
+            "in_action_window": in_task_action_window(day),
+            "marked": status not in ("Pending", ""),
+            "quality_marked": status not in ("Pending", ""),
+            "approval_status": (log.get("approval_status") if log else "") or "",
+            **_apply_slots_to_payload(
+                _timer_payload({**log, "log_date": day} if log else {"log_date": day}, events=events),
+                slots_by_log.get(lid, []) if lid else [],
+                slot_now,
+            ),
+        }
+        additional_work.append(item)
 
     one_time = [_one_time_task_row(r) for r in ot_rows]
     _overlay_one_time_slots(one_time, slots_by_task, slot_now)
     from .hrm_worktime import _day_bounds, _slot_net_in_window
 
     day0, day1 = _day_bounds(day)
-    for it in [*one_time, *worked_on, *not_worked, *other, *whenever_required]:
+    for it in [*one_time, *worked_on, *not_worked, *other, *whenever_required, *additional_work]:
         secs = sum(_slot_net_in_window(s, day0, day1, slot_now) for s in it.get("time_slots") or [])
         it["day_work_seconds"] = secs
         it["day_work_label"] = _format_duration_hm(secs)
@@ -5540,6 +5668,8 @@ def get_performance(department_id=None, from_date=None, to_date=None):
         f"""
         SELECT tl.responsibility_id, tl.log_date, tl.status, tl.blocker_employee_id,
                COALESCE(tl.approval_status,'') as approval_status,
+               tl.employee_id as log_employee_id,
+               COALESCE(tl.is_reassignment,0) as is_reassignment,
                r.linked_to_employee_id
         FROM task_logs tl
         JOIN responsibilities r ON r.id=tl.responsibility_id
@@ -5600,6 +5730,12 @@ def get_performance(department_id=None, from_date=None, to_date=None):
             "linked_to_employee_id": l["linked_to_employee_id"]
             if "linked_to_employee_id" in l.keys()
             else None,
+            "log_employee_id": int(l["log_employee_id"])
+            if "log_employee_id" in l.keys() and l["log_employee_id"] is not None
+            else None,
+            "is_reassignment": bool(int(l["is_reassignment"] or 0))
+            if "is_reassignment" in l.keys()
+            else False,
         }
     issue_map: dict = {}
     for i in issue_counts:
@@ -5639,10 +5775,15 @@ def get_performance(department_id=None, from_date=None, to_date=None):
         done_weight = 0.0
         missed = 0
         blocked = 0
+        cover_days = 0
         for d in dates:
             entry = log_map.get((r["id"], d))
             if not entry:
                 continue
+            credit_eid = entry.get("log_employee_id") or eid
+            covered = bool(entry.get("is_reassignment")) and int(credit_eid) != int(eid)
+            if covered:
+                cover_days += 1
             # Sundays already excluded from dates; N/A never counts via task_log_counts_for_performance
             bucket = task_log_counts_for_performance(
                 entry["status"],
@@ -5650,15 +5791,47 @@ def get_performance(department_id=None, from_date=None, to_date=None):
                 log_date=d,
                 linked_to_employee_id=entry.get("linked_to_employee_id"),
             )
+            if bucket is None:
+                continue
+            target = int(credit_eid)
+            if target not in emp_stats:
+                name_row = next((x for x in resps if int(x["employee_id"]) == target), None)
+                ot0 = (ot_by_emp.get(target) or [{}])[0]
+                emp_stats[target] = {
+                    "employee_name": (name_row["employee_name"] if name_row else "")
+                    or ot0.get("employee_name")
+                    or "",
+                    "department_name": (name_row["department_name"] if name_row else "")
+                    or ot0.get("department_name")
+                    or "",
+                    "total_tasks": 0,
+                    "done_tasks": 0,
+                    "missed_tasks": 0,
+                    "blocked_tasks": 0,
+                }
+            if covered:
+                emp_stats[target]["total_tasks"] += unit_w
             if bucket == "done":
-                done_weight += unit_w
+                if covered:
+                    emp_stats[target]["done_tasks"] += unit_w
+                else:
+                    done_weight += unit_w
             elif bucket == "partial":
-                done_weight += 0.5 * unit_w
+                if covered:
+                    emp_stats[target]["done_tasks"] += 0.5 * unit_w
+                else:
+                    done_weight += 0.5 * unit_w
             elif bucket == "missed":
-                missed += 1
+                if covered:
+                    emp_stats[target]["missed_tasks"] += 1
+                else:
+                    missed += 1
             elif bucket == "blocked":
-                blocked += 1
-        emp_stats[eid]["total_tasks"] += expected * unit_w
+                if covered:
+                    emp_stats[target]["blocked_tasks"] += 1
+                else:
+                    blocked += 1
+        emp_stats[eid]["total_tasks"] += max(0, expected - cover_days) * unit_w
         emp_stats[eid]["done_tasks"] += done_weight
         emp_stats[eid]["missed_tasks"] += missed
         emp_stats[eid]["blocked_tasks"] += blocked

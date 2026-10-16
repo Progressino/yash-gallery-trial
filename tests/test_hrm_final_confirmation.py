@@ -176,7 +176,10 @@ def test_auto_approve_and_missed(hrm):
             "linked_to_employee_id": b,
         }
     )
+    # Pick a weekday at least 5 days ago (Sundays are forced to N/A and never auto-approve).
     task_day = today_ist() - timedelta(days=5)
+    while task_day.weekday() == 6:
+        task_day -= timedelta(days=1)
     day = task_day.isoformat()
     assert mark_task(rid, day, "Done", allow_override=True) is True
     # Auto-approval runs 2 days after the item was sent, not from the task date.

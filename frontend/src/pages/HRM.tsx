@@ -534,12 +534,6 @@ export default function HRM() {
     },
     onError: (err: any) => alert(err?.response?.data?.detail || 'Reassignment failed'),
   })
-  const markCloneMut = useMutation({
-    mutationFn: ({ id, ...b }: { id: number; status: string; remarks?: string }) =>
-      api.post(`/hrm/tasks/reassign-clones/${id}/mark`, b),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['hrm-employee-check'] }),
-    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not mark reassignment'),
-  })
   const approveLogMut = useMutation({
     mutationFn: ({ id, action }: { id: number; action: string }) =>
       api.post(`/hrm/tasks/logs/${id}/approve`, { action }),
@@ -1130,6 +1124,11 @@ export default function HRM() {
         <p className="text-xs text-gray-400">
           {i.frequency} · {i.status}{i.approval_status ? ` · ${i.approval_status}` : ''}{i.marked_by ? ` · ${i.marked_by}` : ''}{i.blocker_reason ? ` — ${i.blocker_reason}` : ''}
         </p>
+        {i.cover_work && i.original_employee_name && (
+          <p className="text-[10px] mt-0.5 text-amber-800">
+            Cover for {i.original_employee_name}{i.assigned_by ? ` · ${i.assigned_by}` : ''} · time and performance count for you
+          </p>
+        )}
         {i.carried_forward && i.pending_since && (
           <p className="text-[10px] mt-0.5 inline-block px-1.5 py-0.5 rounded bg-red-100 text-red-800">
             ↻ Reassigned after rejection · Pending since {i.pending_since}
@@ -1885,30 +1884,14 @@ export default function HRM() {
               {((dayCheckFiltered?.additional_work || []).length > 0) && (
                 <div className="bg-white rounded-xl border overflow-hidden">
                   <div className="px-4 py-2.5 bg-amber-700 text-white font-semibold text-sm">
-                    Additional Work (Assigned by HOD) ({dayCheckFiltered?.additional_work?.length || 0})
+                    Additional Work (Leave / HOD cover) ({dayCheckFiltered?.additional_work?.length || 0})
                   </div>
+                  <p className="px-4 pt-2 text-[11px] text-amber-900/80">Use Start/Pause like your own work — time, DWR and performance count for you.</p>
                   <ul className="divide-y">
                     {(dayCheckFiltered?.additional_work || []).map((i: any) => (
                       <li key={i.clone_id} className="px-4 py-3 flex items-start gap-2">
-                        <div className="flex-1 min-w-0">
-                          <p className="font-medium text-sm text-gray-800">{i.title}</p>
-                          <p className="text-xs text-gray-400">Cover for {i.original_employee_name} · {i.status}{i.assigned_by ? ` · by ${i.assigned_by}` : ''}</p>
-                          {i.status === 'Pending' && (
-                            <select
-                              defaultValue=""
-                              onChange={e => {
-                                const val = e.target.value
-                                if (!val) return
-                                markCloneMut.mutate({ id: i.clone_id, status: val })
-                                e.target.value = ''
-                              }}
-                              className="mt-1.5 text-xs border rounded px-1.5 py-1 bg-white"
-                            >
-                              <option value="">Mark status…</option>
-                              {TASK_LOG_STATUSES.map(st => <option key={st} value={st}>{st}</option>)}
-                            </select>
-                          )}
-                        </div>
+                        <span className={`mt-0.5 inline-flex w-6 h-6 items-center justify-center rounded-full text-xs ${statusBg(i.status)}`}>{statusLabel(i.status)}</span>
+                        {renderRespCheck(i)}
                       </li>
                     ))}
                   </ul>

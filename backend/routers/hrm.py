@@ -820,10 +820,10 @@ def _assert_blocker_allowed(scope: HrmScope, owner_employee_id: int, blocker_id:
 @router.post("/tasks/mark")
 def post_mark_task(body: TaskMarkIn, request: Request):
     scope = _scope_from_request(request)
-    owner = assert_responsibility_in_scope(scope, body.responsibility_id)
+    log_date = _enforce_self_check_today(scope, body.log_date)
+    owner = assert_responsibility_in_scope(scope, body.responsibility_id, log_date=log_date)
     if body.blocker_employee_id:
         _assert_blocker_allowed(scope, owner, int(body.blocker_employee_id))
-    log_date = _enforce_self_check_today(scope, body.log_date)
     editor = None
     if scope.can_edit_assignments and (scope.employee_id is None or int(owner) != int(scope.employee_id)):
         _, editor_name = _recorder_from_request(request)
@@ -938,13 +938,20 @@ def _timer_http_result(ok):
     raise HTTPException(400, str(ok))
 
 
+def _timer_scope_employee(responsibility_id: int, log_date: str) -> int | None:
+    """Office / scope employee for timers — cover backup when leave cover is active."""
+    from ..db.hrm_db import cover_assignee_for_day
+
+    return cover_assignee_for_day(responsibility_id, log_date) or get_responsibility_owner(responsibility_id)
+
+
 @router.post("/tasks/{responsibility_id}/start")
 def post_start_responsibility_timer(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
     scope = _scope_from_request(request)
-    assert_responsibility_in_scope(scope, responsibility_id)
-    _, name = _recorder_from_request(request)
     log_date = _enforce_self_check_today(scope, body.log_date)
-    _assert_office_open_for_timer(scope, get_responsibility_owner(responsibility_id))
+    assert_responsibility_in_scope(scope, responsibility_id, log_date=log_date)
+    _, name = _recorder_from_request(request)
+    _assert_office_open_for_timer(scope, _timer_scope_employee(responsibility_id, log_date))
     return _timer_http_result(
         start_responsibility_timer(
             responsibility_id,
@@ -958,9 +965,9 @@ def post_start_responsibility_timer(responsibility_id: int, body: Responsibility
 @router.post("/tasks/{responsibility_id}/pause")
 def post_pause_responsibility_timer(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
     scope = _scope_from_request(request)
-    assert_responsibility_in_scope(scope, responsibility_id)
-    _, name = _recorder_from_request(request)
     log_date = _enforce_self_check_today(scope, body.log_date)
+    assert_responsibility_in_scope(scope, responsibility_id, log_date=log_date)
+    _, name = _recorder_from_request(request)
     return _timer_http_result(
         pause_responsibility_timer(
             responsibility_id,
@@ -974,10 +981,10 @@ def post_pause_responsibility_timer(responsibility_id: int, body: Responsibility
 @router.post("/tasks/{responsibility_id}/resume")
 def post_resume_responsibility_timer(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
     scope = _scope_from_request(request)
-    assert_responsibility_in_scope(scope, responsibility_id)
-    _, name = _recorder_from_request(request)
     log_date = _enforce_self_check_today(scope, body.log_date)
-    _assert_office_open_for_timer(scope, get_responsibility_owner(responsibility_id))
+    assert_responsibility_in_scope(scope, responsibility_id, log_date=log_date)
+    _, name = _recorder_from_request(request)
+    _assert_office_open_for_timer(scope, _timer_scope_employee(responsibility_id, log_date))
     return _timer_http_result(
         resume_responsibility_timer(
             responsibility_id,
@@ -991,9 +998,9 @@ def post_resume_responsibility_timer(responsibility_id: int, body: Responsibilit
 @router.post("/tasks/{responsibility_id}/end")
 def post_end_responsibility_timer(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
     scope = _scope_from_request(request)
-    assert_responsibility_in_scope(scope, responsibility_id)
-    _, name = _recorder_from_request(request)
     log_date = _enforce_self_check_today(scope, body.log_date)
+    assert_responsibility_in_scope(scope, responsibility_id, log_date=log_date)
+    _, name = _recorder_from_request(request)
     return _timer_http_result(
         end_responsibility_timer(
             responsibility_id,
@@ -1008,7 +1015,7 @@ def post_end_responsibility_timer(responsibility_id: int, body: ResponsibilityTi
 @router.get("/tasks/{responsibility_id}/timer")
 def get_timer_detail(responsibility_id: int, log_date: str, request: Request):
     scope = _scope_from_request(request)
-    assert_responsibility_in_scope(scope, responsibility_id)
+    assert_responsibility_in_scope(scope, responsibility_id, log_date=log_date)
     detail = get_responsibility_timer_detail(responsibility_id, log_date)
     if not detail:
         return {
@@ -1027,9 +1034,9 @@ def get_timer_detail(responsibility_id: int, log_date: str, request: Request):
 @router.post("/tasks/{responsibility_id}/manual-time")
 def post_responsibility_manual_time(responsibility_id: int, body: ResponsibilityTimerIn, request: Request):
     scope = _scope_from_request(request)
-    assert_responsibility_in_scope(scope, responsibility_id)
-    _, name = _recorder_from_request(request)
     log_date = _enforce_self_check_today(scope, body.log_date)
+    assert_responsibility_in_scope(scope, responsibility_id, log_date=log_date)
+    _, name = _recorder_from_request(request)
     with _overlap_http():
         res = set_responsibility_manual_time(
             responsibility_id,
@@ -1982,8 +1989,9 @@ def post_time_slot(body: TimeSlotAddIn, request: Request):
     if body.entity_type == SLOT_RESP:
         if not body.responsibility_id:
             raise HTTPException(400, "responsibility_id is required")
-        owner = get_responsibility_owner(int(body.responsibility_id))
         log_date = str(body.log_date or today_ist().isoformat())[:10]
+        assert_responsibility_in_scope(scope, int(body.responsibility_id), log_date=log_date)
+        owner = _timer_scope_employee(int(body.responsibility_id), log_date)
     else:
         if not body.task_id:
             raise HTTPException(400, "task_id is required")

@@ -378,13 +378,28 @@ def assert_hrm_delete_allowed(scope: HrmScope) -> None:
         raise HTTPException(403, "Only Admin can delete tasks and responsibilities")
 
 
-def assert_responsibility_in_scope(scope: HrmScope, responsibility_id: int) -> int:
-    """Return employee_id for the responsibility; raise 403/404 if out of scope."""
+def assert_responsibility_in_scope(
+    scope: HrmScope,
+    responsibility_id: int,
+    *,
+    log_date: str | None = None,
+) -> int:
+    """Return owner employee_id; raise 403/404 if out of scope.
+
+    Cover backups may act on a responsibility for the leave/cover day even though
+    they are not the permanent owner.
+    """
     from fastapi import HTTPException
-    from ..db.hrm_db import get_responsibility_owner
+    from ..db.hrm_db import cover_assignee_for_day, get_responsibility_owner
 
     owner = get_responsibility_owner(responsibility_id)
     if owner is None:
         raise HTTPException(404, "Responsibility not found")
+    if (
+        log_date
+        and scope.employee_id
+        and int(cover_assignee_for_day(responsibility_id, log_date) or 0) == int(scope.employee_id)
+    ):
+        return owner
     assert_employee_in_scope(scope, owner)
     return owner

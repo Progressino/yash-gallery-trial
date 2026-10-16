@@ -705,8 +705,9 @@ def add_manual_slot(
             if not owner:
                 return "not_found"
             day = str(log_date or start[:10])[:10]
-            log = H._ensure_task_log_row(conn, int(responsibility_id), int(owner["employee_id"]), day)
-            eid, emp_id, rid = int(log["id"]), int(owner["employee_id"]), int(responsibility_id)
+            emp_id = H._timer_employee_id(conn, int(responsibility_id), day)
+            log = H._ensure_task_log_row(conn, int(responsibility_id), emp_id, day)
+            eid, rid = int(log["id"]), int(responsibility_id)
         else:
             t = conn.execute(
                 "SELECT id, employee_id FROM one_time_tasks WHERE id=? AND active=1", (int(entity_id or 0),)

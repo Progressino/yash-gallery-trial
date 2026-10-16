@@ -279,3 +279,32 @@ def test_row5_new_mandatory_responsibility_during_leave(env):
     clock.t = f"{TUE} 10:00:00"
     rid = _resp(a, mandatory=True, backup_employee_id=h)
     assert _clones(rid) == [(TUE, h), (WED, h)]
+
+
+def test_row5_backup_timer_time_and_appraisal_credit(env):
+    """Leave cover: backup Start/Pause time + Done credit go to backup, not owner."""
+    a, h, clock = env["a"], env["h"], env["clock"]
+    rid = _resp(a, title="Fabric Approval", mandatory=True, backup_employee_id=h)
+    hrm_db.create_leave(a, MON, MON, actor="A")
+    assert _clones(rid) == [(MON, h)]
+
+    hrm_worktime.office_start(h)
+    assert hrm_db.start_responsibility_timer(rid, MON, allow_override=True, actor="Hod H") is True
+    clock.t = f"{MON} 11:00:00"
+    assert hrm_db.end_responsibility_timer(rid, MON, allow_override=True, actor="Hod H") is True
+    assert hrm_db.mark_task(rid, MON, "Done", "Hod H", allow_override=True) is True
+
+    cover = hrm_db.get_employee_day_check(h, MON)["additional_work"]
+    assert len(cover) == 1 and cover[0]["status"] == "Done"
+    assert cover[0]["day_work_seconds"] >= 2 * 3600 - 60
+    assert cover[0].get("timer_status") in ("Completed", "Not Started") or cover[0]["day_work_seconds"] > 0
+
+    slots = hrm_worktime.day_time_summary(h, MON)
+    assert slots["working_seconds"] >= 2 * 3600 - 60
+    owner_slots = hrm_worktime.day_time_summary(a, MON)
+    assert owner_slots["working_seconds"] == 0
+
+    appr_h = hrm_db.get_appraisal(h, MON, MON)
+    appr_a = hrm_db.get_appraisal(a, MON, MON)
+    assert appr_h["task_summary"]["done"] >= 1
+    assert appr_a["task_summary"]["done"] == 0
