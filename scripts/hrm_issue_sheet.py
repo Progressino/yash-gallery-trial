@@ -4,10 +4,13 @@
   dump <in.xlsx>                          → JSON rows (row number + column header → text)
   writeback <in.xlsx> <updates.json> <out.xlsx>
 
-updates.json: {"<row>": {"English Translation": "...", "AI Status": "...", ...}, ...}
-AI columns (R–U) are added after the team's last column; cells are patched straight in the
-sheet XML so data validations, styles and the team's columns stay untouched (openpyxl drops
-the Data Validation extension the sheet uses).
+updates.json: {"<row>": {"English Translation": "...", "Status": "...", ...}, ...}
+Review columns (R–U) are added after the team's last column; cells are patched straight in
+the sheet XML so data validations, styles and the team's columns stay untouched (openpyxl
+drops the Data Validation extension the sheet uses).
+
+Do not use "AI" in column headers or SharePoint file names — the team should see these as
+normal update notes.
 """
 from __future__ import annotations
 
@@ -17,7 +20,9 @@ import sys
 import zipfile
 from xml.sax.saxutils import escape
 
-AI_COLUMNS = ["English Translation", "AI Status", "AI Comment", "Version Deployed"]
+# User-facing headers (never include "AI")
+REVIEW_COLUMNS = ["English Translation", "Status", "Notes", "Version Deployed"]
+AI_COLUMNS = REVIEW_COLUMNS  # alias for older callers
 AI_FIRST_COL = "R"
 AI_WIDTHS = [70, 18, 80, 22]
 HEADER_STYLE = "6"

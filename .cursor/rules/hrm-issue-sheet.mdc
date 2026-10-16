@@ -1,5 +1,5 @@
 ---
-description: Routine for "fix HRM issues" — read the team's HRM issue Excel on SharePoint, translate, fix, deploy and write AI columns back
+description: Routine for "fix HRM issues" — read the team's HRM issue Excel on SharePoint, translate, fix, deploy and write review columns back (no "AI" wording for the team)
 alwaysApply: false
 ---
 
@@ -7,21 +7,23 @@ alwaysApply: false
 
 Sheet: `Yash Gallery HRM.xlsx` (Sheet1) —
 https://yashgallery.sharepoint.com/:x:/r/Shared%20Documents/Yash%20Gallery%20HRM.xlsx?d=wdcfe05ee059b4357999658fdaff735c9
-File UniqueId `dcfe05ee-059b-4357-9996-58fdaff735c9`. Team columns A–Q (Hinglish); AI columns R–U:
-**English Translation · AI Status · AI Comment · Version Deployed**.
+File UniqueId `dcfe05ee-059b-4357-9996-58fdaff735c9`. Team columns A–Q (Hinglish); review columns R–U:
+**English Translation · Status · Notes · Version Deployed**.
+
+Never put "AI" in column headers, file names, Status values, Notes, or team-facing messages. Phrase updates as normal development notes (e.g. "Fixed", "Needs clarification").
 
 ## Steps
 1. Open the link in the Cursor browser. If Microsoft sign-in appears, stop and ask the user to sign in (Take Control). Never type their password.
 2. Download a copy from the signed-in tab (`/_layouts/15/download.aspx?UniqueId=…`, base64 via `Runtime.evaluate`), then
    `.venv/bin/python scripts/hrm_issue_sheet.py dump hrm.xlsx` → rows as JSON. Also check stray notes far down the sheet.
-3. Only work rows whose **AI Status** is empty or "Needs clarification" with a new answer from the team.
+3. Only work rows whose **Status** is empty or "Needs clarification" with a new answer from the team.
 4. Triage each row:
    - Clear bug / small change → fix in HRM (`backend/db/hrm_db.py`, `hrm_worktime.py`, `backend/routers/hrm.py`, `frontend/src/pages/HRM.tsx`, `hrmWorkTime.tsx`). Check prod data read-only first (`/data/hrm.db`, `mode=ro`) to find the real root cause.
-   - Large / ambiguous → do the clear part, status **Needs clarification**, ask concrete questions in AI Comment.
+   - Large / ambiguous → do the clear part, status **Needs clarification**, ask concrete questions in Notes.
    - Status values: `Fixed`, `Partly fixed – Needs clarification`, `Needs clarification`, `Not a bug`, `Planned`.
 5. Tests in `tests/test_hrm_sheet_issues.py` (one test per sheet row, named `test_row<N>_…`), full `-k hrm` suite, local stack check, then the normal deploy workflow (push → Deploy to VPS green → `/api/health` git_sha).
-6. Write back: re-download the latest copy (team may have edited), build `updates.json` `{"<row>": {"English Translation": …, "AI Status": …, "AI Comment": …, "Version Deployed": "<sha> (<date>)"}}`, run
-   `scripts/hrm_issue_sheet.py writeback in.xlsx updates.json out.xlsx` (patches XML; keeps dropdowns/formatting), upload over the same file via SharePoint REST from the signed-in tab. Never edit the team's columns A–Q.
-7. Send team notes (what changed per row, what needs their answer).
+6. Write back: re-download the latest copy (team may have edited), build `updates.json` `{"<row>": {"English Translation": …, "Status": …, "Notes": …, "Version Deployed": "<sha> (<date>)"}}`, run
+   `scripts/hrm_issue_sheet.py writeback in.xlsx updates.json out.xlsx` (patches XML; keeps dropdowns/formatting), upload over the same file via SharePoint REST from the signed-in tab. Prefer overwriting the main sheet when unlocked; otherwise use a neutral name like `Yash Gallery HRM - updates.xlsx` (never "AI" in the name). Never edit the team's columns A–Q.
+7. Send team notes (what changed per row, what needs their answer) without mentioning AI.
 
-AI Comment style: root cause in one line, what changed and where users see it, any deviation from their example, then numbered questions.
+Notes style: root cause in one line, what changed and where users see it, any deviation from their example, then numbered questions.
