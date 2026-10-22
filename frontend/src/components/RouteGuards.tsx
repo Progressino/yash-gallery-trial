@@ -1,5 +1,5 @@
 import { Navigate, Outlet, useLocation } from 'react-router-dom'
-import { useAuth, isKarigarUser, canAccessModule, userModules } from '../store/auth'
+import { useAuth, isKarigarUser, isVendorUser, canAccessModule, userModules } from '../store/auth'
 import { moduleForPath } from '../lib/modules'
 
 export function KarigarGate() {
@@ -9,10 +9,18 @@ export function KarigarGate() {
   return <Outlet />
 }
 
+export function VendorGate() {
+  const user = useAuth(s => s.user)
+  if (!user) return null
+  if (!isVendorUser(user)) return <Navigate to="/" replace />
+  return <Outlet />
+}
+
 export function StaffGate() {
   const user = useAuth(s => s.user)
   if (!user) return null
   if (isKarigarUser(user)) return <Navigate to="/production-entry" replace />
+  if (isVendorUser(user)) return <Navigate to="/vendor" replace />
   return <Outlet />
 }
 

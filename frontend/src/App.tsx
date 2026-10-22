@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-quer
 import axios from 'axios'
 import Layout from './components/Layout'
 import KarigarLayout from './components/KarigarLayout'
-import { KarigarGate, StaffGate, ModuleAccessGate } from './components/RouteGuards'
+import { KarigarGate, VendorGate, StaffGate, ModuleAccessGate } from './components/RouteGuards'
 import { isHrmOnlyUser } from './store/auth'
 import Login from './pages/Login'
 import api, { cacheHydrateWarm, cacheLoad, getCoverage, getJobStatus, invalidateDataQueries, waitForWarmCacheReady } from './api/client'
@@ -15,7 +15,8 @@ import { isErpModulePath } from './lib/erpModulePaths'
 import { useUsageTracking } from './lib/usageTracker'
 import { coverageJobsRunning, coverageNeedsSync } from './lib/coverageJobs'
 import { useSession } from './store/session'
-import { useAuth, isKarigarUser, type AuthUser } from './store/auth'
+import { useAuth, isKarigarUser, isVendorUser, type AuthUser } from './store/auth'
+const VendorPortal = lazy(() => import('./pages/VendorPortal'))
 const Dashboard   = lazy(() => import('./pages/Dashboard'))
 const POFresh     = lazy(() => import('./pages/POFresh'))
 const PO2         = lazy(() => import('./pages/PO2'))
@@ -155,6 +156,7 @@ function ProtectedRoute() {
   /** Keep last known profile when the server is busy (upload/restart) but cookie may still be valid. */
   const activeUser = data ?? (authUnreachable ? cachedUser : null) ?? cachedUser
   const isKarigar = isKarigarUser(activeUser)
+  const isVendor = isVendorUser(activeUser)
   const hrmOnly = isHrmOnlyUser(activeUser)
   useUsageTracking(Boolean(activeUser) && !authUnauthorized)
 
@@ -163,7 +165,7 @@ function ProtectedRoute() {
 
   // Only show "Syncing" while this query is actually fetching — never when disabled
   // (React Query v5 leaves disabled queries isPending=true, which stuck HRM on Syncing).
-  const sessionRestoreEnabled = authVerified && !isKarigar && !hrmOnly && !erpModuleRoute
+  const sessionRestoreEnabled = authVerified && !isKarigar && !isVendor && !hrmOnly && !erpModuleRoute
   const { isFetching: isSessionRestoring } = useQuery({
     queryKey: ['session-auto-restore'],
     queryFn: async () => {
@@ -242,7 +244,7 @@ function ProtectedRoute() {
   })
   const isRestoring = sessionRestoreEnabled && isSessionRestoring
 
-  const pollCoverage = authVerified && !isKarigar && !hrmOnly && !erpModuleRoute
+  const pollCoverage = authVerified && !isKarigar && !isVendor && !hrmOnly && !erpModuleRoute
   const dataStillLoading = useSession(s => {
     if (erpModuleRoute) return false
     const loaded = poOperationalLoaded(s)
@@ -284,7 +286,7 @@ function ProtectedRoute() {
           </button>
         </div>
       )}
-      {isRestoring && !isKarigar && !hrmOnly && !invUploadRunning && !erpModuleRoute && (
+      {isRestoring && !isKarigar && !isVendor && !hrmOnly && !invUploadRunning && !erpModuleRoute && (
         <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
           <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -293,7 +295,7 @@ function ProtectedRoute() {
           Syncing your data…
         </div>
       )}
-      {!isRestoring && dataStillLoading && !isKarigar && !hrmOnly && !invUploadRunning && !erpModuleRoute && (
+      {!isRestoring && dataStillLoading && !isKarigar && !isVendor && !hrmOnly && !invUploadRunning && !erpModuleRoute && (
         <div className="fixed top-0 left-0 right-0 z-[9999] flex items-center justify-center gap-2 bg-[#002B5B] text-white text-xs py-1.5 shadow-md">
           <svg className="animate-spin h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -322,6 +324,10 @@ export default function App() {
                 <Route path="/production-entry" element={<StitchingCosting karigarOnly />} />
                 <Route path="*" element={<Navigate to="/production-entry" replace />} />
               </Route>
+            </Route>
+            <Route element={<VendorGate />}>
+              <Route path="/vendor" element={<Suspense fallback={null}><VendorPortal /></Suspense>} />
+              <Route path="*" element={<Navigate to="/vendor" replace />} />
             </Route>
             <Route element={<StaffGate />}>
             <Route path="/" element={<Layout />}>

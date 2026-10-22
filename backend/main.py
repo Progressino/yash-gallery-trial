@@ -26,7 +26,13 @@ from .routers import upload, data, cache, po, shipment, auth as auth_router
 from .routers.admin_performance import router as admin_performance_router
 from .routers.usage import report_router as usage_report_router, track_router as usage_track_router
 from .routers.auth import verify_token, decode_token
-from .services.permissions import karigar_may_access_api, may_access_erp_admin, KARIGAR_ROLE
+from .services.permissions import (
+    karigar_may_access_api,
+    vendor_may_access_api,
+    may_access_erp_admin,
+    KARIGAR_ROLE,
+    VENDOR_ROLE,
+)
 from .routers.finance import router as finance_router
 from .routers.item import router as item_router
 from .routers.sales import router as sales_router
@@ -53,6 +59,7 @@ from .db.grey_db import init_db as init_grey_db
 from .db.stitching_db import init_db as init_stitching_db
 from .db.hrm_db import init_db as init_hrm_db
 from .db.users_db import init_db as init_users_db
+from .db.vendor_portal_db import init_db as init_vendor_portal_db
 from .db.po_raised_db import init_db as init_po_raised_db
 from .db.forecast_session_pg import init_db as init_forecast_session_pg
 from .db.forecast_ops_pg import init_db as init_forecast_ops_pg
@@ -68,6 +75,7 @@ init_grey_db()
 init_stitching_db()
 init_hrm_db()
 init_users_db()
+init_vendor_portal_db()
 init_po_raised_db()
 init_forecast_session_pg()
 init_forecast_ops_pg()
@@ -3609,6 +3617,10 @@ async def auth_middleware(request: Request, call_next):
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=403, content={"detail": "Access denied for karigar role"})
 
+    if role == VENDOR_ROLE and not vendor_may_access_api(path, request.method):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=403, content={"detail": "Access denied for vendor role"})
+
     if path.startswith("/api/erp-admin") and not may_access_erp_admin(role):
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=403, content={"detail": "Admin access required"})
@@ -3838,6 +3850,8 @@ app.include_router(marketplace_router, prefix="/api/marketplace", tags=["marketp
 app.include_router(myntra_partner_router, prefix="/api/myntra/partner", tags=["myntra-partner"])
 app.include_router(gate_router,        prefix="/api/gate",       tags=["gate"])
 app.include_router(document_audit_router, prefix="/api/document-audit", tags=["document-audit"])
+from .routers.vendor_portal import router as vendor_portal_router
+app.include_router(vendor_portal_router, prefix="/api/vendor", tags=["vendor-portal"])
 
 
 @app.get("/api/health")

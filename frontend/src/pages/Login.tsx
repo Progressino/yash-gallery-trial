@@ -19,6 +19,8 @@ function profileFromLoginData(data: Record<string, unknown>): AuthUser {
     modules: data.modules as string[] | undefined,
     hrm_scope: data.hrm_scope as AuthUser['hrm_scope'],
     is_karigar: data.role === 'Karigar',
+    is_vendor: data.role === 'Vendor',
+    vendor: (data.vendor as AuthUser['vendor']) ?? null,
     may_upload_historical: data.may_upload_historical as boolean | undefined,
     may_reset_all: data.may_reset_all as boolean | undefined,
   }
@@ -47,7 +49,8 @@ export default function Login() {
   const finishLogin = (data: Record<string, unknown>) => {
     const profile = profileFromLoginData(data)
     setUser(profile)
-    const dest = (data.redirect as string) || (data.role === 'Karigar' ? '/production-entry' : '/')
+    const dest = (data.redirect as string)
+      || (data.role === 'Karigar' ? '/production-entry' : data.role === 'Vendor' ? '/vendor' : '/')
     nav(dest, { replace: true })
   }
 

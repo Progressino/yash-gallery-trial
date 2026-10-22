@@ -33,6 +33,9 @@ class UserIn(BaseModel):
     hrm_department_id: Optional[int] = None
     reporting_hod_user_id: Optional[int] = None
     module_access: Optional[str] = None
+    vendor_party_kind: Optional[str] = None
+    vendor_party_id: Optional[int] = None
+    vendor_portal_role: Optional[str] = None
 
 class UserUpdate(BaseModel):
     email: Optional[str] = None
@@ -47,6 +50,9 @@ class UserUpdate(BaseModel):
     hrm_department_id: Optional[int] = None
     reporting_hod_user_id: Optional[int] = None
     module_access: Optional[str] = None
+    vendor_party_kind: Optional[str] = None
+    vendor_party_id: Optional[int] = None
+    vendor_portal_role: Optional[str] = None
 
 class ActivityIn(BaseModel):
     username: str
@@ -273,11 +279,44 @@ def get_users(include_inactive: bool = False):
     return list_users(active_only=not include_inactive)
 
 
+def _link_vendor_login(user_id: int, kind: str | None, party_id: int | None, portal_role: str | None) -> None:
+    from ..db.vendor_portal_db import upsert_link
+
+    if not kind or not party_id:
+        raise HTTPException(status_code=400, detail="Vendor users need a supplier or processor link")
+    try:
+        upsert_link(
+            user_id=user_id,
+            party_kind=kind.strip().lower(),
+            party_id=int(party_id),
+            portal_role=(portal_role or "vendor_ops").strip().lower(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/users")
 def post_user(body: UserIn):
+    data = body.model_dump()
+    kind = data.pop("vendor_party_kind", None)
+    party_id = data.pop("vendor_party_id", None)
+    portal_role = data.pop("vendor_portal_role", None)
+    role_name = ""
+    if body.role_id:
+        role_name = next((r["role_name"] for r in list_roles() if r["id"] == body.role_id), "")
+    if role_name == "Vendor" and (not kind or not party_id):
+        raise HTTPException(status_code=400, detail="Vendor users need a supplier or processor link")
     try:
-        create_user(body.model_dump())
+        create_user(data)
+        if role_name == "Vendor":
+            from ..db.users_db import list_users
+            created = next((u for u in list_users(active_only=False) if u["username"] == body.username.strip()), None)
+            if not created:
+                raise HTTPException(status_code=500, detail="User was created but could not be linked")
+            _link_vendor_login(int(created["id"]), kind, party_id, portal_role)
         return {"ok": True}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except sqlite3.IntegrityError as e:
@@ -297,7 +336,13 @@ def post_user(body: UserIn):
 
 @router.patch("/users/{uid}")
 def patch_user(uid: int, body: UserUpdate):
-    update_user(uid, {k: v for k, v in body.model_dump().items() if v is not None})
+    data = body.model_dump()
+    kind = data.pop("vendor_party_kind", None)
+    party_id = data.pop("vendor_party_id", None)
+    portal_role = data.pop("vendor_portal_role", None)
+    update_user(uid, {k: v for k, v in data.items() if v is not None})
+    if kind and party_id:
+        _link_vendor_login(uid, kind, party_id, portal_role)
     return {"ok": True}
 
 @router.delete("/users/{uid}")

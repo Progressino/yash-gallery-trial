@@ -12,6 +12,7 @@ ROLE_SIR = "Sir"
 ROLE_HOD = "HOD"
 ROLE_EMPLOYEE = "Employee"
 ROLE_KARIGAR = "Karigar"
+ROLE_VENDOR = "Vendor"
 
 # Legacy roles that retain full ERP access.
 LEGACY_FULL_ERP_ROLES = frozenset({"Manager", "Executive", "Clerk", "Viewer"})
@@ -178,6 +179,8 @@ def _parse_module_access(raw: str | None) -> list[str] | None:
 def default_modules_for_role(role_name: str) -> list[str]:
     if role_name == ROLE_KARIGAR:
         return ["stitching"]
+    if role_name == ROLE_VENDOR:
+        return ["vendor"]
     if role_name in FULL_ERP_ROLES:
         return list(ALL_MODULES)
     if role_name in HRM_ONLY_ROLES:

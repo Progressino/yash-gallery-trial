@@ -59,6 +59,9 @@ const EMPTY_USER_FORM = {
   department: 'Production', karigar_id: '',
   employee_id: '' as number | '', hrm_department_id: '' as number | '',
   reporting_hod_user_id: '' as number | '', module_access: '',
+  vendor_party_kind: 'supplier',
+  vendor_party_id: '' as number | '',
+  vendor_portal_role: 'vendor_ops',
 }
 
 export default function Admin() {
@@ -92,6 +95,12 @@ export default function Admin() {
     if (form.reporting_hod_user_id !== '') body.reporting_hod_user_id = Number(form.reporting_hod_user_id)
     if (modules.length) body.module_access = JSON.stringify(modules)
     else if (form.module_access) body.module_access = form.module_access
+    const roleName = roles.find(r => r.id === form.role_id)?.role_name
+    if (roleName === 'Vendor') {
+      body.vendor_party_kind = form.vendor_party_kind
+      body.vendor_party_id = form.vendor_party_id === '' ? null : Number(form.vendor_party_id)
+      body.vendor_portal_role = form.vendor_portal_role
+    }
     return body
   }
 
@@ -193,6 +202,17 @@ export default function Admin() {
   const newUserRole = roles.find(r => r.id === userForm.role_id)?.role_name
   const editRoleId = editData.role_id !== undefined ? Number(editData.role_id) : editUser?.role_id
   const editUserRole = roles.find(r => r.id === editRoleId)?.role_name
+  const showVendorLink = newUserRole === 'Vendor' || editUserRole === 'Vendor'
+  const { data: suppliers = [] } = useQuery<{ id: number; supplier_name: string; supplier_code: string }[]>({
+    queryKey: ['vendor-link-suppliers'],
+    queryFn: () => api.get('/purchase/suppliers').then(r => r.data),
+    enabled: tab === 'users' && showVendorLink,
+  })
+  const { data: processors = [] } = useQuery<{ id: number; processor_name: string; processor_code: string }[]>({
+    queryKey: ['vendor-link-processors'],
+    queryFn: () => api.get('/purchase/processors').then(r => r.data),
+    enabled: tab === 'users' && showVendorLink,
+  })
 
   const hrmDeptLabel = (id: number | null | undefined) => {
     if (id == null) return '—'
@@ -413,6 +433,34 @@ export default function Admin() {
                     {departmentNames.map(d => <option key={d}>{d}</option>)}
                   </select>
                 </div>
+                {newUserRole === 'Vendor' && (
+                  <>
+                    <div><label className="text-xs text-gray-500">Linked master</label>
+                      <select value={userForm.vendor_party_kind} onChange={e => setUserForm(f => ({ ...f, vendor_party_kind: e.target.value, vendor_party_id: '' }))}
+                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="supplier">Purchase supplier</option>
+                        <option value="processor">Job work / printing processor</option>
+                      </select>
+                    </div>
+                    <div><label className="text-xs text-gray-500">Supplier or processor</label>
+                      <select value={userForm.vendor_party_id} onChange={e => setUserForm(f => ({ ...f, vendor_party_id: e.target.value ? +e.target.value : '' }))}
+                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="">Select…</option>
+                        {userForm.vendor_party_kind === 'supplier'
+                          ? suppliers.map(s => <option key={s.id} value={s.id}>{s.supplier_name} ({s.supplier_code})</option>)
+                          : processors.map(p => <option key={p.id} value={p.id}>{p.processor_name} ({p.processor_code})</option>)}
+                      </select>
+                    </div>
+                    <div><label className="text-xs text-gray-500">Portal role</label>
+                      <select value={userForm.vendor_portal_role} onChange={e => setUserForm(f => ({ ...f, vendor_portal_role: e.target.value }))}
+                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="vendor_ops">Operations (no rates)</option>
+                        <option value="vendor_accounts">Accounts (rates visible)</option>
+                        <option value="vendor_admin">Vendor admin (rates visible)</option>
+                      </select>
+                    </div>
+                  </>
+                )}
                 {newUserRole === 'Karigar' && (
                   <div><label className="text-xs text-gray-500">Karigar ID (master)</label>
                     <input value={userForm.karigar_id} placeholder="e.g. K001"
@@ -511,6 +559,37 @@ export default function Admin() {
                     onChange={e => setEditData(d => ({ ...d, password: e.target.value }))}
                     className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
                 </div>
+                {editUserRole === 'Vendor' && (
+                  <>
+                    <div><label className="text-xs text-gray-500">Linked master</label>
+                      <select value={(editData.vendor_party_kind as string) || 'supplier'}
+                        onChange={e => setEditData(d => ({ ...d, vendor_party_kind: e.target.value, vendor_party_id: '' }))}
+                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="supplier">Purchase supplier</option>
+                        <option value="processor">Job work / printing processor</option>
+                      </select>
+                    </div>
+                    <div><label className="text-xs text-gray-500">Supplier or processor</label>
+                      <select value={(editData.vendor_party_id as number | string) ?? ''}
+                        onChange={e => setEditData(d => ({ ...d, vendor_party_id: e.target.value ? +e.target.value : '' }))}
+                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="">Select…</option>
+                        {((editData.vendor_party_kind as string) || 'supplier') === 'supplier'
+                          ? suppliers.map(s => <option key={s.id} value={s.id}>{s.supplier_name}</option>)
+                          : processors.map(p => <option key={p.id} value={p.id}>{p.processor_name}</option>)}
+                      </select>
+                    </div>
+                    <div><label className="text-xs text-gray-500">Portal role</label>
+                      <select value={(editData.vendor_portal_role as string) || 'vendor_ops'}
+                        onChange={e => setEditData(d => ({ ...d, vendor_portal_role: e.target.value }))}
+                        className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1">
+                        <option value="vendor_ops">Operations (no rates)</option>
+                        <option value="vendor_accounts">Accounts (rates visible)</option>
+                        <option value="vendor_admin">Vendor admin (rates visible)</option>
+                      </select>
+                    </div>
+                  </>
+                )}
                 {editUserRole === 'Karigar' && (
                   <div><label className="text-xs text-gray-500">Karigar ID (master)</label>
                     <input value={(editData.karigar_id as string) ?? editUser.karigar_id ?? ''} placeholder="e.g. K001"

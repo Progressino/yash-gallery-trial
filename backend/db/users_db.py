@@ -21,6 +21,7 @@ DEFAULT_ROLES = [
     ('Clerk',     'Data entry only; limited view'),
     ('Viewer',    'Read-only access to reports'),
     ('Karigar',   'Stitching production entry only (mobile floor users)'),
+    ('Vendor',    'External vendor portal — own purchase orders and job work only'),
 ]
 
 DEPARTMENTS = ['Sales', 'Merchandising', 'Stores', 'Production', 'Quality', 'Logistics', 'Finance', 'Admin']

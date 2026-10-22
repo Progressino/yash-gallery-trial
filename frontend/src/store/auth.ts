@@ -28,6 +28,15 @@ export interface AuthUser {
   hrm_scope?: HrmScopeInfo
   permissions?: string[]
   is_karigar?: boolean
+  is_vendor?: boolean
+  vendor?: {
+    party_kind: 'supplier' | 'processor' | string
+    party_id: number
+    party_name?: string
+    party_code?: string
+    portal_role?: string
+    show_commercial?: boolean
+  } | null
   historical_upload_locked?: boolean
   may_upload_historical?: boolean
   may_upload_daily?: boolean
@@ -86,12 +95,17 @@ export function isKarigarUser(user: AuthUser | null | undefined): boolean {
   return user?.role === 'Karigar' || !!user?.is_karigar
 }
 
+export function isVendorUser(user: AuthUser | null | undefined): boolean {
+  return user?.role === 'Vendor' || !!user?.is_vendor
+}
+
 const FULL_ERP_ROLES = new Set(['Super Admin', 'Admin', 'Sir', 'Manager', 'Executive', 'Clerk', 'Viewer'])
 
 export function userModules(user: AuthUser | null | undefined): string[] {
   if (!user) return []
   if (user.modules?.length) return user.modules
   if (user.role === 'Karigar') return ['stitching']
+  if (user.role === 'Vendor') return ['vendor']
   if (user.role === 'HOD' || user.role === 'Employee') return ['hrm']
   if (FULL_ERP_ROLES.has(user.role || '')) return ['*']
   return ['hrm']

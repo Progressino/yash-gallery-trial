@@ -47,7 +47,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Auth middleware — same JWT logic as main backend
 from .routers.auth import decode_token
-from .services.permissions import karigar_may_access_api, KARIGAR_ROLE
+from .services.permissions import karigar_may_access_api, KARIGAR_ROLE, VENDOR_ROLE
 from .session import store as _session_store
 
 _EXEMPT = {"/api/auth/login", "/api/auth/logout", "/api/auth/me", "/api/health"}
@@ -64,6 +64,8 @@ async def auth_mw(request: Request, call_next):
         return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
     request.state.auth = payload
     role = payload.get("role", "Admin")
+    if role == VENDOR_ROLE:
+        return JSONResponse(status_code=403, content={"detail": "Access denied for vendor role"})
     if role == KARIGAR_ROLE and not karigar_may_access_api(path, request.method):
         return JSONResponse(status_code=403, content={"detail": "Access denied"})
     return await call_next(request)

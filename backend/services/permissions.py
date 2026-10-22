@@ -5,6 +5,15 @@ from __future__ import annotations
 FULL_ACCESS_ROLES = frozenset({"Super Admin", "Admin", "Manager", "Executive", "Clerk", "Viewer"})
 
 KARIGAR_ROLE = "Karigar"
+VENDOR_ROLE = "Vendor"
+
+# Vendor logins may call only these API prefixes (admin vendor routes are internal).
+_VENDOR_ALLOWED_PREFIXES = (
+    "/api/auth/",
+    "/api/health",
+    "/api/usage/track",
+    "/api/vendor/",
+)
 
 # Stitching endpoints a karigar may call (production entry only).
 _KARIGAR_STITCHING_PREFIXES = (
@@ -22,6 +31,8 @@ _ERP_ADMIN_ROLES = frozenset({"Super Admin", "Admin", "Manager", "Sir"})
 def permissions_for_role(role_name: str) -> list[str]:
     if role_name == KARIGAR_ROLE:
         return ["stitching.production_entry"]
+    if role_name == VENDOR_ROLE:
+        return ["vendor.portal"]
     from .upload_policy import upload_policy_for_role
 
     pol = upload_policy_for_role(role_name)
@@ -51,6 +62,16 @@ def karigar_may_access_api(path: str, method: str) -> bool:
     if not path.startswith("/api/stitching/"):
         return False
     return any(path.startswith(prefix) for prefix in _KARIGAR_STITCHING_PREFIXES)
+
+
+def vendor_may_access_api(path: str, method: str) -> bool:
+    """Vendor role is confined to auth and the vendor portal. Admin link APIs stay internal."""
+    del method
+    if path.startswith("/api/vendor/admin"):
+        return False
+    if path == "/api/health" or path == "/api/usage/track":
+        return True
+    return any(path.startswith(prefix) for prefix in _VENDOR_ALLOWED_PREFIXES)
 
 
 def may_access_erp_admin(role_name: str) -> bool:

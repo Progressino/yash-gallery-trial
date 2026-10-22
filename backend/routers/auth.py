@@ -16,7 +16,7 @@ from jose import jwt, JWTError
 from pydantic import BaseModel, Field
 
 from ..db.users_db import verify_erp_user, get_user_auth_profile
-from ..services.permissions import permissions_for_role, KARIGAR_ROLE
+from ..services.permissions import permissions_for_role, KARIGAR_ROLE, VENDOR_ROLE
 from ..services.upload_policy import upload_policy_for_role
 from ..services.rbac import build_hrm_scope, resolve_module_access, ROLE_SUPER_ADMIN
 from ..services.login_otp import (
@@ -100,13 +100,33 @@ def _reset_session_cookie(request: Request, response: Response) -> None:
     response.delete_cookie("session_id", path="/", secure=sec, httponly=True, samesite="lax")
 
 
+def _vendor_profile(user_id) -> dict | None:
+    if not user_id:
+        return None
+    from ..db.vendor_portal_db import get_link_for_user, show_commercial
+
+    link = get_link_for_user(int(user_id))
+    if not link:
+        return None
+    return {
+        "party_kind": link["party_kind"],
+        "party_id": link["party_id"],
+        "party_name": link.get("party_name") or "",
+        "party_code": link.get("party_code") or "",
+        "portal_role": link["portal_role"],
+        "show_commercial": show_commercial(link["portal_role"]),
+    }
+
+
 def _login_payload(user: dict) -> dict:
     role = user.get("role_name") or user.get("role") or "Clerk"
     username = user.get("username") or ""
     modules = resolve_module_access(role, user.get("module_access"))
     hrm_scope = build_hrm_scope(user, role=role)
     redirect = "/production-entry" if role == KARIGAR_ROLE else "/"
-    if role not in (KARIGAR_ROLE,) and modules == ["hrm"]:
+    if role == VENDOR_ROLE:
+        redirect = "/vendor"
+    if role not in (KARIGAR_ROLE, VENDOR_ROLE) and modules == ["hrm"]:
         redirect = "/hrm"
     pol = upload_policy_for_role(role, username)
     return {
@@ -130,6 +150,9 @@ def _login_payload(user: dict) -> dict:
             "role": hrm_scope.role,
         },
         "permissions": permissions_for_role(role),
+        "is_karigar": role == KARIGAR_ROLE,
+        "is_vendor": role == VENDOR_ROLE,
+        "vendor": _vendor_profile(user.get("id")) if role == VENDOR_ROLE else None,
         **pol,
         "redirect": redirect,
     }
@@ -386,6 +409,8 @@ def me(request: Request):
             },
             "permissions": permissions_for_role(role),
             "is_karigar": role == KARIGAR_ROLE,
+            "is_vendor": role == VENDOR_ROLE,
+            "vendor": _vendor_profile(profile.get("id")) if role == VENDOR_ROLE else None,
             **pol,
         }
 
