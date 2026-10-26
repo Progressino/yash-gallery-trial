@@ -306,6 +306,7 @@ class TaskApproveIn(BaseModel):
     action: str = "Approved"  # Approved | Cancelled
     notes: Optional[str] = ""
     approved_by: Optional[str] = ""
+    achievement_pct: Optional[int] = None
 
 
 class ReassignDayIn(BaseModel):
@@ -503,6 +504,7 @@ class OneTimeTaskNotesIn(BaseModel):
 class OneTimeTaskApprovalIn(BaseModel):
     approved_by: Optional[str] = ""
     notes: Optional[str] = ""
+    achievement_pct: Optional[int] = None
 
 
 @router.get("/scope")
@@ -1057,6 +1059,8 @@ def post_approve_task_log(log_id: int, body: TaskApproveIn, request: Request):
     """Linked person (or HOD/Admin) approves or cancels a Done/Partial mark."""
     scope = _scope_from_request(request)
     _, name = _recorder_from_request(request)
+    if body.achievement_pct is None or not 0 <= body.achievement_pct <= 100:
+        raise HTTPException(400, "Enter achieved % from 0 to 100")
     ok = approve_task_log(
         log_id,
         actor=body.approved_by or name,
@@ -1064,9 +1068,10 @@ def post_approve_task_log(log_id: int, body: TaskApproveIn, request: Request):
         action=body.action or "Approved",
         notes=body.notes or "",
         allow_override=scope.can_edit_assignments,
+        achievement_pct=body.achievement_pct,
     )
     if ok is True:
-        return {"ok": True}
+        return {"ok": True, "achievement_pct": body.achievement_pct}
     if ok == "self_forbidden":
         raise HTTPException(403, "You cannot approve or cancel your own responsibility")
     if ok == "forbidden":
@@ -1077,6 +1082,8 @@ def post_approve_task_log(log_id: int, body: TaskApproveIn, request: Request):
         raise HTTPException(409, "Approval window closed")
     if ok == "invalid_action":
         raise HTTPException(400, "action must be Approved or Cancelled")
+    if ok == "bad_pct":
+        raise HTTPException(400, "Enter achieved % from 0 to 100")
     raise HTTPException(404, "Task log not found")
 
 
@@ -1846,9 +1853,14 @@ def post_approve_one_time_task(task_id: int, body: OneTimeTaskApprovalIn, reques
     assert_employee_in_scope(scope, owner)
     if scope.is_employee:
         raise HTTPException(403, "HOD approval required")
-    if not approve_one_time_task(task_id, body.approved_by or "", body.notes or ""):
+    if body.achievement_pct is None or not 0 <= body.achievement_pct <= 100:
+        raise HTTPException(400, "Enter achieved % from 0 to 100")
+    ok = approve_one_time_task(task_id, body.approved_by or "", body.notes or "", body.achievement_pct)
+    if ok == "bad_pct":
+        raise HTTPException(400, "Enter achieved % from 0 to 100")
+    if not ok:
         raise HTTPException(400, "Task must be Done to approve")
-    return {"ok": True}
+    return {"ok": True, "achievement_pct": body.achievement_pct}
 
 
 @router.post("/one-time-tasks/{task_id}/reject")
@@ -1860,9 +1872,14 @@ def post_reject_one_time_task(task_id: int, body: OneTimeTaskApprovalIn, request
     assert_employee_in_scope(scope, owner)
     if scope.is_employee:
         raise HTTPException(403, "HOD approval required")
-    if not reject_one_time_task(task_id, body.approved_by or "", body.notes or ""):
+    if body.achievement_pct is None or not 0 <= body.achievement_pct <= 100:
+        raise HTTPException(400, "Enter achieved % from 0 to 100")
+    ok = reject_one_time_task(task_id, body.approved_by or "", body.notes or "", body.achievement_pct)
+    if ok == "bad_pct":
+        raise HTTPException(400, "Enter achieved % from 0 to 100")
+    if not ok:
         raise HTTPException(400, "Task must be Done to reject")
-    return {"ok": True}
+    return {"ok": True, "achievement_pct": body.achievement_pct}
 
 
 @router.post("/one-time-tasks/{task_id}/manual-duration")

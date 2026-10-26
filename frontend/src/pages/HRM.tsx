@@ -27,6 +27,20 @@ function withFrequencyHeadings(items: any[], renderItem: (i: any) => ReactNode, 
   ])
 }
 
+function achievedPctOrNull(raw: string | undefined): number | null {
+  const text = String(raw ?? '').trim()
+  if (!/^\d{1,3}$/.test(text)) {
+    alert('Enter achieved % from 0 to 100')
+    return null
+  }
+  const n = Number(text)
+  if (n > 100) {
+    alert('Enter achieved % from 0 to 100')
+    return null
+  }
+  return n
+}
+
 const ONE_TIME_STATUSES = ['Pending', 'In Progress', 'Done', 'Approved', 'Rejected', 'On Hold'] as const
 // Leave is set from the Employee Check header (Leave button), not per item.
 const TASK_LOG_STATUSES = ['Done', 'Partial', 'Missed', 'Blocked', 'N/A'] as const
@@ -212,6 +226,8 @@ export default function HRM() {
   const [completeNotes, setCompleteNotes] = useState('')
   const [approvalModal, setApprovalModal] = useState<{ id: number; title: string; action: 'approve' | 'reject' } | null>(null)
   const [approvalNotes, setApprovalNotes] = useState('')
+  const [approvalPct, setApprovalPct] = useState('')
+  const [inboxPct, setInboxPct] = useState<Record<number, string>>({})
   const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks'>('responsibilities')
   const [reportsSubTab, setReportsSubTab] = useState<'dwr' | 'hours' | 'performance'>('dwr')
   const [reportsDept, setReportsDept] = useState<any>('')
@@ -535,8 +551,8 @@ export default function HRM() {
     onError: (err: any) => alert(err?.response?.data?.detail || 'Reassignment failed'),
   })
   const approveLogMut = useMutation({
-    mutationFn: ({ id, action }: { id: number; action: string }) =>
-      api.post(`/hrm/tasks/logs/${id}/approve`, { action }),
+    mutationFn: ({ id, action, achievement_pct }: { id: number; action: string; achievement_pct: number }) =>
+      api.post(`/hrm/tasks/logs/${id}/approve`, { action, achievement_pct }),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
       qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
@@ -822,19 +838,23 @@ export default function HRM() {
     onError: (err: any) => alert(err?.response?.data?.detail || 'Could not resume task'),
   })
   const approveOneTimeTaskMut = useMutation({
-    mutationFn: ({ id, notes }: { id: number; notes: string }) => api.post(`/hrm/one-time-tasks/${id}/approve`, { notes }),
+    mutationFn: ({ id, notes, achievement_pct }: { id: number; notes: string; achievement_pct: number }) =>
+      api.post(`/hrm/one-time-tasks/${id}/approve`, { notes, achievement_pct }),
     onSuccess: () => {
       invalidateTaskMetrics()
       setApprovalModal(null)
       setApprovalNotes('')
+      setApprovalPct('')
     },
   })
   const rejectOneTimeTaskMut = useMutation({
-    mutationFn: ({ id, notes }: { id: number; notes: string }) => api.post(`/hrm/one-time-tasks/${id}/reject`, { notes }),
+    mutationFn: ({ id, notes, achievement_pct }: { id: number; notes: string; achievement_pct: number }) =>
+      api.post(`/hrm/one-time-tasks/${id}/reject`, { notes, achievement_pct }),
     onSuccess: () => {
       invalidateTaskMetrics()
       setApprovalModal(null)
       setApprovalNotes('')
+      setApprovalPct('')
     },
   })
   const cancelOneTimeTaskMut = useMutation({
@@ -1122,7 +1142,7 @@ export default function HRM() {
       <div className="flex-1 min-w-0">
         <p className="font-medium text-sm text-gray-800">{i.title}</p>
         <p className="text-xs text-gray-400">
-          {i.frequency} · {i.status}{i.approval_status ? ` · ${i.approval_status}` : ''}{i.marked_by ? ` · ${i.marked_by}` : ''}{i.blocker_reason ? ` — ${i.blocker_reason}` : ''}
+          {i.frequency} · {i.status}{i.approval_status ? ` · ${i.approval_status}` : ''}{i.achievement_pct != null && i.achievement_pct !== '' ? ` · Achieved ${i.achievement_pct}%` : ''}{i.marked_by ? ` · ${i.marked_by}` : ''}{i.blocker_reason ? ` — ${i.blocker_reason}` : ''}
         </p>
         {i.cover_work && i.original_employee_name && (
           <p className="text-[10px] mt-0.5 text-amber-800">
@@ -1244,9 +1264,27 @@ export default function HRM() {
               </p>
               {p.remarks && <p className="text-xs text-gray-600 mt-1">{p.remarks}</p>}
             </div>
-            <div className="flex gap-1">
-              <button type="button" className="text-xs px-2 py-1 bg-green-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: p.task_log_id, action: 'Approved' })}>Approve</button>
-              <button type="button" className="text-xs px-2 py-1 bg-red-700 text-white rounded" onClick={() => approveLogMut.mutate({ id: p.task_log_id, action: 'Cancelled' })}>Reject</button>
+            <div className="flex items-center gap-1">
+              <label className="text-[10px] text-gray-500">Achieved %
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={inboxPct[p.task_log_id] ?? ''}
+                  onChange={e => setInboxPct(prev => ({ ...prev, [p.task_log_id]: e.target.value }))}
+                  className="ml-1 w-16 border rounded px-1 py-1 text-xs"
+                />
+              </label>
+              <button type="button" className="text-xs px-2 py-1 bg-green-700 text-white rounded" onClick={() => {
+                const n = achievedPctOrNull(inboxPct[p.task_log_id])
+                if (n == null) return
+                approveLogMut.mutate({ id: p.task_log_id, action: 'Approved', achievement_pct: n })
+              }}>Approve</button>
+              <button type="button" className="text-xs px-2 py-1 bg-red-700 text-white rounded" onClick={() => {
+                const n = achievedPctOrNull(inboxPct[p.task_log_id])
+                if (n == null) return
+                approveLogMut.mutate({ id: p.task_log_id, action: 'Cancelled', achievement_pct: n })
+              }}>Reject</button>
             </div>
           </div>
         ))}
@@ -2628,6 +2666,9 @@ export default function HRM() {
                           {Number(t.auto_approved) > 0 && (
                             <p className="text-[10px] mt-0.5 inline-block px-1 rounded bg-purple-100 text-purple-800">Auto-approved</p>
                           )}
+                          {t.achievement_pct != null && t.achievement_pct !== '' && (
+                            <p className="text-[10px] mt-0.5 text-indigo-700">Achieved {t.achievement_pct}%</p>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-xs text-gray-500">
                           <p>Start: {fmtDateTime(t.started_at)}</p>
@@ -2661,9 +2702,9 @@ export default function HRM() {
                             )}
                             {t.status === 'Done' && canAssignTasks && (
                               <>
-                                <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'approve' }); setApprovalNotes('') }}
+                                <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'approve' }); setApprovalNotes(''); setApprovalPct('') }}
                                   className="text-xs px-2 py-1 bg-green-600 text-white rounded">Approve</button>
-                                <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'reject' }); setApprovalNotes('') }}
+                                <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'reject' }); setApprovalNotes(''); setApprovalPct('') }}
                                   className="text-xs px-2 py-1 bg-red-500 text-white rounded">Reject</button>
                               </>
                             )}
@@ -2754,9 +2795,9 @@ export default function HRM() {
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex gap-1 justify-end">
-                            <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'approve' }); setApprovalNotes('') }}
+                            <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'approve' }); setApprovalNotes(''); setApprovalPct('') }}
                               className="text-xs px-2 py-1 bg-green-600 text-white rounded">Approve</button>
-                            <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'reject' }); setApprovalNotes('') }}
+                            <button onClick={() => { setApprovalModal({ id: t.id, title: t.title, action: 'reject' }); setApprovalNotes(''); setApprovalPct('') }}
                               className="text-xs px-2 py-1 bg-red-500 text-white rounded">Reject</button>
                           </div>
                         </td>
@@ -3538,6 +3579,11 @@ export default function HRM() {
             </h3>
             <p className="text-sm text-gray-600">{approvalModal.title}</p>
             <div>
+              <label className="text-xs text-gray-500">Achieved % (0–100)</label>
+              <input type="number" min={0} max={100} value={approvalPct} onChange={e => setApprovalPct(e.target.value)}
+                className="w-full border rounded px-2 py-1.5 text-sm mt-1" placeholder="How much of this task was achieved?" />
+            </div>
+            <div>
               <label className="text-xs text-gray-500">Notes (optional)</label>
               <textarea value={approvalNotes} onChange={e => setApprovalNotes(e.target.value)} rows={3}
                 className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
@@ -3545,10 +3591,12 @@ export default function HRM() {
             <div className="flex gap-2">
               <button
                 onClick={() => {
+                  const n = achievedPctOrNull(approvalPct)
+                  if (n == null) return
                   if (approvalModal.action === 'approve') {
-                    approveOneTimeTaskMut.mutate({ id: approvalModal.id, notes: approvalNotes })
+                    approveOneTimeTaskMut.mutate({ id: approvalModal.id, notes: approvalNotes, achievement_pct: n })
                   } else {
-                    rejectOneTimeTaskMut.mutate({ id: approvalModal.id, notes: approvalNotes })
+                    rejectOneTimeTaskMut.mutate({ id: approvalModal.id, notes: approvalNotes, achievement_pct: n })
                   }
                 }}
                 disabled={approveOneTimeTaskMut.isPending || rejectOneTimeTaskMut.isPending}

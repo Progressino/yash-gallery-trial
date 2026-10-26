@@ -308,3 +308,34 @@ def test_row5_backup_timer_time_and_appraisal_credit(env):
     appr_a = hrm_db.get_appraisal(a, MON, MON)
     assert appr_h["task_summary"]["done"] >= 1
     assert appr_a["task_summary"]["done"] == 0
+
+
+def test_stray_approval_records_achievement_pct(env, monkeypatch):
+    """Linked person must record achieved % on responsibility and one-time approval."""
+    a, h, client = env["a"], env["h"], env["client"]
+    rid = _resp(a, linked_to_employee_id=h)
+    hrm_db.mark_task(rid, MON, "Partial", "Worker A", allow_override=True)
+    log_id = _log_id(a, rid, MON)
+    assert hrm_db.approve_task_log(
+        log_id, actor="Hod H", linked_employee_id=h, action="Approved", achievement_pct=150,
+    ) == "bad_pct"
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="self", role="Employee", user_id=2, employee_id=h),
+    )
+    missing = client.post(f"/api/hrm/tasks/logs/{log_id}/approve", json={"action": "Approved"})
+    assert missing.status_code == 400
+    saved = client.post(
+        f"/api/hrm/tasks/logs/{log_id}/approve",
+        json={"action": "Cancelled", "achievement_pct": 40},
+    )
+    assert saved.status_code == 200
+    item = _check_item(a, rid, MON)
+    assert item["status"] == "Missed" and item["achievement_pct"] == 40
+
+    tid = _task(a, "One-time review")
+    assert hrm_db.start_one_time_task(tid) is True
+    assert hrm_db.complete_one_time_task(tid, "submitted") is True
+    assert hrm_db.approve_one_time_task(tid, "Hod H", "ok", 80) is True
+    row = next(t for t in hrm_db.list_one_time_tasks(employee_id=a) if t["id"] == tid)
+    assert row["status"] == "Approved" and row["achievement_pct"] == 80

@@ -639,6 +639,9 @@ def init_db():
         "ALTER TABLE one_time_tasks ADD COLUMN held_at TEXT DEFAULT ''",
         "ALTER TABLE one_time_tasks ADD COLUMN held_by TEXT DEFAULT ''",
         "ALTER TABLE one_time_tasks ADD COLUMN auto_approved INTEGER DEFAULT 0",
+        # Linked-person review: how much of the work was achieved (0–100)
+        "ALTER TABLE task_logs ADD COLUMN achievement_pct INTEGER",
+        "ALTER TABLE one_time_tasks ADD COLUMN achievement_pct INTEGER",
     ):
         try:
             conn.execute(sql)
@@ -3764,6 +3767,19 @@ def carried_forward_for_day(conn, employee_id: int, day: str) -> dict[int, dict]
     return out
 
 
+def parse_achievement_pct(value) -> int | None | str:
+    """None when omitted. Integer 0–100 when set. 'bad_pct' when the value is unusable."""
+    if value is None or value == "":
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return "bad_pct"
+    if isinstance(value, bool) or n < 0 or n > 100:
+        return "bad_pct"
+    return n
+
+
 def approve_task_log(
     task_log_id: int,
     *,
@@ -3772,10 +3788,14 @@ def approve_task_log(
     action: str = "Approved",
     notes: str = "",
     allow_override: bool = False,
+    achievement_pct: int | None = None,
 ) -> str | bool:
     """Linked-person Approve/Cancel a Done/Partial task. action: Approved | Cancelled."""
     if action not in ("Approved", "Cancelled"):
         return "invalid_action"
+    pct = parse_achievement_pct(achievement_pct)
+    if pct == "bad_pct":
+        return "bad_pct"
     conn = _connect()
     row = conn.execute(
         """
@@ -3829,7 +3849,8 @@ def approve_task_log(
         approval = "Approved"
 
     conn.execute(
-        """UPDATE task_logs SET status=?, approval_status=?, approved_by=?, approved_at=?, remarks=?
+        """UPDATE task_logs SET status=?, approval_status=?, approved_by=?, approved_at=?, remarks=?,
+           achievement_pct=COALESCE(?, achievement_pct)
            WHERE id=?""",
         (
             new_status,
@@ -3837,6 +3858,7 @@ def approve_task_log(
             actor,
             _now_iso(),
             (notes or row["remarks"] or "") if notes else (row["remarks"] or ""),
+            pct,
             task_log_id,
         ),
     )
@@ -3845,7 +3867,7 @@ def approve_task_log(
         task_log_id,
         f"linked_{action.lower()}",
         old_value=appr,
-        new_value=approval,
+        new_value=approval if pct is None else f"{approval} {pct}%",
         actor=actor,
         notes=notes,
         conn=conn,
@@ -5194,7 +5216,8 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
                COALESCE(hod_original_status,'') as hod_original_status,
                COALESCE(hod_edited_by,'') as hod_edited_by,
                COALESCE(hod_edited_role,'') as hod_edited_role,
-               COALESCE(hod_edited_at,'') as hod_edited_at
+               COALESCE(hod_edited_at,'') as hod_edited_at,
+               achievement_pct
         FROM task_logs
         WHERE employee_id=? AND log_date=?
         """,
@@ -5326,6 +5349,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             "backup_allocation_value": float(rdict.get("backup_allocation_value") or 0),
             "backup_allocation_unit": rdict.get("backup_allocation_unit") or "days",
             "approval_status": (log or {}).get("approval_status") or "",
+            "achievement_pct": (log or {}).get("achievement_pct"),
             "status": status,
             "marked": quality_marked,
             "quality_marked": quality_marked,
@@ -5383,6 +5407,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
             "marked": status not in ("Pending", ""),
             "quality_marked": status not in ("Pending", ""),
             "approval_status": (log.get("approval_status") if log else "") or "",
+            "achievement_pct": log.get("achievement_pct") if log else None,
             **_apply_slots_to_payload(
                 _timer_payload({**log, "log_date": day} if log else {"log_date": day}, events=events),
                 slots_by_log.get(lid, []) if lid else [],
@@ -6495,7 +6520,15 @@ def complete_one_time_task(
     return True
 
 
-def approve_one_time_task(task_id: int, approved_by: str = "", approval_notes: str = "") -> bool:
+def approve_one_time_task(
+    task_id: int,
+    approved_by: str = "",
+    approval_notes: str = "",
+    achievement_pct: int | None = None,
+) -> bool | str:
+    pct = parse_achievement_pct(achievement_pct)
+    if pct == "bad_pct":
+        return "bad_pct"
     conn = _connect()
     row = conn.execute(
         "SELECT status FROM one_time_tasks WHERE id=? AND active=1",
@@ -6507,16 +6540,25 @@ def approve_one_time_task(task_id: int, approved_by: str = "", approval_notes: s
     now = _now_iso()
     conn.execute(
         """UPDATE one_time_tasks
-           SET status='Approved', approved_at=?, approved_by=?, approval_notes=?, updated_at=?
+           SET status='Approved', approved_at=?, approved_by=?, approval_notes=?,
+               achievement_pct=COALESCE(?, achievement_pct), updated_at=?
            WHERE id=?""",
-        (now, approved_by or "", approval_notes or "", now, task_id),
+        (now, approved_by or "", approval_notes or "", pct, now, task_id),
     )
     conn.commit()
     conn.close()
     return True
 
 
-def reject_one_time_task(task_id: int, approved_by: str = "", approval_notes: str = "") -> bool:
+def reject_one_time_task(
+    task_id: int,
+    approved_by: str = "",
+    approval_notes: str = "",
+    achievement_pct: int | None = None,
+) -> bool | str:
+    pct = parse_achievement_pct(achievement_pct)
+    if pct == "bad_pct":
+        return "bad_pct"
     conn = _connect()
     row = conn.execute(
         """SELECT t.*, e.name as assignee_name
@@ -6532,9 +6574,10 @@ def reject_one_time_task(task_id: int, approved_by: str = "", approval_notes: st
     now = _now_iso()
     conn.execute(
         """UPDATE one_time_tasks
-           SET status='Rejected', approved_by=?, approval_notes=?, updated_at=?
+           SET status='Rejected', approved_by=?, approval_notes=?,
+               achievement_pct=COALESCE(?, achievement_pct), updated_at=?
            WHERE id=?""",
-        (approved_by or "", approval_notes or "", now, task_id),
+        (approved_by or "", approval_notes or "", pct, now, task_id),
     )
     # Rework notification to assignee (reuse approval notifications table)
     assignee_id = int(row["employee_id"])
