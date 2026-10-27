@@ -155,8 +155,8 @@ export default function VendorPortal() {
 
   const d = dash.data
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="bg-[#002B5B] text-white px-4 py-4 flex flex-wrap items-center justify-between gap-3">
+    <div className="h-[100dvh] max-h-[100dvh] bg-slate-50 flex flex-col overflow-hidden">
+      <header className="shrink-0 bg-[#002B5B] text-white px-4 py-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-xs text-blue-200">Yash Gallery ERP · Vendor Portal</p>
           <h1 className="text-lg font-semibold">{d?.party_name || user?.full_name || user?.username}</h1>
@@ -166,12 +166,13 @@ export default function VendorPortal() {
             {d?.portal_role ? ` · ${d.portal_role.replace('vendor_', '')}` : ''}
           </p>
         </div>
-        <button type="button" onClick={signOut} className="text-sm px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20">
+        <button type="button" onClick={signOut} className="text-sm px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 touch-manipulation">
           Sign out
         </button>
       </header>
 
-      <main className="max-w-6xl mx-auto p-4 space-y-4">
+      <main className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y">
+        <div className="max-w-6xl mx-auto p-4 pb-16 space-y-4">
         {dash.isError && (
           <p className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
             This login is not linked to an active supplier or processor. Ask ERP admin to activate vendor access.
@@ -334,6 +335,7 @@ export default function VendorPortal() {
             </table>
           </div>
         </section>
+        </div>
       </main>
     </div>
   )
