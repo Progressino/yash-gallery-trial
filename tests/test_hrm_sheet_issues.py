@@ -163,11 +163,37 @@ def test_row3_running_timer_and_edit_overlap(env):
     ta, tb = _task(a, "Running"), _task(a, "Manual")
     assert hrm_db.start_one_time_task(ta) is True
     clock.t = f"{MON} 10:00:00"
-    assert _add_task_slot(tb, "09:10", "09:20") == "overlap_running"
-    assert hrm_db.pause_one_time_task(ta) is True
+    with pytest.raises(hrm_worktime.SlotOverlap) as exc:
+        _add_task_slot(tb, "09:10", "09:20")
+    assert exc.value.conflicts[0]["running"] is True
     out = _add_task_slot(tb, "09:10", "09:20", resolve_overlap=True)
+    _, slots_a = _task_slots(a, ta)
+    assert slots_a[0][:2] == ("09:00", "09:10")
+    assert slots_a[1][0] == "09:20" and slots_a[1][1] == ""
+    assert hrm_db.pause_one_time_task(ta) is True
     with pytest.raises(hrm_worktime.SlotOverlap):
         hrm_worktime.edit_time_slot(out["id"], started_at="09:10", ended_at="09:40", actor="A")
+
+
+def test_row3_stale_open_slot_does_not_block_split(env):
+    """A timer left open on an earlier day must not stop today's time split."""
+    a, clock = env["a"], env["clock"]
+    ta, tb = _task(a, "Old"), _task(a, "Today")
+    conn = hrm_db._connect()
+    hrm_db._open_slot(
+        conn, entity_type="one_time", entity_id=ta, employee_id=a,
+        log_date="2026-10-04", started_at="2026-10-04 11:00:00",
+    )
+    conn.commit()
+    conn.close()
+    clock.t = f"{MON} 18:00:00"
+    _add_task_slot(tb, "09:00", "10:00")
+    _add_task_slot(ta, "09:25", "09:37", resolve_overlap=True)
+    _, old_slots = _task_slots(a, ta)
+    assert ("09:25", "09:37") in [(s, e) for s, e, _ in old_slots]
+    assert all(e for _, e, _ in old_slots)
+    _, today = _task_slots(a, tb)
+    assert today == [("09:00", "09:25", ""), ("09:37", "10:00", "")]
 
 
 def test_row3_api_returns_409_then_resolves(env):

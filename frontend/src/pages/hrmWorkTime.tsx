@@ -26,7 +26,7 @@ export async function sendWithOverlapConfirm<T>(send: (resolve: boolean) => Prom
     const d = e?.response?.data?.detail
     if (e?.response?.status !== 409 || d?.code !== 'overlap') throw e
     const lines = (d.conflicts || [])
-      .map((c: any) => `• ${c.title || 'Item'}: ${clock12(c.started_at)} – ${clock12(c.ended_at)}`)
+      .map((c: any) => `• ${c.title || 'Item'}: ${clock12(c.started_at)} – ${c.running || !c.ended_at ? 'still running' : clock12(c.ended_at)}`)
       .join('\n')
     if (!window.confirm(`${d.message}\n\n${lines}\n\nContinue?`)) return null
     return send(true)

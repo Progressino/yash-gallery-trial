@@ -2889,11 +2889,22 @@ api.interceptors.response.use(
   res => res,
   err => {
     const url: string = err.config?.url ?? ''
+    const status = err.response?.status
+    const body = err.response?.data
+    const gateway =
+      err.code === 'ECONNABORTED' ||
+      status === 502 || status === 503 || status === 504 || status === 522 || status === 524 ||
+      (typeof body === 'string' && /cloudflare|tcp handshake|<!doctype html/i.test(body))
+    if (gateway && err.response) {
+      err.response.data = {
+        detail: 'The server did not respond. Please wait a moment and try again.',
+      }
+    }
     const isTimeout =
       err.code === 'ECONNABORTED' ||
-      err.response?.status === 502 ||
-      err.response?.status === 503 ||
-      err.response?.status === 504
+      status === 502 ||
+      status === 503 ||
+      status === 504
     if (
       err.response?.status === 401 &&
       !isTimeout &&

@@ -5123,6 +5123,9 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     if not emp:
         conn.close()
         return None
+    from .hrm_worktime import retire_stale_open_slots_for_employee
+    if retire_stale_open_slots_for_employee(conn, employee_id, day=day, actor="system"):
+        conn.commit()
     due_ctx = DueContext(conn)
     due_ctx.leave_days(employee_id)
     on_leave = employee_leave_on(employee_id, day, conn)

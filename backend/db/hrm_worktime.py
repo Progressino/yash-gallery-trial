@@ -405,7 +405,8 @@ def working_hours_report(employee_ids: list[int], from_date: str, to_date: str) 
 
 OVERLAP_MESSAGE = (
     "Selected time slot overlaps an existing Responsibility/Task time slot. "
-    "On confirmation, the overlapping duration will be removed from the previous entry."
+    "On confirmation, the overlapping duration will be removed from the previous entry"
+    " (a timer that is still running is split, and keeps going after this time)."
 )
 
 
@@ -458,6 +459,95 @@ def _copy_slot(conn, slot: dict) -> int:
     return int(cur.lastrowid)
 
 
+def _parent_timer_is_live(conn, slot: dict, day: str) -> bool:
+    """True only for an open slot whose timer is actually running on ``day``."""
+    if str(slot.get("started_at") or "")[:10] != day:
+        return False
+    if slot["entity_type"] == H.SLOT_RESP:
+        row = conn.execute(
+            "SELECT status, paused_at, ended_at FROM task_logs WHERE id=?",
+            (int(slot["entity_id"]),),
+        ).fetchone()
+        if not row:
+            return False
+        if str(row["paused_at"] or "").strip() or str(row["ended_at"] or "").strip():
+            return False
+        return str(row["status"] or "Pending").strip() in ("", "Pending")
+    row = conn.execute(
+        "SELECT status, paused_at FROM one_time_tasks WHERE id=?",
+        (int(slot["entity_id"]),),
+    ).fetchone()
+    if not row or str(row["paused_at"] or "").strip():
+        return False
+    return str(row["status"] or "") == "In Progress"
+
+
+def _pause_parent_without_open_slot(conn, slot: dict, at: str) -> None:
+    et, eid = str(slot["entity_type"]), int(slot["entity_id"])
+    still = conn.execute(
+        """SELECT 1 FROM hrm_time_slots
+           WHERE entity_type=? AND entity_id=? AND IFNULL(ended_at,'')='' LIMIT 1""",
+        (et, eid),
+    ).fetchone()
+    if still:
+        return
+    if et == H.SLOT_RESP:
+        row = conn.execute(
+            "SELECT started_at, paused_at, ended_at FROM task_logs WHERE id=?", (eid,)
+        ).fetchone()
+        if (
+            row
+            and str(row["started_at"] or "").strip()
+            and not str(row["paused_at"] or "").strip()
+            and not str(row["ended_at"] or "").strip()
+        ):
+            conn.execute("UPDATE task_logs SET paused_at=? WHERE id=?", (at, eid))
+        return
+    row = conn.execute(
+        "SELECT status, paused_at FROM one_time_tasks WHERE id=?", (eid,)
+    ).fetchone()
+    if row and str(row["status"] or "") == "In Progress" and not str(row["paused_at"] or "").strip():
+        conn.execute(
+            "UPDATE one_time_tasks SET paused_at=?, session_started_at='' WHERE id=?",
+            (at, eid),
+        )
+
+
+def _retire_stale_open_slot(conn, slot: dict, at: str) -> None:
+    """Close a leftover open slot that is not a live timer. Recorded time stays 0."""
+    start = str(slot["started_at"])
+    conn.execute(
+        """UPDATE hrm_time_slots
+           SET ended_at=?, duration_seconds=0, end_reason='stale_open'
+           WHERE id=? AND IFNULL(ended_at,'')=''""",
+        (start, int(slot["id"])),
+    )
+    _pause_parent_without_open_slot(conn, slot, at or start)
+
+
+def retire_stale_open_slots_for_employee(conn, employee_id: int, *, day: str, actor: str = "") -> int:
+    """Close open slots that are not a timer still running on ``day``. Returns how many closed."""
+    rows = conn.execute(
+        """SELECT * FROM hrm_time_slots
+           WHERE employee_id=? AND IFNULL(ended_at,'')=''""",
+        (int(employee_id),),
+    ).fetchall()
+    n = 0
+    at = H._now_iso()
+    for raw in rows:
+        slot = dict(raw)
+        if _parent_timer_is_live(conn, slot, day):
+            continue
+        _retire_stale_open_slot(conn, slot, str(slot["started_at"]) or at)
+        H.write_task_audit(
+            "time_slot", int(slot["id"]), "stale_open_closed",
+            old_value=f"{slot['started_at']} → running", new_value=str(slot["started_at"]),
+            actor=actor or "system", notes="Leftover timer was not still running", conn=conn,
+        )
+        n += 1
+    return n
+
+
 def resolve_slot_overlaps(
     conn,
     employee_id: int,
@@ -471,12 +561,17 @@ def resolve_slot_overlaps(
 ) -> set[tuple[str, int]] | str:
     """Make [start, end) exclusive to the new entry: one minute counts for one item only.
 
+    Leftover open slots from earlier days (or timers that are already paused / missed) are
+    closed first — they are not a timer that is still running. A timer that really is running
+    on this day is split on confirmation, and keeps running after the new entry.
     Without ``resolve`` an overlap raises SlotOverlap (UI asks Yes/No). With it, older slots are
-    trimmed, split (notes carried to both parts) or removed when fully covered. Returns the
-    entities whose totals must be recomputed, or "overlap_running" if a live timer overlaps.
+    trimmed, split (notes carried to both parts) or removed when fully covered.
     """
     if not start or not end or end <= start:
         return set()
+    day = str(start)[:10]
+    if retire_stale_open_slots_for_employee(conn, employee_id, day=day, actor=actor):
+        conn.commit()
     others = [
         s for s in _employee_slots_between(conn, employee_id, start, end)
         if int(s["id"]) != int(exclude_slot_id or 0)
@@ -484,8 +579,7 @@ def resolve_slot_overlaps(
     ]
     if not others:
         return set()
-    if any(not str(s.get("ended_at") or "").strip() for s in others):
-        return "overlap_running"
+    now = H._now_iso()
     if not resolve:
         raise SlotOverlap([
             {
@@ -494,15 +588,46 @@ def resolve_slot_overlaps(
                 "title": _slot_title(conn, s),
                 "started_at": s["started_at"],
                 "ended_at": s["ended_at"],
+                "running": not str(s.get("ended_at") or "").strip(),
             }
             for s in others
         ])
-    now = H._now_iso()
     touched: set[tuple[str, int]] = set()
     for s in others:
-        a, b = str(s["started_at"]), str(s["ended_at"])
-        old = f"{a} → {b}"
-        if a >= start and b <= end:
+        a = str(s["started_at"])
+        raw_end = str(s.get("ended_at") or "").strip()
+        open_slot = not raw_end
+        b = now if open_slot else raw_end
+        old = f"{a} → {raw_end or 'running'}"
+        if open_slot:
+            if a >= end or b <= start:
+                continue
+            if a < start:
+                _set_slot_span(conn, s, a, start, actor, now)
+                action, new = "overlap_trimmed", f"{a} → {start}"
+                if end < now:
+                    tail_id = _copy_slot(conn, s)
+                    conn.execute(
+                        """UPDATE hrm_time_slots
+                           SET started_at=?, ended_at='', duration_seconds=0, break_deduct_seconds=0,
+                               end_reason=''
+                           WHERE id=?""",
+                        (end, tail_id),
+                    )
+                    action, new = "overlap_split", f"{a} → {start} + {end} → running"
+            elif end < now:
+                conn.execute(
+                    """UPDATE hrm_time_slots
+                       SET started_at=?, duration_seconds=0, end_reason=''
+                       WHERE id=?""",
+                    (end, int(s["id"])),
+                )
+                action, new = "overlap_trimmed", f"{end} → running"
+            else:
+                conn.execute("DELETE FROM hrm_time_slots WHERE id=?", (int(s["id"]),))
+                action, new = "overlap_removed", ""
+            _pause_parent_without_open_slot(conn, s, now)
+        elif a >= start and b <= end:
             conn.execute("DELETE FROM hrm_time_slots WHERE id=?", (int(s["id"]),))
             action, new = "overlap_removed", ""
         elif a < start and b > end:
