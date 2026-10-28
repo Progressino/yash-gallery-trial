@@ -3,7 +3,7 @@ import os, sqlite3
 from datetime import datetime
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
 import io
 import pandas as pd
@@ -391,6 +391,16 @@ def calculate_mrp(so_numbers):
 
 # ── Pydantic Models ────────────────────────────────────────────────────────────
 
+def _piece_qty(v):
+    """Cutting forms sometimes send metres. Store a whole piece count, never 422."""
+    if v is None or v == "":
+        return 0
+    try:
+        return int(round(float(v)))
+    except (TypeError, ValueError):
+        return 0
+
+
 class JOLineIn(BaseModel):
     so_number: Optional[str] = ''
     sku: Optional[str] = ''
@@ -399,6 +409,11 @@ class JOLineIn(BaseModel):
     planned_qty: int = 0
     vendor_rate: Optional[float] = 0
     remarks: Optional[str] = ''
+
+    @field_validator("planned_qty", mode="before")
+    @classmethod
+    def _planned_pieces(cls, v):
+        return _piece_qty(v)
 
 class JOIn(BaseModel):
     jo_date: Optional[str] = None
@@ -413,6 +428,11 @@ class JOIn(BaseModel):
     vendor_rate: Optional[float] = 0
     so_qty: Optional[int] = 0
     planned_qty: Optional[int] = 0
+
+    @field_validator("so_qty", "planned_qty", mode="before")
+    @classmethod
+    def _header_pieces(cls, v):
+        return _piece_qty(v)
     expected_completion: Optional[str] = ''
     issued_to: Optional[str] = ''
     remarks: Optional[str] = ''

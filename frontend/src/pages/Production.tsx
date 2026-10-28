@@ -1486,6 +1486,7 @@ export default function Production() {
   const [soLineSearch, setSOLineSearch] = useState('')
   const joImportRef = useRef<HTMLInputElement>(null)
   const wipImportRef = useRef<HTMLInputElement>(null)
+  const urlJoSeeded = useRef(false)
 
   // Modal forms
   const [fabricIssueForm, setFabricIssueForm] = useState({ fabric_code: '', fabric_name: '', issued_qty: 0, unit: 'MTR', issued_by: '', remarks: '' })
@@ -1606,6 +1607,39 @@ export default function Production() {
     enabled: !!newForm.so_number,
     staleTime: 0,
   })
+  // Grey Fabric → Create JO opens this form with fabric metres in the URL.
+  // Seed the sales-order piece qty so Cutting is planned in pieces, and leave
+  // the prefilled fabric metres alone (do not add BOM metres on top).
+  useEffect(() => {
+    if (urlJoSeeded.current) return
+    const p = new URLSearchParams(window.location.search)
+    const sku = (p.get('sku') || '').trim()
+    const so = (p.get('so') || '').trim()
+    if (!sku || !so || newForm.so_number !== so) return
+    const line = (soLines as { sku?: string; sku_name?: string; item_name?: string; qty?: number }[])
+      .find(l => String(l.sku || '').toUpperCase() === sku.toUpperCase())
+    if (!line) return
+    const pcs = Math.round(Number(line.qty) || 0)
+    if (pcs <= 0) return
+    urlJoSeeded.current = true
+    setNewLines(ls => (ls.length ? ls : [{
+      so_number: so,
+      sku: line.sku || sku,
+      sku_name: line.sku_name || line.item_name || '',
+      style: '',
+      planned_qty: pcs,
+      so_qty: pcs,
+      vendor_rate: 0,
+      remarks: '',
+    }]))
+    setNewForm(f => ({
+      ...f,
+      sku: line.sku || sku,
+      sku_name: f.sku_name || line.sku_name || line.item_name || '',
+      planned_qty: pcs,
+      so_qty: pcs,
+    }))
+  }, [soLines, newForm.so_number])
   const readyLinesForJo = useMemo(() => {
     const so = String(newForm.so_number || '')
     return (readyLines as any[])
@@ -2113,7 +2147,18 @@ export default function Production() {
   // ── Add SO lines to new JO ─────────────────────────────────────────────────
   const addSOLineToJO = async (line: any) => {
     if (newLines.find(l => l.sku === line.sku)) return
-    const soQty = Number(line.available_qty ?? line.qty) || 0
+    const wasFirstLine = newLines.length === 0
+    let soQty = Number(line.available_qty ?? line.qty) || 0
+    if (newForm.process === 'Cutting') {
+      const so = (soList as { so_number?: string; lines?: { sku?: string; qty?: number }[] }[])
+        .find(s => s.so_number === newForm.so_number)
+      const match = (so?.lines || []).find(l =>
+        String(l.sku || '').toUpperCase() === String(line.sku || '').toUpperCase(),
+      )
+      const pcs = Math.round(Number(match?.qty) || 0)
+      // Ready-board qty is reserved metres. Sales-order qty is the piece plan.
+      soQty = pcs || (newForm.from_ready_to ? 0 : Math.round(Number(line.qty) || 0))
+    }
     // Cutting planned qty defaults to SO qty but is independent (may cut fewer pcs).
     setNewLines(ls => [...ls, {
       so_number: newForm.so_number,
@@ -2134,17 +2179,26 @@ export default function Production() {
         const orderQty = soQty || 1
         const res = await api.get(`/production/bom-inputs/${encodeURIComponent(line.sku)}`, { params: { qty: orderQty } })
         const inputs = (res.data?.inputs ?? []) as { material_code?: string; material_name?: string; adj_qty?: number; unit?: string }[]
-        const fabric = inputs.find(i => {
+        const preferred = String(newForm.fabric_code || '').trim().toUpperCase()
+        const matched = preferred
+          ? inputs.find(i => String(i.material_code || '').toUpperCase() === preferred)
+          : undefined
+        const fabric = matched || inputs.find(i => {
           const u = String(i.unit || '').toUpperCase()
           const code = String(i.material_code || '').toUpperCase()
           return u.includes('MTR') || u.includes('M') || code.includes('FABRIC') || code.includes('RAYON') || code.includes('COTTON')
         }) || inputs[0]
-        if (fabric?.material_code) {
-          const adj = Number(fabric.adj_qty) || 0
+        if (preferred && !matched) {
+          // Reserved fabric is already on the form. Don't add a different BOM line on top.
+        } else if (fabric?.material_code) {
+          const adj = Number((matched || fabric).adj_qty) || 0
+          // A Ready-to-Cut link already filled this fabric's reserved metres.
+          // Replace that with this line's BOM qty instead of adding it again.
+          const replacePrefilled = wasFirstLine && !!preferred && !!matched
           setNewForm(f => ({
             ...f,
             fabric_code: f.fabric_code || fabric.material_code || '',
-            fabric_qty: (Number(f.fabric_qty) || 0) + adj,
+            fabric_qty: Math.max(0, Math.round(((replacePrefilled ? 0 : (Number(f.fabric_qty) || 0)) + adj) * 1000) / 1000),
             fabric_unit: fabric.unit || f.fabric_unit || 'MTR',
           }))
           setFabricIssueForm(ff => ({
@@ -3111,8 +3165,15 @@ export default function Production() {
                       )}
                     </div>
                     <button onClick={() => {
-                      const avail = Number(r.available_qty || r.reserved_qty || 0)
                       const so = (soList as any[]).find((s: any) => s.so_number === r.so_number)
+                      const soLine = (so?.lines || []).find((l: any) =>
+                        String(l.sku || '').toUpperCase() === String(r.sku || '').toUpperCase(),
+                      )
+                      const soPcs = Math.round(Number(soLine?.qty) || 0)
+                      // Cutting availability is reserved metres. Piece qty comes from the SO line.
+                      const plan = activeProcess === 'Cutting'
+                        ? soPcs
+                        : Number(r.available_qty || r.qty || 0)
                       const defaultMode = so?.production_mode || 'inhouse'
                       const exec = suggestedExecType(defaultMode, activeProcess)
                       setNewForm(f => ({
@@ -3120,12 +3181,12 @@ export default function Production() {
                         so_number: r.so_number,
                         so_source: 'system',
                         sku: r.sku || '',
-                        sku_name: r.sku_name || r.item_name || '',
+                        sku_name: r.sku_name || r.item_name || soLine?.sku_name || '',
                         fabric_code: r.fabric_code || '',
-                        fabric_qty: r.reserved_qty || 0,
+                        fabric_qty: activeProcess === 'Cutting' ? (r.reserved_qty || 0) : (f.fabric_qty || 0),
                         process: activeProcess,
-                        planned_qty: avail,
-                        so_qty: avail,
+                        planned_qty: plan,
+                        so_qty: plan,
                         production_mode: defaultMode,
                         exec_type: exec,
                         from_ready_to: true,
@@ -3133,10 +3194,10 @@ export default function Production() {
                       setNewLines([{
                         so_number: r.so_number,
                         sku: r.sku || '',
-                        sku_name: r.sku_name || r.item_name || '',
+                        sku_name: r.sku_name || r.item_name || soLine?.sku_name || '',
                         style: '',
-                        planned_qty: avail,
-                        so_qty: avail,
+                        planned_qty: plan,
+                        so_qty: plan,
                         vendor_rate: 0,
                         remarks: '',
                       }])

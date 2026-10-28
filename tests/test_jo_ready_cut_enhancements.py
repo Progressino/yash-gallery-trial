@@ -20,6 +20,7 @@ def iso(tmp_path, monkeypatch):
     monkeypatch.setenv("SALES_DB_PATH", sales)
     monkeypatch.setattr(production_db, "_DB", prod)
     monkeypatch.setattr(grey_db, "_DB", grey)
+    monkeypatch.setattr(grey_db, "_PRODUCTION_DB", prod)
     monkeypatch.setattr(sales_db, "_DB", sales)
     production_db.init_db()
     grey_db.init_db()
@@ -288,3 +289,143 @@ def test_reserve_rejects_unrelated_sku_when_mapped(iso, monkeypatch):
         grey_db.reserve_printed_fabric(
             {"fabric_code": "P308", "so_number": "SO-X", "sku": "OTHER", "qty": 5}
         )
+
+
+def test_size_sku_inherits_parent_printed_fabric(iso, tmp_path, monkeypatch):
+    """2020YKWHITE-S has no BOM; it still uses the parent style's printed fabric."""
+    from backend.db import item_db
+    from backend.services import jo_issue_notes
+    from backend.services.fabric_sku_matching import item_master_skus_using_fabric, sku_uses_fabric
+
+    path = str(tmp_path / "items.db")
+    monkeypatch.setattr(item_db, "DB_PATH", path)
+    monkeypatch.setattr(jo_issue_notes, "_ITEM_DB", path)
+    item_db.init_db()
+    conn = item_db._connect()
+    fg = conn.execute("SELECT id FROM item_types WHERE code='FG'").fetchone()[0]
+    sfg = conn.execute("SELECT id FROM item_types WHERE code='SFG'").fetchone()[0]
+    conn.close()
+    parent = item_db.create_item("2020YKWHITE", "White kurti", fg)
+    item_db.create_item("2020YKWHITE-S", "White kurti S", fg, parent_id=parent, size_label="S")
+    item_db.create_item("7104YKOFFWHITE-S-M", "Other", fg)
+    fab = item_db.create_item("D2Slub1White", "Slub white", sfg, uom="MTR")
+    bom_id = item_db.create_bom(parent, "Default", is_default=0)
+    item_db.add_bom_line(
+        bom_id, "D2Slub1White", component_type="SFG", quantity=1.98, unit="MTR", component_item_id=fab,
+    )
+    mapped = item_master_skus_using_fabric("D2Slub1White")
+    assert "2020YKWHITE" in mapped
+    assert "2020YKWHITE-S" in mapped
+    assert "7104YKOFFWHITE-S-M" not in mapped
+    assert sku_uses_fabric("2020YKWHITE-S", "D2Slub1White") is True
+    assert sku_uses_fabric("7104YKOFFWHITE-S-M", "D2Slub1White") is False
+
+
+def test_set_component_without_materials_stays_ready_to_cut(monkeypatch):
+    def _fake(_main):
+        return {
+            "style_key": "2020YKWHITE",
+            "lines": [{
+                "component_code": "TOP",
+                "component_name": "Top",
+                "component_role": "SET_COMPONENT",
+                "qty_per_set": 1,
+                "materials": [],
+            }],
+        }
+
+    monkeypatch.setattr("backend.services.component_bom.effective_set_bom_for_cutting", _fake)
+    rows = expand_ready_to_cut_rows(
+        [{
+            "so_number": "SO-0009",
+            "sku": "2020YKWHITE-S",
+            "fabric_code": "D2Slub1White",
+            "fabric_name": "Slub",
+            "reserved_qty": 59.4,
+        }],
+        hide_if_jo=True,
+    )
+    assert len(rows) == 1
+    assert rows[0]["sku"] == "2020YKWHITE-S"
+    assert rows[0]["fabric_code"] == "D2Slub1White"
+
+
+def test_cutting_jo_accepts_compound_and_numeric_style_skus(iso):
+    cases = [
+        ("SO-0009", "7104YKOFFWHITE-S-M"),
+        ("SO-0010", "4011DRSBLUE-L"),
+        ("SO-0010", "AK-237MULTI-4XL"),
+    ]
+    for so, sku in cases:
+        num = production_db.create_jo({
+            "so_number": so,
+            "so_source": "manual",
+            "sku": sku,
+            "process": "Cutting",
+            "planned_qty": 10,
+            "fabric_code": "FAB1",
+            "fabric_qty": 12.5,
+            "lines": [{"sku": sku, "planned_qty": 10}],
+            "create_component_jos": False,
+        })
+        assert isinstance(num, str) and num
+        jo = next(j for j in production_db.list_jos() if j["jo_number"] == num)
+        assert jo["sku"] == sku
+        assert int(jo["planned_qty"]) == 10
+
+
+def test_fractional_metre_payload_does_not_reject_jo():
+    from backend.routers.production import JOIn
+
+    body = JOIn.model_validate({
+        "so_number": "SO-0010",
+        "sku": "4011DRSBLUE-L",
+        "process": "Cutting",
+        "planned_qty": 14.4,
+        "so_qty": 21.6,
+        "lines": [{"sku": "AK-237MULTI-4XL", "planned_qty": 76.5}],
+    })
+    assert body.planned_qty == 14
+    assert body.so_qty == 22
+    assert body.lines[0].planned_qty == 76
+
+
+def test_empty_material_set_bom_cutting_jo_then_hides_ready(iso, monkeypatch):
+    def _fake(_main):
+        return {
+            "style_key": "2020YKWHITE",
+            "lines": [{
+                "component_code": "TOP",
+                "component_name": "Top",
+                "component_role": "SET_COMPONENT",
+                "qty_per_set": 1,
+                "creates_cutting_jo": True,
+                "materials": [],
+            }],
+        }
+
+    monkeypatch.setattr("backend.services.component_bom.effective_set_bom_for_cutting", _fake)
+    monkeypatch.setattr("backend.services.fabric_sku_matching.skus_using_fabric", lambda _code: set())
+    grey_db.insert_printed_fabric_unchecked("D2Slub1White", 100, fabric_name="Slub", jwo_ref="J", grn_ref="G")
+    grey_db.do_printed_fabric_qc({
+        "fabric_code": "D2Slub1White", "fabric_name": "Slub", "jwo_ref": "J", "passed_qty": 100, "qc_by": "QC",
+    })
+    grey_db.reserve_printed_fabric({
+        "fabric_code": "D2Slub1White", "so_number": "SO-0009", "sku": "2020YKWHITE-S", "qty": 30,
+    })
+    ready = grey_db.list_printed_fabric_ready_to_cut()
+    assert any(r["sku"] == "2020YKWHITE-S" for r in ready)
+    nums = production_db.create_jo({
+        "so_number": "SO-0009",
+        "so_source": "manual",
+        "sku": "2020YKWHITE-S",
+        "process": "Cutting",
+        "planned_qty": 30,
+        "lines": [{"sku": "2020YKWHITE-S", "planned_qty": 30}],
+    })
+    created = nums if isinstance(nums, list) else [nums]
+    assert created
+    jo = next(j for j in production_db.list_jos() if j["jo_number"] == created[0])
+    assert str(jo["sku"]).endswith("-TOP")
+    ready_after = grey_db.list_printed_fabric_ready_to_cut()
+    assert all(r["sku"] != "2020YKWHITE-S" for r in ready_after)

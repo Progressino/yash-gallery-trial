@@ -1212,7 +1212,11 @@ def list_printed_fabric_checked_available():
 
 
 def _cutting_jo_planned_by_so_sku() -> Dict[tuple, float]:
-    """Sum of planned Cutting JO qty per (so_number, sku), excluding cancelled."""
+    """Sum of planned Cutting JO qty per (so_number, sku), excluding cancelled.
+
+    A component Cutting JO (``STYLE-S-TOP``) also counts against the main size
+    SKU so the size leaves Ready to Cut once cutting has started.
+    """
     if not os.path.isfile(_PRODUCTION_DB):
         return {}
     try:
@@ -1227,23 +1231,43 @@ def _cutting_jo_planned_by_so_sku() -> Dict[tuple, float]:
                GROUP BY TRIM(so_number), TRIM(sku)"""
         ).fetchall()
         conn.close()
-        return {(str(r[0]), str(r[1])): float(r[2] or 0) for r in rows}
+        out: Dict[tuple, float] = {}
+        try:
+            from ..services.set_components import parse_component_sku
+        except Exception:
+            parse_component_sku = None  # type: ignore
+        for r in rows:
+            so, sku, planned = str(r[0]), str(r[1]), float(r[2] or 0)
+            out[(so, sku)] = out.get((so, sku), 0.0) + planned
+            if parse_component_sku is None:
+                continue
+            main, comp = parse_component_sku(sku)
+            if main and comp:
+                out[(so, main)] = out.get((so, main), 0.0) + planned
+        return out
     except Exception:
         return {}
 
 
-def _active_printed_reserve_so_sku() -> set:
-    """(so_number, sku) pairs with an Active printed-fabric reservation."""
+def _active_printed_reserve_so_sku(fabric_code: str = "") -> set:
+    """(so_number, sku) pairs with an Active printed-fabric reservation.
+
+    When ``fabric_code`` is set, only reservations of that fabric count, so a
+    second BOM fabric on the same size can still be allocated.
+    """
     conn = _connect()
     try:
-        rows = _fetchall_retry(
-            conn,
-            """SELECT DISTINCT TRIM(so_number), TRIM(sku)
+        sql = """SELECT DISTINCT TRIM(so_number), TRIM(sku)
                FROM printed_fabric_reservations
                WHERE status = 'Active'
                  AND TRIM(COALESCE(so_number, '')) != ''
-                 AND TRIM(COALESCE(sku, '')) != ''""",
-        )
+                 AND TRIM(COALESCE(sku, '')) != ''"""
+        params: tuple = ()
+        fabric_code = (fabric_code or "").strip()
+        if fabric_code:
+            sql += " AND TRIM(fabric_code) = ?"
+            params = (fabric_code,)
+        rows = _fetchall_retry(conn, sql, params)
         conn.close()
         return {(str(r[0]), str(r[1])) for r in rows}
     except sqlite3.Error:
@@ -1285,8 +1309,8 @@ def printed_fabric_reserve_options(fabric_code: str | None = None) -> dict:
     """
     fabrics = list_printed_fabric_checked_available()
     jo_planned = _cutting_jo_planned_by_so_sku()
-    active_reserved = _active_printed_reserve_so_sku()
     fabric_filter = (fabric_code or "").strip()
+    active_reserved = _active_printed_reserve_so_sku(fabric_filter)
     allowed_skus: set[str] | None = None
     fabric_mapping_active = False
     if fabric_filter:
@@ -1316,9 +1340,13 @@ def printed_fabric_reserve_options(fabric_code: str | None = None) -> dict:
             if not sku:
                 continue
             key = (so_number, sku)
-            if key in active_reserved:
-                continue
             if jo_planned.get(key, 0) > 0:
+                continue
+            reserved_here = key in active_reserved
+            # Unfiltered list stays allocation-only. Once a fabric is selected,
+            # keep already-reserved sizes visible so the user can see they are
+            # on this order and continue from Ready to Cut.
+            if reserved_here and not fabric_filter:
                 continue
             if fabric_mapping_active and allowed_skus is not None:
                 try:
@@ -1335,6 +1363,7 @@ def printed_fabric_reserve_options(fabric_code: str | None = None) -> dict:
                     "sku_name": ln.get("sku_name") or "",
                     "qty": ln.get("qty") or 0,
                     "unit": ln.get("unit") or "PCS",
+                    "already_reserved": bool(reserved_here),
                 }
             )
         if not lines:
@@ -1388,9 +1417,9 @@ def reserve_printed_fabric(data: dict):
     # can hold TOP and PANT fabrics; a repeat allocation tops up the same row.
     per_fabric = bool(data.get("per_fabric"))
     key = (so_number, sku)
-    if not per_fabric and key in _active_printed_reserve_so_sku():
+    if not per_fabric and key in _active_printed_reserve_so_sku(fabric_code):
         raise ValueError(
-            f"{sku} is already reserved on {so_number}. Use Ready to Cut to create a job order."
+            f"{sku} is already reserved on {so_number} for {fabric_code}. Use Ready to Cut to create a job order."
         )
     if _cutting_jo_planned_by_so_sku().get(key, 0) > 0:
         raise ValueError(

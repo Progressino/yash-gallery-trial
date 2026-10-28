@@ -91,6 +91,19 @@ def expand_ready_to_cut_rows(
         except Exception:
             comps = []
 
+        # A Set BOM component with no material lines cannot be gated on fabric
+        # coverage. Treat the style like a plain SKU so the reserved printed
+        # fabric still reaches Ready to Cut (e.g. 2020YKWHITE TOP, materials on
+        # the item BOM only).
+        comps = [
+            ln
+            for ln in comps
+            if any(
+                float(m.get("quantity") or 0) > 0 and str(m.get("material_code") or "").strip()
+                for m in (ln.get("materials") or [])
+            )
+        ]
+
         if not comps:
             for fab, res_qty in fabric_map.items():
                 if res_qty <= 0:

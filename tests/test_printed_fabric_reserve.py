@@ -86,6 +86,10 @@ def test_reserve_options_hide_reserved_sku(tmp_path, monkeypatch):
     opts = grey_db.printed_fabric_reserve_options()
     sos = [o for o in opts["sales_orders"] if o["so_number"] == so_num]
     assert sos == []
+    filtered = grey_db.printed_fabric_reserve_options(fabric_code="P100")
+    shown = [ln for o in filtered["sales_orders"] if o["so_number"] == so_num for ln in o["lines"]]
+    assert shown and shown[0]["sku"] == "STYLE-A"
+    assert shown[0]["already_reserved"] is True
 
 
 def test_ready_to_cut_hidden_after_cutting_jo(tmp_path, monkeypatch):

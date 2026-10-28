@@ -1774,14 +1774,17 @@ export default function GreyFabric() {
                           </p>
                         ) : (
                           pfSkuLinesFiltered.map(ln => {
-                            const checked = pfSelectedSkus.includes(ln.sku)
+                            const reserved = Boolean((ln as { already_reserved?: boolean }).already_reserved)
+                            const checked = !reserved && pfSelectedSkus.includes(ln.sku)
                             return (
-                              <label key={ln.sku} className="flex items-start gap-2 px-3 py-2 text-sm hover:bg-gray-50 cursor-pointer">
+                              <label key={ln.sku} className={`flex items-start gap-2 px-3 py-2 text-sm ${reserved ? 'bg-gray-50 text-gray-500' : 'hover:bg-gray-50 cursor-pointer'}`}>
                                 <input
                                   type="checkbox"
                                   className="mt-1"
                                   checked={checked}
+                                  disabled={reserved}
                                   onChange={() => {
+                                    if (reserved) return
                                     setPFSelectedSkus(prev =>
                                       checked ? prev.filter(s => s !== ln.sku) : [...prev, ln.sku],
                                     )
@@ -1790,7 +1793,10 @@ export default function GreyFabric() {
                                 <span className="min-w-0 flex-1">
                                   <span className="font-mono font-semibold text-[#002B5B]">{ln.sku}</span>
                                   {ln.sku_name ? <span className="text-gray-500"> — {ln.sku_name}</span> : null}
-                                  <span className="text-gray-400 text-xs block">order {ln.qty} {ln.unit || 'PCS'}</span>
+                                  <span className="text-gray-400 text-xs block">
+                                    order {ln.qty} {ln.unit || 'PCS'}
+                                    {reserved ? ' · already reserved — create the cutting JO from Ready to Cut below' : ''}
+                                  </span>
                                 </span>
                                 {checked && (
                                   <input

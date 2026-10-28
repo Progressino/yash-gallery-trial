@@ -35,10 +35,22 @@ def item_master_skus_using_fabric(fabric_code: str) -> set[str]:
         return set()
     out: set[str] = set()
     try:
-        items = conn.execute(
-            "SELECT id, item_code FROM items WHERE COALESCE(active,1)=1"
-        ).fetchall()
-        for it in items:
+        # Item master has no `active` flag. Filtering on it made this query fail
+        # on production and silently returned no fabric mappings.
+        try:
+            items = conn.execute(
+                "SELECT id, item_code, parent_id FROM items"
+            ).fetchall()
+        except Exception:
+            items = conn.execute("SELECT id, item_code FROM items").fetchall()
+        item_rows = [dict(it) for it in items]
+        code_by_id: dict[int, str] = {}
+        for it in item_rows:
+            try:
+                code_by_id[int(it["id"])] = _norm(it.get("item_code"))
+            except (TypeError, ValueError):
+                continue
+        for it in item_rows:
             it = dict(it)
             code = _norm(it.get("item_code"))
             if not code:
@@ -95,6 +107,27 @@ def item_master_skus_using_fabric(fabric_code: str) -> set[str]:
                                 break
                     except Exception:
                         continue
+        # Size SKUs usually have no BOM of their own. Inherit the parent style's fabric.
+        pending = list(item_rows)
+        progressed = True
+        while progressed:
+            progressed = False
+            still: list[dict] = []
+            for it in pending:
+                child = _norm(it.get("item_code"))
+                parent_id = it.get("parent_id")
+                if not child or child in out or not parent_id:
+                    continue
+                try:
+                    parent_code = code_by_id.get(int(parent_id))
+                except (TypeError, ValueError):
+                    parent_code = None
+                if parent_code and parent_code in out:
+                    out.add(child)
+                    progressed = True
+                else:
+                    still.append(it)
+            pending = still
     except Exception:
         _log.exception("item_master_skus_using_fabric failed")
     finally:
