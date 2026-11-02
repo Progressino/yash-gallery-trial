@@ -76,7 +76,8 @@ from ..db.hrm_db import (
     resume_responsibility_timer,
     set_responsibility_manual_time,
     get_responsibility_timer_detail,
-    list_pending_linked_approvals,
+    list_linked_approval_bucket,
+    extend_one_time_deadline,
     list_approval_notifications,
     mark_approval_notifications_read,
     self_check_today_only,
@@ -496,6 +497,10 @@ class OneTimeTaskUpdate(BaseModel):
     backup_allocation_unit: Optional[str] = None
 
 
+class ExtendDeadlineIn(BaseModel):
+    due_date: str
+
+
 class OneTimeTaskNotesIn(BaseModel):
     notes: Optional[str] = ""
     break_decision: Optional[str] = None  # count | deduct
@@ -758,6 +763,11 @@ def post_responsibility(body: ResponsibilityIn, request: Request):
         assert_employee_in_scope(scope, int(backup_id))
         if int(backup_id) == int(body.employee_id):
             raise HTTPException(400, "Backup person must be different from the assigned employee")
+    linked_id = data.get("linked_to_employee_id")
+    if not linked_id:
+        raise HTTPException(400, "Accountable person is required")
+    if int(linked_id) == int(body.employee_id):
+        raise HTTPException(400, "Accountable person must be different from the assigned employee")
     data["require_backup"] = is_mandatory
     if not (data.get("added_by") or "").strip():
         _, name = _recorder_from_request(request)
@@ -785,7 +795,10 @@ def patch_responsibility(rid: int, body: ResponsibilityUpdate, request: Request)
     try:
         # exclude_unset: only fields the client sent; keep False/0/"" so mandatory
         # and schedule clears persist (do not drop falsy values).
-        update_responsibility(rid, body.model_dump(exclude_unset=True))
+        payload = body.model_dump(exclude_unset=True)
+        if "linked_to_employee_id" in payload and not payload.get("linked_to_employee_id"):
+            raise HTTPException(400, "Accountable person is required")
+        update_responsibility(rid, payload)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return {"ok": True}
@@ -1093,7 +1106,7 @@ def get_pending_approvals(request: Request):
     scope = _scope_from_request(request)
     if not scope.employee_id:
         return {"pending": [], "notifications": [], "unread": 0}
-    pending = list_pending_linked_approvals(int(scope.employee_id))
+    pending = list_linked_approval_bucket(int(scope.employee_id))
     notes = list_approval_notifications(int(scope.employee_id), unread_only=False, limit=40)
     unread = sum(1 for n in notes if not int(n.get("is_read") or 0))
     return {"pending": pending, "notifications": notes, "unread": unread}
@@ -1751,6 +1764,25 @@ def patch_one_time_task(task_id: int, body: OneTimeTaskUpdate, request: Request)
         assert_employee_in_scope(scope, int(data["employee_id"]))
     update_one_time_task(task_id, data)
     return {"ok": True}
+
+
+@router.post("/one-time-tasks/{task_id}/extend-deadline")
+def post_extend_one_time_deadline(task_id: int, body: ExtendDeadlineIn, request: Request):
+    scope = _scope_from_request(request)
+    if not scope.employee_id:
+        raise HTTPException(400, "No employee linked to this login")
+    ok = extend_one_time_deadline(task_id, body.due_date, int(scope.employee_id))
+    if ok is True:
+        return {"ok": True, "due_date": str(body.due_date)[:10]}
+    if ok == "forbidden":
+        raise HTTPException(403, "Only the accountable person can extend this deadline")
+    if ok == "bad_date":
+        raise HTTPException(400, "Enter a valid deadline date")
+    if ok == "not_later":
+        raise HTTPException(400, "New deadline must be later than the current deadline")
+    if ok == "not_open":
+        raise HTTPException(409, "This task is not waiting on a deadline")
+    raise HTTPException(404, "Task not found")
 
 
 @router.delete("/one-time-tasks/{task_id}")

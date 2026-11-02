@@ -2948,6 +2948,119 @@ def list_pending_linked_approvals(linked_employee_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def list_linked_approval_bucket(linked_employee_id: int) -> list[dict]:
+    """Approval bucket: responsibility marks, finished one-time tasks, and missed deadlines."""
+    items = list_pending_linked_approvals(linked_employee_id)
+    for it in items:
+        it["kind"] = "responsibility"
+    conn = _connect()
+    today = today_ist().isoformat()
+    linked = int(linked_employee_id)
+    done_rows = conn.execute(
+        """SELECT t.id as task_id, t.title, t.status, t.due_date,
+                  t.employee_id as assignee_employee_id, e.name as assignee_name
+           FROM one_time_tasks t
+           JOIN employees e ON e.id=t.employee_id
+           WHERE t.linked_to_employee_id=? AND t.active=1 AND t.status='Done'
+             AND t.linked_to_employee_id != t.employee_id
+           ORDER BY t.due_date, t.id""",
+        (linked,),
+    ).fetchall()
+    for r in done_rows:
+        d = dict(r)
+        d["kind"] = "one_time"
+        items.append(d)
+    overdue = conn.execute(
+        """SELECT t.id as task_id, t.title, t.status, t.due_date,
+                  t.employee_id as assignee_employee_id, e.name as assignee_name
+           FROM one_time_tasks t
+           JOIN employees e ON e.id=t.employee_id
+           WHERE t.linked_to_employee_id=? AND t.active=1
+             AND t.status IN ('Pending','In Progress','Rejected')
+             AND IFNULL(t.due_date,'') != '' AND t.due_date < ?
+             AND t.linked_to_employee_id != t.employee_id
+           ORDER BY t.due_date, t.id""",
+        (linked, today),
+    ).fetchall()
+    now = _now_iso()
+    for r in overdue:
+        d = dict(r)
+        d["kind"] = "deadline"
+        title = str(d.get("title") or "Task")
+        due = str(d.get("due_date") or "")[:10]
+        status = str(d.get("status") or "Pending")
+        msg = (
+            f"Deadline {due} reached for '{title}' and the status is still {status}. "
+            "Extend the deadline or update the task."
+        )
+        d["message"] = msg
+        exists = conn.execute(
+            """SELECT id FROM task_approval_notifications
+               WHERE linked_to_employee_id=? AND task_log_id=0 AND title=? AND log_date=?""",
+            (linked, title, due),
+        ).fetchone()
+        if not exists:
+            conn.execute(
+                """INSERT INTO task_approval_notifications(
+                    task_log_id, responsibility_id, linked_to_employee_id, assignee_employee_id,
+                    log_date, title, assignee_name, message, is_read, created_at
+                ) VALUES (0,0,?,?,?,?,?,?,0,?)""",
+                (
+                    linked,
+                    int(d["assignee_employee_id"]),
+                    due,
+                    title,
+                    d.get("assignee_name") or "",
+                    msg,
+                    now,
+                ),
+            )
+        items.append(d)
+    conn.commit()
+    conn.close()
+    return items
+
+
+def extend_one_time_deadline(task_id: int, new_due: str, actor_employee_id: int) -> bool | str:
+    """Linked person moves a missed one-time deadline later. A later miss shows again."""
+    try:
+        nd = date.fromisoformat(str(new_due)[:10])
+    except ValueError:
+        return "bad_date"
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM one_time_tasks WHERE id=? AND active=1",
+        (int(task_id),),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    row = dict(row)
+    linked = row.get("linked_to_employee_id")
+    try:
+        linked_ok = linked is not None and int(linked) == int(actor_employee_id)
+    except (TypeError, ValueError):
+        linked_ok = False
+    if not linked_ok:
+        conn.close()
+        return "forbidden"
+    status = _normalize_one_time_status(row.get("status"))
+    if status not in ("Pending", "In Progress", "Rejected"):
+        conn.close()
+        return "not_open"
+    old = str(row.get("due_date") or "")[:10]
+    if old and nd.isoformat() <= old:
+        conn.close()
+        return "not_later"
+    conn.execute(
+        "UPDATE one_time_tasks SET due_date=?, updated_at=? WHERE id=?",
+        (nd.isoformat(), _now_iso(), int(task_id)),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 def list_approval_notifications(
     linked_employee_id: int, *, unread_only: bool = False, limit: int = 50
 ) -> list[dict]:
@@ -3747,6 +3860,82 @@ def _close_carry_forward(conn, responsibility_id: int, log_date: str, log_id: in
            WHERE responsibility_id=? AND status='Open' AND carry_date<=?""",
         (int(log_id), str(log_date)[:10], int(responsibility_id), str(log_date)[:10]),
     )
+
+
+_ROLL_FINISHED = frozenset({"Done", "Partial", "N/A", "Leave", "Approved"})
+
+
+def rollover_unfinished_nondaily(conn, employee_id: int, as_of: str, due_ctx: "DueContext") -> int:
+    """Unfinished Weekly/Fortnightly/Monthly/... work reappears the next working day.
+
+    Daily and Whenever Required stay on their own rules. The latest scheduled day
+    before ``as_of`` is the one that counts: Done, Partial, N/A and Leave stay put.
+    """
+    day = str(as_of)[:10]
+    try:
+        as_of_d = date.fromisoformat(day)
+    except ValueError:
+        return 0
+    exempt = {f.lower() for f in CARRY_FORWARD_EXEMPT}
+    rows = conn.execute(
+        """SELECT id, employee_id, frequency, schedule_weekday, schedule_month_day,
+                  COALESCE(schedule_month, 0) as schedule_month,
+                  COALESCE(schedule_rule, '') as schedule_rule,
+                  COALESCE(mandatory, 0) as mandatory, backup_employee_id,
+                  COALESCE(created_at, '') as created_at
+           FROM responsibilities
+           WHERE employee_id=? AND active=1""",
+        (int(employee_id),),
+    ).fetchall()
+    inserted = 0
+    for r in rows:
+        rd = dict(r)
+        freq = str(rd.get("frequency") or "Daily").strip()
+        if freq.lower() in exempt:
+            continue
+        last = None
+        probe = as_of_d - timedelta(days=1)
+        for _ in range(120):
+            if responsibility_due_on(rd, probe.isoformat(), due_ctx, employee_id=employee_id):
+                last = probe
+                break
+            probe -= timedelta(days=1)
+        if last is None:
+            continue
+        created = str(rd.get("created_at") or "")[:10]
+        if created and last.isoformat() < created:
+            continue
+        log = conn.execute(
+            "SELECT id, status FROM task_logs WHERE responsibility_id=? AND log_date=?",
+            (int(rd["id"]), last.isoformat()),
+        ).fetchone()
+        if log and str(log["status"] or "").strip() in _ROLL_FINISHED:
+            continue
+        if conn.execute(
+            "SELECT id FROM hrm_resp_carry_forward WHERE responsibility_id=? AND status='Open'",
+            (int(rd["id"]),),
+        ).fetchone():
+            continue
+        nxt = _next_working_day(conn, last)
+        if nxt > as_of_d:
+            continue
+        conn.execute(
+            """INSERT INTO hrm_resp_carry_forward(
+                responsibility_id, employee_id, source_log_id, pending_since, carry_date, created_by
+            ) VALUES(?,?,?,?,?,?)""",
+            (
+                int(rd["id"]),
+                int(employee_id),
+                int(log["id"]) if log else None,
+                last.isoformat(),
+                nxt.isoformat(),
+                "system",
+            ),
+        )
+        inserted += 1
+    if inserted:
+        conn.commit()
+    return inserted
 
 
 def carried_forward_for_day(conn, employee_id: int, day: str) -> dict[int, dict]:
@@ -5128,6 +5317,7 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
         conn.commit()
     due_ctx = DueContext(conn)
     due_ctx.leave_days(employee_id)
+    rollover_unfinished_nondaily(conn, employee_id, day, due_ctx)
     on_leave = employee_leave_on(employee_id, day, conn)
     carried = carried_forward_for_day(conn, employee_id, day)
 

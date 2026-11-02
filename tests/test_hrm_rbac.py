@@ -200,6 +200,7 @@ def test_hod_can_edit_responsibility_and_task(monkeypatch):
             "backup_employee_id": backup_id,
             "backup_allocation_value": 1,
             "backup_allocation_unit": "days",
+            "linked_to_employee_id": backup_id,
         },
     ).status_code == 200
 

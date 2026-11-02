@@ -365,3 +365,98 @@ def test_stray_approval_records_achievement_pct(env, monkeypatch):
     assert hrm_db.approve_one_time_task(tid, "Hod H", "ok", 80) is True
     row = next(t for t in hrm_db.list_one_time_tasks(employee_id=a) if t["id"] == tid)
     assert row["status"] == "Approved" and row["achievement_pct"] == 80
+
+
+# ── Rows 6–8: accountable person, approval bucket, automatic next-day reassignment ──
+
+
+def test_row6_accountable_person_required(env, monkeypatch):
+    a, h, client = env["a"], env["h"], env["client"]
+    missing = client.post("/api/hrm/responsibilities", json={"employee_id": a, "title": "No owner", "frequency": "Daily"})
+    assert missing.status_code == 400
+    assert "Accountable" in missing.json()["detail"]
+    same = client.post(
+        "/api/hrm/responsibilities",
+        json={"employee_id": a, "title": "Self", "frequency": "Daily", "linked_to_employee_id": a},
+    )
+    assert same.status_code == 400
+    ok = client.post(
+        "/api/hrm/responsibilities",
+        json={"employee_id": a, "title": "Owned", "frequency": "Daily", "linked_to_employee_id": h},
+    )
+    assert ok.status_code == 200
+    rid = next(r["id"] for r in hrm_db.list_responsibilities(employee_id=a) if r["title"] == "Owned")
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="all", role="Admin", user_id=1, employee_id=h),
+    )
+    cleared = client.patch(f"/api/hrm/responsibilities/{rid}", json={"linked_to_employee_id": None})
+    assert cleared.status_code == 400
+
+
+def test_row7_approval_bucket_includes_one_time_and_missed_deadline(env, monkeypatch):
+    a, h, client, clock = env["a"], env["h"], env["client"], env["clock"]
+    rid = _resp(a, frequency="Daily", linked_to_employee_id=h, title="Daily review")
+    hrm_db.mark_task(rid, MON, "Done", "Worker A", allow_override=True)
+    finished = hrm_db.create_one_time_task(
+        {"employee_id": a, "title": "One-time close", "due_date": MON, "linked_to_employee_id": h}
+    )
+    hrm_db.start_one_time_task(finished)
+    assert hrm_db.complete_one_time_task(finished, "done") is True
+    missed = hrm_db.create_one_time_task(
+        {"employee_id": a, "title": "Overdue follow-up", "due_date": "2026-10-01", "linked_to_employee_id": h}
+    )
+    bucket = hrm_db.list_linked_approval_bucket(h)
+    kinds = {(p["kind"], p.get("title")) for p in bucket}
+    assert ("responsibility", "Daily review") in kinds
+    assert ("one_time", "One-time close") in kinds
+    assert ("deadline", "Overdue follow-up") in kinds
+    notes = hrm_db.list_approval_notifications(h)
+    assert any("Deadline 2026-10-01 reached" in n["message"] for n in notes)
+
+    assert hrm_db.extend_one_time_deadline(missed, "2026-09-30", h) == "not_later"
+    assert hrm_db.extend_one_time_deadline(missed, "2026-10-09", h) is True
+    assert not any(p.get("task_id") == missed for p in hrm_db.list_linked_approval_bucket(h))
+    clock.t = "2026-10-10 09:00:00"
+    again = [p for p in hrm_db.list_linked_approval_bucket(h) if p.get("task_id") == missed]
+    assert again and again[0]["kind"] == "deadline"
+
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="self", role="Employee", user_id=2, employee_id=h),
+    )
+    res = client.get("/api/hrm/approvals/pending")
+    assert res.status_code == 200
+    titles = {p["title"] for p in res.json()["pending"]}
+    assert "One-time close" in titles and "Overdue follow-up" in titles
+    extended = client.post(f"/api/hrm/one-time-tasks/{missed}/extend-deadline", json={"due_date": "2026-10-12"})
+    assert extended.status_code == 200
+
+
+def test_row8_unfinished_nondaily_reassigns_next_working_day(env):
+    a = env["a"]
+    weekly = _resp(a, frequency="Weekly", schedule_weekday="Monday", title="Weekly roll")
+    daily = _resp(a, frequency="Daily", title="Daily stays")
+    whenever = _resp(a, frequency="Whenever Required", title="Whenever stays")
+    done = _resp(a, frequency="Weekly", schedule_weekday="Monday", title="Weekly done")
+    conn = hrm_db._connect()
+    conn.execute(
+        "UPDATE responsibilities SET created_at=? WHERE id IN (?,?,?,?)",
+        (f"{MON} 08:00:00", weekly, daily, whenever, done),
+    )
+    conn.commit()
+    conn.close()
+    hrm_db.mark_task(done, MON, "Done", "Worker A", allow_override=True)
+
+    weekly_tue = _check_item(a, weekly, TUE)
+    assert weekly_tue is not None
+    assert weekly_tue["carried_forward"] is True
+    assert weekly_tue["pending_since"] == MON
+    assert weekly_tue["status"] == "Pending"
+
+    assert _check_item(a, daily, TUE)["carried_forward"] is False
+    whenever_rows = hrm_db.get_employee_day_check(a, TUE)["whenever_required"]
+    whenever_row = next(i for i in whenever_rows if i["responsibility_id"] == whenever)
+    assert whenever_row["carried_forward"] is False
+    finished = _check_item(a, done, TUE)
+    assert finished is None or finished["carried_forward"] is False

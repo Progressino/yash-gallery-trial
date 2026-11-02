@@ -227,7 +227,8 @@ export default function HRM() {
   const [approvalModal, setApprovalModal] = useState<{ id: number; title: string; action: 'approve' | 'reject' } | null>(null)
   const [approvalNotes, setApprovalNotes] = useState('')
   const [approvalPct, setApprovalPct] = useState('')
-  const [inboxPct, setInboxPct] = useState<Record<number, string>>({})
+  const [inboxPct, setInboxPct] = useState<Record<string, string>>({})
+  const [extendDue, setExtendDue] = useState<Record<number, string>>({})
   const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks'>('responsibilities')
   const [reportsSubTab, setReportsSubTab] = useState<'dwr' | 'hours' | 'performance'>('dwr')
   const [reportsDept, setReportsDept] = useState<any>('')
@@ -842,6 +843,7 @@ export default function HRM() {
       api.post(`/hrm/one-time-tasks/${id}/approve`, { notes, achievement_pct }),
     onSuccess: () => {
       invalidateTaskMetrics()
+      qc.invalidateQueries({ queryKey: ['hrm-pending-approvals'] })
       setApprovalModal(null)
       setApprovalNotes('')
       setApprovalPct('')
@@ -852,10 +854,20 @@ export default function HRM() {
       api.post(`/hrm/one-time-tasks/${id}/reject`, { notes, achievement_pct }),
     onSuccess: () => {
       invalidateTaskMetrics()
+      qc.invalidateQueries({ queryKey: ['hrm-pending-approvals'] })
       setApprovalModal(null)
       setApprovalNotes('')
       setApprovalPct('')
     },
+  })
+  const extendDeadlineMut = useMutation({
+    mutationFn: ({ id, due_date }: { id: number; due_date: string }) =>
+      api.post(`/hrm/one-time-tasks/${id}/extend-deadline`, { due_date }),
+    onSuccess: () => {
+      invalidateTaskMetrics()
+      qc.invalidateQueries({ queryKey: ['hrm-pending-approvals'] })
+    },
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not extend deadline'),
   })
   const cancelOneTimeTaskMut = useMutation({
     mutationFn: (id: number) => api.delete(`/hrm/one-time-tasks/${id}`),
@@ -873,6 +885,10 @@ export default function HRM() {
   })
   const submitAssign = (form: typeof quickResp) => {
     if (!form.employee_id || !form.title) return
+    if (form.mode !== 'task' && !form.linked_to_employee_id) {
+      alert('Accountable person is required')
+      return
+    }
     if (form.mandatory && !form.backup_employee_id) {
       alert('Backup person is required for mandatory responsibilities')
       return
@@ -1254,40 +1270,69 @@ export default function HRM() {
   const renderApprovalInbox = () => (
     !!scope?.employee_id && Array.isArray(pendingApprovals?.pending) && pendingApprovals.pending.length > 0 ? (
       <div className="space-y-3">
-        {pendingApprovals.pending.map((p: any) => (
-          <div key={p.task_log_id} className="bg-white border border-indigo-100 rounded-lg px-3 py-3 flex flex-wrap items-center justify-between gap-2">
-            <div className="min-w-0">
-              <p className="text-sm font-medium text-gray-900">{p.title}</p>
-              <p className="text-xs text-gray-500">
-                {p.assignee_name} · {p.log_date} · {p.status} · Awaiting approval
-                {p.frequency ? ` · ${p.frequency}` : ''}
-              </p>
-              {p.remarks && <p className="text-xs text-gray-600 mt-1">{p.remarks}</p>}
+        {pendingApprovals.pending.map((p: any) => {
+          const rowKey = `${p.kind || 'responsibility'}-${p.task_log_id || p.task_id}`
+          const isDeadline = p.kind === 'deadline'
+          const isOneTime = p.kind === 'one_time'
+          return (
+            <div key={rowKey} className="bg-white border border-indigo-100 rounded-lg px-3 py-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-gray-900">{p.title}</p>
+                <p className="text-xs text-gray-500">
+                  {p.assignee_name}
+                  {isDeadline
+                    ? ` · deadline ${p.due_date} · ${p.status} · needs a new deadline`
+                    : ` · ${p.log_date || p.due_date || ''} · ${p.status} · Awaiting approval`}
+                  {p.frequency ? ` · ${p.frequency}` : ''}
+                </p>
+                {(p.message || p.remarks) && <p className="text-xs text-gray-600 mt-1">{p.message || p.remarks}</p>}
+              </div>
+              {isDeadline ? (
+                <div className="flex items-center gap-1">
+                  <input
+                    type="date"
+                    value={extendDue[p.task_id] || ''}
+                    onChange={e => setExtendDue(prev => ({ ...prev, [p.task_id]: e.target.value }))}
+                    className="border rounded px-1 py-1 text-xs"
+                  />
+                  <button type="button" className="text-xs px-2 py-1 bg-indigo-700 text-white rounded" onClick={() => {
+                    const due = extendDue[p.task_id]
+                    if (!due || (p.due_date && due <= String(p.due_date).slice(0, 10))) {
+                      alert('Pick a deadline later than the current one')
+                      return
+                    }
+                    extendDeadlineMut.mutate({ id: p.task_id, due_date: due })
+                  }}>Extend deadline</button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1">
+                  <label className="text-[10px] text-gray-500">Achieved %
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={inboxPct[rowKey] ?? ''}
+                      onChange={e => setInboxPct(prev => ({ ...prev, [rowKey]: e.target.value }))}
+                      className="ml-1 w-16 border rounded px-1 py-1 text-xs"
+                    />
+                  </label>
+                  <button type="button" className="text-xs px-2 py-1 bg-green-700 text-white rounded" onClick={() => {
+                    const n = achievedPctOrNull(inboxPct[rowKey])
+                    if (n == null) return
+                    if (isOneTime) approveOneTimeTaskMut.mutate({ id: p.task_id, notes: '', achievement_pct: n })
+                    else approveLogMut.mutate({ id: p.task_log_id, action: 'Approved', achievement_pct: n })
+                  }}>Approve</button>
+                  <button type="button" className="text-xs px-2 py-1 bg-red-700 text-white rounded" onClick={() => {
+                    const n = achievedPctOrNull(inboxPct[rowKey])
+                    if (n == null) return
+                    if (isOneTime) rejectOneTimeTaskMut.mutate({ id: p.task_id, notes: '', achievement_pct: n })
+                    else approveLogMut.mutate({ id: p.task_log_id, action: 'Cancelled', achievement_pct: n })
+                  }}>Reject</button>
+                </div>
+              )}
             </div>
-            <div className="flex items-center gap-1">
-              <label className="text-[10px] text-gray-500">Achieved %
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={inboxPct[p.task_log_id] ?? ''}
-                  onChange={e => setInboxPct(prev => ({ ...prev, [p.task_log_id]: e.target.value }))}
-                  className="ml-1 w-16 border rounded px-1 py-1 text-xs"
-                />
-              </label>
-              <button type="button" className="text-xs px-2 py-1 bg-green-700 text-white rounded" onClick={() => {
-                const n = achievedPctOrNull(inboxPct[p.task_log_id])
-                if (n == null) return
-                approveLogMut.mutate({ id: p.task_log_id, action: 'Approved', achievement_pct: n })
-              }}>Approve</button>
-              <button type="button" className="text-xs px-2 py-1 bg-red-700 text-white rounded" onClick={() => {
-                const n = achievedPctOrNull(inboxPct[p.task_log_id])
-                if (n == null) return
-                approveLogMut.mutate({ id: p.task_log_id, action: 'Cancelled', achievement_pct: n })
-              }}>Reject</button>
-            </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     ) : (
       <p className="text-sm text-gray-400 py-8 text-center">No tasks awaiting your approval.</p>
@@ -1655,10 +1700,10 @@ export default function HRM() {
                         {CATEGORIES.map(c => <option key={c}>{c}</option>)}
                       </select>
                     </div>
-                    <div><label className="text-xs text-gray-500">Linked Person (supervisor / approver)</label>
+                    <div><label className="text-xs text-gray-500">Accountable person *</label>
                       <select value={quickResp.linked_to_employee_id} onChange={e => setQuickResp(f => ({ ...f, linked_to_employee_id: e.target.value }))}
                         className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                        <option value="">Self-complete</option>
+                        <option value="">Select accountable person</option>
                         {(allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                       </select>
                     </div>
@@ -1799,6 +1844,13 @@ export default function HRM() {
               {showDailyGuide ? 'Hide daily guide' : 'Daily guide (Harsh / Sanjay)'}
             </button>
           </div>
+
+          {!!scope?.employee_id && Array.isArray(pendingApprovals?.pending) && pendingApprovals.pending.length > 0 && (
+            <div className="bg-indigo-50/70 border border-indigo-100 rounded-xl p-3 space-y-2">
+              <h3 className="text-sm font-semibold text-indigo-950">Approval bucket</h3>
+              {renderApprovalInbox()}
+            </div>
+          )}
 
           {!!scope?.employee_id && Array.isArray(pendingApprovals?.notifications) && pendingApprovals.notifications.filter((n: any) => !n.is_read).length > 0 && isEmployeeScope && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900">
@@ -2005,8 +2057,8 @@ export default function HRM() {
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div>
-              <h3 className="font-semibold text-gray-800">Approval queue</h3>
-              <p className="text-xs text-gray-500">Tasks marked Done/Partial by your team awaiting your approval as Linked Person.</p>
+              <h3 className="font-semibold text-gray-800">Approval bucket</h3>
+              <p className="text-xs text-gray-500">Approve finished work with achieved %, or extend a one-time deadline that was missed.</p>
             </div>
             {(pendingApprovals?.unread || 0) > 0 && (
               <button
@@ -2392,9 +2444,9 @@ export default function HRM() {
                                 </select>
                               </div>
                               <div className="col-span-2">
-                                <label className="text-[10px] text-gray-400">Linked To (supervisor / approver)</label>
+                                <label className="text-[10px] text-gray-400">Accountable person *</label>
                                 <select value={editResp.linked_to_employee_id || ''} onChange={e => setEditResp((x: any) => ({ ...x, linked_to_employee_id: e.target.value ? +e.target.value : '' }))} className="w-full border rounded px-2 py-1 text-sm">
-                                  <option value="">Self-complete (no Linked Person)</option>
+                                  <option value="">Select accountable person</option>
                                   {(canEditAssignments ? assignPickers : allEmps as any[]).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
                                 </select>
                               </div>
@@ -2412,6 +2464,7 @@ export default function HRM() {
                                   if (editResp.frequency === 'Twice a Week' && !weekdayPairValid(editResp.schedule_weekday)) { alert('Select two different weekdays for Twice a Week'); return }
                                   if (editResp.frequency === 'Monthly' && !editRule && !(editResp.schedule_month_day > 0)) { alert('Select calendar day or a Dynamic Schedule Rule for Monthly'); return }
                                   if (editResp.frequency === 'Quarterly' && !(editResp.schedule_month > 0)) { alert('Select anchor month for Quarterly'); return }
+                                  if (!editResp.linked_to_employee_id) { alert('Accountable person is required'); return }
                                   if (editResp.mandatory && !editResp.backup_employee_id) { alert('Backup person is required for mandatory responsibilities'); return }
                                   if (editResp.backup_employee_id && +editResp.backup_employee_id === +editResp.employee_id) { alert('Backup must differ from assignee'); return }
                                   updateRespMut.mutate({ id: r.id, data: { title: editResp.title, description: editResp.description, frequency: editResp.frequency, category: editResp.category, employee_id: editResp.employee_id, linked_to_employee_id: editResp.linked_to_employee_id || null, priority: editResp.priority || 'Medium', mandatory: !!editResp.mandatory, schedule_weekday: editResp.schedule_weekday || '', schedule_month_day: editResp.schedule_month_day || 0, schedule_month: editResp.schedule_month || 0, schedule_rule: editRule, expected_time: editResp.expected_time || '', kpi_weightage: editResp.kpi_weightage === '' || editResp.kpi_weightage == null ? 0 : +editResp.kpi_weightage, backup_employee_id: editResp.backup_employee_id || null } })
