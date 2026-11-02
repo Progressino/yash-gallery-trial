@@ -125,7 +125,7 @@ def test_missed_and_blocked_without_timer(env):
     r = c.post("/api/hrm/tasks/mark", json={
         "responsibility_id": _resp(a), "log_date": MON, "status": "Blocked",
         "blocker_employee_id": env["o"], "blocker_reason": "Other department"})
-    assert r.status_code == 403  # blocker must be a department peer
+    assert r.status_code == 200, r.text  # any active employee can be the blocker
     r = c.post("/api/hrm/tasks/mark", json={
         "responsibility_id": blocked, "log_date": MON, "status": "Blocked",
         "blocker_employee_id": h, "blocker_reason": "Waiting for data"})
@@ -133,7 +133,7 @@ def test_missed_and_blocked_without_timer(env):
     r = c.post("/api/hrm/tasks/mark", json={"responsibility_id": missed, "log_date": MON, "status": "Done"})
     assert r.status_code == 409  # saved status is locked for the employee (not a timer message)
     r = c.post("/api/hrm/tasks/mark", json={"responsibility_id": done, "log_date": MON, "status": "Done"})
-    assert r.status_code == 400 and "Start time tracking" in r.json()["detail"]
+    assert r.status_code == 400 and "record working time" in r.json()["detail"]
     assert hrm_db.mark_task(_resp(a), MON, "Partial") == "timer_required"
 
 

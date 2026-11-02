@@ -329,17 +329,16 @@ def assert_employee_check_access(scope: HrmScope, employee_id: int) -> None:
 
 
 def assert_hrm_mutate_responsibility(scope: HrmScope, owner_employee_id: int) -> None:
-    """Admin: all. HOD: self + direct hierarchy subordinates. Employee: none for master edit."""
+    """Admin: all. HOD: team only, not their own row. Employee: none."""
     from fastapi import HTTPException
-    from ..db.hrm_db import employee_in_hod_hierarchy
 
-    if scope.can_mutate_assignment_records:
+    if scope.can_manage_org:
         return
     if scope.is_hod:
+        if scope.employee_id is not None and int(owner_employee_id) == int(scope.employee_id):
+            raise HTTPException(403, "HOD cannot add or edit their own responsibilities or tasks")
         assert_employee_in_scope(scope, owner_employee_id)
-        if employee_in_hod_hierarchy(scope.employee_id, owner_employee_id):
-            return
-        raise HTTPException(403, "You can only edit responsibilities for yourself or direct reports")
+        return
     raise HTTPException(403, "Only Admin or HOD can edit responsibilities")
 
 

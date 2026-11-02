@@ -252,7 +252,14 @@ def test_responsibility_timer_dwr_and_linked_person(hrm):
     assert i2["timer_status"] == "Completed"
     assert i2["duration_minutes"] == 150
 
-    # Starting the timer must not lock quality mark (Done)
+    # A completed timer with recorded time still allows the quality mark.
+    conn = hrm._connect()
+    conn.execute(
+        "UPDATE task_logs SET active_seconds=60 WHERE responsibility_id=? AND log_date=?",
+        (r1, day),
+    )
+    conn.commit()
+    conn.close()
     assert mark_task(r1, day, "Done") is True
     dwr = hrm.list_dwr_rows(employee_id=worker["id"], check_date=day)
     assert len(dwr["rows"]) >= 2

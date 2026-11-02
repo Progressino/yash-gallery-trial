@@ -277,8 +277,9 @@ def day_time_summary(employee_id: int, day: str, *, conn=None, now: str | None =
     """Office window, actual working and free time for one date.
 
     Working = union of slot time (one minute counts once even if two items overlap), inside the
-    office window when one exists, so it never exceeds Total Office Time. Free = office window
-    minus working minus the Lunch/Tea windows not spent working.
+    office window when one exists, so it never exceeds Total Office Time.
+    Free = Total Office Time − Actual Working Time. Lunch and tea count as free time when
+    nobody worked through them, and as working time when they did.
     """
     owns = conn is None
     if owns:
@@ -320,11 +321,9 @@ def day_time_summary(employee_id: int, day: str, *, conn=None, now: str | None =
     working = _union_seconds(plain + _subtract(deduct, _break_intervals(w0, w1)))
     if office_seconds:
         working = min(working, office_seconds)
-    gaps = (
-        free_time_gaps(o_start, o_end, busy + _break_intervals(o_start, o_end)) if office_seconds else []
-    )
-    free_seconds = sum(g["seconds"] for g in gaps)
-    break_seconds = max(0, office_seconds - working - free_seconds)
+    gaps = free_time_gaps(o_start, o_end, busy) if office_seconds else []
+    free_seconds = max(0, office_seconds - working) if office_seconds else sum(g["seconds"] for g in gaps)
+    break_seconds = 0
     return {
         "employee_id": int(employee_id),
         "work_date": day,
@@ -399,6 +398,89 @@ def working_hours_report(employee_ids: list[int], from_date: str, to_date: str) 
         "employees": sorted(per_emp.values(), key=lambda t: -t["working_seconds"]),
         "totals": totals,
     }
+
+
+def attendance_report(employee_ids: list[int], from_date: str, to_date: str) -> dict:
+    """Daily attendance and time for the Reports tab. Every date in the range is listed."""
+    days = _date_range(from_date, to_date, REPORT_MAX_DAYS)
+    conn = H._connect()
+    try:
+        names = {
+            int(r["id"]): dict(r)
+            for r in conn.execute(
+                f"""SELECT e.id, e.name, d.name AS department_name FROM employees e
+                    LEFT JOIN departments d ON d.id=e.department_id
+                    WHERE e.id IN ({','.join('?' * len(employee_ids)) or 'NULL'})""",
+                [int(e) for e in employee_ids],
+            ).fetchall()
+        }
+        holidays = H.holiday_set(conn)
+        now = H._now_iso()
+        people = []
+        for eid in employee_ids:
+            day_rows = []
+            counts = {"Present": 0, "Absent": 0, "Leave": 0, "Holiday": 0, "Weekoff": 0}
+            office = working = free = 0
+            most = least = None
+            for day in days:
+                s = day_time_summary(int(eid), day, conn=conn, now=now)
+                d = date.fromisoformat(day)
+                if s["on_leave"]:
+                    status = "Leave"
+                elif day in holidays:
+                    status = "Holiday"
+                elif d.weekday() == 6:
+                    status = "Weekoff"
+                elif s["office_start"]:
+                    status = "Present"
+                else:
+                    status = "Absent"
+                counts[status] += 1
+                office += s["office_seconds"]
+                working += s["working_seconds"]
+                free += s["free_seconds"]
+                if status == "Present":
+                    if most is None or s["free_seconds"] > most[1]:
+                        most = (day, s["free_seconds"])
+                    if least is None or s["free_seconds"] < least[1]:
+                        least = (day, s["free_seconds"])
+                day_rows.append({
+                    "date": day,
+                    "status": status,
+                    "office_seconds": s["office_seconds"],
+                    "working_seconds": s["working_seconds"],
+                    "free_seconds": s["free_seconds"],
+                    "office_label": s["office_label"],
+                    "working_label": s["working_label"],
+                    "free_label": s["free_label"],
+                })
+            present = counts["Present"]
+            expected = present * 8 * 3600
+            emp = names.get(int(eid), {})
+            people.append({
+                "employee_id": int(eid),
+                "employee_name": emp.get("name") or "",
+                "department_name": emp.get("department_name") or "",
+                "present_days": present,
+                "absent_days": counts["Absent"],
+                "leave_days": counts["Leave"],
+                "holiday_days": counts["Holiday"],
+                "weekoff_days": counts["Weekoff"],
+                "total_days": len(days),
+                "office_seconds": office,
+                "working_seconds": working,
+                "free_seconds": free,
+                "expected_seconds": expected,
+                "gap_seconds": expected - working,
+                "productivity_pct": round(working / expected * 100, 2) if expected else None,
+                "avg_free_seconds": round(free / present) if present else 0,
+                "most_free_day": most[0] if most else "",
+                "least_free_day": least[0] if least else "",
+                "days": day_rows,
+            })
+    finally:
+        conn.close()
+    return {"from_date": days[0], "to_date": days[-1], "employees": people}
 
 
 # ── Overlap resolution for manual time entries ───────────────────────────────
@@ -676,7 +758,7 @@ def _entity_time_locked(conn, entity_type: str, entity_id: int) -> bool:
         row = conn.execute("SELECT status FROM task_logs WHERE id=?", (int(entity_id),)).fetchone()
         return bool(row) and str(row["status"] or "Pending").strip() not in ("Pending", "")
     row = conn.execute("SELECT status FROM one_time_tasks WHERE id=?", (int(entity_id),)).fetchone()
-    return bool(row) and str(row["status"] or "") == "Approved"
+    return bool(row) and str(row["status"] or "") in ("Done", "Approved")
 
 
 def _sync_parent_after_slot_change(conn, entity_type: str, entity_id: int) -> None:

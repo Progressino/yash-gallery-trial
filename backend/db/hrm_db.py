@@ -641,6 +641,7 @@ def init_db():
         "ALTER TABLE one_time_tasks ADD COLUMN auto_approved INTEGER DEFAULT 0",
         # Linked-person review: how much of the work was achieved (0–100)
         "ALTER TABLE task_logs ADD COLUMN achievement_pct INTEGER",
+        "ALTER TABLE task_logs ADD COLUMN approval_employee_id INTEGER",
         "ALTER TABLE one_time_tasks ADD COLUMN achievement_pct INTEGER",
     ):
         try:
@@ -1452,6 +1453,10 @@ def task_log_counts_for_performance(
     Post-cutover: N/A has no impact; Done only after Self/Approved/Auto-Approved.
     """
     st = (status or "").strip()
+    if st == "N/A":
+        if (approval_status or "").strip() in ("Approved", "Auto-Approved"):
+            return "done"
+        return None
     if st in NEUTRAL_TASK_STATUSES:
         return None
     ld = (log_date or "")[:10]
@@ -2694,18 +2699,32 @@ def mark_task(
         except (TypeError, ValueError):
             linked_id = None
 
-    # Self-complete when no Linked To; else Done/Partial need linked approval
-    if status in ("Done", "Partial"):
-        if linked_id:
-            approval_status = "Pending"
-            approved_by = ""
-            approved_at = ""
-        else:
-            approval_status = "Self"
-            approved_by = marked_by or "self"
-            approved_at = _now_iso()
+    owner_id = int(resp["employee_id"])
+    manager_id = None
+    mgr = conn.execute(
+        "SELECT reports_to_employee_id FROM employees WHERE id=?",
+        (owner_id,),
+    ).fetchone()
+    if mgr and mgr["reports_to_employee_id"]:
+        manager_id = int(mgr["reports_to_employee_id"])
+    approver_id = linked_id or (manager_id if manager_id and manager_id != owner_id else None)
+
+    # Done/Partial/N/A go to the accountable person, or the HOD when none is set.
+    # Missed and Blocked are saved directly and do not wait for approval.
+    if status in ("Done", "Partial", "N/A") and approver_id:
+        approval_status = "Pending"
+        approved_by = ""
+        approved_at = ""
+    elif status in ("Done", "Partial"):
+        approval_status = "Self"
+        approved_by = marked_by or "self"
+        approved_at = _now_iso()
+    elif status == "N/A":
+        approval_status = "N/A"
+        approved_by = ""
+        approved_at = ""
     elif status in NEUTRAL_TASK_STATUSES:
-        approval_status = "N/A" if status == "N/A" else ""
+        approval_status = ""
         approved_by = ""
         approved_at = ""
     else:
@@ -2731,13 +2750,23 @@ def mark_task(
         conn.close()
         return "locked"
 
-    # Mandatory time tracking only for statuses that claim work (Done / Partial).
-    # Missed / Blocked / Leave / N/A need no Start/Complete time.
-    # HOD/Admin overrides and system auto-marks may skip the timer gate.
+    # Done / Partial need recorded working time. Missed, Blocked, Leave and N/A do not.
     if status in TIMED_TASK_STATUSES and not allow_override:
-        started = str(existing["started_at"] or "").strip() if existing else ""
         active_secs = int(existing["active_seconds"] or 0) if existing else 0
-        if not started and active_secs <= 0:
+        slot_secs = conn.execute(
+            """SELECT COALESCE(SUM(duration_seconds),0) s FROM hrm_time_slots
+               WHERE entity_type='responsibility' AND responsibility_id=? AND log_date=?
+                 AND IFNULL(ended_at,'')!=''""",
+            (responsibility_id, log_date),
+        ).fetchone()
+        running = conn.execute(
+            """SELECT 1 FROM hrm_time_slots
+               WHERE entity_type='responsibility' AND responsibility_id=? AND log_date=?
+                 AND IFNULL(started_at,'')!='' AND IFNULL(ended_at,'')=''
+               LIMIT 1""",
+            (responsibility_id, log_date),
+        ).fetchone()
+        if active_secs <= 0 and int(slot_secs["s"] or 0) <= 0 and not running:
             conn.close()
             return "timer_required"
 
@@ -2759,7 +2788,8 @@ def mark_task(
             """UPDATE task_logs
                SET status=?, remarks=?, marked_by=?, marked_at=?,
                    blocker_employee_id=?, blocker_reason=?,
-                   approval_status=?, approved_by=?, approved_at=?, approval_sent_at=?
+                   approval_status=?, approved_by=?, approved_at=?, approval_sent_at=?,
+                   approval_employee_id=?
                WHERE responsibility_id=? AND log_date=?""",
             (
                 status,
@@ -2772,6 +2802,7 @@ def mark_task(
                 approved_by,
                 approved_at,
                 mark_now if approval_status == "Pending" else "",
+                approver_id if approval_status == "Pending" else None,
                 responsibility_id,
                 log_date,
             ),
@@ -2783,8 +2814,9 @@ def mark_task(
             """INSERT INTO task_logs(
                 responsibility_id,employee_id,log_date,status,remarks,marked_by,marked_at,
                 blocker_employee_id,blocker_reason,approval_status,approved_by,approved_at,
-                approval_sent_at, is_reassignment, reassignment_clone_id, reassigned_from_employee_id)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                approval_sent_at, is_reassignment, reassignment_clone_id, reassigned_from_employee_id,
+                approval_employee_id)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(responsibility_id,log_date) DO NOTHING
         """,
             (
@@ -2804,6 +2836,7 @@ def mark_task(
                 1 if cover else 0,
                 int(cover["id"]) if cover else 0,
                 int(cover["original_employee_id"]) if cover else None,
+                approver_id if approval_status == "Pending" else None,
             ),
         )
 
@@ -2873,7 +2906,7 @@ def mark_task(
             )
 
     # Notify Linked To person that approval is required (in-app inbox)
-    if approval_status == "Pending" and linked_id and task_log_id:
+    if approval_status == "Pending" and approver_id and task_log_id:
         log_id = int(task_log_id["id"] if hasattr(task_log_id, "keys") else task_log_id["id"])
         title_row = conn.execute(
             """SELECT r.title, e.name as assignee_name
@@ -2890,7 +2923,7 @@ def mark_task(
         conn.execute(
             """DELETE FROM task_approval_notifications
                WHERE task_log_id=? AND linked_to_employee_id=? AND is_read=0""",
-            (log_id, linked_id),
+            (log_id, approver_id),
         )
         conn.execute(
             """INSERT INTO task_approval_notifications(
@@ -2900,7 +2933,7 @@ def mark_task(
             (
                 log_id,
                 responsibility_id,
-                linked_id,
+                approver_id,
                 int(resp["employee_id"]),
                 log_date,
                 title,
@@ -2928,21 +2961,26 @@ def list_pending_linked_approvals(linked_employee_id: int) -> list[dict]:
                e.name as assignee_name, d.name as department_name,
                be.name as backup_employee_name,
                le.name as linked_to_employee_name,
-               r.linked_to_employee_id
+               r.linked_to_employee_id, r.kpi_weightage,
+               tl.approval_employee_id,
+               (SELECT COALESCE(SUM(duration_seconds),0) FROM hrm_time_slots s
+                 WHERE s.responsibility_id=tl.responsibility_id AND s.log_date=tl.log_date) AS work_seconds
         FROM task_logs tl
         JOIN responsibilities r ON r.id=tl.responsibility_id
         JOIN employees e ON e.id=tl.employee_id
         LEFT JOIN departments d ON d.id=e.department_id
         LEFT JOIN employees be ON be.id=r.backup_employee_id
         LEFT JOIN employees le ON le.id=r.linked_to_employee_id
-        WHERE r.linked_to_employee_id=?
-          AND tl.approval_status='Pending'
-          AND tl.status IN ('Done','Partial')
+        WHERE tl.approval_status='Pending'
+          AND tl.status IN ('Done','Partial','N/A')
           AND r.active=1
-          AND r.linked_to_employee_id != tl.employee_id
+          AND (
+            (r.linked_to_employee_id=? AND r.linked_to_employee_id != tl.employee_id)
+            OR tl.approval_employee_id=?
+          )
         ORDER BY tl.log_date DESC, tl.id DESC
         """,
-        (int(linked_employee_id),),
+        (int(linked_employee_id), int(linked_employee_id)),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -4011,13 +4049,21 @@ def approve_task_log(
     if linked and linked_employee_id is not None and int(linked) != int(linked_employee_id) and not allow_override:
         conn.close()
         return "forbidden"
-    if (row["status"] or "") not in ("Done", "Partial"):
+    if (row["status"] or "") not in ("Done", "Partial", "N/A"):
         conn.close()
         return "not_pending"
     appr = (row["approval_status"] if "approval_status" in row.keys() else "") or ""
     if appr not in ("Pending",):
         conn.close()
         return "not_pending"
+    approver_col = row["approval_employee_id"] if "approval_employee_id" in row.keys() else None
+    if (
+        linked_employee_id is not None
+        and not allow_override
+        and approver_col
+        and int(approver_col) == int(linked_employee_id)
+    ):
+        linked = approver_col
     if not allow_override and not in_task_action_window(row["log_date"]):
         # Linked person keeps the full 2-day approval period counted from when it was sent.
         keys = row.keys()
@@ -4032,10 +4078,17 @@ def approve_task_log(
 
     new_status = row["status"]
     if action == "Cancelled":
-        new_status = "Missed"
-        approval = "Cancelled"
+        # N/A sent back so the employee can choose another status. Other rejects stay Missed.
+        if (row["status"] or "") == "N/A":
+            new_status = "Pending"
+            approval = "Rejected"
+        else:
+            new_status = "Missed"
+            approval = "Cancelled"
     else:
         approval = "Approved"
+        if pct is None and (row["status"] or "") == "N/A":
+            pct = 100
 
     conn.execute(
         """UPDATE task_logs SET status=?, approval_status=?, approved_by=?, approved_at=?, remarks=?,
@@ -5886,6 +5939,7 @@ def get_performance(department_id=None, from_date=None, to_date=None):
         f"""
         SELECT tl.responsibility_id, tl.log_date, tl.status, tl.blocker_employee_id,
                COALESCE(tl.approval_status,'') as approval_status,
+               tl.achievement_pct,
                tl.employee_id as log_employee_id,
                COALESCE(tl.is_reassignment,0) as is_reassignment,
                r.linked_to_employee_id
@@ -5954,6 +6008,7 @@ def get_performance(department_id=None, from_date=None, to_date=None):
             "is_reassignment": bool(int(l["is_reassignment"] or 0))
             if "is_reassignment" in l.keys()
             else False,
+            "achievement_pct": l["achievement_pct"] if "achievement_pct" in l.keys() else None,
         }
     issue_map: dict = {}
     for i in issue_counts:
@@ -6029,16 +6084,20 @@ def get_performance(department_id=None, from_date=None, to_date=None):
                 }
             if covered:
                 emp_stats[target]["total_tasks"] += unit_w
+            pct = entry.get("achievement_pct")
+            credit = (float(pct) / 100.0) if pct is not None and str(pct) != "" else None
             if bucket == "done":
+                factor = credit if credit is not None else 1.0
                 if covered:
-                    emp_stats[target]["done_tasks"] += unit_w
+                    emp_stats[target]["done_tasks"] += factor * unit_w
                 else:
-                    done_weight += unit_w
+                    done_weight += factor * unit_w
             elif bucket == "partial":
+                factor = credit if credit is not None else 0.5
                 if covered:
-                    emp_stats[target]["done_tasks"] += 0.5 * unit_w
+                    emp_stats[target]["done_tasks"] += factor * unit_w
                 else:
-                    done_weight += 0.5 * unit_w
+                    done_weight += factor * unit_w
             elif bucket == "missed":
                 if covered:
                     emp_stats[target]["missed_tasks"] += 1

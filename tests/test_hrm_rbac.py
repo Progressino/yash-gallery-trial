@@ -181,15 +181,20 @@ def _seed_resp_and_task():
 
 
 def test_hod_can_edit_responsibility_and_task(monkeypatch):
-    """HOD may assign/mark; edit/delete of master records is Admin-only."""
+    """HOD edits the team's responsibilities and tasks, not their own."""
     dept_id, emp_id, backup_id, rid, tid = _seed_resp_and_task()
     client = _make_client(
         monkeypatch,
         "hod_edit",
-        _profile("HOD", hrm_department_id=dept_id),
+        _profile("HOD", hrm_department_id=dept_id, employee_id=backup_id),
     )
-    assert client.patch(f"/api/hrm/responsibilities/{rid}", json={"title": "Updated daily check"}).status_code == 403
-    assert client.patch(f"/api/hrm/one-time-tasks/{tid}", json={"title": "Updated audit"}).status_code == 403
+    assert client.patch(f"/api/hrm/responsibilities/{rid}", json={"title": "Updated daily check"}).status_code == 200
+    assert client.patch(f"/api/hrm/one-time-tasks/{tid}", json={"title": "Updated audit"}).status_code == 200
+    own = hrm_db.create_responsibility({
+        "employee_id": backup_id, "title": "HOD own", "frequency": "Daily",
+        "linked_to_employee_id": emp_id,
+    })
+    assert client.patch(f"/api/hrm/responsibilities/{own}", json={"title": "Nope"}).status_code == 403
     # Create still allowed via can_edit_assignments
     assert client.post(
         "/api/hrm/responsibilities",

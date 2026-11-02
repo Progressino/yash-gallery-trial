@@ -86,8 +86,8 @@ def test_row2_sheet_example_free_time_deducts_breaks(env):
     out = hrm_worktime.office_close(a)
     assert out["office_seconds"] == 9 * 3600
     assert out["working_seconds"] == int(4.5 * 3600)
-    assert out["free_seconds"] == 3 * 3600 + 45 * 60
-    assert out["break_seconds"] == 45 * 60
+    assert out["free_seconds"] == int(4.5 * 3600)
+    assert out["break_seconds"] == 0
 
 
 def test_row2_working_never_exceeds_office_with_overlapping_legacy_slots(env):
@@ -372,6 +372,10 @@ def test_stray_approval_records_achievement_pct(env, monkeypatch):
 
 def test_row6_accountable_person_required(env, monkeypatch):
     a, h, client = env["a"], env["h"], env["client"]
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="all", role="Admin", user_id=1, employee_id=h),
+    )
     missing = client.post("/api/hrm/responsibilities", json={"employee_id": a, "title": "No owner", "frequency": "Daily"})
     assert missing.status_code == 400
     assert "Accountable" in missing.json()["detail"]
@@ -386,10 +390,6 @@ def test_row6_accountable_person_required(env, monkeypatch):
     )
     assert ok.status_code == 200
     rid = next(r["id"] for r in hrm_db.list_responsibilities(employee_id=a) if r["title"] == "Owned")
-    monkeypatch.setattr(
-        "backend.routers.hrm._scope_from_request",
-        lambda request: HrmScope(level="all", role="Admin", user_id=1, employee_id=h),
-    )
     cleared = client.patch(f"/api/hrm/responsibilities/{rid}", json={"linked_to_employee_id": None})
     assert cleared.status_code == 400
 
@@ -460,3 +460,71 @@ def test_row8_unfinished_nondaily_reassigns_next_working_day(env):
     assert whenever_row["carried_forward"] is False
     finished = _check_item(a, done, TUE)
     assert finished is None or finished["carried_forward"] is False
+
+
+def test_employee_cannot_add_responsibility_or_task(env):
+    a, client = env["a"], env["client"]
+    resp = client.post(
+        "/api/hrm/responsibilities",
+        json={"employee_id": a, "title": "Mine", "frequency": "Daily", "linked_to_employee_id": env["h"]},
+    )
+    assert resp.status_code == 403
+    task = client.post("/api/hrm/one-time-tasks", json={"employee_id": a, "title": "Mine"})
+    assert task.status_code == 403
+
+
+def test_done_needs_working_time_and_na_goes_for_approval(env):
+    a, h = env["a"], env["h"]
+    rid = _resp(a, frequency="Daily", linked_to_employee_id=h, title="Needs time")
+    assert hrm_db.mark_task(rid, MON, "Done", "Worker A") == "timer_required"
+    assert hrm_db.mark_task(rid, MON, "N/A", "Worker A") is True
+    conn = hrm_db._connect()
+    log = conn.execute(
+        "SELECT id, status, approval_status FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        (rid, MON),
+    ).fetchone()
+    conn.close()
+    assert log["status"] == "N/A" and log["approval_status"] == "Pending"
+    assert hrm_db.approve_task_log(log["id"], actor="Hod H", linked_employee_id=h, action="Cancelled") is True
+    conn = hrm_db._connect()
+    again = conn.execute("SELECT status, approval_status FROM task_logs WHERE id=?", (log["id"],)).fetchone()
+    conn.close()
+    assert again["status"] == "Pending" and again["approval_status"] == "Rejected"
+
+
+def test_approved_percent_is_the_responsibility_score(env):
+    a, h, clock = env["a"], env["h"], env["clock"]
+    rid = _resp(a, frequency="Daily", linked_to_employee_id=h, title="Score me")
+    clock.t = f"{MON} 10:00:00"
+    hrm_worktime.add_manual_slot(
+        entity_type="responsibility", responsibility_id=rid, log_date=MON,
+        started_at=f"{MON} 09:00", ended_at=f"{MON} 10:00", actor="A",
+    )
+    assert hrm_db.mark_task(rid, MON, "Done", "Worker A") is True
+    conn = hrm_db._connect()
+    log_id = conn.execute(
+        "SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?", (rid, MON)
+    ).fetchone()["id"]
+    conn.close()
+    assert hrm_db.approve_task_log(
+        log_id, actor="Hod H", linked_employee_id=h, action="Approved", achievement_pct=80
+    ) is True
+    perf = hrm_db.get_performance(None, MON, MON)
+    me = next(p for p in perf if p["employee_id"] == a)
+    assert me["responsibility_performance_pct"] == 80.0
+
+
+def test_attendance_classifies_weekoff_present_leave_and_holiday(env):
+    a = env["a"]
+    hrm_worktime.office_start(a)
+    hrm_db.create_leave(a, TUE, TUE, actor="A")
+    hrm_db.upsert_holiday(WED, "Festival")
+    report = hrm_worktime.attendance_report([a], "2026-10-04", WED)
+    person = report["employees"][0]
+    by_day = {d["date"]: d["status"] for d in person["days"]}
+    assert by_day["2026-10-04"] == "Weekoff"
+    assert by_day[MON] == "Present"
+    assert by_day[TUE] == "Leave"
+    assert by_day[WED] == "Holiday"
+    assert person["present_days"] == 1
+    assert person["free_seconds"] == person["office_seconds"] - person["working_seconds"]

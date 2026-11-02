@@ -107,14 +107,41 @@ def _set_cells(row_xml: str, rnum: int, values: dict[str, str], style: str) -> s
     return f"{head}>{ordered}</row>"
 
 
+def _existing_review_columns(xml: str, shared: list[str]) -> dict[str, str] | None:
+    """Use the review headers already on the sheet, so tester columns after them stay put."""
+    header = re.search(r'<row r="1"[^>]*?(?:/>|>.*?</row>)', xml, re.S)
+    if not header:
+        return None
+    found = {}
+    for ref, attrs, inner in re.findall(r'<c r="([A-Z]+)1"([^>]*?)(?:/>|>(.*?)</c>)', header.group(0), re.S):
+        text = ""
+        v = re.search(r"<v>(.*?)</v>", inner or "", re.S)
+        if 't="s"' in attrs and v and shared:
+            text = shared[int(v.group(1))]
+        elif inner:
+            text = _unescape("".join(re.findall(r"<t[^>]*>(.*?)</t>", inner, re.S)))
+        text = text.strip()
+        if text in REVIEW_COLUMNS:
+            found[text] = ref
+    if all(name in found for name in REVIEW_COLUMNS):
+        return found
+    return None
+
+
 def writeback(src: str, updates_path: str, dst: str) -> None:
     updates = json.load(open(updates_path, encoding="utf-8"))
-    first = _col_index(AI_FIRST_COL)
-    col_of = {name: _col_letter(first + i) for i, name in enumerate(AI_COLUMNS)}
     with zipfile.ZipFile(src) as z:
         xml = z.read(SHEET).decode("utf-8")
         members = {i.filename: z.read(i.filename) for i in z.infolist()}
         infos = {i.filename: i for i in z.infolist()}
+        shared = _shared_strings(z)
+    existing = _existing_review_columns(xml, shared)
+    if existing:
+        col_of = existing
+        first = None
+    else:
+        first = _col_index(AI_FIRST_COL)
+        col_of = {name: _col_letter(first + i) for i, name in enumerate(AI_COLUMNS)}
 
     def patch_row(rnum: int, values: dict[str, str], style: str) -> None:
         nonlocal xml
@@ -128,17 +155,19 @@ def writeback(src: str, updates_path: str, dst: str) -> None:
         pos = later[0].start() if later else xml.index("</sheetData>")
         xml = xml[:pos] + new_row + xml[pos:]
 
-    patch_row(1, {col_of[n]: n for n in AI_COLUMNS}, HEADER_STYLE)
+    if first is not None:
+        patch_row(1, {col_of[n]: n for n in AI_COLUMNS}, HEADER_STYLE)
     for rnum, vals in updates.items():
         patch_row(int(rnum), {col_of[k]: str(v) for k, v in vals.items() if k in col_of}, BODY_STYLE)
 
-    last = _col_letter(first + len(AI_COLUMNS) - 1)
-    xml = re.sub(r'<dimension ref="([A-Z]+)(\d+):[A-Z]+(\d+)"/>', rf'<dimension ref="\g<1>\g<2>:{last}\g<3>"/>', xml, count=1)
-    xml = re.sub(rf'<col min="({first}|{first + 1}|{first + 2}|{first + 3})" [^>]*/>', "", xml)
-    extra = "".join(
-        f'<col min="{first + i}" max="{first + i}" width="{w}" customWidth="1"/>' for i, w in enumerate(AI_WIDTHS)
-    )
-    xml = xml.replace("</cols>", extra + "</cols>", 1)
+    if first is not None:
+        last = _col_letter(first + len(AI_COLUMNS) - 1)
+        xml = re.sub(r'<dimension ref="([A-Z]+)(\d+):[A-Z]+(\d+)"/>', rf'<dimension ref="\g<1>\g<2>:{last}\g<3>"/>', xml, count=1)
+        xml = re.sub(rf'<col min="({first}|{first + 1}|{first + 2}|{first + 3})" [^>]*/>', "", xml)
+        extra = "".join(
+            f'<col min="{first + i}" max="{first + i}" width="{w}" customWidth="1"/>' for i, w in enumerate(AI_WIDTHS)
+        )
+        xml = xml.replace("</cols>", extra + "</cols>", 1)
     members[SHEET] = xml.encode("utf-8")
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as out:
         for name, data in members.items():

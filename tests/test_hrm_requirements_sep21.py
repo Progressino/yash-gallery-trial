@@ -240,7 +240,7 @@ def test_self_assign_task_http(client, hrm, monkeypatch):
         "/api/hrm/one-time-tasks",
         json={"employee_id": a, "title": "Boss asked now", "priority": "High"},
     )
-    assert ok.status_code == 200, ok.text
+    assert ok.status_code == 403, ok.text
     blocked = client.post(
         "/api/hrm/one-time-tasks",
         json={"employee_id": b, "title": "Other person", "priority": "High"},

@@ -747,9 +747,11 @@ def get_responsibilities(
 @router.post("/responsibilities")
 def post_responsibility(body: ResponsibilityIn, request: Request):
     scope = _scope_from_request(request)
+    if scope.is_employee:
+        raise HTTPException(403, "Employees cannot add responsibilities")
+    if scope.is_hod and scope.employee_id and int(body.employee_id) == int(scope.employee_id):
+        raise HTTPException(403, "HOD cannot add a responsibility for themselves")
     assert_employee_in_scope(scope, body.employee_id)
-    if scope.is_employee and scope.employee_id != body.employee_id:
-        raise HTTPException(403, "Cannot assign responsibilities for other employees")
     data = body.model_dump()
     is_mandatory = bool(data.get("mandatory"))
     backup_id = data.get("backup_employee_id")
@@ -789,6 +791,8 @@ def patch_responsibility(rid: int, body: ResponsibilityUpdate, request: Request)
         raise HTTPException(404, "Responsibility not found")
     assert_hrm_mutate_responsibility(scope, owner)
     if body.employee_id is not None:
+        if scope.is_hod and scope.employee_id and int(body.employee_id) == int(scope.employee_id):
+            raise HTTPException(403, "HOD cannot assign a responsibility to themselves")
         assert_employee_in_scope(scope, body.employee_id)
     if body.backup_employee_id is not None:
         assert_employee_in_scope(scope, body.backup_employee_id)
@@ -819,17 +823,10 @@ def del_responsibility(rid: int, request: Request):
 
 
 def _assert_blocker_allowed(scope: HrmScope, owner_employee_id: int, blocker_id: int) -> None:
-    """Blocker = anyone in the caller's scope, or an active peer in the item owner's department."""
-    try:
-        assert_employee_in_scope(scope, blocker_id)
-        return
-    except HTTPException:
-        pass
-    blocker_dept = employee_department_id(blocker_id)
-    if blocker_dept is not None and blocker_dept == employee_department_id(owner_employee_id):
-        if any(int(e["id"]) == blocker_id for e in list_employees(int(blocker_dept), "Active")):
-            return
-    raise HTTPException(403, "Blocker must be an active employee in the same department")
+    """Any active employee can be named as the blocker."""
+    del scope, owner_employee_id
+    if not any(int(e["id"]) == int(blocker_id) for e in list_employees(None, "Active")):
+        raise HTTPException(400, "Blocker must be an active employee")
 
 
 @router.post("/tasks/mark")
@@ -866,10 +863,7 @@ def post_mark_task(body: TaskMarkIn, request: Request):
     if ok == "invalid_status":
         raise HTTPException(400, "Invalid status")
     if ok == "timer_required":
-        raise HTTPException(
-            400,
-            "Start time tracking before updating status (press ▶ Start, or enter Manual Time)",
-        )
+        raise HTTPException(400, "Please record working time before marking Done or Partial.")
     raise HTTPException(404, "Responsibility not found")
 
 
@@ -1141,6 +1135,16 @@ def get_employees_for_pickers(request: Request, department_id: Optional[int] = N
             return list_employees(int(dept), "Active")
         return list_employees(None, "Active", employee_id=int(scope.employee_id))
     raise HTTPException(403, "Not allowed")
+
+
+@router.get("/employees/blocker-choices")
+def get_blocker_choices(request: Request):
+    """Every active employee. A block can name anyone, not only the same department."""
+    _scope_from_request(request)
+    return [
+        {"id": e["id"], "name": e["name"], "department_name": e.get("department_name") or ""}
+        for e in list_employees(None, "Active")
+    ]
 
 
 @router.post("/tasks/reassign-day")
@@ -1678,6 +1682,29 @@ def get_working_hours_report(
         raise HTTPException(400, str(e)) from e
 
 
+@router.get("/reports/attendance")
+def get_attendance_report(
+    request: Request,
+    employee_id: Optional[int] = None,
+    department_id: Optional[int] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+):
+    """Attendance, office time, working time and free time. No task or approval data."""
+    scope = _scope_from_request(request)
+    emp_f, dept_f = _report_scope(scope, employee_id, department_id)
+    d0 = str(from_date or today_ist().isoformat())[:10]
+    d1 = str(to_date or d0)[:10]
+    if emp_f == -1:
+        return {"from_date": d0, "to_date": d1, "employees": []}
+    try:
+        return hrm_worktime.attendance_report(
+            scoped_employee_ids(employee_id=emp_f, department_id=dept_f), d0, d1
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @router.post("/employee-check/{employee_id}/mark-unmarked-missed")
 def employee_mark_unmarked_missed(
     employee_id: int,
@@ -1730,11 +1757,11 @@ def get_one_time_tasks(
 @router.post("/one-time-tasks")
 def post_one_time_task(body: OneTimeTaskIn, request: Request):
     scope = _scope_from_request(request)
-    assert_employee_in_scope(scope, body.employee_id)
-    # User ID → Task: employees may self-assign only
     if scope.is_employee:
-        if not scope.employee_id or int(body.employee_id) != int(scope.employee_id):
-            raise HTTPException(403, "You can only create tasks for yourself")
+        raise HTTPException(403, "Employees cannot add tasks")
+    if scope.is_hod and scope.employee_id and int(body.employee_id) == int(scope.employee_id):
+        raise HTTPException(403, "HOD cannot add a task for themselves")
+    assert_employee_in_scope(scope, body.employee_id)
     data = body.model_dump()
     # Backup person is no longer collected on Assign Task — ignore if sent
     data.pop("backup_employee_id", None)
@@ -1754,10 +1781,10 @@ def post_one_time_task(body: OneTimeTaskIn, request: Request):
 @router.patch("/one-time-tasks/{task_id}")
 def patch_one_time_task(task_id: int, body: OneTimeTaskUpdate, request: Request):
     scope = _scope_from_request(request)
-    assert_hrm_admin_mutate_records(scope)
     owner = get_one_time_task_owner(task_id)
     if owner is None:
         raise HTTPException(404, "Task not found")
+    assert_hrm_mutate_responsibility(scope, owner)
     assert_employee_in_scope(scope, owner)
     data = {k: v for k, v in body.model_dump().items() if v is not None}
     if "employee_id" in data:

@@ -292,6 +292,7 @@ export function OfficeTimeBar({
           <Stat label="Free Time" value={fmtHM(s.free_seconds)} tone="text-amber-700" />
           {Number(s.break_seconds) > 0 && <Stat label="Lunch/Tea Break" value={fmtHM(s.break_seconds)} />}
         </div>
+        <p className="text-[10px] text-gray-400">Free time = office time − working time. Lunch and tea with no work recorded are included in free time.</p>
         {(s.free_gaps || []).length > 0 && (
           <button type="button" onClick={() => setShowGaps(v => !v)} className="text-xs text-blue-600 underline">
             {showGaps ? 'Hide' : 'Show'} free gaps ({s.free_gaps.length})
@@ -577,9 +578,12 @@ const monthLabel = (ym: string) => {
 type DwrFilters = { date: string; employee: string; item: string; type: string; status: string; linked: string; minMinutes: string }
 const EMPTY_FILTERS: DwrFilters = { date: '', employee: '', item: '', type: '', status: '', linked: '', minMinutes: '' }
 
-export function DwrReport({ employeeId, departmentId }: { employeeId?: number | ''; departmentId?: number | '' }) {
-  const [from, setFrom] = useState(todayIst())
-  const [to, setTo] = useState(todayIst())
+export function DwrReport({ employeeId, departmentId, from: fromProp, to: toProp }: { employeeId?: number | ''; departmentId?: number | ''; from?: string; to?: string }) {
+  const [fromLocal, setFrom] = useState(todayIst())
+  const [toLocal, setTo] = useState(todayIst())
+  const controlled = fromProp != null && toProp != null
+  const from = controlled ? fromProp : fromLocal
+  const to = controlled ? toProp : toLocal
   const [sortDesc, setSortDesc] = useState(true)
   const [showSlots, setShowSlots] = useState(true)
   const [f, setF] = useState<DwrFilters>(EMPTY_FILTERS)
@@ -642,6 +646,8 @@ export function DwrReport({ employeeId, departmentId }: { employeeId?: number | 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-end gap-2">
+        {!controlled && (
+          <>
         <label className="text-[10px] text-gray-400">From
           <input type="date" value={from} onChange={e => { setFrom(e.target.value); if (to < e.target.value) setTo(e.target.value) }} className="block border rounded-lg px-3 py-1.5 text-sm" />
         </label>
@@ -653,6 +659,8 @@ export function DwrReport({ employeeId, departmentId }: { employeeId?: number | 
             <button key={k} type="button" onClick={() => setQuick(k)} className="px-3 py-1.5 border rounded-lg text-xs hover:bg-blue-50">{label}</button>
           ))}
         </div>
+          </>
+        )}
         <button type="button" onClick={() => setShowSlots(v => !v)} className="px-3 py-1.5 border rounded-lg text-xs font-medium text-[#002B5B] hover:bg-blue-50">
           {showSlots ? 'Hide time slots & notes' : 'Show time slots & notes'}
         </button>
@@ -840,9 +848,12 @@ export function DwrReport({ employeeId, departmentId }: { employeeId?: number | 
 
 // ── Reports: Actual Working Hours & Free Time ────────────────────────────────
 
-export function WorkingHoursReport({ employeeId, departmentId }: { employeeId?: number | ''; departmentId?: number | '' }) {
-  const [from, setFrom] = useState(todayIst())
-  const [to, setTo] = useState(todayIst())
+export function WorkingHoursReport({ employeeId, departmentId, from: fromProp, to: toProp }: { employeeId?: number | ''; departmentId?: number | ''; from?: string; to?: string }) {
+  const [fromLocal, setFrom] = useState(todayIst())
+  const [toLocal, setTo] = useState(todayIst())
+  const controlled = fromProp != null && toProp != null
+  const from = controlled ? fromProp : fromLocal
+  const to = controlled ? toProp : toLocal
   const [openRow, setOpenRow] = useState<string | null>(null)
   const { data, isFetching, error } = useQuery({
     queryKey: ['hrm-working-hours', employeeId || '', departmentId || '', from, to],
@@ -859,6 +870,7 @@ export function WorkingHoursReport({ employeeId, departmentId }: { employeeId?: 
   const totals = data?.totals || {}
   return (
     <div className="space-y-3">
+      {!controlled && (
       <div className="flex flex-wrap items-end gap-2">
         <label className="text-[10px] text-gray-400">From
           <input type="date" value={from} onChange={e => { setFrom(e.target.value); if (to < e.target.value) setTo(e.target.value) }} className="block border rounded-lg px-3 py-1.5 text-sm" />
@@ -868,6 +880,7 @@ export function WorkingHoursReport({ employeeId, departmentId }: { employeeId?: 
         </label>
         {isFetching && <span className="text-xs text-gray-400">Loading…</span>}
       </div>
+      )}
       {error && <p className="text-sm text-red-600">{errMsg(error, 'Could not load report')}</p>}
       <div className="grid grid-cols-3 gap-3">
         <Stat label="Total Office Time" value={fmtHM(totals.office_seconds)} strong />
@@ -876,7 +889,7 @@ export function WorkingHoursReport({ employeeId, departmentId }: { employeeId?: 
       </div>
       <p className="text-[11px] text-gray-500">
         Working Hours count each minute once (overlapping items are not double-counted) and never exceed Office Time.
-        Free Time = Office Time − Working Hours − Lunch/Tea break (45 min) not spent working.
+        Free Time = Office Time − Working Hours. Lunch and tea count as free time when no work was recorded in that window.
       </p>
       {emps.length > 1 && (
         <div className="bg-white rounded-xl border overflow-x-auto">
@@ -948,6 +961,82 @@ export function WorkingHoursReport({ employeeId, departmentId }: { employeeId?: 
         </table>
         {!rows.length && !isFetching && <p className="text-center text-gray-400 py-8 text-sm">No office time or time slots in this range.</p>}
       </div>
+    </div>
+  )
+}
+
+export function AttendanceReport({ employeeId, departmentId, from, to }: { employeeId?: number | ''; departmentId?: number | ''; from: string; to: string }) {
+  const { data, isFetching, error } = useQuery({
+    queryKey: ['hrm-attendance', employeeId || '', departmentId || '', from, to],
+    queryFn: () => {
+      const p = new URLSearchParams({ from_date: from, to_date: to })
+      if (employeeId) p.set('employee_id', String(employeeId))
+      if (departmentId && !employeeId) p.set('department_id', String(departmentId))
+      return api.get(`/hrm/reports/attendance?${p}`).then(r => r.data)
+    },
+    enabled: !!from && !!to && to >= from,
+  })
+  const people = (data?.employees as any[]) || []
+  const one = people.length === 1 ? people[0] : null
+  return (
+    <div className="space-y-3">
+      {isFetching && <p className="text-xs text-gray-400">Loading…</p>}
+      {error && <p className="text-sm text-red-600">{errMsg(error, 'Could not load attendance')}</p>}
+      {people.map((p: any) => (
+        <div key={p.employee_id} className="bg-white rounded-xl border p-4 space-y-3">
+          <div>
+            <p className="font-semibold text-gray-800">{p.employee_name}</p>
+            <p className="text-xs text-gray-500">{p.department_name}</p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-xs">
+            <Stat label="Present" value={String(p.present_days)} />
+            <Stat label="Absent" value={String(p.absent_days)} />
+            <Stat label="Leave" value={String(p.leave_days)} />
+            <Stat label="Holiday" value={String(p.holiday_days)} />
+            <Stat label="Weekoff" value={String(p.weekoff_days)} />
+            <Stat label="Total days" value={String(p.total_days)} />
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+            <Stat label="Office time" value={fmtHM(p.office_seconds)} />
+            <Stat label="Working time" value={fmtHM(p.working_seconds)} />
+            <Stat label="Free time" value={fmtHM(p.free_seconds)} />
+            <Stat label="Productivity" value={p.productivity_pct == null ? '—' : `${p.productivity_pct}%`} />
+          </div>
+          <p className="text-[11px] text-gray-500">
+            Expected working hours {fmtHM(p.expected_seconds)} (present days × 8 h). Gap {fmtHM(p.gap_seconds)}.
+            Average free / present day {fmtHM(p.avg_free_seconds)}.
+            {p.most_free_day ? ` Most free ${p.most_free_day}.` : ''}
+            {p.least_free_day ? ` Least free ${p.least_free_day}.` : ''}
+          </p>
+        </div>
+      ))}
+      {one && (
+        <div className="bg-white rounded-xl border overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-gray-50 text-gray-500">
+              <tr>
+                <th className="text-left px-3 py-2">Date</th>
+                <th className="text-left px-3 py-2">Attendance</th>
+                <th className="text-left px-3 py-2">Office time</th>
+                <th className="text-left px-3 py-2">Working time</th>
+                <th className="text-left px-3 py-2">Free time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {one.days.map((d: any) => (
+                <tr key={d.date} className="border-t">
+                  <td className="px-3 py-1.5">{d.date}</td>
+                  <td className="px-3 py-1.5">{d.status}</td>
+                  <td className="px-3 py-1.5">{d.office_label}</td>
+                  <td className="px-3 py-1.5">{d.working_label}</td>
+                  <td className="px-3 py-1.5">{d.free_label}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {!people.length && !isFetching && <p className="text-center text-gray-400 py-6 text-sm">No employees in this filter.</p>}
     </div>
   )
 }
