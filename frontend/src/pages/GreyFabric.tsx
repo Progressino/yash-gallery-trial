@@ -194,6 +194,8 @@ export default function GreyFabric() {
     reservation_id: '', from_so: '', from_sku: '', to_so: '', to_sku: '', printed_code: '', qty: '', reason: '',
   })
   const [planMsg, setPlanMsg] = useState('')
+  const [advanceForm, setAdvanceForm] = useState({ fabric_code: '', style_code: '', qty: 0, reason: '' })
+  const [advanceDraft, setAdvanceDraft] = useState<Record<number, { qty: string; reason: string; to_style: string; so_number: string; sku: string }>>({})
 
   // ── Queries ──────────────────────────────────────────────────────────────────
   const { data: stats } = useQuery<GreyStats>({
@@ -291,6 +293,18 @@ export default function GreyFabric() {
     staleTime: 10_000,
     refetchOnMount: 'always',
     refetchOnWindowFocus: false,
+  })
+  const { data: printedVisibility = [] } = useQuery({
+    queryKey: ['printed-stock-visibility', tab, pfSubTab],
+    queryFn: () => api.get('/grey/printed-fabric/stock-visibility').then(r => r.data),
+    enabled: tab === 'printed-fabric' && (pfSubTab === 'checked' || pfSubTab === 'ready-to-cut'),
+    staleTime: 10_000,
+  })
+  const { data: printedAdvance = [] } = useQuery({
+    queryKey: ['printed-advance', tab, pfSubTab],
+    queryFn: () => api.get('/grey/printed-fabric/advance').then(r => r.data),
+    enabled: tab === 'printed-fabric' && (pfSubTab === 'checked' || pfSubTab === 'ready-to-cut'),
+    staleTime: 10_000,
   })
 
   // ── Mutations ─────────────────────────────────────────────────────────────────
@@ -540,6 +554,32 @@ export default function GreyFabric() {
       setPFSkuSearch('')
       if (res.errors.length) alert(`Reserved ${res.ok} SKU(s).\nSome failed:\n${res.errors.join('\n')}`)
     },
+  })
+
+  const refreshPrintedStock = () => {
+    qc.invalidateQueries({ queryKey: ['printed-fabric-checked'] })
+    qc.invalidateQueries({ queryKey: ['printed-ready-to-cut'] })
+    qc.invalidateQueries({ queryKey: ['printed-stock-visibility'] })
+    qc.invalidateQueries({ queryKey: ['printed-advance'] })
+    qc.invalidateQueries({ queryKey: ['printed-fabric-reserve-options'] })
+  }
+  const advanceError = (e: unknown, fallback: string) => {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+    alert(detail || fallback)
+  }
+  const advanceReserveMut = useMutation({
+    mutationFn: (b: object) => api.post('/grey/printed-fabric/advance', b),
+    onSuccess: () => {
+      refreshPrintedStock()
+      setAdvanceForm({ fabric_code: '', style_code: '', qty: 0, reason: '' })
+    },
+    onError: (e: unknown) => advanceError(e, 'Could not reserve fabric for this style'),
+  })
+  const advanceActMut = useMutation({
+    mutationFn: ({ id, action, body }: { id: number; action: 'release' | 'transfer' | 'convert'; body: object }) =>
+      api.post(`/grey/printed-fabric/advance/${id}/${action}`, body),
+    onSuccess: () => refreshPrintedStock(),
+    onError: (e: unknown) => advanceError(e, 'Could not update the style reservation'),
   })
 
   const openEdit = (entry: GreyEntry) => {
@@ -1618,22 +1658,80 @@ export default function GreyFabric() {
               </div>
               <table className="w-full text-sm">
                 <thead className="text-gray-400 text-xs uppercase">
-                  <tr>{['Fabric Code','Name','Checked','Passed','Reserved','Available'].map(h => <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
+                  <tr>{['Fabric Code','Name','Total stock','SO allocated','Style reserved','Free'].map(h => <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
                 </thead>
                 <tbody>
-                  {(printedFabricChecked as any[]).map((c: any, i: number) => (
+                  {(printedFabricChecked as any[]).map((c: any, i: number) => {
+                    const vis = (printedVisibility as any[]).find((v: any) => v.fabric_code === c.fabric_code)
+                    return (
                     <tr key={i} className="border-t border-gray-50 hover:bg-gray-50">
                       <td className="px-4 py-2 font-mono text-xs text-[#002B5B] font-semibold">{c.fabric_code}</td>
                       <td className="px-4 py-2 text-gray-700">{c.fabric_name}</td>
-                      <td className="px-4 py-2 text-gray-600">{c.checked_qty} m</td>
-                      <td className="px-4 py-2 text-green-600 font-semibold">{c.passed_qty} m</td>
-                      <td className="px-4 py-2 text-purple-600">{c.reserved_qty || 0} m</td>
-                      <td className="px-4 py-2 font-bold text-[#002B5B]">{c.available_qty || 0} m</td>
+                      <td className="px-4 py-2 text-gray-700">{vis?.total_stock ?? ((c.available_qty || 0) + (c.reserved_qty || 0))} m</td>
+                      <td className="px-4 py-2 text-blue-700">{vis?.so_allocated ?? 0} m</td>
+                      <td className="px-4 py-2 text-amber-700">{vis?.advance_reserved ?? 0} m</td>
+                      <td className="px-4 py-2 font-bold text-[#002B5B]">{vis?.free_available ?? c.available_qty ?? 0} m</td>
                     </tr>
-                  ))}
+                    )
+                  })}
                 </tbody>
               </table>
               {printedFabricChecked.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No checked fabric yet. Submit QC first.</p>}
+              <div className="border-t px-4 py-4 space-y-3 bg-amber-50/40">
+                <div>
+                  <p className="text-sm font-semibold text-gray-700">Reserve fabric for a style before a sales order</p>
+                  <p className="text-xs text-gray-500">These metres leave free stock. Another style cannot use them until you release, transfer, or convert them to a sales order.</p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-2 items-end">
+                  <select value={advanceForm.fabric_code} onChange={e => setAdvanceForm(f => ({ ...f, fabric_code: e.target.value }))} className="border rounded px-2 py-1.5 text-sm">
+                    <option value="">Fabric…</option>
+                    {(printedFabricChecked as any[]).filter((c: any) => (c.available_qty || 0) > 0).map((c: any) => (
+                      <option key={c.fabric_code} value={c.fabric_code}>{c.fabric_code} ({c.available_qty} m free)</option>
+                    ))}
+                  </select>
+                  <input value={advanceForm.style_code} onChange={e => setAdvanceForm(f => ({ ...f, style_code: e.target.value }))} placeholder="Style / P-code" className="border rounded px-2 py-1.5 text-sm" />
+                  <input type="number" value={advanceForm.qty || ''} onChange={e => setAdvanceForm(f => ({ ...f, qty: +e.target.value }))} placeholder="Metres" className="border rounded px-2 py-1.5 text-sm" />
+                  <input value={advanceForm.reason} onChange={e => setAdvanceForm(f => ({ ...f, reason: e.target.value }))} placeholder="Reason" className="border rounded px-2 py-1.5 text-sm" />
+                  <button
+                    type="button"
+                    disabled={advanceReserveMut.isPending}
+                    onClick={() => advanceReserveMut.mutate(advanceForm)}
+                    className="px-3 py-1.5 bg-amber-700 text-white rounded text-sm disabled:opacity-50"
+                  >Reserve for style</button>
+                </div>
+                {(printedAdvance as any[]).length > 0 && (
+                  <table className="w-full text-xs bg-white rounded border">
+                    <thead className="text-gray-400 uppercase">
+                      <tr>{['Fabric','Style','Metres held','Release / transfer / convert to SO'].map(h => <th key={h} className="text-left px-3 py-2">{h}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {(printedAdvance as any[]).map((r: any) => {
+                        const d = advanceDraft[r.id] || { qty: String(r.qty || ''), reason: '', to_style: '', so_number: '', sku: '' }
+                        const setD = (patch: Partial<typeof d>) => setAdvanceDraft(prev => ({ ...prev, [r.id]: { ...d, ...patch } }))
+                        return (
+                          <tr key={r.id} className="border-t">
+                            <td className="px-3 py-2 font-mono">{r.fabric_code}</td>
+                            <td className="px-3 py-2 font-semibold">{r.style_code}</td>
+                            <td className="px-3 py-2">{r.qty} m</td>
+                            <td className="px-3 py-2">
+                              <div className="flex flex-wrap gap-1 items-center">
+                                <input value={d.qty} onChange={e => setD({ qty: e.target.value })} className="border rounded px-1.5 py-1 w-16" placeholder="m" />
+                                <input value={d.reason} onChange={e => setD({ reason: e.target.value })} className="border rounded px-1.5 py-1 w-28" placeholder="Reason" />
+                                <button type="button" className="px-2 py-1 border rounded" onClick={() => advanceActMut.mutate({ id: r.id, action: 'release', body: { qty: +d.qty, reason: d.reason } })}>Release</button>
+                                <input value={d.to_style} onChange={e => setD({ to_style: e.target.value })} className="border rounded px-1.5 py-1 w-24" placeholder="To style" />
+                                <button type="button" className="px-2 py-1 border rounded" onClick={() => advanceActMut.mutate({ id: r.id, action: 'transfer', body: { qty: +d.qty, reason: d.reason, to_style: d.to_style } })}>Transfer</button>
+                                <input value={d.so_number} onChange={e => setD({ so_number: e.target.value })} className="border rounded px-1.5 py-1 w-24" placeholder="SO" />
+                                <input value={d.sku} onChange={e => setD({ sku: e.target.value })} className="border rounded px-1.5 py-1 w-28" placeholder="Size SKU" />
+                                <button type="button" className="px-2 py-1 bg-[#002B5B] text-white rounded" onClick={() => advanceActMut.mutate({ id: r.id, action: 'convert', body: { reason: d.reason, lines: [{ so_number: d.so_number, sku: d.sku, qty: +d.qty }] } })}>Convert to SO</button>
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
             </div>
           )}
 

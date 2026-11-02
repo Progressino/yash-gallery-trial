@@ -1483,6 +1483,8 @@ export default function Production() {
     'cutting' | 'stitching' | 'embroidery' | 'kajh' | 'shirring' | 'handwork' | 'finishing' | 'date_txns' | 'quality' | 'process' | 'master'
   >('master')
   const [newLines, setNewLines] = useState<{ so_number: string; sku: string; sku_name: string; style: string; planned_qty: number; vendor_rate: number; remarks: string; so_qty?: number }[]>([])
+  const [cuttingPlanReason, setCuttingPlanReason] = useState('')
+  const [extraSizeSku, setExtraSizeSku] = useState('')
   const [soLineSearch, setSOLineSearch] = useState('')
   const joImportRef = useRef<HTMLInputElement>(null)
   const wipImportRef = useRef<HTMLInputElement>(null)
@@ -1881,6 +1883,12 @@ export default function Production() {
     setNewForm(f => (f.planned_qty === total ? f : { ...f, planned_qty: total }))
   }, [newLines])
 
+  useEffect(() => {
+    if (modal === 'new-jo') return
+    setCuttingPlanReason('')
+    setExtraSizeSku('')
+  }, [modal])
+
   const { data: joValidation } = useQuery({
     queryKey: ['jo-validate', newForm.process, newForm.so_number, newForm.sku, newForm.planned_qty],
     queryFn: () => api.get(`/production/orders/validate?process=${newForm.process}&so_number=${newForm.so_number}&sku=${newForm.sku}&planned_qty=${newForm.planned_qty}`).then(r => r.data),
@@ -1921,6 +1929,25 @@ export default function Production() {
     queryKey: ['set-bom-for-sku', cuttingMainSku],
     queryFn: () => api.get(`/production/set-bom-for-sku/${encodeURIComponent(cuttingMainSku)}`).then(r => r.data),
     enabled: modal === 'new-jo' && newForm.process === 'Cutting' && cuttingMainSku.length > 0,
+  })
+  const cuttingPlanKey = newLines.map(l => `${l.sku}:${l.planned_qty}:${l.so_qty ?? ''}`).join('|')
+  const cuttingQtyChanged = newForm.process === 'Cutting' && newLines.some(l =>
+    l.so_qty != null && Number(l.so_qty) !== Number(l.planned_qty),
+  )
+  const { data: cuttingPreview, error: cuttingPreviewError } = useQuery({
+    queryKey: ['cutting-plan-preview', newForm.so_number, newForm.fabric_code, newForm.sku, cuttingPlanKey],
+    queryFn: () => api.post('/production/cutting-plan/preview', {
+      so_number: newForm.so_number,
+      fabric_code: newForm.fabric_code,
+      sku: newForm.sku || newLines[0]?.sku || '',
+      lines: newLines.filter(l => (Number(l.planned_qty) || 0) > 0 || (Number(l.so_qty) || 0) > 0).map(l => ({
+        sku: l.sku,
+        planned_qty: l.planned_qty,
+        so_qty: l.so_qty,
+      })),
+    }).then(r => r.data),
+    enabled: modal === 'new-jo' && cuttingQtyChanged && !!newForm.so_number && !!newForm.fabric_code && newLines.length > 0,
+    retry: false,
   })
 
   const invalidateAll = () => {
@@ -2148,7 +2175,7 @@ export default function Production() {
   const addSOLineToJO = async (line: any) => {
     if (newLines.find(l => l.sku === line.sku)) return
     const wasFirstLine = newLines.length === 0
-    let soQty = Number(line.available_qty ?? line.qty) || 0
+    let soQty: number | undefined = Number(line.available_qty ?? line.qty) || 0
     if (newForm.process === 'Cutting') {
       const so = (soList as { so_number?: string; lines?: { sku?: string; qty?: number }[] }[])
         .find(s => s.so_number === newForm.so_number)
@@ -2157,7 +2184,8 @@ export default function Production() {
       )
       const pcs = Math.round(Number(match?.qty) || 0)
       // Ready-board qty is reserved metres. Sales-order qty is the piece plan.
-      soQty = pcs || (newForm.from_ready_to ? 0 : Math.round(Number(line.qty) || 0))
+      // Leave so_qty unset when the sales line is not loaded, so saving is not treated as a size revision.
+      soQty = match ? pcs : (newForm.from_ready_to ? undefined : Math.round(Number(line.qty) || 0))
     }
     // Cutting planned qty defaults to SO qty but is independent (may cut fewer pcs).
     setNewLines(ls => [...ls, {
@@ -2165,7 +2193,7 @@ export default function Production() {
       sku: line.sku || '',
       sku_name: line.sku_name || line.item_name || '',
       style: '',
-      planned_qty: soQty,
+      planned_qty: soQty ?? 0,
       so_qty: soQty,
       vendor_rate: newForm.vendor_rate || 0,
       remarks: '',
@@ -2228,14 +2256,19 @@ export default function Production() {
           return u.includes('MTR') || u.includes('M') || code.includes('FABRIC')
         }) || inputs[0]
       }
+      const preferred = String(newForm.fabric_code || '').trim().toUpperCase()
+      const pickPreferred = (data: any) => {
+        const inputs = (data?.inputs ?? []) as { material_code?: string; material_name?: string; adj_qty?: number; unit?: string }[]
+        return (preferred && inputs.find(i => String(i.material_code || '').toUpperCase() === preferred)) || pickFab(data)
+      }
       const [oldBom, newBom] = await Promise.all([
         prev > 0
           ? api.get(`/production/bom-inputs/${encodeURIComponent(ln.sku)}`, { params: { qty: prev } })
           : Promise.resolve({ data: { inputs: [] } }),
         api.get(`/production/bom-inputs/${encodeURIComponent(ln.sku)}`, { params: { qty: Math.max(0, cuttingQty) } }),
       ])
-      const oldAdj = Number(pickFab(oldBom.data)?.adj_qty) || 0
-      const fab = pickFab(newBom.data)
+      const oldAdj = Number(pickPreferred(oldBom.data)?.adj_qty) || 0
+      const fab = pickPreferred(newBom.data)
       const newAdj = Number(fab?.adj_qty) || 0
       const delta = newAdj - oldAdj
       setNewForm(f => ({
@@ -3174,6 +3207,7 @@ export default function Production() {
                       const plan = activeProcess === 'Cutting'
                         ? soPcs
                         : Number(r.available_qty || r.qty || 0)
+                      const knownSoQty = activeProcess === 'Cutting' ? (soLine ? soPcs : undefined) : plan
                       const defaultMode = so?.production_mode || 'inhouse'
                       const exec = suggestedExecType(defaultMode, activeProcess)
                       setNewForm(f => ({
@@ -3186,7 +3220,7 @@ export default function Production() {
                         fabric_qty: activeProcess === 'Cutting' ? (r.reserved_qty || 0) : (f.fabric_qty || 0),
                         process: activeProcess,
                         planned_qty: plan,
-                        so_qty: plan,
+                        so_qty: knownSoQty ?? plan,
                         production_mode: defaultMode,
                         exec_type: exec,
                         from_ready_to: true,
@@ -3197,7 +3231,7 @@ export default function Production() {
                         sku_name: r.sku_name || r.item_name || soLine?.sku_name || '',
                         style: '',
                         planned_qty: plan,
-                        so_qty: plan,
+                        so_qty: knownSoQty,
                         vendor_rate: 0,
                         remarks: '',
                       }])
@@ -3707,6 +3741,12 @@ export default function Production() {
                   <div><label className="text-xs text-gray-500">Fabric Qty (MTR)</label>
                     <input type="number" value={newForm.fabric_qty} onChange={e => setNewForm(f => ({ ...f, fabric_qty: +e.target.value }))}
                       className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" /></div>
+                  <div className="md:col-span-2">
+                    <label className="text-xs text-gray-500">Reason if cutting quantities differ from the sales order</label>
+                    <input value={cuttingPlanReason} onChange={e => setCuttingPlanReason(e.target.value)}
+                      placeholder="Example: buyer revised the size ratio"
+                      className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mt-1" />
+                  </div>
                 </>
               )}
             </div>
@@ -3875,10 +3915,34 @@ export default function Production() {
                   <span>JO Lines ({newLines.length})</span>
                   {newForm.process === 'Cutting' && (
                     <span className="font-normal text-amber-800">
-                      Edit Cutting Qty freely — it may be lower than SO (demand cut / fabric reject). Fabric MTR re-scales from BOM.
+                      Sales order quantity stays as it is. Change the cutting quantity, or add a size of the same style. Fabric is recalculated from the BOM and checked against reserved metres plus free stock.
                     </span>
                   )}
                 </div>
+                {newForm.process === 'Cutting' && (
+                  <div className="px-3 py-2 border-b space-y-2">
+                    <div className="flex gap-2">
+                      <input value={extraSizeSku} onChange={e => setExtraSizeSku(e.target.value)} placeholder="Add a size of this style, e.g. STYLE-XL" className="border rounded px-2 py-1 text-xs flex-1 font-mono" />
+                      <button type="button" className="px-2 py-1 bg-[#002B5B] text-white rounded text-xs" onClick={() => {
+                        const sku = extraSizeSku.trim().toUpperCase()
+                        if (!sku || newLines.some(l => l.sku.toUpperCase() === sku)) return
+                        setNewLines(ls => [...ls, {
+                          so_number: newForm.so_number, sku, sku_name: '', style: '',
+                          planned_qty: 0, so_qty: 0, vendor_rate: newForm.vendor_rate || 0, remarks: '',
+                        }])
+                        setExtraSizeSku('')
+                      }}>Add size</button>
+                    </div>
+                    {cuttingPreview && (
+                      <p className={`text-xs ${cuttingPreview.ok ? 'text-green-800' : 'text-red-700'}`}>
+                        Reserved {cuttingPreview.reserved_metres} m · revised plan {cuttingPreview.revised_metres} m · free {cuttingPreview.free_available} m. {cuttingPreview.message}
+                      </p>
+                    )}
+                    {cuttingPreviewError && (
+                      <p className="text-xs text-red-700">{apiErrorMessage(cuttingPreviewError, 'Could not check the cutting plan')}</p>
+                    )}
+                  </div>
+                )}
                 <div className="max-h-52 overflow-y-auto">
                 <table className="w-full text-xs">
                   <thead className="sticky top-0 bg-white"><tr className="text-gray-400 border-b">
@@ -3954,6 +4018,13 @@ export default function Production() {
                   || 0
                 const headerSku = (newForm.sku || '').trim() || (lines[0]?.sku || '')
                 const headerName = (newForm.sku_name || '').trim() || (lines[0]?.sku_name || '')
+                const sizeChanged = newForm.process === 'Cutting' && lines.some(l =>
+                  l.so_qty != null && Number(l.so_qty) !== Number(l.planned_qty),
+                )
+                if (sizeChanged && !cuttingPlanReason.trim()) {
+                  alert('Enter a reason. The cutting quantities are different from the sales order.')
+                  return
+                }
                 const { from_ready_to: _fromReady, ...formPayload } = newForm
                 createJOMut.mutate({
                   ...formPayload,
@@ -3961,6 +4032,7 @@ export default function Production() {
                   sku: headerSku,
                   sku_name: headerName,
                   planned_qty: totalPlanned,
+                  cutting_plan_reason: cuttingPlanReason.trim(),
                   // Always send size lines so the server validates each SKU vs its own Ready qty.
                   lines,
                 })

@@ -282,6 +282,87 @@ def get_printed_fabric_ready_to_cut():
     return gdb.list_printed_fabric_ready_to_cut()
 
 
+@router.get("/printed-fabric/stock-visibility")
+def get_printed_stock_visibility(fabric_code: Optional[str] = None):
+    return gdb.printed_stock_visibility(fabric_code or "")
+
+
+class AdvanceReserveIn(BaseModel):
+    fabric_code: str
+    fabric_name: str = ""
+    style_code: str
+    qty: float
+    reason: str = ""
+    user_name: str = ""
+
+
+class AdvanceQtyIn(BaseModel):
+    qty: float
+    reason: str = ""
+    user_name: str = ""
+    to_style: str = ""
+
+
+class AdvanceConvertLineIn(BaseModel):
+    so_number: str
+    sku: str
+    qty: float
+
+
+class AdvanceConvertIn(BaseModel):
+    lines: list[AdvanceConvertLineIn]
+    reason: str = ""
+    user_name: str = ""
+
+
+@router.get("/printed-fabric/advance")
+def get_advance_reservations(fabric_code: Optional[str] = None):
+    from ..services.printed_flexibility import list_advance_reservations
+    return list_advance_reservations(fabric_code or "")
+
+
+@router.post("/printed-fabric/advance")
+def post_advance_reservation(body: AdvanceReserveIn):
+    from ..services.printed_flexibility import reserve_for_style
+    try:
+        rid = reserve_for_style(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "id": rid}
+
+
+@router.post("/printed-fabric/advance/{reservation_id}/release")
+def post_advance_release(reservation_id: int, body: AdvanceQtyIn):
+    from ..services.printed_flexibility import release_advance
+    try:
+        return release_advance(reservation_id, body.qty, body.reason, body.user_name)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/printed-fabric/advance/{reservation_id}/transfer")
+def post_advance_transfer(reservation_id: int, body: AdvanceQtyIn):
+    from ..services.printed_flexibility import transfer_advance
+    try:
+        return transfer_advance(reservation_id, body.to_style, body.qty, body.reason, body.user_name)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/printed-fabric/advance/{reservation_id}/convert")
+def post_advance_convert(reservation_id: int, body: AdvanceConvertIn):
+    from ..services.printed_flexibility import convert_advance_to_so
+    try:
+        return convert_advance_to_so(
+            reservation_id,
+            [ln.model_dump() for ln in body.lines],
+            body.reason,
+            body.user_name,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 # ── Reservations ──────────────────────────────────────────────────────────────
 @router.get("/reservations")
 def get_hard_reservations(status: str = "Active"):

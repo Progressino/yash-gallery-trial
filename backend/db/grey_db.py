@@ -268,8 +268,38 @@ def init_db():
         ("locked_reason", "TEXT DEFAULT ''"),
         ("jo_id", "INTEGER"),
         ("cutting_issued_qty", "REAL DEFAULT 0"),
+        ("reservation_kind", "TEXT DEFAULT 'so'"),
+        ("style_code", "TEXT DEFAULT ''"),
+        ("reserved_by", "TEXT DEFAULT ''"),
     ]:
         _add_col(conn, "printed_fabric_reservations", name, decl)
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS cutting_plan_revisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            so_number TEXT DEFAULT '',
+            fabric_code TEXT DEFAULT '',
+            style_code TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            user_name TEXT DEFAULT '',
+            jo_numbers TEXT DEFAULT '',
+            original_metres REAL DEFAULT 0,
+            revised_metres REAL DEFAULT 0,
+            reserved_metres REAL DEFAULT 0,
+            topped_up_metres REAL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS cutting_plan_revision_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            revision_id INTEGER NOT NULL,
+            sku TEXT DEFAULT '',
+            so_qty REAL DEFAULT 0,
+            revised_qty REAL DEFAULT 0,
+            bom_per_pc REAL DEFAULT 0,
+            fabric_metres REAL DEFAULT 0
+        );
+        """
+    )
 
     _repair_printed_fabric_partial_qc_rows(conn)
     conn.executescript(
@@ -1490,6 +1520,8 @@ def list_printed_fabric_ready_to_cut():
             FROM printed_fabric_reservations r
             LEFT JOIN printed_fabric_checked_stock s ON s.fabric_code = r.fabric_code
             WHERE r.status = 'Active'
+              AND COALESCE(r.reservation_kind, 'so') != 'advance'
+              AND TRIM(COALESCE(r.so_number, '')) != ''
             ORDER BY r.so_number
         """)
         conn.close()
@@ -1511,3 +1543,57 @@ def list_printed_fabric_ready_to_cut():
     except sqlite3.Error:
         conn.close()
         return []
+
+
+def _audit_fabric(conn, *, event_type: str, fabric_code: str, qty: float, reason: str,
+                  user_name: str = "", from_so: str = "", to_so: str = "",
+                  from_sku: str = "", to_sku: str = "", status_to: str = "") -> None:
+    conn.execute(
+        """INSERT INTO fabric_allocation_history(
+            event_type, entity_type, printed_code, from_so, to_so, from_sku, to_sku,
+            qty, new_status, user_name, reason)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            event_type, "printed", fabric_code, from_so, to_so, from_sku, to_sku,
+            float(qty or 0), status_to, user_name or "", reason or "",
+        ),
+    )
+
+
+def printed_stock_visibility(fabric_code: str = "") -> List[Dict[str, Any]]:
+    """Total checked, SO allocated, style advance, and free metres — one stock row."""
+    conn = _connect()
+    code = (fabric_code or "").strip().upper()
+    where = "WHERE UPPER(TRIM(s.fabric_code))=?" if code else ""
+    params: tuple = (code,) if code else ()
+    stocks = conn.execute(
+        f"SELECT fabric_code, fabric_name, checked_qty, passed_qty, reserved_qty, available_qty FROM printed_fabric_checked_stock s {where} ORDER BY fabric_code",
+        params,
+    ).fetchall()
+    out = []
+    for s in stocks:
+        fc = str(s["fabric_code"] or "")
+        so_row = conn.execute(
+            """SELECT COALESCE(SUM(qty),0) q FROM printed_fabric_reservations
+               WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?)) AND status='Active'
+                 AND COALESCE(reservation_kind,'so')!='advance'
+                 AND TRIM(COALESCE(so_number,''))!=''""",
+            (fc,),
+        ).fetchone()
+        adv_row = conn.execute(
+            """SELECT COALESCE(SUM(qty),0) q FROM printed_fabric_reservations
+               WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?)) AND status='Active'
+                 AND COALESCE(reservation_kind,'so')='advance'""",
+            (fc,),
+        ).fetchone()
+        out.append({
+            "fabric_code": fc,
+            "fabric_name": s["fabric_name"] or "",
+            "total_stock": round(float(s["available_qty"] or 0) + float(s["reserved_qty"] or 0), 3),
+            "so_allocated": round(float(so_row["q"] or 0), 3),
+            "advance_reserved": round(float(adv_row["q"] or 0), 3),
+            "free_available": round(float(s["available_qty"] or 0), 3),
+            "reserved_qty": round(float(s["reserved_qty"] or 0), 3),
+        })
+    conn.close()
+    return out

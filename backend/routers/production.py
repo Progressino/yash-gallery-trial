@@ -407,12 +407,20 @@ class JOLineIn(BaseModel):
     sku_name: Optional[str] = ''
     style: Optional[str] = ''
     planned_qty: int = 0
+    so_qty: Optional[int] = None
     vendor_rate: Optional[float] = 0
     remarks: Optional[str] = ''
 
     @field_validator("planned_qty", mode="before")
     @classmethod
     def _planned_pieces(cls, v):
+        return _piece_qty(v)
+
+    @field_validator("so_qty", mode="before")
+    @classmethod
+    def _line_so_pieces(cls, v):
+        if v is None or v == "":
+            return None
         return _piece_qty(v)
 
 class JOIn(BaseModel):
@@ -439,6 +447,7 @@ class JOIn(BaseModel):
     fabric_code: Optional[str] = ''
     fabric_qty: Optional[float] = 0
     fabric_unit: Optional[str] = 'MTR'
+    cutting_plan_reason: Optional[str] = ''
     lines: List[JOLineIn] = []
     production_mode: Optional[str] = ''
     # None = auto (component JOs when Set BOM exists); False = legacy single JO + receive split
@@ -1535,6 +1544,28 @@ def get_jo_panel_wip_detail(joid: int):
     """Child panel WIP for a Cutting JO (TOP → FRONT/BACK, etc.)."""
     return get_jo_panel_wip(joid)
 
+class CuttingPlanPreviewIn(BaseModel):
+    so_number: str = ""
+    fabric_code: str = ""
+    sku: str = ""
+    lines: List[JOLineIn] = []
+
+
+@router.post("/cutting-plan/preview")
+def preview_cutting_plan(body: CuttingPlanPreviewIn):
+    """Metres for a revised size mix, against fabric already reserved for the order."""
+    from ..services.printed_flexibility import evaluate_cutting_plan
+    try:
+        return evaluate_cutting_plan(
+            body.so_number,
+            body.fabric_code,
+            [ln.model_dump() for ln in body.lines],
+            anchor_sku=body.sku,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @router.post("/orders")
 def post_jo(body: JOIn):
     data = body.model_dump()
@@ -1581,8 +1612,37 @@ def post_jo(body: JOIn):
                 raise HTTPException(400, v['message'])
     fabric_code = (data.get("fabric_code") or "").strip()
     fabric_qty = float(data.get("fabric_qty") or 0)
-    # Manual SO references skip MRP commitment hard-gate (no system SO for commitment key).
-    if so_source != "manual" and so_number and fabric_code and fabric_qty > 0:
+    cutting_reason = str(data.pop("cutting_plan_reason", "") or "").strip()
+    revision = None
+    if process == "Cutting" and so_source != "manual" and so_number and fabric_code:
+        plan_lines = []
+        for ln in data.get("lines") or []:
+            sku_ln = str(ln.get("sku") or "").strip()
+            planned_ln = int(ln.get("planned_qty") or 0)
+            so_ln = ln.get("so_qty")
+            if not sku_ln:
+                continue
+            if planned_ln <= 0 and not (so_ln is not None and int(so_ln) > 0):
+                continue
+            plan_lines.append(ln)
+        if plan_lines:
+            from ..services.printed_flexibility import apply_cutting_plan
+            try:
+                revision = apply_cutting_plan(
+                    so_number,
+                    fabric_code,
+                    plan_lines,
+                    cutting_reason,
+                    anchor_sku=str(sku or ""),
+                )
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from e
+            if revision:
+                data["fabric_qty"] = revision["revised_metres"]
+                fabric_qty = float(revision["revised_metres"] or 0)
+    # A size revision is checked against reserved printed fabric plus free stock.
+    # Manual SO references skip the MRP commitment hard-gate (no system SO for that key).
+    if revision is None and so_source != "manual" and so_number and fabric_code and fabric_qty > 0:
         try:
             check_mrp_commitment(so_number, fabric_code, fabric_qty)
         except ValueError as e:
@@ -1590,7 +1650,19 @@ def post_jo(body: JOIn):
     try:
         result = create_jo(data)
     except ValueError as e:
+        if revision:
+            from ..services.printed_flexibility import undo_cutting_topup
+            undo_cutting_topup(revision)
         raise HTTPException(400, str(e)) from e
+    except Exception:
+        if revision:
+            from ..services.printed_flexibility import undo_cutting_topup
+            undo_cutting_topup(revision)
+        raise
+    if revision:
+        from ..services.printed_flexibility import save_cutting_plan
+        nums = result if isinstance(result, list) else [result]
+        save_cutting_plan(revision, ", ".join(str(n) for n in nums if n))
     if isinstance(result, list):
         orders = []
         for num in result:
