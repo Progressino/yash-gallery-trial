@@ -5,6 +5,7 @@ import { useTrackTab } from '../lib/usageTracker'
 import { useAuth } from '../store/auth'
 import { FREQUENCIES, PRIORITIES, WEEKDAYS, MONTHS, priorityStyle, SCHEDULE_RULE_FREQS, todayIst } from './hrmConstants'
 import { loadHrmLang, saveHrmLang, t, type HrmLang } from './hrmI18n'
+import { OrgChart } from './hrmOrgChart'
 import {
   AttendanceReport, BreakConfirmModal, DwrReport, HolidayModal, HoldModal, OfficeTimeBar, ScheduleRuleInput, SlotList,
   WeekdayPairInput, weekdayPairValid, WorkingHoursReport, sendWithOverlapConfirm, type BreakInfo,
@@ -2950,6 +2951,11 @@ export default function HRM() {
       {/* ── HIERARCHY ── */}
       {tab === 'hierarchy' && (
         <div className="space-y-4">
+          <OrgChart
+            employees={(orgHierarchy?.employees_flat?.length ? orgHierarchy.employees_flat : allEmps) as any[]}
+            canApply={canManageOrg}
+            onApplied={() => qc.invalidateQueries({ queryKey: ['hrm-hierarchy'] })}
+          />
           <div className="bg-white rounded-xl border p-4">
             <h3 className="font-semibold text-gray-800 mb-2">{t(lang, 'hierarchy')}</h3>
             <p className="text-xs text-gray-500 mb-3">Organization departments, HOD assignment, and employee reporting structure</p>
