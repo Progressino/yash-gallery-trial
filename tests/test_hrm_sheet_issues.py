@@ -210,6 +210,44 @@ def test_row3_api_returns_409_then_resolves(env):
     assert r.status_code == 200
 
 
+def test_dwr_other_day_does_not_auto_pause_running_timer(env):
+    """Opening Daily Working Report for another day must not pause today's Active timer."""
+    a, clock = env["a"], env["clock"]
+    rid = _resp(a, title="Keep running")
+    hrm_worktime.office_start(a)
+    assert hrm_db.start_responsibility_timer(rid, MON) is True
+    clock.t = f"{MON} 11:00:00"
+    # Simulate Reports/DWR walking an older date for this employee.
+    hrm_db.get_employee_day_check(a, "2026-10-04")
+    hrm_worktime.list_dwr_report(employee_ids=[a], from_date="2026-10-04", to_date=MON)
+    log = hrm_db._connect().execute(
+        "SELECT started_at, paused_at, ended_at FROM task_logs WHERE responsibility_id=? AND log_date=?",
+        (rid, MON),
+    ).fetchone()
+    assert log["started_at"] and not log["paused_at"] and not log["ended_at"]
+    open_slots = hrm_db._connect().execute(
+        """SELECT COUNT(*) c FROM hrm_time_slots
+           WHERE entity_type='responsibility' AND responsibility_id=? AND IFNULL(ended_at,'')=''""",
+        (rid,),
+    ).fetchone()["c"]
+    assert open_slots == 1
+
+
+def test_assign_pickers_include_every_active_employee(env, monkeypatch):
+    a, h, c, client = env["a"], env["h"], env["c"], env["client"]
+    did = next(e["department_id"] for e in hrm_db.list_employees() if e["id"] == a)
+    other_dept = hrm_db.create_department({"name": f"Other-{uuid.uuid4().hex[:6]}"})
+    hrm_db.create_employee({"name": "Other Dept Person", "department_id": other_dept})
+    outsider = next(e["id"] for e in hrm_db.list_employees() if e["name"] == "Other Dept Person")
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="department", role="HOD", user_id=2, employee_id=h, department_id=did),
+    )
+    rows = client.get("/api/hrm/employees/for-pickers").json()
+    ids = {int(e["id"]) for e in rows}
+    assert a in ids and h in ids and c in ids and outsider in ids
+
+
 # ── Row 4: Linked person reject → reassigned next day (non-daily) ────────────
 
 

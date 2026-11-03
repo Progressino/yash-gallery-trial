@@ -401,8 +401,8 @@ export default function HRM() {
   const { data: employees = [] } = useQuery({ queryKey: ['hrm-emps', selDept], queryFn: () => api.get(`/hrm/employees${selDept ? `?department_id=${selDept}` : ''}`).then(r => r.data) })
   const { data: allEmps = [] } = useQuery({ queryKey: ['hrm-all-emps'], queryFn: () => api.get('/hrm/employees').then(r => r.data) })
   const { data: pickersEmps = [] } = useQuery({
-    queryKey: ['hrm-pickers-emps', selDept],
-    queryFn: () => api.get(`/hrm/employees/for-pickers${selDept ? `?department_id=${selDept}` : ''}`).then(r => r.data),
+    queryKey: ['hrm-pickers-emps'],
+    queryFn: () => api.get('/hrm/employees/for-pickers').then(r => r.data),
   })
   const { data: blockerChoices = [] } = useQuery({
     queryKey: ['hrm-blocker-choices'],
@@ -2295,15 +2295,16 @@ export default function HRM() {
                 <div><label className="text-xs text-gray-500">Linked Person (supervisor / approver)</label>
                   <select value={respForm.linked_to_employee_id} onChange={e => setRespForm(f => ({ ...f, linked_to_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Self-complete (no approval)</option>
-                    {assignPickers.map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                    {assignPickers.map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
                   </select>
-                  <p className="text-[10px] text-gray-400 mt-0.5">Shown on Employee Check so the employee knows who supervises or approves this task.</p>
+                  <p className="text-[10px] text-gray-400 mt-0.5">Anyone in the organization. Shown on Employee Check so the employee knows who supervises or approves this task.</p>
                 </div>
                 <div><label className="text-xs text-gray-500">Backup person{respForm.mandatory ? ' *' : ''}</label>
                   <select value={respForm.backup_employee_id} onChange={e => setRespForm(f => ({ ...f, backup_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select backup…</option>
-                    {assignPickers.filter((e: any) => String(e.id) !== String(respForm.employee_id)).map((e: any) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                    {assignPickers.filter((e: any) => String(e.id) !== String(respForm.employee_id)).map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
                   </select>
+                  <p className="text-[10px] text-gray-400 mt-0.5">Anyone active in the organization (all departments).</p>
                 </div>
                 <div><label className="text-xs text-gray-500">Category</label>
                   <select value={respForm.category} onChange={e => setRespForm(f => ({ ...f, category: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
@@ -2617,7 +2618,7 @@ export default function HRM() {
                   <select value={taskForm.linked_to_employee_id || ''} onChange={e => setTaskForm(f => ({ ...f, linked_to_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">—</option>
                     {assignPickers.filter((e: any) => String(e.id) !== String(taskForm.employee_id)).map((e: any) => (
-                      <option key={e.id} value={e.id}>{e.name}</option>
+                      <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>
                     ))}
                   </select>
                 </div>

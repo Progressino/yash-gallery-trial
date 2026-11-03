@@ -5365,9 +5365,12 @@ def get_employee_day_check(employee_id: int, check_date: str | None = None) -> d
     if not emp:
         conn.close()
         return None
-    from .hrm_worktime import retire_stale_open_slots_for_employee
-    if retire_stale_open_slots_for_employee(conn, employee_id, day=day, actor="system"):
-        conn.commit()
+    # Only clean leftover open slots when viewing today. Historical DWR/report days
+    # must not pause a timer that is still running now.
+    if day == today_ist().isoformat():
+        from .hrm_worktime import retire_stale_open_slots_for_employee
+        if retire_stale_open_slots_for_employee(conn, employee_id, day=day, actor="system"):
+            conn.commit()
     due_ctx = DueContext(conn)
     due_ctx.leave_days(employee_id)
     rollover_unfinished_nondaily(conn, employee_id, day, due_ctx)

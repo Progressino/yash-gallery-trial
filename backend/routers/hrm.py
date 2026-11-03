@@ -1121,20 +1121,20 @@ def post_mark_approval_notifications_read(
 
 @router.get("/employees/for-pickers")
 def get_employees_for_pickers(request: Request, department_id: Optional[int] = None):
-    """Employees for Linked To / Backup dropdowns (department peers for HOD/self)."""
+    """Everyone active in the org for Employee / Linked Person / Backup on assign forms.
+
+    Optional department_id only narrows the list; it never hides other departments by default.
+    """
     scope = _scope_from_request(request)
-    if scope.can_view_employee_list or scope.can_manage_org:
-        return list_employees(department_id, "Active")
-    if scope.level == "department" and scope.department_id is not None:
-        return list_employees(int(scope.department_id), "Active")
-    if scope.level == "self" and scope.employee_id is not None:
-        # Peers in same department so Linked To / Backup can be chosen when assigning
-        # (HOD/Admin still preferred for create; keep list useful for display/edit).
-        dept = employee_department_id(int(scope.employee_id))
-        if dept:
-            return list_employees(int(dept), "Active")
-        return list_employees(None, "Active", employee_id=int(scope.employee_id))
-    raise HTTPException(403, "Not allowed")
+    if not (
+        scope.can_view_employee_list
+        or scope.can_manage_org
+        or scope.can_edit_assignments
+        or scope.level in ("department", "self", "all")
+    ):
+        raise HTTPException(403, "Not allowed")
+    del department_id  # assign tags can be any active employee in the organization
+    return list_employees(None, "Active")
 
 
 @router.get("/employees/blocker-choices")

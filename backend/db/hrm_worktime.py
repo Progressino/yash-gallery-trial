@@ -541,25 +541,30 @@ def _copy_slot(conn, slot: dict) -> int:
     return int(cur.lastrowid)
 
 
-def _parent_timer_is_live(conn, slot: dict, day: str) -> bool:
-    """True only for an open slot whose timer is actually running on ``day``."""
-    if str(slot.get("started_at") or "")[:10] != day:
-        return False
+def _parent_timer_is_live(conn, slot: dict, day: str | None = None) -> bool:
+    """True when this open slot belongs to a timer that is still running.
+
+    Do not use the report/check ``day`` here. Loading Daily Working Report for an
+    older date must not treat today's Active timer as stale and pause it.
+    """
+    del day  # kept for callers; liveness is about the parent timer, not the viewed day
     if slot["entity_type"] == H.SLOT_RESP:
         row = conn.execute(
-            "SELECT status, paused_at, ended_at FROM task_logs WHERE id=?",
+            "SELECT started_at, paused_at, ended_at FROM task_logs WHERE id=?",
             (int(slot["entity_id"]),),
         ).fetchone()
-        if not row:
+        if not row or not str(row["started_at"] or "").strip():
             return False
         if str(row["paused_at"] or "").strip() or str(row["ended_at"] or "").strip():
             return False
-        return str(row["status"] or "Pending").strip() in ("", "Pending")
+        return True
     row = conn.execute(
-        "SELECT status, paused_at FROM one_time_tasks WHERE id=?",
+        "SELECT status, paused_at, started_at FROM one_time_tasks WHERE id=?",
         (int(slot["entity_id"]),),
     ).fetchone()
     if not row or str(row["paused_at"] or "").strip():
+        return False
+    if not str(row["started_at"] or "").strip():
         return False
     return str(row["status"] or "") == "In Progress"
 
