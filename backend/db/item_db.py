@@ -451,13 +451,20 @@ def list_items(
     used by pickers together with ``limit`` so typing "YK" does not ship 6k rows.
     """
     conn = _connect()
+    # JOIN aggregated variant counts once — correlated COUNT per row was too slow on 7k+ items.
     q = """
         SELECT i.*, t.name AS item_type_name, t.code AS item_type_code,
-               (SELECT COUNT(*) FROM items v WHERE v.parent_id = i.id) AS variant_count,
+               COALESCE(vc.variant_count, 0) AS variant_count,
                p.image_path AS _parent_image_path
         FROM items i
         JOIN item_types t ON i.item_type_id = t.id
         LEFT JOIN items p ON p.id = i.parent_id
+        LEFT JOIN (
+            SELECT parent_id, COUNT(*) AS variant_count
+            FROM items
+            WHERE parent_id IS NOT NULL
+            GROUP BY parent_id
+        ) vc ON vc.parent_id = i.id
         WHERE 1=1
     """
     params: list = []
@@ -850,6 +857,24 @@ def opening_stock_for_code(item_code: str) -> dict:
         return out
     except sqlite3.Error:
         return out
+    finally:
+        conn.close()
+
+
+def list_opening_printed_fabric_codes() -> list[str]:
+    """Item codes that have a manual Opening/Existing Stock Adjustment (for printed advance UI)."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            """SELECT DISTINCT TRIM(item_code) AS item_code
+               FROM item_stock_adjustments
+               WHERE LOWER(COALESCE(reason,'')) LIKE '%opening%'
+                  OR LOWER(COALESCE(reason,'')) LIKE '%existing%'
+               ORDER BY item_code"""
+        ).fetchall()
+        return [str(r["item_code"]) for r in rows if str(r["item_code"] or "").strip()]
+    except sqlite3.Error:
+        return []
     finally:
         conn.close()
 

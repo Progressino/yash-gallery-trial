@@ -33,9 +33,49 @@ def _style_uses_fabric(style_code: str, fabric_code: str) -> None:
         return
 
 
+def _ensure_checked_free_for_advance(fabric_code: str, qty: float, *, user_name: str = "", reason: str = "") -> None:
+    """Pull free Opening Stock into checked free when advance reserve needs more metres."""
+    from .fabric_allocation_engine import (
+        FabricAllocationError,
+        convert_printed_opening_to_checked,
+        printed_opening_allocatable,
+    )
+
+    conn = gdb._connect()
+    try:
+        stock = conn.execute(
+            "SELECT available_qty FROM printed_fabric_checked_stock WHERE UPPER(TRIM(fabric_code))=?",
+            (fabric_code,),
+        ).fetchone()
+        free = float(stock["available_qty"] or 0) if stock else 0.0
+    finally:
+        conn.close()
+    if free + 1e-6 >= qty:
+        return
+    opening = float(printed_opening_allocatable(fabric_code).get("allocatable") or 0)
+    need = round(qty - free, 3)
+    if need > opening + 1e-6:
+        raise ValueError(
+            f"Only {free + opening:.1f} m is free for {fabric_code} "
+            f"({free:.1f} m checked + {opening:.1f} m opening). "
+            "A style reservation cannot use metres already reserved."
+        )
+    if need > 0:
+        try:
+            convert_printed_opening_to_checked(
+                fabric_code,
+                need,
+                user_name=user_name,
+                reason=reason or "Opening stock treated as checked (advance style reserve)",
+            )
+        except FabricAllocationError as e:
+            raise ValueError(str(e)) from e
+
+
 def reserve_for_style(data: dict) -> int:
     fabric_code = (data.get("fabric_code") or "").strip().upper()
     style_code = (data.get("style_code") or "").strip().upper()
+    sku = (data.get("sku") or "").strip().upper()
     qty = float(data.get("qty") or 0)
     reason = (data.get("reason") or data.get("remarks") or "").strip()
     user_name = (data.get("user_name") or data.get("reserved_by") or "").strip()
@@ -43,7 +83,14 @@ def reserve_for_style(data: dict) -> int:
         raise ValueError("Fabric, style, and metres are required")
     if not reason:
         raise ValueError("A reason is required to reserve fabric for a style")
-    _style_uses_fabric(style_code, fabric_code)
+    # Size-level: SKU must belong to the parent style and use this fabric.
+    if sku:
+        if not (sku == style_code or sku.startswith(style_code + "-")):
+            raise ValueError(f"Size SKU {sku} does not belong to style {style_code}")
+        _style_uses_fabric(sku, fabric_code)
+    else:
+        _style_uses_fabric(style_code, fabric_code)
+    _ensure_checked_free_for_advance(fabric_code, qty, user_name=user_name, reason=reason)
     conn = gdb._connect()
     stock = conn.execute(
         "SELECT * FROM printed_fabric_checked_stock WHERE UPPER(TRIM(fabric_code))=?",
@@ -51,7 +98,7 @@ def reserve_for_style(data: dict) -> int:
     ).fetchone()
     if not stock:
         conn.close()
-        raise ValueError(f"No checked stock for fabric {fabric_code}")
+        raise ValueError(f"No checked or opening stock for fabric {fabric_code}")
     if float(stock["available_qty"] or 0) + 1e-6 < qty:
         free = float(stock["available_qty"] or 0)
         conn.close()
@@ -62,8 +109,9 @@ def reserve_for_style(data: dict) -> int:
     existing = conn.execute(
         """SELECT id FROM printed_fabric_reservations
            WHERE UPPER(TRIM(fabric_code))=? AND UPPER(TRIM(style_code))=?
+             AND UPPER(TRIM(COALESCE(sku,'')))=?
              AND COALESCE(reservation_kind,'so')='advance' AND status='Active'""",
-        (fabric_code, style_code),
+        (fabric_code, style_code, sku),
     ).fetchone()
     conn.execute(
         "UPDATE printed_fabric_checked_stock SET available_qty = available_qty - ?, reserved_qty = reserved_qty + ? WHERE id=?",
@@ -83,14 +131,14 @@ def reserve_for_style(data: dict) -> int:
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 fabric_code, stock["fabric_name"] or data.get("fabric_name") or "",
-                "", "", qty, "MTR", "Active", reason,
+                "", sku, qty, "MTR", "Active", reason,
                 "advance", style_code, user_name,
             ),
         )
         rid = int(cur.lastrowid)
     gdb._audit_fabric(
         conn, event_type="ADVANCE_RESERVE", fabric_code=fabric_code, qty=qty, reason=reason,
-        user_name=user_name, to_sku=style_code, status_to="Active",
+        user_name=user_name, to_sku=sku or style_code, status_to="Active",
     )
     conn.commit()
     conn.close()
@@ -199,7 +247,12 @@ def transfer_advance(reservation_id: int, to_style: str, qty: float, reason: str
 
 
 def convert_advance_to_so(reservation_id: int, lines: list, reason: str = "", user_name: str = "") -> dict:
-    """Move metres from a style block onto SO/SKU rows. Free and reserved totals do not change."""
+    """Move metres from a style block onto SO/SKU rows. Free and reserved totals do not change.
+
+    Supports partial conversion: leftover metres stay on the advance reservation.
+    Parent-style holds may split across several SO/size lines; size-level holds
+    may only convert to that same size SKU.
+    """
     reason = (reason or "").strip() or "Converted style reservation to sales order"
     clean = []
     for ln in lines or []:
@@ -218,7 +271,20 @@ def convert_advance_to_so(reservation_id: int, lines: list, reason: str = "", us
         if need > held + 1e-6:
             raise ValueError(f"Style reservation has {held:.1f} m. Conversion asks for {need:.1f} m.")
         fabric = str(row["fabric_code"] or "")
-        style = str(row["style_code"] or "")
+        style = str(row["style_code"] or "").strip().upper()
+        held_sku = str(row["sku"] or "").strip().upper()
+        for ln in clean:
+            if held_sku and ln["sku"] != held_sku:
+                raise ValueError(
+                    f"This reservation is for size {held_sku}. Convert only to that size SKU."
+                )
+            if not held_sku and not (
+                ln["sku"] == style or ln["sku"].startswith(style + "-")
+            ):
+                raise ValueError(
+                    f"Size {ln['sku']} does not belong to style {style}"
+                )
+            _style_uses_fabric(ln["sku"], fabric)
         created = []
         for ln in clean:
             existing = conn.execute(
@@ -254,6 +320,82 @@ def convert_advance_to_so(reservation_id: int, lines: list, reason: str = "", us
         return {"id": reservation_id, "remaining_qty": round(max(0, left), 3), "status": status, "lines": created}
     finally:
         conn.close()
+
+
+def advance_options(fabric_code: str = "") -> dict:
+    """Fabrics with free (checked + opening), BOM-linked parent styles / size SKUs, and matching SOs."""
+    fabric = (fabric_code or "").strip().upper()
+    visibility = gdb.printed_stock_visibility(fabric)
+    fabrics = [
+        {
+            "fabric_code": v["fabric_code"],
+            "fabric_name": v.get("fabric_name") or v["fabric_code"],
+            "free_available": v.get("free_available") or 0,
+            "checked_free": v.get("checked_free") or 0,
+            "opening_free": v.get("opening_free") or 0,
+        }
+        for v in visibility
+        if float(v.get("free_available") or 0) > 0
+    ]
+    parent_styles: list[dict] = []
+    size_skus: list[dict] = []
+    sales_orders: list[dict] = []
+    fabric_filter_active = False
+    if fabric:
+        try:
+            from .fabric_sku_matching import skus_using_fabric
+
+            mapped = sorted(skus_using_fabric(fabric))
+            fabric_filter_active = bool(mapped)
+            parents: set[str] = set()
+            sizes: set[str] = set()
+            for code in mapped:
+                u = code.strip().upper()
+                if not u:
+                    continue
+                if "-" in u:
+                    sizes.add(u)
+                    parents.add(u.rsplit("-", 1)[0])
+                else:
+                    parents.add(u)
+            # Prefer real Item Master parents when available
+            try:
+                from ..db import item_db
+
+                for p in list(parents):
+                    rows = item_db.list_items(search=p, parent_only=True, limit=5, rank_search=True)
+                    for r in rows:
+                        if str(r.get("item_code") or "").strip().upper() == p:
+                            break
+            except Exception:
+                pass
+            parent_styles = [{"style_code": p, "label": p} for p in sorted(parents)]
+            size_skus = [
+                {
+                    "sku": s,
+                    "style_code": s.rsplit("-", 1)[0],
+                    "label": s,
+                }
+                for s in sorted(sizes)
+            ]
+        except Exception:
+            parent_styles = []
+            size_skus = []
+            fabric_filter_active = False
+        try:
+            opts = gdb.printed_fabric_reserve_options(fabric_code=fabric)
+            sales_orders = opts.get("sales_orders") or []
+            fabric_filter_active = fabric_filter_active or bool(opts.get("fabric_filter_active"))
+        except Exception:
+            sales_orders = []
+    return {
+        "fabrics": fabrics,
+        "parent_styles": parent_styles,
+        "size_skus": size_skus,
+        "sales_orders": sales_orders,
+        "fabric_code": fabric or None,
+        "fabric_filter_active": fabric_filter_active,
+    }
 
 
 def style_base(sku: str) -> str:

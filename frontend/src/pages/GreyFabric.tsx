@@ -1,7 +1,98 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useTrackTab } from '../lib/usageTracker'
+
+type AdvancePickOption = { value: string; primary: string; secondary?: string; haystack: string }
+
+function AdvanceSearchSelect({
+  label,
+  placeholder,
+  value,
+  onChange,
+  options,
+  disabled,
+  emptyMessage = 'No matches',
+  hint,
+}: {
+  label: string
+  placeholder: string
+  value: string
+  onChange: (v: string) => void
+  options: AdvancePickOption[]
+  disabled?: boolean
+  emptyMessage?: string
+  hint?: string
+}) {
+  const [search, setSearch] = useState('')
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const selected = options.find(o => o.value === value)
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return options.slice(0, 80)
+    return options.filter(o => o.haystack.includes(q)).slice(0, 80)
+  }, [options, search])
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
+  const displayValue = open
+    ? search
+    : selected
+      ? (selected.secondary ? `${selected.primary} — ${selected.secondary}` : selected.primary)
+      : ''
+  return (
+    <div ref={wrapRef} className={`relative ${disabled ? 'opacity-60' : ''}`}>
+      <label className="text-xs text-gray-500">{label}</label>
+      {hint && !disabled && <p className="text-[10px] text-gray-400 mt-0.5">{hint}</p>}
+      <input
+        type="search"
+        disabled={disabled}
+        placeholder={placeholder}
+        className="mt-1 w-full border rounded px-2 py-1.5 text-sm disabled:bg-gray-50"
+        value={displayValue}
+        onChange={e => {
+          setSearch(e.target.value)
+          setOpen(true)
+          if (!e.target.value) onChange('')
+        }}
+        onFocus={() => {
+          if (disabled) return
+          setOpen(true)
+          setSearch('')
+        }}
+      />
+      {open && !disabled && (
+        <ul className="absolute z-30 left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-white border rounded-lg shadow-lg">
+          {filtered.length === 0 ? (
+            <li className="px-3 py-2 text-xs text-gray-400">{emptyMessage}</li>
+          ) : (
+            filtered.map(o => (
+              <li key={o.value}>
+                <button
+                  type="button"
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 border-b border-gray-50 last:border-0"
+                  onClick={() => {
+                    onChange(o.value)
+                    setSearch('')
+                    setOpen(false)
+                  }}
+                >
+                  <span className="font-mono font-semibold text-[#002B5B]">{o.primary}</span>
+                  {o.secondary && <span className="text-gray-500 text-xs block">{o.secondary}</span>}
+                </button>
+              </li>
+            ))
+          )}
+        </ul>
+      )}
+    </div>
+  )
+}
 
 type Tab =
   | 'dashboard'
@@ -194,8 +285,13 @@ export default function GreyFabric() {
     reservation_id: '', from_so: '', from_sku: '', to_so: '', to_sku: '', printed_code: '', qty: '', reason: '',
   })
   const [planMsg, setPlanMsg] = useState('')
-  const [advanceForm, setAdvanceForm] = useState({ fabric_code: '', style_code: '', qty: 0, reason: '' })
-  const [advanceDraft, setAdvanceDraft] = useState<Record<number, { qty: string; reason: string; to_style: string; so_number: string; sku: string }>>({})
+  const [advanceForm, setAdvanceForm] = useState({
+    fabric_code: '', style_code: '', sku: '', qty: 0, reason: '', level: 'parent' as 'parent' | 'size',
+  })
+  const [advanceDraft, setAdvanceDraft] = useState<Record<number, {
+    qty: string; reason: string; to_style: string
+    convertLines: { so_number: string; sku: string; qty: string }[]
+  }>>({})
 
   // ── Queries ──────────────────────────────────────────────────────────────────
   const { data: stats } = useQuery<GreyStats>({
@@ -306,6 +402,34 @@ export default function GreyFabric() {
     enabled: tab === 'printed-fabric' && (pfSubTab === 'checked' || pfSubTab === 'ready-to-cut'),
     staleTime: 10_000,
   })
+  const advanceFabricKeys = useMemo(() => {
+    const codes = new Set<string>()
+    if (advanceForm.fabric_code) codes.add(advanceForm.fabric_code)
+    for (const r of printedAdvance as any[]) {
+      if (r?.fabric_code) codes.add(String(r.fabric_code))
+    }
+    return [...codes].sort()
+  }, [advanceForm.fabric_code, printedAdvance])
+
+  const { data: advanceOptionsByFabric = {} } = useQuery<Record<string, any>>({
+    queryKey: ['printed-advance-options', advanceFabricKeys.join('|') || '_all'],
+    queryFn: async () => {
+      const base = await api.get('/grey/printed-fabric/advance-options').then(r => r.data)
+      const out: Record<string, any> = { '': base }
+      await Promise.all(
+        advanceFabricKeys.map(async code => {
+          const data = await api
+            .get('/grey/printed-fabric/advance-options', { params: { fabric_code: code } })
+            .then(r => r.data)
+          out[code] = data
+        }),
+      )
+      return out
+    },
+    enabled: tab === 'printed-fabric' && pfSubTab === 'checked',
+    staleTime: 15_000,
+  })
+  const advanceOptions = advanceOptionsByFabric[advanceForm.fabric_code || ''] || advanceOptionsByFabric[''] || {}
 
   // ── Mutations ─────────────────────────────────────────────────────────────────
   const createMut = useMutation({
@@ -562,6 +686,7 @@ export default function GreyFabric() {
     qc.invalidateQueries({ queryKey: ['printed-stock-visibility'] })
     qc.invalidateQueries({ queryKey: ['printed-advance'] })
     qc.invalidateQueries({ queryKey: ['printed-fabric-reserve-options'] })
+    qc.invalidateQueries({ queryKey: ['printed-advance-options'] })
   }
   const advanceError = (e: unknown, fallback: string) => {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
@@ -571,16 +696,85 @@ export default function GreyFabric() {
     mutationFn: (b: object) => api.post('/grey/printed-fabric/advance', b),
     onSuccess: () => {
       refreshPrintedStock()
-      setAdvanceForm({ fabric_code: '', style_code: '', qty: 0, reason: '' })
+      qc.invalidateQueries({ queryKey: ['printed-advance-options'] })
+      setAdvanceForm({ fabric_code: '', style_code: '', sku: '', qty: 0, reason: '', level: 'parent' })
     },
     onError: (e: unknown) => advanceError(e, 'Could not reserve fabric for this style'),
   })
   const advanceActMut = useMutation({
     mutationFn: ({ id, action, body }: { id: number; action: 'release' | 'transfer' | 'convert'; body: object }) =>
       api.post(`/grey/printed-fabric/advance/${id}/${action}`, body),
-    onSuccess: () => refreshPrintedStock(),
+    onSuccess: () => {
+      refreshPrintedStock()
+      qc.invalidateQueries({ queryKey: ['printed-advance-options'] })
+    },
     onError: (e: unknown) => advanceError(e, 'Could not update the style reservation'),
   })
+
+  const advanceFabricOptions = useMemo<AdvancePickOption[]>(() => {
+    const rows = (advanceOptions?.fabrics as any[]) || []
+    const fromVis = (printedVisibility as any[]).filter((v: any) => Number(v.free_available || 0) > 0)
+    const src = rows.length ? rows : fromVis
+    return src.map((f: any) => {
+      const free = Number(f.free_available ?? 0)
+      const opening = Number(f.opening_free ?? 0)
+      const checked = Number(f.checked_free ?? free - opening)
+      return {
+        value: f.fabric_code,
+        primary: f.fabric_code,
+        secondary: `${free} m free` + (opening > 0 ? ` (${checked} checked + ${opening} opening)` : ''),
+        haystack: `${f.fabric_code} ${f.fabric_name || ''}`.toLowerCase(),
+      }
+    })
+  }, [advanceOptions, printedVisibility])
+
+  const advanceStyleOptions = useMemo<AdvancePickOption[]>(() => {
+    const rows = (advanceOptions?.parent_styles as any[]) || []
+    return rows.map((s: any) => ({
+      value: s.style_code,
+      primary: s.style_code,
+      secondary: 'Parent style',
+      haystack: String(s.style_code || '').toLowerCase(),
+    }))
+  }, [advanceOptions])
+
+  const advanceSizeOptions = useMemo<AdvancePickOption[]>(() => {
+    const rows = ((advanceOptions?.size_skus as any[]) || []).filter((s: any) =>
+      !advanceForm.style_code || String(s.style_code || '').toUpperCase() === advanceForm.style_code.toUpperCase()
+        || String(s.sku || '').toUpperCase().startsWith(advanceForm.style_code.toUpperCase() + '-'),
+    )
+    return rows.map((s: any) => ({
+      value: s.sku,
+      primary: s.sku,
+      secondary: s.style_code || '',
+      haystack: `${s.sku} ${s.style_code || ''}`.toLowerCase(),
+    }))
+  }, [advanceOptions, advanceForm.style_code])
+
+  const advanceSoOptionsFor = (fabric: string, style: string, sizeSku: string) => {
+    const opts = advanceOptionsByFabric[fabric] || advanceOptions || {}
+    const orders = (opts.sales_orders as any[]) || []
+    return orders
+      .map((o: any) => {
+        const lines = (o.lines || []).filter((ln: any) => {
+          const sku = String(ln.sku || '').toUpperCase()
+          if (sizeSku && sku !== sizeSku.toUpperCase()) return false
+          if (style && !(sku === style.toUpperCase() || sku.startsWith(style.toUpperCase() + '-'))) return false
+          return true
+        })
+        return { ...o, lines }
+      })
+      .filter((o: any) => o.lines.length > 0)
+  }
+  const advanceStyleOptionsFor = (fabric: string) => {
+    const opts = advanceOptionsByFabric[fabric] || advanceOptions || {}
+    return ((opts.parent_styles as any[]) || []).map((s: any) => ({
+      value: s.style_code,
+      primary: s.style_code,
+      secondary: 'Parent style',
+      haystack: String(s.style_code || '').toLowerCase(),
+    }))
+  }
 
   const openEdit = (entry: GreyEntry) => {
     setEditEntry(entry)
@@ -1658,78 +1852,298 @@ export default function GreyFabric() {
               </div>
               <table className="w-full text-sm">
                 <thead className="text-gray-400 text-xs uppercase">
-                  <tr>{['Fabric Code','Name','Total stock','SO allocated','Style reserved','Free'].map(h => <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
+                  <tr>{['Fabric Code','Name','Total stock','SO allocated','Style reserved','Checked free','Opening free','Free'].map(h => <th key={h} className="text-left px-4 py-2">{h}</th>)}</tr>
                 </thead>
                 <tbody>
-                  {(printedFabricChecked as any[]).map((c: any, i: number) => {
-                    const vis = (printedVisibility as any[]).find((v: any) => v.fabric_code === c.fabric_code)
-                    return (
-                    <tr key={i} className="border-t border-gray-50 hover:bg-gray-50">
-                      <td className="px-4 py-2 font-mono text-xs text-[#002B5B] font-semibold">{c.fabric_code}</td>
-                      <td className="px-4 py-2 text-gray-700">{c.fabric_name}</td>
-                      <td className="px-4 py-2 text-gray-700">{vis?.total_stock ?? ((c.available_qty || 0) + (c.reserved_qty || 0))} m</td>
-                      <td className="px-4 py-2 text-blue-700">{vis?.so_allocated ?? 0} m</td>
-                      <td className="px-4 py-2 text-amber-700">{vis?.advance_reserved ?? 0} m</td>
-                      <td className="px-4 py-2 font-bold text-[#002B5B]">{vis?.free_available ?? c.available_qty ?? 0} m</td>
+                  {((printedVisibility as any[]).length
+                    ? (printedVisibility as any[])
+                    : (printedFabricChecked as any[]).map((c: any) => ({
+                        fabric_code: c.fabric_code,
+                        fabric_name: c.fabric_name,
+                        total_stock: (c.available_qty || 0) + (c.reserved_qty || 0),
+                        so_allocated: 0,
+                        advance_reserved: 0,
+                        checked_free: c.available_qty || 0,
+                        opening_free: 0,
+                        free_available: c.available_qty || 0,
+                      }))
+                  ).map((vis: any, i: number) => (
+                    <tr key={vis.fabric_code || i} className="border-t border-gray-50 hover:bg-gray-50">
+                      <td className="px-4 py-2 font-mono text-xs text-[#002B5B] font-semibold">{vis.fabric_code}</td>
+                      <td className="px-4 py-2 text-gray-700">{vis.fabric_name}</td>
+                      <td className="px-4 py-2 text-gray-700">{vis.total_stock ?? 0} m</td>
+                      <td className="px-4 py-2 text-blue-700">{vis.so_allocated ?? 0} m</td>
+                      <td className="px-4 py-2 text-amber-700">{vis.advance_reserved ?? 0} m</td>
+                      <td className="px-4 py-2 text-gray-600">{vis.checked_free ?? 0} m</td>
+                      <td className="px-4 py-2 text-violet-700">{vis.opening_free ?? 0} m</td>
+                      <td className="px-4 py-2 font-bold text-[#002B5B]">{vis.free_available ?? 0} m</td>
                     </tr>
-                    )
-                  })}
+                  ))}
                 </tbody>
               </table>
-              {printedFabricChecked.length === 0 && <p className="text-center text-gray-400 py-8 text-sm">No checked fabric yet. Submit QC first.</p>}
+              {(printedVisibility as any[]).length === 0 && printedFabricChecked.length === 0 && (
+                <p className="text-center text-gray-400 py-8 text-sm">No checked or opening printed stock yet.</p>
+              )}
               <div className="border-t px-4 py-4 space-y-3 bg-amber-50/40">
                 <div>
-                  <p className="text-sm font-semibold text-gray-700">Reserve fabric for a style before a sales order</p>
-                  <p className="text-xs text-gray-500">These metres leave free stock. Another style cannot use them until you release, transfer, or convert them to a sales order.</p>
+                  <p className="text-sm font-semibold text-gray-700">Advance Style Reservation</p>
+                  <p className="text-xs text-gray-500">
+                    Hold free checked stock or Item Master Opening Stock for a parent style or a size SKU before an SO exists.
+                    Partial release / transfer / convert keep the leftover on this reservation. Opening stock is converted into checked free only when reserved (no double count).
+                  </p>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-2 items-end">
-                  <select value={advanceForm.fabric_code} onChange={e => setAdvanceForm(f => ({ ...f, fabric_code: e.target.value }))} className="border rounded px-2 py-1.5 text-sm">
-                    <option value="">Fabric…</option>
-                    {(printedFabricChecked as any[]).filter((c: any) => (c.available_qty || 0) > 0).map((c: any) => (
-                      <option key={c.fabric_code} value={c.fabric_code}>{c.fabric_code} ({c.available_qty} m free)</option>
-                    ))}
-                  </select>
-                  <input value={advanceForm.style_code} onChange={e => setAdvanceForm(f => ({ ...f, style_code: e.target.value }))} placeholder="Style / P-code" className="border rounded px-2 py-1.5 text-sm" />
-                  <input type="number" value={advanceForm.qty || ''} onChange={e => setAdvanceForm(f => ({ ...f, qty: +e.target.value }))} placeholder="Metres" className="border rounded px-2 py-1.5 text-sm" />
-                  <input value={advanceForm.reason} onChange={e => setAdvanceForm(f => ({ ...f, reason: e.target.value }))} placeholder="Reason" className="border rounded px-2 py-1.5 text-sm" />
-                  <button
-                    type="button"
-                    disabled={advanceReserveMut.isPending}
-                    onClick={() => advanceReserveMut.mutate(advanceForm)}
-                    className="px-3 py-1.5 bg-amber-700 text-white rounded text-sm disabled:opacity-50"
-                  >Reserve for style</button>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 bg-white border rounded-lg p-3">
+                  <AdvanceSearchSelect
+                    label="Printed fabric P-Code *"
+                    placeholder="Search fabric…"
+                    value={advanceForm.fabric_code}
+                    options={advanceFabricOptions}
+                    onChange={v => setAdvanceForm(f => ({ ...f, fabric_code: v, style_code: '', sku: '' }))}
+                    emptyMessage="No free checked or opening stock"
+                  />
+                  <div>
+                    <label className="text-xs text-gray-500">Reserve level *</label>
+                    <select
+                      value={advanceForm.level}
+                      onChange={e => setAdvanceForm(f => ({
+                        ...f,
+                        level: e.target.value as 'parent' | 'size',
+                        sku: e.target.value === 'parent' ? '' : f.sku,
+                      }))}
+                      className="mt-1 w-full border rounded px-2 py-1.5 text-sm"
+                    >
+                      <option value="parent">Parent style (before size / SO)</option>
+                      <option value="size">Size SKU (size known)</option>
+                    </select>
+                  </div>
+                  <AdvanceSearchSelect
+                    label="Parent style *"
+                    placeholder="Search style / P-code…"
+                    value={advanceForm.style_code}
+                    options={advanceStyleOptions}
+                    disabled={!advanceForm.fabric_code}
+                    onChange={v => setAdvanceForm(f => ({ ...f, style_code: v, sku: '' }))}
+                    emptyMessage={advanceForm.fabric_code ? 'No BOM-mapped styles for this fabric' : 'Select fabric first'}
+                    hint={advanceOptions?.fabric_filter_active ? 'Only styles mapped to this fabric in BOM' : undefined}
+                  />
+                  {advanceForm.level === 'size' && (
+                    <AdvanceSearchSelect
+                      label="Size SKU *"
+                      placeholder="Search size SKU…"
+                      value={advanceForm.sku}
+                      options={advanceSizeOptions}
+                      disabled={!advanceForm.style_code}
+                      onChange={v => setAdvanceForm(f => ({ ...f, sku: v }))}
+                      emptyMessage="No size SKUs for this style / fabric"
+                    />
+                  )}
+                  <div>
+                    <label className="text-xs text-gray-500">Metres *</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={advanceForm.qty || ''}
+                      onChange={e => setAdvanceForm(f => ({ ...f, qty: +e.target.value }))}
+                      className="mt-1 w-full border rounded px-2 py-1.5 text-sm"
+                      placeholder="Qty to hold"
+                    />
+                    {advanceForm.fabric_code && (
+                      <p className="text-[10px] text-gray-500 mt-0.5">
+                        Available:{' '}
+                        <b className="font-mono">
+                          {(advanceFabricOptions.find(o => o.value === advanceForm.fabric_code)?.secondary || '—')}
+                        </b>
+                      </p>
+                    )}
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500">Reason *</label>
+                    <input
+                      value={advanceForm.reason}
+                      onChange={e => setAdvanceForm(f => ({ ...f, reason: e.target.value }))}
+                      className="mt-1 w-full border rounded px-2 py-1.5 text-sm"
+                      placeholder="Why hold this fabric?"
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <button
+                      type="button"
+                      disabled={advanceReserveMut.isPending}
+                      onClick={() => {
+                        if (!advanceForm.fabric_code || !advanceForm.style_code || !advanceForm.qty || !advanceForm.reason) {
+                          alert('Fabric, style, metres and reason are required')
+                          return
+                        }
+                        if (advanceForm.level === 'size' && !advanceForm.sku) {
+                          alert('Select a size SKU for size-level reservation')
+                          return
+                        }
+                        advanceReserveMut.mutate({
+                          fabric_code: advanceForm.fabric_code,
+                          style_code: advanceForm.style_code,
+                          sku: advanceForm.level === 'size' ? advanceForm.sku : '',
+                          qty: advanceForm.qty,
+                          reason: advanceForm.reason,
+                        })
+                      }}
+                      className="w-full px-3 py-1.5 bg-amber-700 text-white rounded text-sm disabled:opacity-50"
+                    >
+                      {advanceReserveMut.isPending ? 'Reserving…' : 'Reserve'}
+                    </button>
+                  </div>
                 </div>
                 {(printedAdvance as any[]).length > 0 && (
-                  <table className="w-full text-xs bg-white rounded border">
-                    <thead className="text-gray-400 uppercase">
-                      <tr>{['Fabric','Style','Metres held','Release / transfer / convert to SO'].map(h => <th key={h} className="text-left px-3 py-2">{h}</th>)}</tr>
-                    </thead>
-                    <tbody>
-                      {(printedAdvance as any[]).map((r: any) => {
-                        const d = advanceDraft[r.id] || { qty: String(r.qty || ''), reason: '', to_style: '', so_number: '', sku: '' }
-                        const setD = (patch: Partial<typeof d>) => setAdvanceDraft(prev => ({ ...prev, [r.id]: { ...d, ...patch } }))
-                        return (
-                          <tr key={r.id} className="border-t">
-                            <td className="px-3 py-2 font-mono">{r.fabric_code}</td>
-                            <td className="px-3 py-2 font-semibold">{r.style_code}</td>
-                            <td className="px-3 py-2">{r.qty} m</td>
-                            <td className="px-3 py-2">
-                              <div className="flex flex-wrap gap-1 items-center">
-                                <input value={d.qty} onChange={e => setD({ qty: e.target.value })} className="border rounded px-1.5 py-1 w-16" placeholder="m" />
-                                <input value={d.reason} onChange={e => setD({ reason: e.target.value })} className="border rounded px-1.5 py-1 w-28" placeholder="Reason" />
-                                <button type="button" className="px-2 py-1 border rounded" onClick={() => advanceActMut.mutate({ id: r.id, action: 'release', body: { qty: +d.qty, reason: d.reason } })}>Release</button>
-                                <input value={d.to_style} onChange={e => setD({ to_style: e.target.value })} className="border rounded px-1.5 py-1 w-24" placeholder="To style" />
-                                <button type="button" className="px-2 py-1 border rounded" onClick={() => advanceActMut.mutate({ id: r.id, action: 'transfer', body: { qty: +d.qty, reason: d.reason, to_style: d.to_style } })}>Transfer</button>
-                                <input value={d.so_number} onChange={e => setD({ so_number: e.target.value })} className="border rounded px-1.5 py-1 w-24" placeholder="SO" />
-                                <input value={d.sku} onChange={e => setD({ sku: e.target.value })} className="border rounded px-1.5 py-1 w-28" placeholder="Size SKU" />
-                                <button type="button" className="px-2 py-1 bg-[#002B5B] text-white rounded" onClick={() => advanceActMut.mutate({ id: r.id, action: 'convert', body: { reason: d.reason, lines: [{ so_number: d.so_number, sku: d.sku, qty: +d.qty }] } })}>Convert to SO</button>
-                              </div>
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
+                  <div className="space-y-3">
+                    {(printedAdvance as any[]).map((r: any) => {
+                      const d = advanceDraft[r.id] || {
+                        qty: String(r.qty || ''),
+                        reason: '',
+                        to_style: '',
+                        convertLines: [{ so_number: '', sku: r.sku || '', qty: String(r.qty || '') }],
+                      }
+                      const setD = (patch: Partial<typeof d>) =>
+                        setAdvanceDraft(prev => ({ ...prev, [r.id]: { ...d, ...patch } }))
+                      const soChoices = advanceSoOptionsFor(r.fabric_code, r.style_code, r.sku || '')
+                      const soOpts: AdvancePickOption[] = soChoices.map((o: any) => ({
+                        value: o.so_number,
+                        primary: o.so_number,
+                        secondary: o.buyer || o.status || '',
+                        haystack: `${o.so_number} ${o.buyer || ''}`.toLowerCase(),
+                      }))
+                      const styleOpts = advanceStyleOptionsFor(r.fabric_code).filter(o => o.value !== r.style_code)
+                      return (
+                        <div key={r.id} className="bg-white border rounded-lg p-3 space-y-2 text-sm">
+                          <div className="flex flex-wrap gap-3 items-baseline">
+                            <span className="font-mono font-semibold text-[#002B5B]">{r.fabric_code}</span>
+                            <span className="font-semibold">{r.style_code}</span>
+                            {r.sku ? <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-800">Size {r.sku}</span>
+                              : <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-800">Parent style</span>}
+                            <span className="font-mono text-amber-800">{r.qty} m held</span>
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
+                            <div>
+                              <label className="text-[10px] text-gray-500">Qty (partial OK)</label>
+                              <input value={d.qty} onChange={e => setD({ qty: e.target.value })} className="mt-0.5 w-full border rounded px-2 py-1 text-sm" />
+                            </div>
+                            <div className="md:col-span-2">
+                              <label className="text-[10px] text-gray-500">Reason *</label>
+                              <input value={d.reason} onChange={e => setD({ reason: e.target.value })} className="mt-0.5 w-full border rounded px-2 py-1 text-sm" placeholder="Required for release / transfer / convert" />
+                            </div>
+                            <button
+                              type="button"
+                              className="px-2 py-1.5 border rounded text-sm"
+                              onClick={() => advanceActMut.mutate({ id: r.id, action: 'release', body: { qty: +d.qty, reason: d.reason } })}
+                            >Release to free</button>
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-2 items-end border-t pt-2">
+                            <AdvanceSearchSelect
+                              label="Transfer to style"
+                              placeholder="Search target style…"
+                              value={d.to_style}
+                              options={styleOpts}
+                              onChange={v => setD({ to_style: v })}
+                              emptyMessage="No other BOM-mapped styles"
+                            />
+                            <button
+                              type="button"
+                              className="px-2 py-1.5 border rounded text-sm"
+                              onClick={() => advanceActMut.mutate({
+                                id: r.id, action: 'transfer',
+                                body: { qty: +d.qty, reason: d.reason, to_style: d.to_style },
+                              })}
+                            >Partial transfer</button>
+                          </div>
+                          <div className="border-t pt-2 space-y-2">
+                            <p className="text-xs font-semibold text-gray-600">Convert to SO / Size SKU (partial OK — add lines)</p>
+                            {d.convertLines.map((ln, idx) => {
+                              const so = soChoices.find((o: any) => o.so_number === ln.so_number)
+                              const skuOpts: AdvancePickOption[] = ((so?.lines || []) as any[])
+                                .filter((x: any) => !r.sku || String(x.sku).toUpperCase() === String(r.sku).toUpperCase())
+                                .map((x: any) => ({
+                                  value: x.sku,
+                                  primary: x.sku,
+                                  secondary: x.sku_name || '',
+                                  haystack: `${x.sku} ${x.sku_name || ''}`.toLowerCase(),
+                                }))
+                              return (
+                                <div key={idx} className="grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
+                                  <AdvanceSearchSelect
+                                    label="SO number"
+                                    placeholder="Search SO…"
+                                    value={ln.so_number}
+                                    options={soOpts}
+                                    onChange={v => {
+                                      const next = d.convertLines.map((row, i) =>
+                                        i === idx ? { ...row, so_number: v, sku: r.sku || '' } : row,
+                                      )
+                                      setD({ convertLines: next })
+                                    }}
+                                    emptyMessage="No matching open SOs for this fabric/style"
+                                  />
+                                  <AdvanceSearchSelect
+                                    label="Size SKU"
+                                    placeholder="Search size…"
+                                    value={ln.sku}
+                                    options={skuOpts}
+                                    disabled={!ln.so_number}
+                                    onChange={v => {
+                                      const next = d.convertLines.map((row, i) =>
+                                        i === idx ? { ...row, sku: v } : row,
+                                      )
+                                      setD({ convertLines: next })
+                                    }}
+                                  />
+                                  <div>
+                                    <label className="text-[10px] text-gray-500">Metres</label>
+                                    <input
+                                      value={ln.qty}
+                                      onChange={e => {
+                                        const next = d.convertLines.map((row, i) =>
+                                          i === idx ? { ...row, qty: e.target.value } : row,
+                                        )
+                                        setD({ convertLines: next })
+                                      }}
+                                      className="mt-0.5 w-full border rounded px-2 py-1 text-sm"
+                                    />
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="text-xs text-red-500"
+                                    onClick={() => setD({ convertLines: d.convertLines.filter((_, i) => i !== idx) })}
+                                    disabled={d.convertLines.length <= 1}
+                                  >Remove</button>
+                                </div>
+                              )
+                            })}
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                className="px-2 py-1 border rounded text-xs"
+                                onClick={() => setD({
+                                  convertLines: [...d.convertLines, { so_number: '', sku: r.sku || '', qty: '' }],
+                                })}
+                              >+ Add SO / size line</button>
+                              <button
+                                type="button"
+                                className="px-3 py-1.5 bg-[#002B5B] text-white rounded text-sm"
+                                onClick={() => advanceActMut.mutate({
+                                  id: r.id,
+                                  action: 'convert',
+                                  body: {
+                                    reason: d.reason,
+                                    lines: d.convertLines
+                                      .filter(ln => ln.so_number && ln.sku && +ln.qty > 0)
+                                      .map(ln => ({ so_number: ln.so_number, sku: ln.sku, qty: +ln.qty })),
+                                  },
+                                })}
+                              >Convert to SO</button>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
                 )}
               </div>
             </div>

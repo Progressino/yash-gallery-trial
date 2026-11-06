@@ -1561,7 +1561,14 @@ def _audit_fabric(conn, *, event_type: str, fabric_code: str, qty: float, reason
 
 
 def printed_stock_visibility(fabric_code: str = "") -> List[Dict[str, Any]]:
-    """Total checked, SO allocated, style advance, and free metres — one stock row."""
+    """Total checked, SO allocated, style advance, and free metres — one stock row.
+
+    Free includes Item Master Opening Stock that has not yet been converted into
+    checked stock (same pool MRP allocation uses). Opening is never double-counted
+    with checked free.
+    """
+    from ..services.fabric_allocation_engine import printed_opening_allocatable
+
     conn = _connect()
     code = (fabric_code or "").strip().upper()
     where = "WHERE UPPER(TRIM(s.fabric_code))=?" if code else ""
@@ -1571,8 +1578,10 @@ def printed_stock_visibility(fabric_code: str = "") -> List[Dict[str, Any]]:
         params,
     ).fetchall()
     out = []
+    seen: set[str] = set()
     for s in stocks:
         fc = str(s["fabric_code"] or "")
+        seen.add(fc.upper())
         so_row = conn.execute(
             """SELECT COALESCE(SUM(qty),0) q FROM printed_fabric_reservations
                WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?)) AND status='Active'
@@ -1586,14 +1595,54 @@ def printed_stock_visibility(fabric_code: str = "") -> List[Dict[str, Any]]:
                  AND COALESCE(reservation_kind,'so')='advance'""",
             (fc,),
         ).fetchone()
+        checked_free = round(float(s["available_qty"] or 0), 3)
+        opening_free = 0.0
+        try:
+            opening_free = round(float(printed_opening_allocatable(fc).get("allocatable") or 0), 3)
+        except Exception:
+            opening_free = 0.0
         out.append({
             "fabric_code": fc,
             "fabric_name": s["fabric_name"] or "",
-            "total_stock": round(float(s["available_qty"] or 0) + float(s["reserved_qty"] or 0), 3),
+            "total_stock": round(checked_free + float(s["reserved_qty"] or 0) + opening_free, 3),
             "so_allocated": round(float(so_row["q"] or 0), 3),
             "advance_reserved": round(float(adv_row["q"] or 0), 3),
-            "free_available": round(float(s["available_qty"] or 0), 3),
+            "free_available": round(checked_free + opening_free, 3),
+            "checked_free": checked_free,
+            "opening_free": opening_free,
             "reserved_qty": round(float(s["reserved_qty"] or 0), 3),
         })
     conn.close()
+    # Opening-only fabrics (Item Master Opening Stock, never QC'd) still appear for advance reserve.
+    opening_codes: list[str] = []
+    if code:
+        if code not in seen:
+            opening_codes = [code]
+    else:
+        try:
+            from ..db.item_db import list_opening_printed_fabric_codes
+            opening_codes = list_opening_printed_fabric_codes()
+        except Exception:
+            opening_codes = []
+    for fc in opening_codes:
+        if fc.upper() in seen:
+            continue
+        try:
+            opening_free = round(float(printed_opening_allocatable(fc).get("allocatable") or 0), 3)
+        except Exception:
+            opening_free = 0.0
+        if opening_free <= 0:
+            continue
+        out.append({
+            "fabric_code": fc,
+            "fabric_name": fc,
+            "total_stock": opening_free,
+            "so_allocated": 0.0,
+            "advance_reserved": 0.0,
+            "free_available": opening_free,
+            "checked_free": 0.0,
+            "opening_free": opening_free,
+            "reserved_qty": 0.0,
+        })
+    out.sort(key=lambda r: str(r.get("fabric_code") or ""))
     return out

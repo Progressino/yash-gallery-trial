@@ -291,6 +291,7 @@ class AdvanceReserveIn(BaseModel):
     fabric_code: str
     fabric_name: str = ""
     style_code: str
+    sku: str = ""
     qty: float
     reason: str = ""
     user_name: str = ""
@@ -319,6 +320,13 @@ class AdvanceConvertIn(BaseModel):
 def get_advance_reservations(fabric_code: Optional[str] = None):
     from ..services.printed_flexibility import list_advance_reservations
     return list_advance_reservations(fabric_code or "")
+
+
+@router.get("/printed-fabric/advance-options")
+def get_advance_options(fabric_code: Optional[str] = None):
+    """Free fabrics (checked + opening) plus BOM-linked styles/SKUs and matching SOs."""
+    from ..services.printed_flexibility import advance_options
+    return advance_options(fabric_code or "")
 
 
 @router.post("/printed-fabric/advance")

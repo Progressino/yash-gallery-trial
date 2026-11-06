@@ -278,8 +278,21 @@ def get_items(
     type_id:     Optional[int] = None,
     search:      Optional[str] = None,
     parent_only: bool          = False,
+    limit:       Optional[int] = None,
 ):
-    return list_items(type_id=type_id, search=search, parent_only=parent_only)
+    needle = (search or "").strip()
+    # Cap list/search responses so Item Master stays responsive with thousands of SKUs.
+    effective_limit = limit
+    if effective_limit is None:
+        effective_limit = 400 if needle else 800
+    effective_limit = max(1, min(int(effective_limit), 2000))
+    return list_items(
+        type_id=type_id,
+        search=search,
+        parent_only=parent_only,
+        limit=effective_limit,
+        rank_search=bool(needle),
+    )
 
 
 @router.post("")

@@ -154,7 +154,7 @@ export default function ItemMaster() {
 
   const [debouncedSearchQ, setDebouncedSearchQ] = useState('')
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearchQ(searchQ.trim()), 300)
+    const t = setTimeout(() => setDebouncedSearchQ(searchQ.trim()), 250)
     return () => clearTimeout(t)
   }, [searchQ])
   const [itemShowLimit, setItemShowLimit] = useState(ITEM_RENDER_STEP)
@@ -517,30 +517,59 @@ export default function ItemMaster() {
   const updateBomCostsMut = useMutation({
     mutationFn: (body: { cmt_cost: number; other_cost: number }) =>
       api.put(`/items/${bomItemId}/boms/${selectedBomId}`, body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['bom', bomItemId, selectedBomId] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['bom-detail', selectedBomId] }),
+  })
+
+  const updateLineMut = useMutation({
+    mutationFn: ({ lineId, body }: { lineId: number; body: object }) =>
+      api.put(`/items/${bomItemId}/boms/${selectedBomId}/lines/${lineId}`, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['bom-detail', selectedBomId] })
+      qc.invalidateQueries({ queryKey: ['boms', bomItemId] })
+    },
+    onError: (e: any) => setCertifyErr(e?.response?.data?.detail ?? 'Could not save process line.'),
   })
 
   const matLines = useMemo(() => (bomDetail?.lines ?? []).filter(l => l.component_type !== 'SVC'), [bomDetail])
   const [svcLines, setSvcLines] = useState<any[]>([])
 
-useEffect(() => {
-  setSvcLines((bomDetail?.lines ?? []).filter((l: any) => l.component_type === 'SVC'))
-}, [bomDetail])
-const totalCost = useMemo(() =>
-  (bomDetail?.lines ?? []).reduce((s: number, l: any) => s + lineAmt(l), 0),
-  [bomDetail]
-)
+  useEffect(() => {
+    setSvcLines((bomDetail?.lines ?? []).filter((l: any) => l.component_type === 'SVC'))
+  }, [bomDetail])
 
-    const grandTotal = useMemo(() =>
-    totalCost + (parseFloat(bomCmtCost) || 0) + (parseFloat(bomOtherCost) || 0), [totalCost, bomCmtCost, bomOtherCost])
+  const materialCost = useMemo(
+    () => matLines.reduce((s, l) => s + lineAmt(l), 0),
+    [matLines],
+  )
+  const processCost = useMemo(
+    () => svcLines.reduce((s, l) => s + lineAmt(l), 0),
+    [svcLines],
+  )
+  // Material + Process must include live process edits (svcLines), not only last-saved bomDetail.
+  const totalCost = materialCost + processCost
+  const grandTotal = useMemo(
+    () => totalCost + (parseFloat(bomCmtCost) || 0) + (parseFloat(bomOtherCost) || 0),
+    [totalCost, bomCmtCost, bomOtherCost],
+  )
 
   const costByType = useMemo(() => {
     const acc: Record<string, number> = {}
-    for (const l of bomDetail?.lines ?? []) {
+    for (const l of matLines) {
       acc[l.component_type] = (acc[l.component_type] ?? 0) + lineAmt(l)
     }
+    if (svcLines.length > 0) {
+      acc.SVC = processCost
+    }
     return acc
-  }, [bomDetail])
+  }, [matLines, svcLines, processCost])
+
+  const persistSvcLine = (line: any) => {
+    if (!selectedBomId || !line?.id || bomDetail?.is_certified) return
+    updateLineMut.mutate({
+      lineId: line.id,
+      body: { quantity: Number(line.quantity) || 0, rate: Number(line.rate) || 0 },
+    })
+  }
 
   function handleAddLine() {
     if (!newLine.component_item_id) {
@@ -1922,32 +1951,36 @@ const totalCost = useMemo(() =>
                                       <tr key={l.id} className="hover:bg-gray-50">
                                         <td className="px-3 py-2 font-medium text-gray-800">{l.component_name}</td>
                                         <td className="px-3 py-2">
-  <input
-    type="number"
-    value={l.quantity}
-    onChange={(e) => {
-      const updated = svcLines.map(x =>
-        x.id === l.id ? { ...x, quantity: Number(e.target.value) } : x
-      )
-      setSvcLines(updated)
-    }}
-    className="w-16 border border-gray-300 rounded px-2 py-1 text-xs"
-  />
-</td>
+                                          <input
+                                            type="number"
+                                            value={l.quantity}
+                                            disabled={!!bomDetail.is_certified}
+                                            onChange={(e) => {
+                                              const quantity = Number(e.target.value)
+                                              setSvcLines(prev => prev.map(x =>
+                                                x.id === l.id ? { ...x, quantity } : x
+                                              ))
+                                            }}
+                                            onBlur={(e) => persistSvcLine({ ...l, quantity: Number(e.target.value), rate: Number(l.rate) || 0 })}
+                                            className="w-16 border border-gray-300 rounded px-2 py-1 text-xs disabled:bg-gray-50"
+                                          />
+                                        </td>
                                         <td className="px-3 py-2 text-gray-500">{l.unit}</td>
                                         <td className="px-3 py-2">
-  <input
-    type="number"
-    value={l.rate}
-    onChange={(e) => {
-      const updated = svcLines.map(x =>
-        x.id === l.id ? { ...x, rate: Number(e.target.value) } : x
-      )
-      setSvcLines(updated)
-    }}
-    className="w-20 border border-gray-300 rounded px-2 py-1 text-xs"
-  />
-</td>
+                                          <input
+                                            type="number"
+                                            value={l.rate}
+                                            disabled={!!bomDetail.is_certified}
+                                            onChange={(e) => {
+                                              const rate = Number(e.target.value)
+                                              setSvcLines(prev => prev.map(x =>
+                                                x.id === l.id ? { ...x, rate } : x
+                                              ))
+                                            }}
+                                            onBlur={(e) => persistSvcLine({ ...l, rate: Number(e.target.value), quantity: Number(l.quantity) || 0 })}
+                                            className="w-20 border border-gray-300 rounded px-2 py-1 text-xs disabled:bg-gray-50"
+                                          />
+                                        </td>
                                         <td className="px-3 py-2 tabular-nums font-medium">{fmt(lineAmt(l))}</td>
                                         <td className="px-3 py-2 text-gray-400">{l.remarks || '—'}</td>
                                         <td className="px-3 py-2">
@@ -2025,7 +2058,7 @@ const totalCost = useMemo(() =>
                             {svcLines.length > 0 && (
                               <div className="bg-white rounded-lg p-2 border border-gray-100">
                                 <div className="text-gray-500">Process (SVC)</div>
-                                <div className="font-semibold text-gray-900 mt-0.5">{fmt(svcLines.reduce((s, l) => s + lineAmt(l), 0))}</div>
+                                <div className="font-semibold text-gray-900 mt-0.5">{fmt(processCost)}</div>
                               </div>
                             )}
                           </div>

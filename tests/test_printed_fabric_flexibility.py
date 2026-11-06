@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import pytest
 
-from backend.db import grey_db, sales_db
+from backend.db import grey_db, item_db, sales_db
 from backend.services.fabric_allocation_engine import FabricAllocationError, allocate_printed_bulk
 from backend.services.printed_flexibility import (
+    advance_options,
     apply_cutting_plan,
     convert_advance_to_so,
     list_advance_reservations,
@@ -24,9 +25,20 @@ def isolated_grey_sales(tmp_path, monkeypatch):
     monkeypatch.setenv("SALES_DB_PATH", sales_path)
     monkeypatch.setattr(grey_db, "_DB", grey_path)
     monkeypatch.setattr(sales_db, "_DB", sales_path)
+    monkeypatch.setattr(item_db, "DB_PATH", str(tmp_path / "items.db"))
     grey_db.init_db()
     sales_db.init_db()
+    item_db.init_db()
     yield
+
+
+def _item_opening(code: str, qty: float) -> int:
+    conn = item_db._connect()
+    sfg = conn.execute("SELECT id FROM item_types WHERE code='SFG'").fetchone()[0]
+    conn.close()
+    iid = item_db.create_item(code, code, sfg, uom="MTR")
+    item_db.adjust_item_stock(iid, qty, "IN", entry_date="2026-04-01", reason="Opening Stock")
+    return iid
 
 
 def _check(code: str, qty: float):
@@ -118,6 +130,74 @@ def test_release_and_transfer():
     styles = {r["style_code"]: r["qty"] for r in list_advance_reservations("PFLEX003")}
     assert styles["KURTI"] == 110
     assert styles["SHIRT"] == 40
+
+
+def test_advance_reserve_uses_opening_stock_without_double_count():
+    _item_opening("POPEN1", 100)
+    vis = grey_db.printed_stock_visibility("POPEN1")
+    assert len(vis) == 1
+    assert vis[0]["opening_free"] == 100
+    assert vis[0]["free_available"] == 100
+    rid = reserve_for_style({
+        "fabric_code": "POPEN1", "style_code": "KURTI", "qty": 40, "reason": "Hold opening",
+    })
+    assert rid
+    vis = grey_db.printed_stock_visibility("POPEN1")[0]
+    assert vis["advance_reserved"] == 40
+    assert vis["free_available"] == 60
+    assert vis["opening_free"] == 60
+    assert vis["checked_free"] == 0
+    # Second reserve pulls more opening into checked then holds it
+    reserve_for_style({
+        "fabric_code": "POPEN1", "style_code": "KURTI", "qty": 60, "reason": "Hold rest",
+    })
+    vis = grey_db.printed_stock_visibility("POPEN1")[0]
+    assert vis["advance_reserved"] == 100
+    assert vis["free_available"] == 0
+    assert vis["opening_free"] == 0
+
+
+def test_size_level_advance_and_partial_convert():
+    _check("PSIZE1", 200)
+    rid = reserve_for_style({
+        "fabric_code": "PSIZE1", "style_code": "KURTI", "sku": "KURTI-M",
+        "qty": 80, "reason": "Size known",
+    })
+    row = list_advance_reservations("PSIZE1")[0]
+    assert row["sku"] == "KURTI-M" and row["qty"] == 80
+    with pytest.raises(ValueError, match="size KURTI-M"):
+        convert_advance_to_so(rid, [{"so_number": "SO-1", "sku": "KURTI-L", "qty": 10}], reason="wrong size")
+    out = convert_advance_to_so(rid, [
+        {"so_number": "SO-1", "sku": "KURTI-M", "qty": 30},
+    ], reason="Partial SO")
+    assert out["remaining_qty"] == 50
+    assert out["status"] == "Active"
+    assert list_advance_reservations("PSIZE1")[0]["qty"] == 50
+    ready = grey_db.list_printed_fabric_ready_to_cut()
+    assert any(r["sku"] == "KURTI-M" and float(r.get("reserved_qty") or r.get("qty") or 0) == 30 for r in ready)
+
+
+def test_parent_partial_convert_to_multiple_sizes():
+    _check("PPART1", 300)
+    rid = reserve_for_style({
+        "fabric_code": "PPART1", "style_code": "KURTI", "qty": 200, "reason": "Parent hold",
+    })
+    out = convert_advance_to_so(rid, [
+        {"so_number": "SO-2", "sku": "KURTI-S", "qty": 50},
+        {"so_number": "SO-2", "sku": "KURTI-M", "qty": 70},
+    ], reason="SO split")
+    assert out["remaining_qty"] == 80
+    styles = list_advance_reservations("PPART1")
+    assert styles[0]["qty"] == 80 and not styles[0].get("sku")
+
+
+def test_advance_options_lists_opening_fabric():
+    _item_opening("POPT1", 55)
+    opts = advance_options()
+    codes = {f["fabric_code"] for f in opts["fabrics"]}
+    assert "POPT1" in codes
+    row = next(f for f in opts["fabrics"] if f["fabric_code"] == "POPT1")
+    assert row["opening_free"] == 55 and row["free_available"] == 55
 
 
 def test_cutting_revision_uses_reserved_metres_then_free_stock(monkeypatch):
