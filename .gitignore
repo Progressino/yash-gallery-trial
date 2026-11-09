@@ -10,6 +10,7 @@
 !frontend/tsconfig*.json
 !frontend/eslint.config.js
 !backend/data/yash_sku_mapping_master.json
+!backend/db/hrm_org_chart_default.json
 # node_modules
 frontend/node_modules/
 

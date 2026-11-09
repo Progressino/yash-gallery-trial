@@ -573,6 +573,50 @@ def test_row10_only_admin_can_change_reporting(env, monkeypatch):
     assert int(emp["reports_to_employee_id"] or 0) == h
 
 
+def test_row10_admin_edits_org_chart_hod_sees_full_company(env, monkeypatch):
+    """Sheet row 10: Admin edits pictorial chart boxes; HOD sees the full company chart."""
+    a, h, client = env["a"], env["h"], env["client"]
+    did = next(e["department_id"] for e in hrm_db.list_employees() if e["id"] == a)
+    hrm_db.create_department({"name": f"Other-{uuid.uuid4().hex[:6]}"})
+    other_id = next(d["id"] for d in hrm_db.list_departments() if str(d["name"]).startswith("Other-"))
+    hrm_db.create_employee({"name": "Other Dept Emp", "department_id": other_id})
+
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="department", role="HOD", user_id=2, employee_id=h, department_id=did),
+    )
+    denied = client.put(
+        "/api/hrm/hierarchy/org-chart",
+        json={"name": "Director", "children": [{"name": "Should Fail"}]},
+    )
+    assert denied.status_code == 403
+
+    hod_view = client.get("/api/hrm/hierarchy")
+    assert hod_view.status_code == 200
+    flat = hod_view.json()["employees_flat"]
+    assert {e["name"] for e in flat} >= {"Worker A", "Hod H", "Other Dept Emp"}
+    chart = hod_view.json()["org_chart"]
+    assert chart["name"] == "Director"
+
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="all", role="Admin", user_id=1, employee_id=h, department_id=did),
+    )
+    tree = {"name": "Director", "children": [{"name": "Ops Lead", "children": [{"name": "Worker A"}]}]}
+    saved = client.put("/api/hrm/hierarchy/org-chart", json=tree)
+    assert saved.status_code == 200
+    assert saved.json()["org_chart"]["children"][0]["name"] == "Ops Lead"
+    assert hrm_db.get_org_chart()["children"][0]["children"][0]["name"] == "Worker A"
+
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="department", role="HOD", user_id=2, employee_id=h, department_id=did),
+    )
+    again = client.get("/api/hrm/hierarchy/org-chart")
+    assert again.status_code == 200
+    assert again.json()["children"][0]["name"] == "Ops Lead"
+
+
 def test_attendance_classifies_weekoff_present_leave_and_holiday(env):
     a = env["a"]
     hrm_worktime.office_start(a)

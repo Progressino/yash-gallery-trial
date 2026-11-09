@@ -1603,8 +1603,77 @@ def get_dashboard_stats(department_id: int | None = None, employee_id: int | Non
     }
 
 
+_ORG_CHART_META_KEY = "org_chart_json"
+
+
+def _default_org_chart() -> dict:
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).with_name("hrm_org_chart_default.json")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _normalize_org_chart(node) -> dict:
+    if not isinstance(node, dict):
+        raise ValueError("Org chart root must be an object with a name")
+    name = str(node.get("name") or "").strip()
+    if not name:
+        raise ValueError("Every org chart box needs a name")
+    kids_in = node.get("children") or []
+    if kids_in is None:
+        kids_in = []
+    if not isinstance(kids_in, list):
+        raise ValueError("children must be a list")
+    children = [_normalize_org_chart(c) for c in kids_in]
+    out = {"name": name}
+    if children:
+        out["children"] = children
+    return out
+
+
+def get_org_chart() -> dict:
+    """Pictorial Hierarchy chart (Admin-editable). Seeds from the default company chart once."""
+    import json
+
+    conn = _connect()
+    row = conn.execute(
+        "SELECT value FROM hrm_meta WHERE key=?", (_ORG_CHART_META_KEY,)
+    ).fetchone()
+    if row and str(row["value"] or "").strip():
+        try:
+            chart = _normalize_org_chart(json.loads(row["value"]))
+            conn.close()
+            return chart
+        except Exception:
+            pass
+    chart = _normalize_org_chart(_default_org_chart())
+    conn.execute(
+        "INSERT OR REPLACE INTO hrm_meta(key, value) VALUES(?, ?)",
+        (_ORG_CHART_META_KEY, json.dumps(chart, ensure_ascii=False)),
+    )
+    conn.commit()
+    conn.close()
+    return chart
+
+
+def save_org_chart(tree: dict) -> dict:
+    """Replace the pictorial Hierarchy chart. Admin only (caller enforces)."""
+    import json
+
+    chart = _normalize_org_chart(tree)
+    conn = _connect()
+    conn.execute(
+        "INSERT OR REPLACE INTO hrm_meta(key, value) VALUES(?, ?)",
+        (_ORG_CHART_META_KEY, json.dumps(chart, ensure_ascii=False)),
+    )
+    conn.commit()
+    conn.close()
+    return chart
+
+
 def get_org_hierarchy() -> dict:
-    """Departments tree + employee reporting tree."""
+    """Departments tree + employee reporting tree + pictorial org chart."""
     conn = _connect()
     depts = [dict(r) for r in conn.execute("SELECT * FROM departments ORDER BY name").fetchall()]
     emps = [
@@ -1647,6 +1716,7 @@ def get_org_hierarchy() -> dict:
         "reporting": emp_roots,
         "employees_flat": emps,
         "departments_flat": depts,
+        "org_chart": get_org_chart(),
     }
 
 

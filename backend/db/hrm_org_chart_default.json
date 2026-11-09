@@ -1,0 +1,97 @@
+{
+  "name": "Director",
+  "children": [
+    {
+      "name": "Suresh Kundnani",
+      "children": [
+        {
+          "name": "Ajay Kumar Verma",
+          "children": [
+            { "name": "Sunil Yogi" },
+            { "name": "Farhan Khan" },
+            { "name": "Deepak Kumhar" },
+            { "name": "Ravi ji" },
+            { "name": "Prahalad" }
+          ]
+        },
+        {
+          "name": "Irfan Ali",
+          "children": [
+            { "name": "Sandeep Saini" },
+            { "name": "Manisha Kanwar" },
+            { "name": "Sadhana Verma" },
+            { "name": "Vikash Yadav", "children": [{ "name": "Priyanka Kumawat" }] }
+          ]
+        },
+        {
+          "name": "Chajuram master",
+          "children": [
+            { "name": "Suresh Sharma" },
+            { "name": "Bhimaram ji" },
+            { "name": "Ramkaran ji" },
+            { "name": "Rajkumar Sharma" },
+            {
+              "name": "Rohitash ji",
+              "children": [{ "name": "Mahtab" }, { "name": "Jitendra Yadav" }]
+            },
+            {
+              "name": "Tayub Master",
+              "children": [
+                { "name": "Chain Management Staff (6)" },
+                { "name": "Chain Workers" }
+              ]
+            },
+            { "name": "Babulal ji" }
+          ]
+        },
+        {
+          "name": "Madan Singh",
+          "children": [{ "name": "Vishwajeet" }, { "name": "Bhanu ji/Hari ji" }]
+        },
+        {
+          "name": "Rajni Devi",
+          "children": [{ "name": "Pinky" }, { "name": "All Finishing staff" }]
+        },
+        {
+          "name": "Admin",
+          "children": [
+            { "name": "Cleaning Staff" },
+            { "name": "Maintenance Staff" },
+            { "name": "Field Staff" },
+            { "name": "Security" }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Yogesh Kundnani",
+      "children": [
+        { "name": "Sanjay Sodani", "children": [{ "name": "Rohit" }] },
+        {
+          "name": "Suraj Chaurasia",
+          "children": [
+            { "name": "Bharti" },
+            { "name": "Rimjhim" },
+            { "name": "Dinesh Kumar" },
+            { "name": "Sandeep kumar" },
+            { "name": "Tannu" }
+          ]
+        },
+        { "name": "Irfan Dewshwali" },
+        { "name": "Harsh" },
+        {
+          "name": "Vijay Kumar Saini",
+          "children": [
+            { "name": "Ashu Bhatt" },
+            { "name": "Banwari" },
+            { "name": "Guddi" },
+            { "name": "HImanshu Saini" },
+            { "name": "Sanjay Saini" },
+            { "name": "Nemichand Saini" }
+          ]
+        },
+        { "name": "Manish Saini", "children": [{ "name": "Dispatch Staff" }] }
+      ]
+    }
+  ]
+}

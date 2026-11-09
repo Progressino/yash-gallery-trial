@@ -2954,13 +2954,15 @@ export default function HRM() {
         <div className="space-y-4">
           <div className={`rounded-lg border px-3 py-2 text-xs ${canManageOrg ? 'bg-green-50 border-green-200 text-green-900' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
             {canManageOrg
-              ? 'Admin: you can expand/collapse the tree, save reporting lines from the chart, change HOD names, and change who each employee reports to. Add a new person under Employees, then set Reports to here.'
-              : 'View only — HOD and other users can expand or collapse the tree. Only Admin can change reporting lines or HOD names.'}
+              ? 'Admin: edit the pictorial chart boxes (rename, add child, remove), then Save chart. You can also save reporting lines from the chart, change HOD names, and change who each employee reports to under Employees / Reports to.'
+              : 'Full company chart — HOD can expand or collapse every branch (view only). Only Admin can edit chart boxes, reporting lines, or HOD names.'}
           </div>
           <OrgChart
             employees={(orgHierarchy?.employees_flat?.length ? orgHierarchy.employees_flat : allEmps) as any[]}
             canApply={canManageOrg}
+            initialChart={orgHierarchy?.org_chart || null}
             onApplied={() => qc.invalidateQueries({ queryKey: ['hrm-hierarchy'] })}
+            onChartSaved={() => qc.invalidateQueries({ queryKey: ['hrm-hierarchy'] })}
           />
           <div className="bg-white rounded-xl border p-4">
             <h3 className="font-semibold text-gray-800 mb-2">{t(lang, 'hierarchy')}</h3>

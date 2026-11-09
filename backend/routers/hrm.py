@@ -3,7 +3,7 @@ import io
 from contextlib import contextmanager
 
 import pandas as pd
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, field_validator
 from typing import Any, Optional
@@ -2286,16 +2286,31 @@ def hierarchy_get(request: Request):
     scope = _scope_from_request(request)
     if not scope.can_manage_org and not scope.is_hod:
         raise HTTPException(403, "Hierarchy view requires HOD or Admin")
-    tree = get_org_hierarchy()
-    if scope.level == "department" and scope.department_id is not None:
-        did = scope.department_id
-        tree["employees_flat"] = [e for e in tree["employees_flat"] if e.get("department_id") == did]
-        tree["departments_flat"] = [d for d in tree["departments_flat"] if d.get("id") == did]
-        tree["departments"] = [d for d in tree["departments"] if d.get("id") == did]
-        tree["reporting"] = [
-            e for e in tree["reporting"] if e.get("department_id") == did
-        ]
-    return tree
+    # Full company chart for Admin and HOD (pictorial tree + all active employees).
+    return get_org_hierarchy()
+
+
+@router.get("/hierarchy/org-chart")
+def hierarchy_get_org_chart(request: Request):
+    scope = _scope_from_request(request)
+    if not scope.can_manage_org and not scope.is_hod:
+        raise HTTPException(403, "Hierarchy view requires HOD or Admin")
+    from ..db.hrm_db import get_org_chart
+
+    return get_org_chart()
+
+
+@router.put("/hierarchy/org-chart")
+def hierarchy_put_org_chart(request: Request, body: dict = Body(...)):
+    """Admin replaces the pictorial Hierarchy chart (rename / add child / remove boxes)."""
+    assert_hrm_write_org(_scope_from_request(request))
+    from ..db.hrm_db import save_org_chart
+
+    try:
+        chart = save_org_chart(body if isinstance(body, dict) else {})
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return {"ok": True, "org_chart": chart}
 
 
 @router.patch("/hierarchy/department")
