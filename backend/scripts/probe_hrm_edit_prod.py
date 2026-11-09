@@ -186,22 +186,29 @@ def main() -> int:
         raise SystemExit(f"Edit fields did not persist: {checks}")
 
     # Restore original so we don't leave probe mutations
+    restore_body = _restore_payload(original)
     restore = s.patch(
-        f"{BASE}/api/hrm/responsibilities/{rid}", json=_restore_payload(original), timeout=60
+        f"{BASE}/api/hrm/responsibilities/{rid}", json=restore_body, timeout=60
     )
-    print("RESTORE", restore.status_code)
+    print("RESTORE", restore.status_code, (restore.text or "")[:300])
     restore.raise_for_status()
     print("HRM_EDIT_PROBE_OK", json.dumps({"id": rid, "checks": checks}))
     return 0
 
 
 def _restore_payload(original: dict) -> dict:
-    """Omit null backup fields so legacy rows without backup can be restored."""
+    """Omit null backup/linked fields so legacy rows can be restored.
+
+    Accountable (linked) person is required on PATCH now — do not send null and
+    clear a value the probe just set on older rows that had none.
+    """
     data = dict(original)
     if not data.get("backup_employee_id"):
         data.pop("backup_employee_id", None)
         data.pop("backup_allocation_value", None)
         data.pop("backup_allocation_unit", None)
+    if not data.get("linked_to_employee_id"):
+        data.pop("linked_to_employee_id", None)
     return data
 
 
