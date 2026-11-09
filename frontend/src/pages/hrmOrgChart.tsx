@@ -65,24 +65,14 @@ function collectExpandablePaths(node: OrgNode, parentPath = '', out: string[] = 
 }
 
 function findNode(root: OrgNode, path: string): OrgNode | null {
-  const parts = path.split('/')
-  let cur: OrgNode | null = root
-  let walked = ''
-  for (const part of parts) {
-    walked = walked ? `${walked}/${part}` : part
-    if (!cur || cur.name !== part) {
-      // path segments are full names joined by / — walk by matching cumulative path from root
-      break
-    }
-  }
-  // Walk using split that respects names containing no slashes (names don't include /)
-  cur = root
   if (path === root.name) return root
+  if (!path.startsWith(`${root.name}/`)) return null
   const segs = path.slice(root.name.length + 1).split('/').filter(Boolean)
+  let cur: OrgNode = root
   for (const seg of segs) {
-    const next = (cur.children || []).find(c => c.name === seg)
-    if (!next) return null
-    cur = next
+    const child: OrgNode | undefined = (cur.children || []).find(c => c.name === seg)
+    if (!child) return null
+    cur = child
   }
   return cur
 }
