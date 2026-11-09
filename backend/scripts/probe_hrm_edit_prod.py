@@ -72,7 +72,7 @@ def main() -> int:
             raise SystemExit("HRM chunk not found in index")
         hrm_js = s.get(f"https://app.progressino.com/assets/{hm.group(0)}", timeout=60).text
         for needle in (
-            "Linked To (supervisor / approver)",
+            "Linked Person (supervisor / approver)",
             "Mandatory",
             "Anchor month",
             "Day of month",
