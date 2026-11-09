@@ -2952,6 +2952,11 @@ export default function HRM() {
       {/* ── HIERARCHY ── */}
       {tab === 'hierarchy' && (
         <div className="space-y-4">
+          <div className={`rounded-lg border px-3 py-2 text-xs ${canManageOrg ? 'bg-green-50 border-green-200 text-green-900' : 'bg-slate-50 border-slate-200 text-slate-700'}`}>
+            {canManageOrg
+              ? 'Admin: you can expand/collapse the tree, save reporting lines from the chart, change HOD names, and change who each employee reports to. Add a new person under Employees, then set Reports to here.'
+              : 'View only — HOD and other users can expand or collapse the tree. Only Admin can change reporting lines or HOD names.'}
+          </div>
           <OrgChart
             employees={(orgHierarchy?.employees_flat?.length ? orgHierarchy.employees_flat : allEmps) as any[]}
             canApply={canManageOrg}
@@ -2962,7 +2967,7 @@ export default function HRM() {
             <p className="text-xs text-gray-500 mb-3">Organization departments, HOD assignment, and employee reporting structure</p>
             <div className="grid md:grid-cols-2 gap-4">
               <div>
-                <h4 className="text-sm font-semibold text-[#002B5B] mb-2">Departments & HOD</h4>
+                <h4 className="text-sm font-semibold text-[#002B5B] mb-2">Departments & HOD{canManageOrg ? ' (edit)' : ''}</h4>
                 <ul className="space-y-2 text-sm">
                   {((orgHierarchy?.departments_flat) || depts as any[]).map((d: any) => (
                     <li key={d.id} className="border rounded-lg p-2">
@@ -2982,13 +2987,16 @@ export default function HRM() {
                 </ul>
               </div>
               <div>
-                <h4 className="text-sm font-semibold text-[#002B5B] mb-2">Reporting structure</h4>
+                <h4 className="text-sm font-semibold text-[#002B5B] mb-2">Change reporting structure{canManageOrg ? '' : ' (view)'}</h4>
+                <p className="text-[10px] text-gray-500 mb-2">Each employee’s manager. Admin changes take effect immediately on Employee Check and HOD views.</p>
                 <ul className="space-y-2 text-sm max-h-96 overflow-auto">
-                  {((orgHierarchy?.employees_flat) || allEmps as any[]).map((e: any) => (
+                  {((orgHierarchy?.employees_flat) || allEmps as any[]).map((e: any) => {
+                    const manager = ((orgHierarchy?.employees_flat) || allEmps as any[]).find((x: any) => Number(x.id) === Number(e.reports_to_employee_id))
+                    return (
                     <li key={e.id} className="border rounded-lg p-2 flex flex-wrap gap-2 items-center">
                       <span className="font-medium">{e.name}</span>
                       <span className="text-xs text-gray-400">{e.emp_code} · {e.department_name}</span>
-                      {canManageOrg && (
+                      {canManageOrg ? (
                         <select className="border rounded text-xs ml-auto" defaultValue={e.reports_to_employee_id || ''}
                           onChange={ev => api.patch('/hrm/hierarchy/reporting', { employee_id: e.id, reports_to_employee_id: ev.target.value ? +ev.target.value : null }).then(() => qc.invalidateQueries({ queryKey: ['hrm-hierarchy'] }))}>
                           <option value="">Reports to…</option>
@@ -2996,9 +3004,12 @@ export default function HRM() {
                             <option key={m.id} value={m.id}>{m.name}</option>
                           ))}
                         </select>
+                      ) : (
+                        <span className="text-xs text-gray-600 ml-auto">Reports to: {manager?.name || '—'}</span>
                       )}
                     </li>
-                  ))}
+                    )
+                  })}
                 </ul>
               </div>
             </div>
@@ -3588,6 +3599,12 @@ export default function HRM() {
 
           {reportsSubTab === 'performance' && (
         <div className="space-y-4">
+          <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-xs text-blue-950 space-y-1">
+            <p className="font-semibold text-blue-900">How the performance % is calculated</p>
+            <p><b>Responsibilities:</b> After Linked Person / HOD approval, the Completion % they enter (1–100) is that day’s score for the item. Rejected / Missed = 0. Partial without a % uses 50%. Average of scored items in the date range = Responsibility performance.</p>
+            <p><b>One-time tasks:</b> Approved on time count fully; approved late count at 60%; rejected and overdue reduce the score.</p>
+            <p><b>Combined:</b> If the person has both, overall ≈ 70% responsibilities + 30% one-time tasks. Open Full Appraisal for the detailed breakdown.</p>
+          </div>
           <div className="space-y-3">
             {(perfData as any[]).map((p: any, i: number) => (
               <div key={i} className="bg-white rounded-xl border p-4">

@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react'
 import api from '../api/client'
 
 /** Reporting lines from the Hierarchy tab org chart. */
@@ -132,18 +133,73 @@ function matchOne(map: Map<string, any[]>, name: string) {
   return null
 }
 
-function Box({ node, people, depth }: { node: OrgNode; people: Map<string, any[]>; depth: number }) {
+function nodePath(parentPath: string, name: string) {
+  return parentPath ? `${parentPath}/${name}` : name
+}
+
+function collectExpandablePaths(node: OrgNode, parentPath = '', out: string[] = []) {
+  const path = nodePath(parentPath, node.name)
+  if (node.children?.length) {
+    out.push(path)
+    for (const child of node.children) collectExpandablePaths(child, path, out)
+  }
+  return out
+}
+
+function Box({
+  node,
+  people,
+  depth,
+  path,
+  collapsed,
+  toggle,
+}: {
+  node: OrgNode
+  people: Map<string, any[]>
+  depth: number
+  path: string
+  collapsed: Set<string>
+  toggle: (path: string) => void
+}) {
   const emp = matchOne(people, node.name)
   const tone = depth <= 1 ? 'bg-[#1f7a4d] text-white border-[#166534]' : emp ? 'bg-[#d9f2d9] border-[#3d8b40] text-gray-900' : 'bg-[#eef6ee] border-[#8fbc8f] text-gray-700'
+  const hasKids = !!node.children?.length
+  const isCollapsed = hasKids && collapsed.has(path)
   return (
     <li>
       <div className={`org-box min-w-[7.5rem] max-w-[9.5rem] rounded-md border px-2 py-1.5 text-center shadow-sm ${tone}`}>
-        <p className="text-[11px] font-semibold leading-tight">{node.name}</p>
-        {emp && <p className={`text-[9px] mt-0.5 ${depth <= 1 ? 'text-green-100' : 'text-gray-500'}`}>{emp.department_name || emp.designation || 'Employee'}</p>}
+        <div className="flex items-start justify-center gap-1">
+          {hasKids && (
+            <button
+              type="button"
+              title={isCollapsed ? 'Expand' : 'Collapse'}
+              onClick={() => toggle(path)}
+              className={`mt-0.5 shrink-0 w-4 h-4 rounded text-[10px] leading-none border ${
+                depth <= 1 ? 'border-green-200 text-green-50 hover:bg-green-600' : 'border-green-700/40 text-green-900 hover:bg-green-100'
+              }`}
+            >
+              {isCollapsed ? '+' : '−'}
+            </button>
+          )}
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold leading-tight">{node.name}</p>
+            {emp && <p className={`text-[9px] mt-0.5 ${depth <= 1 ? 'text-green-100' : 'text-gray-500'}`}>{emp.department_name || emp.designation || 'Employee'}</p>}
+          </div>
+        </div>
       </div>
-      {!!node.children?.length && (
+      {hasKids && !isCollapsed && (
         <ul>
-          {node.children.map(child => <Box key={child.name} node={child} people={people} depth={depth + 1} />)}
+          {node.children!.map(child => (
+            <Box
+              key={child.name}
+              node={child}
+              people={people}
+              depth={depth + 1}
+              path={nodePath(path, child.name)}
+              collapsed={collapsed}
+              toggle={toggle}
+            />
+          ))}
         </ul>
       )}
     </li>
@@ -160,6 +216,16 @@ export function OrgChart({ employees, canApply, onApplied }: { employees: any[];
   const people = indexEmployees(employees)
   const pairs = reportingPairs(ORG_CHART, null, [])
   const ready = pairs.filter(p => matchOne(people, p.person) && matchOne(people, p.manager))
+  const allPaths = useMemo(() => collectExpandablePaths(ORG_CHART), [])
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+  const toggle = (path: string) => {
+    setCollapsed(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
   async function apply() {
     if (!window.confirm(`Save ${ready.length} reporting lines from this chart onto the matching employee records?`)) return
     for (const pair of ready) {
@@ -175,13 +241,21 @@ export function OrgChart({ employees, canApply, onApplied }: { employees: any[];
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 className="font-semibold text-gray-800">Organization chart</h3>
-          <p className="text-xs text-gray-500">Director at the top. A darker box is a manager. A name with a department is an employee record.</p>
+          <p className="text-xs text-gray-500">Director at the top. A darker box is a manager. A name with a department is an employee record. Use + / − to expand or collapse a branch.</p>
         </div>
-        {canApply && (
-          <button type="button" onClick={apply} disabled={!ready.length} className="px-3 py-1.5 rounded-lg bg-[#1f7a4d] text-white text-xs disabled:opacity-40">
-            Save reporting lines ({ready.length})
+        <div className="flex flex-wrap gap-2 items-center">
+          <button type="button" onClick={() => setCollapsed(new Set())} className="px-2.5 py-1 rounded-lg border text-xs text-gray-700 hover:bg-gray-50">
+            Expand tree
           </button>
-        )}
+          <button type="button" onClick={() => setCollapsed(new Set(allPaths))} className="px-2.5 py-1 rounded-lg border text-xs text-gray-700 hover:bg-gray-50">
+            Collapse tree
+          </button>
+          {canApply && (
+            <button type="button" onClick={apply} disabled={!ready.length} className="px-3 py-1.5 rounded-lg bg-[#1f7a4d] text-white text-xs disabled:opacity-40">
+              Save reporting lines ({ready.length})
+            </button>
+          )}
+        </div>
       </div>
       <style>{`
         .org-chart ul { display: flex; justify-content: center; padding-top: 16px; position: relative; }
@@ -204,7 +278,7 @@ export function OrgChart({ employees, canApply, onApplied }: { employees: any[];
       `}</style>
       <div className="org-chart overflow-x-auto pb-2">
         <ul className="w-max min-w-full">
-          <Box node={ORG_CHART} people={people} depth={0} />
+          <Box node={ORG_CHART} people={people} depth={0} path={ORG_CHART.name} collapsed={collapsed} toggle={toggle} />
         </ul>
       </div>
     </div>

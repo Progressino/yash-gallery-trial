@@ -530,7 +530,8 @@ def test_done_needs_working_time_and_na_goes_for_approval(env):
     assert again["status"] == "Pending" and again["approval_status"] == "Rejected"
 
 
-def test_approved_percent_is_the_responsibility_score(env):
+def test_row9_approved_percent_is_the_responsibility_score(env):
+    """Sheet row 9: Linked Person / HOD completion % becomes the responsibility score."""
     a, h, clock = env["a"], env["h"], env["clock"]
     rid = _resp(a, frequency="Daily", linked_to_employee_id=h, title="Score me")
     clock.t = f"{MON} 10:00:00"
@@ -550,6 +551,26 @@ def test_approved_percent_is_the_responsibility_score(env):
     perf = hrm_db.get_performance(None, MON, MON)
     me = next(p for p in perf if p["employee_id"] == a)
     assert me["responsibility_performance_pct"] == 80.0
+
+
+def test_row10_only_admin_can_change_reporting(env, monkeypatch):
+    """Sheet row 10: Hierarchy reporting edits are Admin-only; HOD cannot patch."""
+    a, h, client = env["a"], env["h"], env["client"]
+    did = next(e["department_id"] for e in hrm_db.list_employees() if e["id"] == a)
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="department", role="HOD", user_id=2, employee_id=h, department_id=did),
+    )
+    r = client.patch("/api/hrm/hierarchy/reporting", json={"employee_id": a, "reports_to_employee_id": h})
+    assert r.status_code == 403
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="all", role="Admin", user_id=1, employee_id=h, department_id=did),
+    )
+    r = client.patch("/api/hrm/hierarchy/reporting", json={"employee_id": a, "reports_to_employee_id": h})
+    assert r.status_code == 200
+    emp = next(e for e in hrm_db.list_employees() if e["id"] == a)
+    assert int(emp["reports_to_employee_id"] or 0) == h
 
 
 def test_attendance_classifies_weekoff_present_leave_and_holiday(env):
