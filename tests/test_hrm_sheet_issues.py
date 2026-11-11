@@ -236,7 +236,8 @@ def test_dwr_other_day_does_not_auto_pause_running_timer(env):
 def test_assign_pickers_include_every_active_employee(env, monkeypatch):
     a, h, c, client = env["a"], env["h"], env["c"], env["client"]
     did = next(e["department_id"] for e in hrm_db.list_employees() if e["id"] == a)
-    other_dept = hrm_db.create_department({"name": f"Other-{uuid.uuid4().hex[:6]}"})
+    hrm_db.create_department({"name": f"Other-{uuid.uuid4().hex[:6]}"})
+    other_dept = next(d["id"] for d in hrm_db.list_departments() if d["name"].startswith("Other-"))
     hrm_db.create_employee({"name": "Other Dept Person", "department_id": other_dept})
     outsider = next(e["id"] for e in hrm_db.list_employees() if e["name"] == "Other Dept Person")
     monkeypatch.setattr(
@@ -246,6 +247,40 @@ def test_assign_pickers_include_every_active_employee(env, monkeypatch):
     rows = client.get("/api/hrm/employees/for-pickers").json()
     ids = {int(e["id"]) for e in rows}
     assert a in ids and h in ids and c in ids and outsider in ids
+
+
+def test_hod_can_assign_one_time_task_cross_department(env, monkeypatch):
+    """Assign Task pickers are org-wide; POST must accept the same roster (not silent 403)."""
+    a, h, c, client = env["a"], env["h"], env["c"], env["client"]
+    did = next(e["department_id"] for e in hrm_db.list_employees() if e["id"] == a)
+    hrm_db.create_department({"name": f"Admin-{uuid.uuid4().hex[:6]}"})
+    admin_dept = next(d["id"] for d in hrm_db.list_departments() if d["name"].startswith("Admin-"))
+    hrm_db.create_employee({"name": "Harsh Admin", "department_id": admin_dept})
+    harsh = next(e["id"] for e in hrm_db.list_employees() if e["name"] == "Harsh Admin")
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="department", role="HOD", user_id=2, employee_id=h, department_id=did),
+    )
+    r = client.post(
+        "/api/hrm/one-time-tasks",
+        json={
+            "employee_id": harsh,
+            "title": "New design of Label and Tag",
+            "description": "label design",
+            "due_date": "2026-11-12",
+            "priority": "Medium",
+            "assigned_by": "Yogesh Kundnani",
+            "linked_to_employee_id": c,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("ok") is True
+    tid = body.get("id")
+    assert tid
+    row = next(t for t in hrm_db.list_one_time_tasks(employee_id=harsh) if t["id"] == tid)
+    assert row["title"] == "New design of Label and Tag"
+    assert int(row["linked_to_employee_id"] or 0) == int(c)
 
 
 # ── Row 4: Linked person reject → reassigned next day (non-daily) ────────────

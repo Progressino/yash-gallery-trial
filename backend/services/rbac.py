@@ -310,6 +310,25 @@ def assert_employee_in_scope(scope: HrmScope, employee_id: int, *, conn=None) ->
         raise HTTPException(403, "Access denied for this employee")
 
 
+def assert_assignment_target_employee(scope: HrmScope, employee_id: int) -> None:
+    """Assignee / Linked / Backup on Assign forms may be any active employee.
+
+    `/employees/for-pickers` returns the full org roster for HOD and Admin. Create
+    endpoints must match that list — otherwise Assign looks like a dead button
+    (403 with no UI feedback) when picking someone outside the HOD department.
+    """
+    from fastapi import HTTPException
+
+    if scope.can_edit_assignments:
+        from ..db.hrm_db import list_employees
+
+        rows = list_employees(None, "Active", employee_id=int(employee_id))
+        if not rows:
+            raise HTTPException(400, "Employee not found or inactive")
+        return
+    assert_employee_in_scope(scope, employee_id)
+
+
 def assert_employee_check_access(scope: HrmScope, employee_id: int) -> None:
     """Employee Check: HOD may only view their own check (not subordinates)."""
     from fastapi import HTTPException

@@ -507,7 +507,18 @@ export default function HRM() {
   })
   const updateEmpMut = useMutation({ mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/employees/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }); setEditEmp(null) } })
   const deleteEmpMut = useMutation({ mutationFn: (id: number) => api.delete(`/hrm/employees/${id}`), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }) } })
-  const createRespMut = useMutation({ mutationFn: (b: object) => api.post('/hrm/responsibilities', b), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-resps'] }); qc.invalidateQueries({ queryKey: ['hrm-hod'] }); setShowRespForm(false); setShowQuickResp(false); setAiParsed(null); setVoiceText('') } })
+  const createRespMut = useMutation({
+    mutationFn: (b: object) => api.post('/hrm/responsibilities', b),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['hrm-resps'] })
+      qc.invalidateQueries({ queryKey: ['hrm-hod'] })
+      setShowRespForm(false)
+      setShowQuickResp(false)
+      setAiParsed(null)
+      setVoiceText('')
+    },
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not assign responsibility'),
+  })
   const updateRespMut = useMutation({
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/responsibilities/${id}`, data),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-resps'] }); qc.invalidateQueries({ queryKey: ['hrm-hod'] }); setEditResp(null) },
@@ -801,6 +812,7 @@ export default function HRM() {
         linked_to_employee_id: '',
       })
     },
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Could not assign task'),
   })
   const startOneTimeTaskMut = useMutation({
     mutationFn: (id: number) => api.post(`/hrm/one-time-tasks/${id}/start`),
@@ -2339,7 +2351,7 @@ export default function HRM() {
                 </div>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => submitAssign({ ...respForm, mode: 'responsibility' as const, department_id: '', due_date: '' })} disabled={!respForm.employee_id || !respForm.title || (respForm.mandatory && !respForm.backup_employee_id) || createRespMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">Assign</button>
+                <button type="button" onClick={() => submitAssign({ ...respForm, mode: 'responsibility' as const, department_id: '', due_date: '' })} disabled={!respForm.employee_id || !respForm.title || (respForm.mandatory && !respForm.backup_employee_id) || createRespMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">{createRespMut.isPending ? 'Saving…' : 'Assign'}</button>
                 <button onClick={() => setShowRespForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               </div>
             </div>
@@ -2625,6 +2637,7 @@ export default function HRM() {
               </div>
               <div className="flex gap-2">
                 <button
+                  type="button"
                   onClick={() => submitAssign({
                     mode: 'task',
                     employee_id: taskForm.employee_id,
@@ -2650,9 +2663,9 @@ export default function HRM() {
                   })}
                   disabled={!taskForm.employee_id || !taskForm.title || createOneTimeTaskMut.isPending}
                   className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">
-                  Assign
+                  {createOneTimeTaskMut.isPending ? 'Saving…' : 'Assign'}
                 </button>
-                <button onClick={() => setShowTaskForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
+                <button type="button" onClick={() => setShowTaskForm(false)} className="px-4 py-2 border rounded-lg text-sm">Cancel</button>
               </div>
             </div>
           )}

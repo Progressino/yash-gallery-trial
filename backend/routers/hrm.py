@@ -113,6 +113,7 @@ from ..services.rbac import (
     hrm_scope_filters,
     assert_department_in_scope,
     assert_employee_in_scope,
+    assert_assignment_target_employee,
     assert_hrm_write_org,
     assert_hrm_hod_or_admin,
     assert_hrm_admin_mutate_records,
@@ -751,18 +752,18 @@ def post_responsibility(body: ResponsibilityIn, request: Request):
         raise HTTPException(403, "Employees cannot add responsibilities")
     if scope.is_hod and scope.employee_id and int(body.employee_id) == int(scope.employee_id):
         raise HTTPException(403, "HOD cannot add a responsibility for themselves")
-    assert_employee_in_scope(scope, body.employee_id)
+    assert_assignment_target_employee(scope, body.employee_id)
     data = body.model_dump()
     is_mandatory = bool(data.get("mandatory"))
     backup_id = data.get("backup_employee_id")
     if is_mandatory:
         if not backup_id:
             raise HTTPException(400, "Backup person is required for mandatory responsibilities")
-        assert_employee_in_scope(scope, int(backup_id))
+        assert_assignment_target_employee(scope, int(backup_id))
         if int(backup_id) == int(body.employee_id):
             raise HTTPException(400, "Backup person must be different from the assigned employee")
     elif backup_id:
-        assert_employee_in_scope(scope, int(backup_id))
+        assert_assignment_target_employee(scope, int(backup_id))
         if int(backup_id) == int(body.employee_id):
             raise HTTPException(400, "Backup person must be different from the assigned employee")
     linked_id = data.get("linked_to_employee_id")
@@ -770,6 +771,7 @@ def post_responsibility(body: ResponsibilityIn, request: Request):
         raise HTTPException(400, "Accountable person is required")
     if int(linked_id) == int(body.employee_id):
         raise HTTPException(400, "Accountable person must be different from the assigned employee")
+    assert_assignment_target_employee(scope, int(linked_id))
     data["require_backup"] = is_mandatory
     if not (data.get("added_by") or "").strip():
         _, name = _recorder_from_request(request)
@@ -1761,13 +1763,18 @@ def post_one_time_task(body: OneTimeTaskIn, request: Request):
         raise HTTPException(403, "Employees cannot add tasks")
     if scope.is_hod and scope.employee_id and int(body.employee_id) == int(scope.employee_id):
         raise HTTPException(403, "HOD cannot add a task for themselves")
-    assert_employee_in_scope(scope, body.employee_id)
+    assert_assignment_target_employee(scope, body.employee_id)
     data = body.model_dump()
     # Backup person is no longer collected on Assign Task — ignore if sent
     data.pop("backup_employee_id", None)
     data.pop("backup_allocation_value", None)
     data.pop("backup_allocation_unit", None)
     data["require_backup"] = False
+    linked_id = data.get("linked_to_employee_id")
+    if linked_id:
+        if int(linked_id) == int(body.employee_id):
+            raise HTTPException(400, "Linked person must be different from the assigned employee")
+        assert_assignment_target_employee(scope, int(linked_id))
     if not (data.get("assigned_by") or "").strip():
         _, name = _recorder_from_request(request)
         data["assigned_by"] = name if not scope.is_employee else (name or "Self")
