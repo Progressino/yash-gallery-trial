@@ -477,6 +477,9 @@ def init_db():
         "ALTER TABLE grn_headers ADD COLUMN inventory_posted INTEGER DEFAULT 0",
         "ALTER TABLE grn_headers ADD COLUMN item_stock_posted INTEGER DEFAULT 0",
         "ALTER TABLE material_issue_notes ADD COLUMN stock_posted INTEGER DEFAULT 0",
+        "ALTER TABLE material_issue_notes ADD COLUMN approval_required INTEGER DEFAULT 0",
+        "ALTER TABLE material_issue_notes ADD COLUMN approved_by TEXT DEFAULT ''",
+        "ALTER TABLE material_issue_notes ADD COLUMN approved_at TEXT DEFAULT ''",
         "ALTER TABLE po_headers ADD COLUMN bill_to_name TEXT DEFAULT ''",
         "ALTER TABLE po_headers ADD COLUMN bill_to_address TEXT DEFAULT ''",
         "ALTER TABLE po_headers ADD COLUMN bill_to_gst TEXT DEFAULT ''",
@@ -1953,12 +1956,32 @@ def update_min_status(minid: int, status: str):
     new_status = str(status or "").strip()
 
     if new_status == "Confirmed":
+        if cur_status == "Pending Approval":
+            conn.close()
+            raise ValueError(
+                "Issue qty is outside the BOM tolerance — a Manager / Admin must approve before this can be confirmed"
+            )
         if cur_status != "Draft":
             conn.close()
             raise ValueError("Only Draft issue notes can be confirmed")
         if int(note.get("stock_posted") or 0):
             conn.close()
             raise ValueError("Stock already posted for this issue note")
+        # Tolerance gate (shared helper): unapproved over-tolerance lines cannot be confirmed.
+        if not str(note.get("approved_by") or "").strip():
+            from ..services import min_tolerance
+            from ..services.jwo_issue_variance import _line_basis
+
+            for ln in lines:
+                if min_tolerance.exceeds_tolerance(
+                    _line_basis(ln)[0], float(ln.get("issue_qty") or 0)
+                ):
+                    conn.close()
+                    raise ValueError(
+                        f"Issue qty for {ln.get('material_code')} is outside the "
+                        f"{min_tolerance.get_tolerance_pct():g}% BOM tolerance — "
+                        "Manager approval required before confirming"
+                    )
         _sync_item_master_stock(
             lines,
             grn_or_min_number=note.get("min_number") or "",

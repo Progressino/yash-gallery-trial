@@ -32,7 +32,12 @@ def _item_connect():
     raise FileNotFoundError("Item Master DB not found for BOM explosion")
 
 
+_SCHEMA_READY: set[str] = set()
+
+
 def init_issue_note_tables():
+    if _PROD_DB in _SCHEMA_READY and os.path.exists(_PROD_DB):
+        return
     conn = _prod_connect()
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS jo_issue_notes (
@@ -47,7 +52,7 @@ def init_issue_note_tables():
         finished_item_code  TEXT DEFAULT '',
         finished_item_name  TEXT DEFAULT '',
         planned_qty         REAL DEFAULT 0,
-        status              TEXT DEFAULT 'Open',
+        status              TEXT DEFAULT 'Draft',
         remarks             TEXT DEFAULT '',
         created_at          TEXT DEFAULT (datetime('now'))
     );
@@ -68,9 +73,72 @@ def init_issue_note_tables():
         remarks             TEXT DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_jo_issue_notes_jo ON jo_issue_notes(jo_id);
+    CREATE TABLE IF NOT EXISTS jo_min_qty_adjustments (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        in_id            INTEGER NOT NULL,
+        in_number        TEXT DEFAULT '',
+        jo_id            INTEGER,
+        jo_number        TEXT DEFAULT '',
+        line_id          INTEGER,
+        material_code    TEXT DEFAULT '',
+        phase            TEXT DEFAULT 'PRE_ISSUE',
+        old_issue_qty    REAL DEFAULT 0,
+        new_issue_qty    REAL DEFAULT 0,
+        delta_qty        REAL DEFAULT 0,
+        bom_required_qty REAL DEFAULT 0,
+        variance_pct     REAL,
+        reason           TEXT DEFAULT '',
+        remarks          TEXT DEFAULT '',
+        stock_posted     INTEGER DEFAULT 0,
+        user_name        TEXT DEFAULT '',
+        created_at       TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_jo_min_adj_in ON jo_min_qty_adjustments(in_id);
     """)
+    # ALTER-safe column adds (same pattern as Purchase MIN).
+    _ensure_columns(conn, "jo_issue_notes", {
+        "stock_posted": "INTEGER DEFAULT 0",
+        "issued_by": "TEXT DEFAULT ''",
+        "received_by": "TEXT DEFAULT ''",
+        "confirmed_at": "TEXT DEFAULT ''",
+        "confirmed_by": "TEXT DEFAULT ''",
+        "parent_in_id": "INTEGER",
+        "approval_required": "INTEGER DEFAULT 0",
+        "approved_by": "TEXT DEFAULT ''",
+        "approved_at": "TEXT DEFAULT ''",
+    })
+    _ensure_columns(conn, "jo_issue_note_lines", {
+        "bom_required_qty": "REAL",
+        "issue_qty": "REAL",
+        "variance_qty": "REAL DEFAULT 0",
+        "variance_pct": "REAL",
+        "variance_reason": "TEXT DEFAULT ''",
+        "variance_remarks": "TEXT DEFAULT ''",
+        "revised_by": "TEXT DEFAULT ''",
+        "revised_at": "TEXT DEFAULT ''",
+    })
+    # Backfill legacy (read-only era) notes: BOM frozen = required, issue = BOM, status Open → Draft.
+    # Only write when there is something to migrate (keeps read paths lock-free).
+    if conn.execute(
+        "SELECT 1 FROM jo_issue_note_lines WHERE bom_required_qty IS NULL OR issue_qty IS NULL LIMIT 1"
+    ).fetchone():
+        conn.execute("UPDATE jo_issue_note_lines SET bom_required_qty = required_qty WHERE bom_required_qty IS NULL")
+        conn.execute("UPDATE jo_issue_note_lines SET issue_qty = required_qty WHERE issue_qty IS NULL")
+    if conn.execute("SELECT 1 FROM jo_issue_notes WHERE status='Open' LIMIT 1").fetchone():
+        conn.execute("UPDATE jo_issue_notes SET status='Draft' WHERE status='Open'")
     conn.commit()
     conn.close()
+    _SCHEMA_READY.add(_PROD_DB)
+
+
+def _ensure_columns(conn, table: str, cols: dict[str, str]) -> None:
+    have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, ddl in cols.items():
+        if name not in have:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            except sqlite3.OperationalError:
+                pass
 
 
 def _next_in_number(conn) -> str:
@@ -419,14 +487,25 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
     }
 
     conn = _prod_connect()
-    existing = conn.execute("SELECT id FROM jo_issue_notes WHERE jo_id=?", (joid,)).fetchone()
+    existing = conn.execute(
+        "SELECT id, status, stock_posted FROM jo_issue_notes WHERE jo_id=? AND COALESCE(parent_in_id,0)=0 "
+        "ORDER BY id LIMIT 1",
+        (joid,),
+    ).fetchone()
+    if existing and (
+        str(existing["status"] or "") in ("Confirmed", "Cancelled") or int(existing["stock_posted"] or 0)
+    ):
+        # Stock already moved against this MIN — never rewrite BOM lines under it.
+        conn.close()
+        return get_issue_note_by_jo_id(joid) or {}
     if existing:
         conn.execute("DELETE FROM jo_issue_note_lines WHERE issue_note_id=?", (existing["id"],))
         in_id = existing["id"]
         in_num = conn.execute("SELECT in_number FROM jo_issue_notes WHERE id=?", (in_id,)).fetchone()[0]
         conn.execute(
             """UPDATE jo_issue_notes SET in_date=?, jo_date=?, so_number=?, process=?,
-               finished_item_code=?, finished_item_name=?, planned_qty=?, status='Open',
+               finished_item_code=?, finished_item_name=?, planned_qty=?, status='Draft',
+               approval_required=0, approved_by='', approved_at='',
                remarks=? WHERE id=?""",
             (
                 datetime.now().strftime("%Y-%m-%d"),
@@ -460,7 +539,7 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
                 primary_fin["code"],
                 primary_fin["name"],
                 primary_fin["qty"],
-                "Open",
+                "Draft",
                 "Auto-generated from BOM (all JO size lines)"
                 if material_lines
                 else "No BOM lines — add materials manually",
@@ -472,8 +551,9 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
         conn.execute(
             """INSERT INTO jo_issue_note_lines(
                 issue_note_id, line_no, finished_item_code, finished_item_name, finished_planned_qty,
-                material_code, material_name, material_type, bom_qty_per_unit, required_qty, unit, remarks)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                material_code, material_name, material_type, bom_qty_per_unit, required_qty, unit, remarks,
+                bom_required_qty, issue_qty)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 in_id,
                 i,
@@ -487,6 +567,8 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
                 m["required_qty"],
                 m.get("unit", "PCS"),
                 m.get("remarks", ""),
+                m["required_qty"],  # BOM requirement frozen at create
+                m["required_qty"],  # issue qty defaults to BOM (editable before confirm)
             ),
         )
     conn.commit()
@@ -494,13 +576,7 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
     return get_issue_note_by_jo_id(joid) or {"in_number": in_num, "lines": material_lines}
 
 
-def get_issue_note_by_jo_id(joid: int) -> dict | None:
-    init_issue_note_tables()
-    conn = _prod_connect()
-    row = conn.execute("SELECT * FROM jo_issue_notes WHERE jo_id=?", (joid,)).fetchone()
-    if not row:
-        conn.close()
-        return None
+def _note_with_lines(conn, row) -> dict:
     note = dict(row)
     note["lines"] = [
         dict(l)
@@ -509,6 +585,83 @@ def get_issue_note_by_jo_id(joid: int) -> dict | None:
             (note["id"],),
         ).fetchall()
     ]
+    return note
+
+
+def jo_cumulative_issue(conn, joid: int) -> list[dict]:
+    """Per material: BOM requirement (primary note) vs confirmed / pending issue across all notes of the JO."""
+    primary = conn.execute(
+        "SELECT id FROM jo_issue_notes WHERE jo_id=? AND COALESCE(parent_in_id,0)=0 ORDER BY id LIMIT 1",
+        (joid,),
+    ).fetchone()
+    if not primary:
+        return []
+    rows = conn.execute(
+        """SELECT n.id AS note_id, n.status, n.parent_in_id, l.*
+           FROM jo_issue_note_lines l JOIN jo_issue_notes n ON n.id = l.issue_note_id
+           WHERE n.jo_id=? AND n.status != 'Cancelled' ORDER BY n.id, l.line_no, l.id""",
+        (joid,),
+    ).fetchall()
+    by_mat: dict[str, dict] = {}
+    for r in rows:
+        r = dict(r)
+        code = str(r.get("material_code") or "").strip()
+        if not code:
+            continue
+        acc = by_mat.setdefault(code, {
+            "material_code": code, "material_name": r.get("material_name") or "",
+            "unit": r.get("unit") or "", "bom_required_qty": 0.0,
+            "confirmed_issued_qty": 0.0, "pending_issue_qty": 0.0,
+        })
+        if int(r["note_id"]) == int(primary["id"]):
+            acc["bom_required_qty"] = round(
+                acc["bom_required_qty"] + float(r.get("bom_required_qty") if r.get("bom_required_qty") is not None else r.get("required_qty") or 0), 3
+            )
+        qty = float(r.get("issue_qty") if r.get("issue_qty") is not None else r.get("required_qty") or 0)
+        if str(r["status"]) == "Confirmed":
+            acc["confirmed_issued_qty"] = round(acc["confirmed_issued_qty"] + qty, 3)
+        else:
+            acc["pending_issue_qty"] = round(acc["pending_issue_qty"] + qty, 3)
+    out = []
+    for acc in by_mat.values():
+        acc["remaining_qty"] = round(max(0.0, acc["bom_required_qty"] - acc["confirmed_issued_qty"]), 3)
+        out.append(acc)
+    return out
+
+
+def get_issue_note_by_jo_id(joid: int) -> dict | None:
+    """Primary (BOM) note for the JO, plus ``additional_notes`` and ``cumulative`` issue context."""
+    init_issue_note_tables()
+    conn = _prod_connect()
+    row = conn.execute(
+        "SELECT * FROM jo_issue_notes WHERE jo_id=? AND COALESCE(parent_in_id,0)=0 ORDER BY id LIMIT 1",
+        (joid,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+    note = _note_with_lines(conn, row)
+    note["additional_notes"] = [
+        _note_with_lines(conn, r)
+        for r in conn.execute(
+            "SELECT * FROM jo_issue_notes WHERE jo_id=? AND parent_in_id=? ORDER BY id",
+            (joid, note["id"]),
+        ).fetchall()
+    ]
+    note["cumulative"] = jo_cumulative_issue(conn, joid)
+    conn.close()
+    return note
+
+
+def get_issue_note_by_id(note_id: int) -> dict | None:
+    init_issue_note_tables()
+    conn = _prod_connect()
+    row = conn.execute("SELECT * FROM jo_issue_notes WHERE id=?", (note_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    note = _note_with_lines(conn, row)
+    note["cumulative"] = jo_cumulative_issue(conn, int(note["jo_id"]))
     conn.close()
     return note
 
@@ -538,6 +691,10 @@ def list_issue_notes(jo_number: str | None = None, status: str | None = None) ->
         ]
         d["line_count"] = len(d["lines"])
         d["total_required_qty"] = sum(float(l.get("required_qty") or 0) for l in d["lines"])
+        d["total_issue_qty"] = sum(
+            float(l["issue_qty"] if l.get("issue_qty") is not None else l.get("required_qty") or 0)
+            for l in d["lines"]
+        )
         out.append(d)
     conn.close()
     return out

@@ -174,6 +174,7 @@ def test_post_issue_correction_posts_stock_and_audits():
     jid = _jwo()
     note = get_min_by_jwo_id(jid)
     v.revise_issue_qty(note["id"], _lines(jid)[GREY]["id"], 500, reason="Bundle Size")
+    v.approve_min(note["id"], user_name="mgr")  # 500 vs BOM 450 is over tolerance
     purchase_db.update_min_status(note["id"], "Confirmed")
     assert _stock(iid) == 500
 
@@ -257,6 +258,7 @@ def test_http_endpoints(client, monkeypatch):
     assert ok.status_code == 200, ok.text
     assert ok.json()["expected_output_qty"] == pytest.approx(555.556)
 
+    v.approve_min(note["id"], user_name="mgr")  # over tolerance → Manager approval first
     purchase_db.update_min_status(note["id"], "Confirmed")
     lid = _lines(jid)[GREY]["id"]
     monkeypatch.setattr(

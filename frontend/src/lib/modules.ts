@@ -72,6 +72,7 @@ export const PATH_MODULE: Record<string, ModuleKey> = {
   '/production': 'production',
   '/stitching-costing': 'stitching',
   '/grey': 'grey',
+  '/fabric-warehouse': 'grey',
   '/hrm': 'hrm',
   '/inventory': 'inventory',
   '/inventory-history': 'po',

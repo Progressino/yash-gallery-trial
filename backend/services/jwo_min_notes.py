@@ -18,6 +18,9 @@ def _ensure_min_schema(conn) -> None:
     for sql in (
         "ALTER TABLE material_issue_notes ADD COLUMN jwo_id INTEGER",
         "ALTER TABLE material_issue_notes ADD COLUMN jwo_date TEXT DEFAULT ''",
+        "ALTER TABLE material_issue_notes ADD COLUMN approval_required INTEGER DEFAULT 0",
+        "ALTER TABLE material_issue_notes ADD COLUMN approved_by TEXT DEFAULT ''",
+        "ALTER TABLE material_issue_notes ADD COLUMN approved_at TEXT DEFAULT ''",
         "ALTER TABLE min_lines ADD COLUMN line_no INTEGER DEFAULT 1",
         "ALTER TABLE min_lines ADD COLUMN output_material TEXT DEFAULT ''",
         "ALTER TABLE min_lines ADD COLUMN output_material_name TEXT DEFAULT ''",
@@ -191,7 +194,8 @@ def create_min_for_jwo(jwoid: int, jwo_number: str, jwo: dict, jwo_lines: list[d
         conn.execute("DELETE FROM min_lines WHERE min_id=?", (min_id,))
         conn.execute(
             """UPDATE material_issue_notes SET min_date=?, jwo_id=?, jwo_date=?,
-               jwo_reference=?, so_reference=?, to_vendor=?, issued_by=?, remarks=?, status='Draft'
+               jwo_reference=?, so_reference=?, to_vendor=?, issued_by=?, remarks=?, status='Draft',
+               approval_required=0, approved_by='', approved_at=''
                WHERE id=?""",
             (
                 min_date,

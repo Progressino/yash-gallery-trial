@@ -2,6 +2,7 @@ import { Fragment, useState, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useTrackTab } from '../lib/usageTracker'
+import { useAuth, mayAccessErpAdmin } from '../store/auth'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
 import { YASH_GALLERY, brandLogoDataUrl, brandPrintHeaderHtml, BRAND_PRINT_CSS } from '../lib/printBrand'
@@ -72,6 +73,8 @@ interface IssueNote {
   from_location?: string
   status: string
   remarks?: string
+  approval_required?: number
+  approved_by?: string
   lines: MINLine[]
 }
 interface GRN { id: number; grn_number: string; grn_date: string; grn_type: string; party_name: string; status: string; total_value: number; reference_number?: string; challan_no?: string; invoice_no?: string; lines: GRNLine[] }
@@ -470,6 +473,15 @@ function useVarianceReasons() {
   return data
 }
 
+function useMinTolerance() {
+  const { data } = useQuery<{ tolerance_pct: number }>({
+    queryKey: ['min-tolerance'],
+    queryFn: () => api.get('/purchase/min-tolerance').then(r => r.data),
+    staleTime: 3_600_000,
+  })
+  return data?.tolerance_pct ?? 10
+}
+
 function minLineBasis(ln: MINLine) {
   const bomIssue = Number(ln.bom_issue_qty ?? ln.issue_qty ?? 0)
   const origOut = Number(ln.original_output_qty ?? ln.output_qty ?? 0)
@@ -501,6 +513,9 @@ function IssueQtyEditor({
   const vsBomPct = bomIssue ? r3((vsBom / bomIssue) * 100) : 0
   const delta = r3(n - Number(line.issue_qty || 0))
   const needReason = confirmed || Math.abs(vsBom) > 0.0005
+  const tolerancePct = useMinTolerance()
+  const overTolerance = !confirmed && Math.abs(vsBom) > 0.0005
+    && (bomIssue > 0 ? Math.abs(vsBomPct) > tolerancePct : n > 0)
 
   const save = async () => {
     if (n <= 0 && !confirmed) { setErr('Issue qty must be greater than zero'); return }
@@ -567,6 +582,12 @@ function IssueQtyEditor({
           </label>
         )}
       </div>
+      {overTolerance && (
+        <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+          Outside the ±{tolerancePct}% BOM tolerance — the MIN will go to <b>Pending Approval</b> and a Manager / Admin
+          must approve it before it can be confirmed.
+        </p>
+      )}
       <div className="flex items-center gap-2">
         <button type="button" onClick={save} disabled={busy}
           className={`text-xs px-3 py-1 rounded text-white disabled:opacity-50 ${confirmed ? 'bg-amber-600 hover:bg-amber-700' : 'bg-sky-700 hover:bg-sky-800'}`}>
@@ -783,6 +804,17 @@ function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string })
       alert(msg || 'Could not regenerate issue note')
     },
   })
+  const authUser = useAuth(s => s.user)
+  const canApprove = mayAccessErpAdmin(authUser)
+  const tolerancePct = useMinTolerance()
+  const approveMut = useMutation({
+    mutationFn: () => api.post(`/purchase/min/${note?.id}/approve`),
+    onSuccess: () => {
+      void refetch()
+      qc.invalidateQueries({ queryKey: ['mins'] })
+    },
+    onError: (e: unknown) => alert(apiDetail(e, 'Could not approve issue note')),
+  })
   const statusMut = useMutation({
     mutationFn: (status: string) => api.patch(`/purchase/min/${note?.id}/status`, { status }),
     onSuccess: () => {
@@ -844,6 +876,16 @@ function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string })
               </button>
             </>
           )}
+          {note.status === 'Pending Approval' && canApprove && (
+            <button
+              type="button"
+              onClick={() => approveMut.mutate()}
+              disabled={approveMut.isPending}
+              className="text-xs px-2 py-1 rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+            >
+              {approveMut.isPending ? '…' : '✔ Approve over-tolerance issue'}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => void printWithBarcode('MIN', note.min_number, bc => buildMINPrintHTML(note, bc), `MIN - ${note.min_number}`)}
@@ -864,6 +906,13 @@ function JWOMinPanel({ jwoId, jwoNumber }: { jwoId: number; jwoNumber: string })
       {note.status === 'Draft' && (
         <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
           Draft — stock is <strong>not</strong> deducted until you click <strong>Confirm Issue</strong>.
+          {note.approved_by ? ` Over-tolerance qty approved by ${note.approved_by}.` : ''}
+        </p>
+      )}
+      {note.status === 'Pending Approval' && (
+        <p className="text-xs text-orange-800 bg-orange-50 border border-orange-200 rounded px-2 py-1">
+          <strong>Pending Approval</strong> — issue qty is outside the ±{tolerancePct}% BOM tolerance.
+          {canApprove ? ' Approve to allow confirmation.' : ' A Manager / Admin must approve before this can be confirmed.'}
         </p>
       )}
       {note.lines.length === 0 ? (

@@ -1,7 +1,7 @@
 """Production Module — Dynamic Routing, Multi-process JO"""
 import os, sqlite3
 from datetime import datetime
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, field_validator
 from typing import Optional, List
@@ -29,7 +29,7 @@ from ..db.production_db import (
 )
 from ..db.sales_db import get_open_orders, list_orders
 from ..services.helpers import get_parent_sku
-from ..services import jo_issue_notes, jo_returns
+from ..services import jo_issue_notes, jo_min_control, jo_returns, min_tolerance
 from ..services.jo_import import (
     aggregate_jo_import_payloads,
     build_jo_payload_from_import_row,
@@ -1923,6 +1923,124 @@ def regenerate_production_issue_note(joid: int):
         joid, jo["jo_number"], jo, jo.get("lines") or []
     )
     return {"ok": True, "issue_note": note}
+
+
+# ── JO MIN control: revise / approve / confirm / correct / additional / print ─
+
+def _min_auth(request: Request) -> dict:
+    return getattr(request.state, "auth", None) or {}
+
+
+def _min_actor(request: Request) -> str:
+    return str(_min_auth(request).get("sub", "") or "")
+
+
+class JOMinQtyIn(BaseModel):
+    issue_qty: float
+    reason: Optional[str] = ""
+    remarks: Optional[str] = ""
+
+
+class JOMinCorrectIn(JOMinQtyIn):
+    line_id: int
+
+
+class JOMinConfirmIn(BaseModel):
+    issued_by: Optional[str] = ""
+    received_by: Optional[str] = ""
+
+
+class JOMinAdditionalLineIn(BaseModel):
+    material_code: str
+    issue_qty: float
+    reason: Optional[str] = ""
+    remarks: Optional[str] = ""
+
+
+class JOMinAdditionalIn(BaseModel):
+    lines: Optional[List[JOMinAdditionalLineIn]] = None
+    remarks: Optional[str] = ""
+    extra: Optional[bool] = False  # extra issue beyond BOM: zero-qty lines to edit
+
+
+def _min_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.get("/issue-notes/settings")
+def get_issue_note_settings():
+    """Tolerance % and Production variance reasons for the MIN UI."""
+    return min_tolerance.tolerance_summary()
+
+
+@router.get("/issue-notes/{in_id}")
+def get_issue_note_by_id(in_id: int):
+    note = jo_issue_notes.get_issue_note_by_id(in_id)
+    if not note:
+        raise HTTPException(404, "Issue note not found")
+    return note
+
+
+@router.get("/issue-notes/{in_id}/adjustments")
+def get_issue_note_adjustments(in_id: int):
+    return jo_min_control.list_adjustments(in_id)
+
+
+@router.get("/issue-notes/{in_id}/print")
+def get_issue_note_print(in_id: int):
+    return _min_call(jo_min_control.print_payload, in_id)
+
+
+@router.patch("/issue-notes/{in_id}/lines/{line_id}")
+def patch_issue_note_line(in_id: int, line_id: int, body: JOMinQtyIn, request: Request):
+    return _min_call(
+        jo_min_control.revise_line, in_id, line_id, body.issue_qty,
+        reason=body.reason or "", remarks=body.remarks or "", user_name=_min_actor(request),
+    )
+
+
+@router.post("/issue-notes/{in_id}/approve")
+def approve_issue_note(in_id: int, request: Request):
+    if not min_tolerance.may_approve(str(_min_auth(request).get("role", "") or "")):
+        raise HTTPException(403, "Only Manager / Admin can approve an over-tolerance Material Issue.")
+    return _min_call(jo_min_control.approve, in_id, user_name=_min_actor(request))
+
+
+@router.post("/issue-notes/{in_id}/confirm")
+def confirm_issue_note(in_id: int, request: Request, body: Optional[JOMinConfirmIn] = None):
+    body = body or JOMinConfirmIn()
+    return _min_call(
+        jo_min_control.confirm, in_id, user_name=_min_actor(request),
+        issued_by=body.issued_by or "", received_by=body.received_by or "",
+    )
+
+
+@router.post("/issue-notes/{in_id}/correct")
+def correct_issue_note(in_id: int, body: JOMinCorrectIn, request: Request):
+    if not min_tolerance.may_approve(str(_min_auth(request).get("role", "") or "")):
+        raise HTTPException(403, "Only Admin / Manager can correct a confirmed Material Issue.")
+    return _min_call(
+        jo_min_control.correct, in_id, body.line_id, body.issue_qty,
+        reason=body.reason or "", remarks=body.remarks or "", user_name=_min_actor(request),
+    )
+
+
+@router.post("/issue-notes/{in_id}/cancel")
+def cancel_issue_note(in_id: int, request: Request):
+    return _min_call(jo_min_control.cancel, in_id, user_name=_min_actor(request))
+
+
+@router.post("/orders/{joid}/issue-notes/additional")
+def post_additional_issue_note(joid: int, request: Request, body: Optional[JOMinAdditionalIn] = None):
+    body = body or JOMinAdditionalIn()
+    return _min_call(
+        jo_min_control.create_additional, joid,
+        lines=[l.model_dump() for l in body.lines] if body.lines else None,
+        remarks=body.remarks or "", user_name=_min_actor(request), extra=bool(body.extra),
+    )
 
 
 # ── BOM Inputs ────────────────────────────────────────────────────────────────

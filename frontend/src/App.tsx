@@ -38,6 +38,7 @@ const TNA         = lazy(() => import('./pages/TNA'))
 const Production  = lazy(() => import('./pages/Production'))
 const StitchingCosting = lazy(() => import('./pages/StitchingCosting'))
 const GreyFabric  = lazy(() => import('./pages/GreyFabric'))
+const FabricWarehouse = lazy(() => import('./pages/FabricWarehouse'))
 const HRM         = lazy(() => import('./pages/HRM'))
 const InventoryHistory         = lazy(() => import('./pages/InventoryHistory'))
 const SalesHistory             = lazy(() => import('./pages/SalesHistory'))
@@ -358,6 +359,7 @@ export default function App() {
               <Route path="production" element={<Production />} />
               <Route path="stitching-costing" element={<StitchingCosting />} />
               <Route path="grey"      element={<GreyFabric />} />
+              <Route path="fabric-warehouse" element={<FabricWarehouse />} />
               <Route path="hrm"       element={<HRM />} />
               <Route path="inventory-history" element={<InventoryHistory />} />
               <Route path="sales-history" element={<SalesHistory />} />

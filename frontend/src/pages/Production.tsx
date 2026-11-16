@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import api from '../api/client'
 import { useTrackTab } from '../lib/usageTracker'
-import { useAuth } from '../store/auth'
+import { useAuth, mayAccessErpAdmin } from '../store/auth'
 import { barcodePrintBlock, fetchDocBarcode } from '../lib/docBarcode'
 import { fetchItemImageDataUrlMap, printThumbHtml } from '../lib/itemImage'
 import { brandLogoDataUrl, brandPrintHeaderHtml, BRAND_PRINT_CSS } from '../lib/printBrand'
@@ -277,6 +277,22 @@ interface IssueNoteLine {
   unit: string
   issued_qty: number
   remarks: string
+  bom_required_qty?: number | null
+  issue_qty?: number | null
+  variance_qty?: number | null
+  variance_pct?: number | null
+  variance_reason?: string
+  variance_remarks?: string
+}
+
+interface IssueNoteCumulative {
+  material_code: string
+  material_name?: string
+  unit: string
+  bom_required_qty: number
+  confirmed_issued_qty: number
+  pending_issue_qty: number
+  remaining_qty: number
 }
 
 interface IssueNote {
@@ -295,6 +311,18 @@ interface IssueNote {
   remarks: string
   lines: IssueNoteLine[]
   line_count?: number
+  parent_in_id?: number | null
+  stock_posted?: number
+  issued_by?: string
+  received_by?: string
+  confirmed_at?: string
+  confirmed_by?: string
+  approval_required?: number
+  approved_by?: string
+  approved_at?: string
+  additional_notes?: IssueNote[]
+  cumulative?: IssueNoteCumulative[]
+  total_issue_qty?: number
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -305,19 +333,505 @@ const STATUS_COLORS: Record<string, string> = {
   Cancelled: 'bg-red-100 text-red-600',
 }
 
+const MIN_EPS = 0.0005
+const minR3 = (n: number) => Math.round(n * 1000) / 1000
+const minBomQty = (ln: IssueNoteLine) => Number(ln.bom_required_qty ?? ln.required_qty ?? 0)
+const minIssueQty = (ln: IssueNoteLine) => Number(ln.issue_qty ?? ln.required_qty ?? 0)
+const minVariancePct = (bom: number, issue: number): number | null =>
+  bom > MIN_EPS ? Math.round(((issue - bom) / bom) * 10000) / 100 : null
+const minOverTolerance = (bom: number, issue: number, tolerancePct: number) => {
+  const d = Math.abs(issue - bom)
+  if (d <= MIN_EPS) return false
+  if (bom <= MIN_EPS) return issue > MIN_EPS
+  return (d / bom) * 100 > tolerancePct + 1e-9
+}
+const fmtSigned = (n: number | null | undefined, suffix = '') =>
+  n == null ? '—' : `${n > 0 ? '+' : ''}${n}${suffix}`
+const escHtml = (s: unknown) =>
+  String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+const MIN_STATUS_COLORS: Record<string, string> = {
+  Draft: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+  'Pending Approval': 'bg-orange-100 text-orange-800 border-orange-200',
+  Confirmed: 'bg-green-100 text-green-800 border-green-200',
+  Cancelled: 'bg-red-100 text-red-700 border-red-200',
+}
+
+interface MinSettings { tolerance_pct: number; reasons: string[] }
+
+interface MinPrintLine {
+  material_code: string
+  material_name?: string
+  finished_item_code?: string
+  finished_planned_qty?: number
+  unit?: string
+  bom_required_qty: number
+  issue_qty: number
+  diff_qty: number
+  variance_pct: number | null
+  over_tolerance: boolean
+  variance_reason?: string
+  variance_remarks?: string
+}
+
+interface MinPrintPayload {
+  id: number
+  in_number: string
+  in_date: string
+  jo_number: string
+  jo_date?: string
+  so_number?: string
+  process?: string
+  finished_item_code?: string
+  finished_item_name?: string
+  planned_qty?: number
+  status: string
+  remarks?: string
+  issued_by?: string
+  received_by?: string
+  confirmed_at?: string
+  approved_by?: string
+  lines: MinPrintLine[]
+  tolerance_pct: number
+}
+
+async function printIssueNote(noteId: number) {
+  const { data: p } = await api.get<MinPrintPayload>(`/production/issue-notes/${noteId}/print`)
+  let barcodeHtml = ''
+  try {
+    barcodeHtml = barcodePrintBlock(await fetchDocBarcode('JO', p.jo_number))
+  } catch { /* optional */ }
+  const logoSrc = await brandLogoDataUrl()
+  const win = window.open('', '_blank', 'width=900,height=700')
+  if (!win) { alert('Allow popups to print'); return }
+  win.document.write(`<!DOCTYPE html><html><head><title>MIN - ${escHtml(p.in_number)}</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'Segoe UI',sans-serif;font-size:12px;color:#1a1a1a;padding:24px}
+    ${BRAND_PRINT_CSS}
+    .info-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
+    .info-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px}
+    .info-label{font-size:10px;text-transform:uppercase;color:#64748b;font-weight:600;margin-bottom:4px}
+    .info-value{font-size:13px;font-weight:600;color:#1e293b}
+    table{width:100%;border-collapse:collapse;margin-bottom:16px}
+    th{background:#002B5B;color:white;padding:7px 10px;text-align:left;font-size:11px}
+    th.r,td.r{text-align:right}
+    td{padding:6px 10px;border-bottom:1px solid #e2e8f0;font-size:12px}
+    tr:nth-child(even) td{background:#f8fafc}
+    .over{color:#b91c1c;font-weight:700}
+    .badge{background:#e2e8f0;border-radius:10px;padding:2px 8px;font-size:11px}
+    .footer{margin-top:32px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;border-top:1px solid #e2e8f0;padding-top:16px}
+    .sign-box{text-align:center}
+    .sign-line{border-top:1px solid #64748b;margin-top:32px;padding-top:6px;font-size:10px;color:#64748b}
+    @media print{body{padding:12px}}
+  </style></head><body>
+  ${brandPrintHeaderHtml({
+    logoSrc,
+    department: 'Production Department',
+    docTitle: 'MATERIAL ISSUE NOTE',
+    docNumber: p.in_number,
+    barcodeHtml,
+  })}
+  <div class="info-grid">
+    <div class="info-box"><div class="info-label">Job Order</div><div class="info-value">${escHtml(p.jo_number)}</div>
+      <div class="info-label" style="margin-top:8px">JO Date</div><div class="info-value">${escHtml(p.jo_date || '—')}</div></div>
+    <div class="info-box"><div class="info-label">SO Number</div><div class="info-value">${escHtml(p.so_number || '—')}</div>
+      <div class="info-label" style="margin-top:8px">Process</div><div class="info-value">${escHtml(p.process || '—')}</div></div>
+    <div class="info-box"><div class="info-label">SKU / Style</div><div class="info-value">${escHtml(p.finished_item_code || '—')}</div>
+      <div class="info-label" style="margin-top:8px">Planned Qty</div><div class="info-value">${escHtml(p.planned_qty ?? '—')}</div></div>
+    <div class="info-box"><div class="info-label">Issue Date</div><div class="info-value">${escHtml(p.in_date)}</div>
+      <div class="info-label" style="margin-top:8px">Status</div><div class="info-value"><span class="badge">${escHtml(p.status)}</span></div></div>
+    <div class="info-box"><div class="info-label">Issued By</div><div class="info-value">${escHtml(p.issued_by || '—')}</div>
+      <div class="info-label" style="margin-top:8px">Received By</div><div class="info-value">${escHtml(p.received_by || '—')}</div></div>
+    <div class="info-box"><div class="info-label">Tolerance</div><div class="info-value">±${p.tolerance_pct}%</div>
+      <div class="info-label" style="margin-top:8px">Approved By</div><div class="info-value">${escHtml(p.approved_by || '—')}</div></div>
+  </div>
+  <table>
+    <thead><tr><th>#</th><th>Material</th><th>For</th><th class="r">BOM Required</th><th class="r">Issue Qty</th>
+      <th class="r">Diff</th><th class="r">Variance %</th><th>Reason / Remarks</th><th>Unit</th></tr></thead>
+    <tbody>${p.lines.map((l, i) => `<tr>
+      <td>${i + 1}</td>
+      <td><strong>${escHtml(l.material_code)}</strong>${l.material_name && l.material_name !== l.material_code ? `<br/><span style="font-size:10px;color:#64748b">${escHtml(l.material_name)}</span>` : ''}</td>
+      <td>${escHtml(l.finished_item_code || '—')}${l.finished_planned_qty ? `<br/><span style="font-size:10px;color:#64748b">× ${escHtml(l.finished_planned_qty)}</span>` : ''}</td>
+      <td class="r">${l.bom_required_qty}</td>
+      <td class="r"><strong>${l.issue_qty}</strong></td>
+      <td class="r ${l.over_tolerance ? 'over' : ''}">${fmtSigned(l.diff_qty)}</td>
+      <td class="r ${l.over_tolerance ? 'over' : ''}">${fmtSigned(l.variance_pct, '%')}</td>
+      <td>${escHtml(l.variance_reason || '—')}${l.variance_remarks ? `<br/><span style="font-size:10px;color:#64748b">${escHtml(l.variance_remarks)}</span>` : ''}</td>
+      <td>${escHtml(l.unit || '')}</td></tr>`).join('')}</tbody>
+  </table>
+  ${p.remarks ? `<div style="background:#fef9c3;border:1px solid #fde047;border-radius:6px;padding:10px;font-size:11px"><strong>Remarks:</strong> ${escHtml(p.remarks)}</div>` : ''}
+  <div class="footer">
+    <div class="sign-box"><div class="sign-line">Issued By (Stores)</div></div>
+    <div class="sign-box"><div class="sign-line">Received By (${escHtml(p.process || 'Production')})</div></div>
+    <div class="sign-box"><div class="sign-line">Authorized By</div></div>
+  </div>
+  <script>window.onload=()=>window.print()<\/script>
+  </body></html>`)
+  win.document.close()
+}
+
+function invalidateJoMinQueries(qc: ReturnType<typeof useQueryClient>, joId?: number) {
+  qc.invalidateQueries({ queryKey: ['jo-issue-note', joId] })
+  qc.invalidateQueries({ queryKey: ['jo-issue-note'] })
+  qc.invalidateQueries({ queryKey: ['prod-issue-notes'] })
+  qc.invalidateQueries({ queryKey: ['jo-detail'] })
+  qc.invalidateQueries({ queryKey: ['jo-panel-wip'] })
+  qc.invalidateQueries({ queryKey: ['jos-process'] })
+  qc.invalidateQueries({ queryKey: ['jos-all'] })
+  qc.invalidateQueries({ queryKey: ['prod-stats'] })
+}
+
+function JOIssueLineRow({
+  note, line, tolerancePct, reasons, canCorrect, onSaved,
+}: {
+  note: IssueNote
+  line: IssueNoteLine
+  tolerancePct: number
+  reasons: string[]
+  canCorrect: boolean
+  onSaved: () => void
+}) {
+  const confirmed = note.status === 'Confirmed'
+  const editableDraft = note.status === 'Draft' || note.status === 'Pending Approval'
+  const [correcting, setCorrecting] = useState(false)
+  const editing = editableDraft || (confirmed && canCorrect && correcting)
+  const bom = minBomQty(line)
+  const current = minIssueQty(line)
+  const [qty, setQty] = useState(String(current))
+  const [reason, setReason] = useState(line.variance_reason || '')
+  const [remarks, setRemarks] = useState(line.variance_remarks || '')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    setQty(String(minIssueQty(line)))
+    setReason(line.variance_reason || '')
+    setRemarks(line.variance_remarks || '')
+  }, [line.issue_qty, line.variance_reason, line.variance_remarks, line.id])
+
+  const n = Number(qty)
+  const nValid = qty.trim() !== '' && Number.isFinite(n) && n >= 0
+  const shown = editing && nValid ? n : current
+  const diff = minR3(shown - bom)
+  const pct = minVariancePct(bom, shown)
+  const differs = Math.abs(diff) > MIN_EPS
+  const over = minOverTolerance(bom, shown, tolerancePct)
+  const changed = editing && nValid && Math.abs(n - current) > MIN_EPS
+  const needReason = confirmed ? true : differs
+  const tone = over ? 'text-red-600 font-semibold' : differs ? (diff > 0 ? 'text-orange-700' : 'text-blue-700') : 'text-gray-400'
+
+  const save = async () => {
+    if (!nValid) { setErr('Enter a valid qty'); return }
+    if (needReason && !reason) { setErr('Select a reason'); return }
+    if (reason === 'Other' && !remarks.trim()) { setErr('Remarks are required for Other'); return }
+    if (confirmed && !window.confirm(
+      `Post-issue correction: ${n - current > 0 ? `issue ${minR3(n - current)} more` : `return ${minR3(current - n)}`} ${line.unit} of ${line.material_code}. ` +
+      'Stock will be corrected and the change audited. Continue?',
+    )) return
+    setBusy(true)
+    setErr('')
+    try {
+      if (confirmed) {
+        await api.post(`/production/issue-notes/${note.id}/correct`, {
+          line_id: line.id, issue_qty: n, reason, remarks,
+        })
+        setCorrecting(false)
+      } else {
+        await api.patch(`/production/issue-notes/${note.id}/lines/${line.id}`, {
+          issue_qty: n, reason: needReason ? reason : '', remarks: needReason ? remarks : '',
+        })
+      }
+      onSaved()
+    } catch (e) {
+      setErr(apiErrorMessage(e, 'Could not update issue qty'))
+    }
+    setBusy(false)
+  }
+
+  return (
+    <tr className="border-t border-gray-50 hover:bg-indigo-50/30 align-top">
+      <td className="px-3 py-2">
+        <span className="font-mono font-semibold text-[#002B5B]">{line.finished_item_code}</span>
+        {line.finished_item_name && <span className="text-gray-500 ml-1">({line.finished_item_name})</span>}
+        <span className="text-gray-400 ml-1">× {line.finished_planned_qty}</span>
+      </td>
+      <td className="px-3 py-2">
+        <span className="font-mono font-semibold">{line.material_code}</span>
+        {line.material_name && line.material_name !== line.material_code && (
+          <span className="text-gray-500 ml-1">— {line.material_name}</span>
+        )}
+        <span className="block text-gray-400">BOM / unit {line.bom_qty_per_unit}</span>
+      </td>
+      <td className="px-3 py-2 text-right text-gray-600">{bom}</td>
+      <td className="px-3 py-2 text-right">
+        {editing ? (
+          <input type="number" min={0} step="0.001" value={qty} onChange={e => { setQty(e.target.value); setErr('') }}
+            className={`w-24 border rounded px-1.5 py-1 text-right font-mono ${over ? 'border-red-400 bg-red-50' : 'border-gray-300'}`} />
+        ) : (
+          <span className="font-bold text-indigo-700">{current}</span>
+        )}
+      </td>
+      <td className={`px-3 py-2 text-right ${tone}`}>{differs ? fmtSigned(diff) : '—'}</td>
+      <td className={`px-3 py-2 text-right ${tone}`}>
+        {differs ? fmtSigned(pct, '%') : '—'}
+        {editing && over && (
+          <span className="block text-[10px] font-normal text-red-600">&gt; ±{tolerancePct}% — needs approval</span>
+        )}
+      </td>
+      <td className="px-3 py-2 min-w-[11rem]">
+        {editing && needReason ? (
+          <div className="space-y-1">
+            <select value={reason} onChange={e => { setReason(e.target.value); setErr('') }}
+              className="w-full border border-gray-300 rounded px-1.5 py-1">
+              <option value="">Select reason…</option>
+              {reasons.map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+            {(reason === 'Other' || remarks) && (
+              <input value={remarks} onChange={e => setRemarks(e.target.value)}
+                placeholder={reason === 'Other' ? 'Remarks (required)' : 'Remarks'}
+                className="w-full border border-gray-300 rounded px-1.5 py-1" />
+            )}
+          </div>
+        ) : (
+          <span className="text-gray-600">
+            {line.variance_reason || (differs ? '—' : '')}
+            {line.variance_remarks && <span className="block text-gray-400">{line.variance_remarks}</span>}
+          </span>
+        )}
+        {err && <span className="block text-red-600 mt-1">{err}</span>}
+      </td>
+      <td className="px-3 py-2 text-gray-500">{line.unit}</td>
+      <td className="px-3 py-2 whitespace-nowrap">
+        {editing && (
+          <>
+            {(changed || confirmed) && (
+              <button type="button" onClick={save} disabled={busy || !changed}
+                className={`text-[11px] px-2 py-1 rounded text-white disabled:opacity-40 ${confirmed ? 'bg-amber-600 hover:bg-amber-700' : 'bg-sky-700 hover:bg-sky-800'}`}>
+                {busy ? '…' : confirmed ? 'Post correction' : 'Save'}
+              </button>
+            )}
+            {!confirmed && Math.abs(current - bom) > MIN_EPS && (
+              <button type="button" onClick={() => { setQty(String(bom)); setReason(''); setRemarks('') }}
+                className="ml-1 text-[11px] px-2 py-1 rounded border border-gray-300 bg-white">Reset to BOM</button>
+            )}
+            {confirmed && (
+              <button type="button" onClick={() => { setCorrecting(false); setErr('') }}
+                className="ml-1 text-[11px] px-2 py-1 rounded border border-gray-300 bg-white">Close</button>
+            )}
+          </>
+        )}
+        {confirmed && canCorrect && !correcting && (
+          <button type="button" onClick={() => setCorrecting(true)}
+            className="text-[11px] px-2 py-1 rounded border border-amber-300 text-amber-800 bg-white hover:bg-amber-50">Correct</button>
+        )}
+      </td>
+    </tr>
+  )
+}
+
+function JOMinAdjustmentHistory({ noteId }: { noteId: number }) {
+  const { data = [] } = useQuery<any[]>({
+    queryKey: ['jo-min-adjustments', noteId],
+    queryFn: () => api.get(`/production/issue-notes/${noteId}/adjustments`).then(r => r.data),
+  })
+  if (!data.length) return null
+  const phaseLabel = (p: string) =>
+    p === 'POST_ISSUE' ? 'Correction after issue' : p === 'APPROVED' ? 'Approved' : 'Before issue'
+  return (
+    <details className="text-xs px-3 pb-2">
+      <summary className="cursor-pointer text-indigo-700 font-medium">Issue qty change history ({data.length})</summary>
+      <table className="w-full mt-1">
+        <thead>
+          <tr className="text-gray-500 border-b">
+            <th className="text-left py-1">When</th><th className="text-left py-1">Stage</th>
+            <th className="text-left py-1">Material</th><th className="text-right py-1">Issue qty</th>
+            <th className="text-right py-1">BOM</th><th className="text-left py-1 pl-2">Reason</th>
+            <th className="text-left py-1">Stock</th><th className="text-left py-1">By</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.map(a => (
+            <tr key={a.id} className="border-t border-gray-100">
+              <td className="py-1 whitespace-nowrap">{a.created_at}</td>
+              <td className="py-1">{phaseLabel(a.phase)}</td>
+              <td className="py-1 font-mono">{a.material_code}</td>
+              <td className="py-1 text-right font-mono">{a.old_issue_qty} → {a.new_issue_qty}</td>
+              <td className="py-1 text-right font-mono">{a.bom_required_qty}{a.variance_pct != null ? ` (${fmtSigned(a.variance_pct, '%')})` : ''}</td>
+              <td className="py-1 pl-2">{a.reason || '—'}{a.remarks ? ` · ${a.remarks}` : ''}</td>
+              <td className="py-1">{a.stock_posted ? `${a.delta_qty > 0 ? 'OUT' : 'IN'} ${Math.abs(a.delta_qty)}` : '—'}</td>
+              <td className="py-1">{a.user_name || '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </details>
+  )
+}
+
+function JOIssueNoteCard({
+  note, settings, isPrimary, canApprove, onChanged, onRegen, regenBusy,
+}: {
+  note: IssueNote
+  settings: MinSettings
+  isPrimary: boolean
+  canApprove: boolean
+  onChanged: () => void
+  onRegen?: () => void
+  regenBusy?: boolean
+}) {
+  const [issuedBy, setIssuedBy] = useState(note.issued_by || '')
+  const [receivedBy, setReceivedBy] = useState(note.received_by || '')
+  const onError = (fallback: string) => (e: unknown) => alert(apiErrorMessage(e, fallback))
+  const confirmMut = useMutation({
+    mutationFn: () => api.post(`/production/issue-notes/${note.id}/confirm`, { issued_by: issuedBy, received_by: receivedBy }),
+    onSuccess: onChanged,
+    onError: onError('Could not confirm issue note'),
+  })
+  const approveMut = useMutation({
+    mutationFn: () => api.post(`/production/issue-notes/${note.id}/approve`),
+    onSuccess: onChanged,
+    onError: onError('Could not approve issue note'),
+  })
+  const cancelMut = useMutation({
+    mutationFn: () => api.post(`/production/issue-notes/${note.id}/cancel`),
+    onSuccess: onChanged,
+    onError: onError('Could not cancel issue note'),
+  })
+
+  const open = note.status === 'Draft' || note.status === 'Pending Approval'
+  const badge = MIN_STATUS_COLORS[note.status] || 'bg-white text-indigo-700 border-indigo-200'
+  const tol = settings.tolerance_pct
+
+  return (
+    <div className="bg-white rounded-lg border border-indigo-100 overflow-hidden">
+      <div className="px-3 py-2 bg-indigo-50 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-xs font-semibold text-indigo-800">
+            📋 Material Issue Note — <span className="font-mono">{note.in_number}</span>
+            {!isPrimary && <span className="ml-2 font-normal text-indigo-600">(additional issue)</span>}
+          </p>
+          <p className="text-xs text-indigo-600 mt-0.5">
+            JO <b>{note.jo_number}</b> · {note.in_date} · For: <b>{note.finished_item_code}</b>
+            {note.finished_item_name ? ` — ${note.finished_item_name}` : ''} · Qty <b>{note.planned_qty}</b>
+            {' '}· Tolerance ±{tol}%
+          </p>
+          {note.status === 'Confirmed' && (
+            <p className="text-xs text-green-700 mt-0.5">
+              Confirmed {note.confirmed_at || ''}{note.confirmed_by ? ` by ${note.confirmed_by}` : ''}
+              {note.issued_by ? ` · Issued by ${note.issued_by}` : ''}{note.received_by ? ` · Received by ${note.received_by}` : ''}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`text-xs px-2 py-0.5 rounded-full border ${badge}`}>{note.status}</span>
+          {note.status === 'Draft' && (
+            <>
+              <input value={issuedBy} onChange={e => setIssuedBy(e.target.value)} placeholder="Issued by"
+                className="w-24 text-xs border border-gray-300 rounded px-1.5 py-1" />
+              <input value={receivedBy} onChange={e => setReceivedBy(e.target.value)} placeholder="Received by"
+                className="w-24 text-xs border border-gray-300 rounded px-1.5 py-1" />
+              <button type="button" disabled={confirmMut.isPending || note.lines.length === 0}
+                onClick={() => {
+                  if (!window.confirm('Confirm material issue? Stock will be deducted for the ACTUAL issue qty shown.')) return
+                  confirmMut.mutate()
+                }}
+                className="text-xs px-2 py-1 rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50">
+                {confirmMut.isPending ? '…' : '✓ Confirm Issue'}
+              </button>
+            </>
+          )}
+          {note.status === 'Pending Approval' && canApprove && (
+            <button type="button" disabled={approveMut.isPending} onClick={() => approveMut.mutate()}
+              className="text-xs px-2 py-1 rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+              {approveMut.isPending ? '…' : '✔ Approve over-tolerance issue'}
+            </button>
+          )}
+          <button type="button" onClick={() => void printIssueNote(note.id).catch(e => alert(apiErrorMessage(e, 'Could not print')))}
+            className="text-xs px-2 py-1 border border-indigo-200 rounded text-indigo-700 bg-white hover:bg-indigo-50">
+            🖨️ Print
+          </button>
+          {isPrimary && onRegen && (
+            <button type="button" onClick={onRegen} disabled={regenBusy || !open}
+              className="text-xs px-2 py-1 border border-indigo-200 rounded text-indigo-700 hover:bg-white disabled:opacity-50">
+              ↻ Refresh BOM
+            </button>
+          )}
+          {!isPrimary && open && (
+            <button type="button" disabled={cancelMut.isPending} onClick={() => cancelMut.mutate()}
+              className="text-xs px-2 py-1 rounded border border-red-200 text-red-700 bg-white hover:bg-red-50 disabled:opacity-50">
+              Cancel
+            </button>
+          )}
+        </div>
+      </div>
+      {note.status === 'Draft' && (
+        <p className="text-xs text-amber-800 bg-amber-50 border-b border-amber-200 px-3 py-1">
+          Draft — stock is <strong>not</strong> deducted until you click <strong>Confirm Issue</strong>.
+          {note.approved_by ? ` Over-tolerance qty approved by ${note.approved_by}.` : ''}
+        </p>
+      )}
+      {note.status === 'Pending Approval' && (
+        <p className="text-xs text-orange-800 bg-orange-50 border-b border-orange-200 px-3 py-1">
+          <strong>Pending Approval</strong> — issue qty is outside the ±{tol}% BOM tolerance.
+          {canApprove ? ' Approve to allow confirmation.' : ' A Manager / Admin must approve before this can be confirmed.'}
+        </p>
+      )}
+      {note.lines.length === 0 ? (
+        <p className="text-xs text-gray-400 p-3">{note.remarks || 'No BOM lines found.'}</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="text-gray-400 uppercase bg-gray-50 border-b">
+              <tr>
+                <th className="text-left px-3 py-2">For (finished item)</th>
+                <th className="text-left px-3 py-2">Material</th>
+                <th className="text-right px-3 py-2">BOM Required</th>
+                <th className="text-right px-3 py-2">Issue Qty</th>
+                <th className="text-right px-3 py-2">Diff</th>
+                <th className="text-right px-3 py-2">Variance %</th>
+                <th className="text-left px-3 py-2">Reason</th>
+                <th className="text-left px-3 py-2">Unit</th>
+                <th className="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {note.lines.map(ln => (
+                <JOIssueLineRow key={ln.id} note={note} line={ln} tolerancePct={tol}
+                  reasons={settings.reasons} canCorrect={canApprove} onSaved={onChanged} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <JOMinAdjustmentHistory noteId={note.id} />
+    </div>
+  )
+}
+
 function JOIssueNotePanel({ joId, joNumber }: { joId: number; joNumber: string }) {
   const qc = useQueryClient()
+  const authUser = useAuth(s => s.user)
+  const canApprove = mayAccessErpAdmin(authUser)
   const { data: note, isLoading, isError } = useQuery<IssueNote>({
     queryKey: ['jo-issue-note', joId],
     queryFn: () => api.get(`/production/orders/${joId}/issue-note`).then(r => r.data),
   })
+  const { data: settings = { tolerance_pct: 10, reasons: [] } } = useQuery<MinSettings>({
+    queryKey: ['jo-min-settings'],
+    queryFn: () => api.get('/production/issue-notes/settings').then(r => r.data),
+    staleTime: 3_600_000,
+  })
+  const refresh = () => invalidateJoMinQueries(qc, joId)
   const regenMut = useMutation({
     mutationFn: () => api.post(`/production/orders/${joId}/regenerate-issue-note`),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['jo-issue-note', joId] })
-      qc.invalidateQueries({ queryKey: ['prod-issue-notes'] })
-    },
+    onSuccess: refresh,
     onError: (e: any) => alert(e.response?.data?.detail || 'Could not regenerate issue note'),
+  })
+  const additionalMut = useMutation({
+    mutationFn: (extra: boolean) => api.post(`/production/orders/${joId}/issue-notes/additional`, { extra }),
+    onSuccess: refresh,
+    onError: (e: unknown) => alert(apiErrorMessage(e, 'Could not create additional issue')),
   })
 
   if (isLoading) return <p className="text-xs text-gray-400 py-2">Loading issue note…</p>
@@ -333,60 +847,39 @@ function JOIssueNotePanel({ joId, joNumber }: { joId: number; joNumber: string }
     )
   }
 
+  const extras = note.additional_notes || []
+  const hasOpenExtra = extras.some(x => x.status === 'Draft' || x.status === 'Pending Approval')
+  const cumulative = note.cumulative || []
+  const canAddExtra = note.status === 'Confirmed' && !hasOpenExtra
+  const nothingRemaining = cumulative.every(c => c.remaining_qty <= MIN_EPS)
+
   return (
-    <div className="bg-white rounded-lg border border-indigo-100 overflow-hidden">
-      <div className="px-3 py-2 bg-indigo-50 flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <p className="text-xs font-semibold text-indigo-800">
-            📋 Material Issue Note — <span className="font-mono">{note.in_number}</span>
-          </p>
-          <p className="text-xs text-indigo-600 mt-0.5">
-            JO <b>{note.jo_number}</b> · {note.in_date} · For: <b>{note.finished_item_code}</b>
-            {note.finished_item_name ? ` — ${note.finished_item_name}` : ''} · Qty <b>{note.planned_qty}</b>
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs px-2 py-0.5 rounded-full bg-white text-indigo-700 border border-indigo-200">{note.status}</span>
-          <button onClick={() => regenMut.mutate()} disabled={regenMut.isPending}
-            className="text-xs px-2 py-1 border border-indigo-200 rounded text-indigo-700 hover:bg-white disabled:opacity-50">
-            ↻ Refresh BOM
-          </button>
-        </div>
-      </div>
-      {note.lines.length === 0 ? (
-        <p className="text-xs text-gray-400 p-3">{note.remarks || 'No BOM lines found.'}</p>
-      ) : (
-        <table className="w-full text-xs">
-          <thead className="text-gray-400 uppercase bg-gray-50 border-b">
-            <tr>
-              <th className="text-left px-3 py-2">For (finished item)</th>
-              <th className="text-left px-3 py-2">Material</th>
-              <th className="text-right px-3 py-2">BOM / unit</th>
-              <th className="text-right px-3 py-2">Required</th>
-              <th className="text-left px-3 py-2">Unit</th>
-            </tr>
-          </thead>
-          <tbody>
-            {note.lines.map(ln => (
-              <tr key={ln.id} className="border-t border-gray-50 hover:bg-indigo-50/30">
-                <td className="px-3 py-2">
-                  <span className="font-mono font-semibold text-[#002B5B]">{ln.finished_item_code}</span>
-                  {ln.finished_item_name && <span className="text-gray-500 ml-1">({ln.finished_item_name})</span>}
-                  <span className="text-gray-400 ml-1">× {ln.finished_planned_qty}</span>
-                </td>
-                <td className="px-3 py-2">
-                  <span className="font-mono font-semibold">{ln.material_code}</span>
-                  {ln.material_name && ln.material_name !== ln.material_code && (
-                    <span className="text-gray-500 ml-1">— {ln.material_name}</span>
-                  )}
-                </td>
-                <td className="px-3 py-2 text-right text-gray-600">{ln.bom_qty_per_unit}</td>
-                <td className="px-3 py-2 text-right font-bold text-indigo-700">{ln.required_qty}</td>
-                <td className="px-3 py-2 text-gray-500">{ln.unit}</td>
-              </tr>
+    <div className="space-y-2">
+      <JOIssueNoteCard note={note} settings={settings} isPrimary canApprove={canApprove}
+        onChanged={refresh} onRegen={() => regenMut.mutate()} regenBusy={regenMut.isPending} />
+      {cumulative.length > 0 && (
+        <div className="bg-white rounded-lg border border-gray-100 px-3 py-2 text-xs">
+          <p className="font-semibold text-gray-500 uppercase mb-1">BOM vs issued (all notes on this JO)</p>
+          <div className="flex flex-wrap gap-x-6 gap-y-1">
+            {cumulative.map(c => (
+              <span key={c.material_code} className="text-gray-700">
+                <b className="font-mono">{c.material_code}</b>: BOM {c.bom_required_qty} · issued <b className="text-green-700">{c.confirmed_issued_qty}</b>
+                {c.pending_issue_qty > 0 && <> · pending <b className="text-amber-700">{c.pending_issue_qty}</b></>}
+                {' '}· remaining <b className={c.remaining_qty > 0 ? 'text-orange-700' : 'text-gray-500'}>{c.remaining_qty}</b> {c.unit}
+              </span>
             ))}
-          </tbody>
-        </table>
+          </div>
+        </div>
+      )}
+      {extras.filter(x => x.status !== 'Cancelled').map(x => (
+        <JOIssueNoteCard key={x.id} note={x} settings={settings} isPrimary={false}
+          canApprove={canApprove} onChanged={refresh} />
+      ))}
+      {canAddExtra && (
+        <button type="button" onClick={() => additionalMut.mutate(nothingRemaining)} disabled={additionalMut.isPending}
+          className="text-xs px-3 py-1.5 rounded border border-indigo-300 text-indigo-700 bg-white hover:bg-indigo-50 disabled:opacity-50">
+          {additionalMut.isPending ? '…' : nothingRemaining ? '＋ Extra Issue (beyond BOM — needs reason + approval)' : '＋ Additional Issue (remaining BOM qty)'}
+        </button>
       )}
     </div>
   )
@@ -3359,7 +3852,7 @@ export default function Production() {
       {tab === 'issue-notes' && (
         <div className="space-y-3">
           <p className="text-sm text-gray-500">
-            Material issue notes auto-created from Job Orders and Item Master BOM. Quantities scale with JO planned qty.
+            Material issue notes auto-created from Job Orders and Item Master BOM. Open a JO to edit issue qty, confirm (posts stock), print or raise an additional issue.
           </p>
           {issueNotes.length === 0 && (
             <p className="text-center text-gray-400 py-12 text-sm">No issue notes yet. Create a Job Order to generate one.</p>
@@ -3378,7 +3871,8 @@ export default function Production() {
                       <span className={`text-xs px-2 py-0.5 rounded-full ${PROCESS_COLORS[note.process] || 'bg-gray-100 text-gray-600'}`}>
                         {note.process}
                       </span>
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{note.status}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full border ${MIN_STATUS_COLORS[note.status] || 'bg-gray-100 text-gray-600 border-gray-200'}`}>{note.status}</span>
+                      {note.parent_in_id ? <span className="text-xs text-indigo-600">additional</span> : null}
                     </div>
                     <p className="text-xs text-gray-500 mt-1">
                       Date {note.in_date} · SO {note.so_number || '—'} · For <b className="text-[#002B5B]">{note.finished_item_code}</b>
@@ -3395,7 +3889,8 @@ export default function Production() {
                         <th className="text-left px-4 py-2">For (finished item)</th>
                         <th className="text-left px-4 py-2">Material to issue</th>
                         <th className="text-right px-4 py-2">BOM / unit</th>
-                        <th className="text-right px-4 py-2">Required qty</th>
+                        <th className="text-right px-4 py-2">BOM required</th>
+                        <th className="text-right px-4 py-2">Issue qty</th>
                         <th className="text-left px-4 py-2">Unit</th>
                       </tr>
                     </thead>
@@ -3413,7 +3908,8 @@ export default function Production() {
                             )}
                           </td>
                           <td className="px-4 py-2 text-right text-gray-600">{ln.bom_qty_per_unit}</td>
-                          <td className="px-4 py-2 text-right font-bold text-indigo-700">{ln.required_qty}</td>
+                          <td className="px-4 py-2 text-right text-gray-600">{ln.bom_required_qty ?? ln.required_qty}</td>
+                          <td className="px-4 py-2 text-right font-bold text-indigo-700">{ln.issue_qty ?? ln.required_qty}</td>
                           <td className="px-4 py-2 text-gray-500">{ln.unit}</td>
                         </tr>
                       ))}

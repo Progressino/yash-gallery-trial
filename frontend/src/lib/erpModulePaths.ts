@@ -6,6 +6,7 @@ export const ERP_MODULE_PATH_PREFIXES = [
   '/items',
   '/sales',
   '/grey',
+  '/fabric-warehouse',
   '/tna',
   '/stitching-costing',
   '/hrm',

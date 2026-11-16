@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from ..db import purchase_db
+from . import min_tolerance
 from .jwo_min_notes import _ensure_min_schema, create_min_for_jwo, get_min_by_jwo_id
 
 VARIANCE_REASONS = (
@@ -36,17 +37,70 @@ def _now() -> str:
 
 
 def validate_reason(reason: str, remarks: str, *, required: bool) -> tuple[str, str]:
-    reason = str(reason or "").strip()
-    remarks = str(remarks or "").strip()
-    if not required:
-        return reason, remarks
-    if not reason:
-        raise ValueError("Reason is required when Grey Issue Qty differs from the BOM requirement")
-    if reason not in VARIANCE_REASONS:
-        raise ValueError(f"Reason must be one of: {', '.join(VARIANCE_REASONS)}")
-    if reason == "Other" and not remarks:
-        raise ValueError("Remarks are required when reason is Other")
-    return reason, remarks
+    return min_tolerance.validate_reason(
+        reason, remarks, required=required, allowed=VARIANCE_REASONS, subject="Grey Issue Qty"
+    )
+
+
+def refresh_approval_state(min_id: int) -> dict[str, Any]:
+    """Draft ⇄ Pending Approval based on whether any line is outside tolerance vs BOM.
+
+    Any quantity change clears a previous approval so the approver always signs off the final qty.
+    """
+    conn = purchase_db._connect()
+    _ensure_min_schema(conn)
+    try:
+        note = conn.execute("SELECT * FROM material_issue_notes WHERE id=?", (min_id,)).fetchone()
+        if not note:
+            raise ValueError("Material issue note not found")
+        status = str(note["status"] or "")
+        if status not in (min_tolerance.STATUS_DRAFT, min_tolerance.STATUS_PENDING):
+            return {"status": status, "approval_required": bool(note["approval_required"])}
+        lines = [dict(r) for r in conn.execute("SELECT * FROM min_lines WHERE min_id=?", (min_id,)).fetchall()]
+        over = any(
+            min_tolerance.exceeds_tolerance(_line_basis(ln)[0], float(ln.get("issue_qty") or 0))
+            for ln in lines
+        )
+        if over:
+            conn.execute(
+                """UPDATE material_issue_notes SET status=?, approval_required=1,
+                   approved_by='', approved_at='' WHERE id=?""",
+                (min_tolerance.STATUS_PENDING, min_id),
+            )
+        else:
+            conn.execute(
+                """UPDATE material_issue_notes SET status=?, approval_required=0,
+                   approved_by='', approved_at='' WHERE id=?""",
+                (min_tolerance.STATUS_DRAFT, min_id),
+            )
+        conn.commit()
+        return {
+            "status": min_tolerance.STATUS_PENDING if over else min_tolerance.STATUS_DRAFT,
+            "approval_required": over,
+        }
+    finally:
+        conn.close()
+
+
+def approve_min(min_id: int, *, user_name: str = "") -> dict[str, Any]:
+    """Manager+ sign-off for an over-tolerance MIN (caller enforces role). Back to Draft, approved."""
+    conn = purchase_db._connect()
+    _ensure_min_schema(conn)
+    try:
+        note = conn.execute("SELECT * FROM material_issue_notes WHERE id=?", (min_id,)).fetchone()
+        if not note:
+            raise ValueError("Material issue note not found")
+        if str(note["status"] or "") != min_tolerance.STATUS_PENDING:
+            raise ValueError("Only a Pending Approval Material Issue can be approved")
+        conn.execute(
+            """UPDATE material_issue_notes SET status=?, approved_by=?, approved_at=? WHERE id=?""",
+            (min_tolerance.STATUS_DRAFT, user_name, _now(), min_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _audit_event(min_id, user_name, "Over-tolerance issue qty approved")
+    return {"ok": True, "issue_note": purchase_db.get_min_by_number(dict(note)["min_number"])}
 
 
 def _line_basis(line: dict) -> tuple[float, float, float]:
@@ -217,12 +271,22 @@ def revise_issue_qty(min_id: int, line_id: int, new_issue_qty: float, *, reason:
             c2.commit()
             c2.close()
             result = get_min_by_jwo_id(int(jwo_id))
+    # Tolerance gate (shared with Production JO MIN): over limit → Pending Approval.
+    state = refresh_approval_state(min_id)
     _audit_event(
         min_id, user_name,
         f"Issue qty {line.get('material_code')}: {_r3(old_issue)} → {new_issue}"
-        + (f" ({reason})" if reason else "") + f"; expected output → {new_out}",
+        + (f" ({reason})" if reason else "") + f"; expected output → {new_out}"
+        + ("; over tolerance — Manager approval required" if state["approval_required"] else ""),
     )
-    return {"ok": True, "expected_output_qty": new_out, "issue_note": result or purchase_db.get_min_by_number(note["min_number"])}
+    return {
+        "ok": True,
+        "expected_output_qty": new_out,
+        "tolerance_pct": min_tolerance.get_tolerance_pct(),
+        "approval_required": state["approval_required"],
+        "status": state["status"],
+        "issue_note": purchase_db.get_min_by_number(note["min_number"]),
+    }
 
 
 def correct_confirmed_issue(min_id: int, line_id: int, new_issue_qty: float, *, reason: str,

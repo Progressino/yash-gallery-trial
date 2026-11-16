@@ -505,6 +505,27 @@ def correct_min_line(minid: int, line_id: int, body: IssueQtyChangeIn, request: 
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/min-tolerance")
+def min_tolerance_settings():
+    from ..services.min_tolerance import get_tolerance_pct
+
+    return {"tolerance_pct": get_tolerance_pct()}
+
+
+@router.post("/min/{minid}/approve")
+def approve_min_issue(minid: int, request: Request):
+    """Manager+ approval for a Pending Approval (over-tolerance) MIN."""
+    from ..services.jwo_issue_variance import approve_min
+    from ..services.min_tolerance import may_approve
+
+    if not may_approve(str(_auth(request).get("role", "") or "")):
+        raise HTTPException(status_code=403, detail="Only Manager / Admin can approve an over-tolerance Material Issue.")
+    try:
+        return approve_min(minid, user_name=_actor(request))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/min/{minid}/adjustments")
 def min_adjustments(minid: int):
     from ..services.jwo_issue_variance import list_adjustments

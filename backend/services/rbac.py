@@ -74,6 +74,7 @@ ROUTE_MODULE_PREFIXES: tuple[tuple[str, str], ...] = (
     ("/production", "production"),
     ("/stitching-costing", "stitching"),
     ("/grey", "grey"),
+    ("/fabric-warehouse", "grey"),
     ("/hrm", "hrm"),
     ("/inventory", "inventory"),
     ("/po", "po"),

@@ -40,6 +40,7 @@ from .routers.purchase import router as purchase_router
 from .routers.tna import router as tna_router
 from .routers.production import router as production_router
 from .routers.grey import router as grey_router
+from .routers.fabric_warehouse import router as fabric_warehouse_router
 from .routers.stitching import router as stitching_router
 from .routers.hrm import router as hrm_router
 from .routers.erp_admin import router as erp_admin_router
@@ -3476,6 +3477,7 @@ def _session_skip_heavy_warm(path: str) -> bool:
             "/api/sales/",
             "/api/items/",
             "/api/grey/",
+            "/api/fabric-warehouse/",
             "/api/tna/",
         )
     ):
@@ -3560,6 +3562,7 @@ def _session_uses_stitching_db_only(path: str) -> bool:
             "/api/sales/",
             "/api/items/",
             "/api/grey/",
+            "/api/fabric-warehouse/",
             "/api/tna/",
         )
     )
@@ -3840,6 +3843,7 @@ app.include_router(purchase_router,    prefix="/api/purchase",   tags=["purchase
 app.include_router(tna_router,         prefix="/api/tna",        tags=["tna"])
 app.include_router(production_router,  prefix="/api/production", tags=["production"])
 app.include_router(grey_router,        prefix="/api/grey",       tags=["grey"])
+app.include_router(fabric_warehouse_router, prefix="/api/fabric-warehouse", tags=["fabric-warehouse"])
 app.include_router(stitching_router,   prefix="/api/stitching",  tags=["stitching"])
 app.include_router(hrm_router,         prefix="/api/hrm",        tags=["hrm"])
 app.include_router(erp_admin_router,   prefix="/api/erp-admin",  tags=["erp-admin"])

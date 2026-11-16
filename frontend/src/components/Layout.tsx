@@ -44,6 +44,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { to: '/production', module: 'production', label: 'Production', short: '⚙️' },
       { to: '/stitching-costing', module: 'stitching', label: 'Stitching Costing', short: '🧵' },
       { to: '/grey', module: 'grey', label: 'Grey Fabric', short: '🧵' },
+      { to: '/fabric-warehouse', module: 'grey', label: 'Fabric Warehouse', short: '🏬' },
       { to: '/hrm', module: 'hrm', label: 'HRM', short: '👥' },
       { to: '/inventory', module: 'inventory', label: 'Inventory', short: '📦' },
       { to: '/po-fresh', module: 'po', label: 'PO Engine', short: '🎯' },
