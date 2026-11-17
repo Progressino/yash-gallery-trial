@@ -107,6 +107,7 @@ from ..db.hrm_db import (
 )
 from ..db import hrm_db as H
 from ..db import hrm_worktime
+from ..services import hrm_assignment_workflow as assignment_wf
 from ..db.users_db import get_user_auth_profile, search_active_users, get_user_by_id
 from ..services.rbac import (
     build_hrm_scope,
@@ -204,6 +205,16 @@ def _enforce_list_employee_scope(scope: HrmScope, employee_id: int | None) -> No
         assert_employee_in_scope(scope, employee_id)
 
 
+def _clean_assignment_attachments(data: dict) -> tuple[list[str], str]:
+    """Validate attachment URLs / voice note link; strip workflow-only keys from the create payload."""
+    try:
+        links = assignment_wf.clean_attachment_links(data.pop("attachment_links", None))
+        voice = assignment_wf._clean_voice_url(data.pop("voice_note_url", ""))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    return links, voice
+
+
 class DepartmentIn(BaseModel):
     name: str
     description: Optional[str] = ""
@@ -279,6 +290,9 @@ class ResponsibilityIn(BaseModel):
     backup_employee_id: Optional[int] = None
     backup_allocation_value: Optional[float] = None
     backup_allocation_unit: Optional[str] = "days"
+    attachment_links: Optional[list[str]] = None
+    assign_remarks: Optional[str] = ""
+    voice_note_url: Optional[str] = ""
 
 
 class ResponsibilityUpdate(BaseModel):
@@ -481,6 +495,9 @@ class OneTimeTaskIn(BaseModel):
     backup_employee_id: Optional[int] = None
     backup_allocation_value: Optional[float] = None
     backup_allocation_unit: Optional[str] = "days"
+    attachment_links: Optional[list[str]] = None
+    assign_remarks: Optional[str] = ""
+    voice_note_url: Optional[str] = ""
 
 
 class OneTimeTaskUpdate(BaseModel):
@@ -496,6 +513,12 @@ class OneTimeTaskUpdate(BaseModel):
     backup_employee_id: Optional[int] = None
     backup_allocation_value: Optional[float] = None
     backup_allocation_unit: Optional[str] = None
+
+
+class AssignmentActionIn(BaseModel):
+    entity_type: str  # responsibility | task
+    entity_id: int
+    remarks: Optional[str] = ""
 
 
 class ExtendDeadlineIn(BaseModel):
@@ -524,6 +547,7 @@ def get_hrm_scope(request: Request):
         "department_id": scope.department_id,
         "can_manage_org": scope.can_manage_org,
         "can_edit_assignments": scope.can_edit_assignments,
+        "can_assign_work": scope.can_assign_work,
         "can_mutate_assignment_records": scope.can_mutate_assignment_records,
         "can_view_employee_list": scope.can_view_employee_list,
         "can_delete_hrm_records": scope.can_delete_hrm_records,
@@ -736,8 +760,12 @@ def get_responsibilities(
     request: Request,
     employee_id: Optional[int] = None,
     department_id: Optional[int] = None,
+    assigned_by_me: Optional[int] = None,
 ):
     scope = _scope_from_request(request)
+    if assigned_by_me:
+        # Cross-department: only what *I* assigned, never the assignee's other records.
+        return assignment_wf.list_assigned_by_me(assignment_wf.ENTITY_RESPONSIBILITY, scope.employee_id)
     dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
     if emp_f == -1 or dept_f == -1:
         return []
@@ -748,12 +776,15 @@ def get_responsibilities(
 @router.post("/responsibilities")
 def post_responsibility(body: ResponsibilityIn, request: Request):
     scope = _scope_from_request(request)
-    if scope.is_employee:
-        raise HTTPException(403, "Employees cannot add responsibilities")
+    if not scope.can_assign_work:
+        raise HTTPException(403, "You are not allowed to assign responsibilities")
     if scope.is_hod and scope.employee_id and int(body.employee_id) == int(scope.employee_id):
         raise HTTPException(403, "HOD cannot add a responsibility for themselves")
+    if scope.is_employee and int(body.employee_id) == int(scope.employee_id or 0):
+        raise HTTPException(403, "Employees cannot add a responsibility for themselves")
     assert_assignment_target_employee(scope, body.employee_id)
     data = body.model_dump()
+    links, voice = _clean_assignment_attachments(data)
     is_mandatory = bool(data.get("mandatory"))
     backup_id = data.get("backup_employee_id")
     if is_mandatory:
@@ -767,20 +798,33 @@ def post_responsibility(body: ResponsibilityIn, request: Request):
         if int(backup_id) == int(body.employee_id):
             raise HTTPException(400, "Backup person must be different from the assigned employee")
     linked_id = data.get("linked_to_employee_id")
-    if not linked_id:
+    # Accountable person is optional when we know who assigned it: completion approval then
+    # goes to the assigner.
+    if not linked_id and not scope.employee_id:
         raise HTTPException(400, "Accountable person is required")
-    if int(linked_id) == int(body.employee_id):
-        raise HTTPException(400, "Accountable person must be different from the assigned employee")
-    assert_assignment_target_employee(scope, int(linked_id))
+    if linked_id:
+        if int(linked_id) == int(body.employee_id):
+            raise HTTPException(400, "Accountable person must be different from the assigned employee")
+        assert_assignment_target_employee(scope, int(linked_id))
     data["require_backup"] = is_mandatory
+    _, name = _recorder_from_request(request)
     if not (data.get("added_by") or "").strip():
-        _, name = _recorder_from_request(request)
         data["added_by"] = name
     try:
-        create_responsibility(data)
+        rid = create_responsibility(data)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    return {"ok": True}
+    wf = assignment_wf.start_assignment_workflow(
+        assignment_wf.ENTITY_RESPONSIBILITY,
+        int(rid),
+        assigner_employee_id=scope.employee_id,
+        assigner_name=name,
+        is_org_manager=scope.can_manage_org,
+        remarks=data.get("assign_remarks") or "",
+        attachment_links=links,
+        voice_note_url=voice,
+    )
+    return {"ok": True, "id": rid, **wf}
 
 
 @router.patch("/responsibilities/{rid}")
@@ -821,6 +865,7 @@ def del_responsibility(rid: int, request: Request):
         raise HTTPException(404, "Responsibility not found")
     assert_employee_in_scope(scope, owner)
     delete_responsibility(rid)
+    assignment_wf.mark_cancelled_if_open(assignment_wf.ENTITY_RESPONSIBILITY, rid)
     return {"ok": True}
 
 
@@ -1101,11 +1146,23 @@ def get_pending_approvals(request: Request):
     """Inbox for the Linked To person: Done/Partial marks awaiting their Approve/Cancel."""
     scope = _scope_from_request(request)
     if not scope.employee_id:
-        return {"pending": [], "notifications": [], "unread": 0}
+        return {"pending": [], "notifications": [], "unread": 0, "assignment_reviews": [], "assignment_unread": 0}
     pending = list_linked_approval_bucket(int(scope.employee_id))
     notes = list_approval_notifications(int(scope.employee_id), unread_only=False, limit=40)
     unread = sum(1 for n in notes if not int(n.get("is_read") or 0))
-    return {"pending": pending, "notifications": notes, "unread": unread}
+    # HOD inbox: cross-department work waiting for this person's review
+    reviews = assignment_wf.list_tracker(
+        view=assignment_wf.VIEW_HOD_INBOX,
+        viewer_employee_id=int(scope.employee_id),
+        status=assignment_wf.PENDING_HOD_REVIEW,
+    )["rows"]
+    return {
+        "pending": pending,
+        "notifications": notes,
+        "unread": unread,
+        "assignment_reviews": reviews,
+        "assignment_unread": assignment_wf.unread_count(int(scope.employee_id)),
+    }
 
 
 @router.post("/approvals/notifications/read")
@@ -1119,6 +1176,118 @@ def post_mark_approval_notifications_read(
         int(scope.employee_id), task_log_id=task_log_id
     )
     return {"ok": True, "marked": n}
+
+
+# ── Cross-department assignment workflow ─────────────────────────────────────
+
+
+def _assignment_actor(request: Request) -> dict:
+    scope = _scope_from_request(request)
+    _, name = _recorder_from_request(request)
+    return {
+        "actor_employee_id": scope.employee_id,
+        "actor_name": name,
+        "is_org_manager": scope.can_manage_org,
+    }
+
+
+@router.get("/assignments/summary")
+def get_assignment_summary(request: Request):
+    scope = _scope_from_request(request)
+    return assignment_wf.summary(viewer_employee_id=scope.employee_id, is_org_manager=scope.can_manage_org)
+
+
+@router.get("/assignments/tracker")
+def get_assignment_tracker(
+    request: Request,
+    view: str = "assigned_to_me",
+    status: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    priority: Optional[str] = None,
+    department_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    overdue: Optional[int] = None,
+    q: Optional[str] = None,
+):
+    scope = _scope_from_request(request)
+    return assignment_wf.list_tracker(
+        view=view,
+        viewer_employee_id=scope.employee_id,
+        is_org_manager=scope.can_manage_org,
+        status=status,
+        entity_type=entity_type,
+        priority=priority,
+        department_id=department_id,
+        employee_id=employee_id,
+        overdue=bool(overdue),
+        q=q,
+    )
+
+
+@router.get("/assignments/notifications")
+def get_assignment_notifications(request: Request, unread_only: Optional[int] = None, limit: int = 50):
+    scope = _scope_from_request(request)
+    rows = assignment_wf.list_notifications(scope.employee_id, unread_only=bool(unread_only), limit=limit)
+    return {"notifications": rows, "unread": assignment_wf.unread_count(scope.employee_id)}
+
+
+@router.post("/assignments/notifications/read")
+def post_assignment_notifications_read(request: Request, notification_id: Optional[int] = None):
+    scope = _scope_from_request(request)
+    if not scope.employee_id:
+        raise HTTPException(400, "No employee linked to this login")
+    return {"ok": True, "marked": assignment_wf.mark_notifications_read(scope.employee_id, notification_id)}
+
+
+@router.post("/assignments/hod-forward")
+def post_assignment_hod_forward(body: AssignmentActionIn, request: Request):
+    return {"ok": True, **assignment_wf.hod_forward(
+        body.entity_type, body.entity_id, remarks=body.remarks or "", **_assignment_actor(request))}
+
+
+@router.post("/assignments/hod-reject")
+def post_assignment_hod_reject(body: AssignmentActionIn, request: Request):
+    return {"ok": True, **assignment_wf.hod_reject(
+        body.entity_type, body.entity_id, remarks=body.remarks or "", **_assignment_actor(request))}
+
+
+@router.post("/assignments/accept")
+def post_assignment_accept(body: AssignmentActionIn, request: Request):
+    actor = _assignment_actor(request)
+    actor.pop("is_org_manager")
+    return {"ok": True, **assignment_wf.employee_accept(
+        body.entity_type, body.entity_id, remarks=body.remarks or "", **actor)}
+
+
+@router.post("/assignments/clarify")
+def post_assignment_clarify(body: AssignmentActionIn, request: Request):
+    return {"ok": True, **assignment_wf.request_clarification(
+        body.entity_type, body.entity_id, remarks=body.remarks or "", **_assignment_actor(request))}
+
+
+@router.post("/assignments/clarify-reply")
+def post_assignment_clarify_reply(body: AssignmentActionIn, request: Request):
+    return {"ok": True, **assignment_wf.assigner_reply_clarification(
+        body.entity_type, body.entity_id, remarks=body.remarks or "", **_assignment_actor(request))}
+
+
+@router.post("/assignments/remind")
+def post_assignment_remind(body: AssignmentActionIn, request: Request):
+    return {"ok": True, **assignment_wf.remind_hod(
+        body.entity_type, body.entity_id, remarks=body.remarks or "", **_assignment_actor(request))}
+
+
+@router.post("/assignments/cancel")
+def post_assignment_cancel(body: AssignmentActionIn, request: Request):
+    return {"ok": True, **assignment_wf.cancel_assignment(
+        body.entity_type, body.entity_id, remarks=body.remarks or "", **_assignment_actor(request))}
+
+
+@router.get("/assignments/history")
+def get_assignment_history(entity_type: str, entity_id: int, request: Request):
+    scope = _scope_from_request(request)
+    return {"events": assignment_wf.list_history(
+        entity_type, entity_id, viewer_employee_id=scope.employee_id, is_org_manager=scope.can_manage_org)}
 
 
 @router.get("/employees/for-pickers")
@@ -1747,8 +1916,12 @@ def get_one_time_tasks(
     employee_id: Optional[int] = None,
     department_id: Optional[int] = None,
     status: Optional[str] = None,
+    assigned_by_me: Optional[int] = None,
 ):
     scope = _scope_from_request(request)
+    if assigned_by_me:
+        rows = assignment_wf.list_assigned_by_me(assignment_wf.ENTITY_TASK, scope.employee_id)
+        return [r for r in rows if not status or r.get("status") == status]
     dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
     if emp_f == -1 or dept_f == -1:
         return []
@@ -1759,12 +1932,15 @@ def get_one_time_tasks(
 @router.post("/one-time-tasks")
 def post_one_time_task(body: OneTimeTaskIn, request: Request):
     scope = _scope_from_request(request)
-    if scope.is_employee:
-        raise HTTPException(403, "Employees cannot add tasks")
+    if not scope.can_assign_work:
+        raise HTTPException(403, "You are not allowed to assign tasks")
     if scope.is_hod and scope.employee_id and int(body.employee_id) == int(scope.employee_id):
         raise HTTPException(403, "HOD cannot add a task for themselves")
+    if scope.is_employee and int(body.employee_id) == int(scope.employee_id or 0):
+        raise HTTPException(403, "Employees cannot add a task for themselves")
     assert_assignment_target_employee(scope, body.employee_id)
     data = body.model_dump()
+    links, voice = _clean_assignment_attachments(data)
     # Backup person is no longer collected on Assign Task — ignore if sent
     data.pop("backup_employee_id", None)
     data.pop("backup_allocation_value", None)
@@ -1782,7 +1958,17 @@ def post_one_time_task(body: OneTimeTaskIn, request: Request):
         tid = create_one_time_task(data)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    return {"ok": True, "id": tid}
+    wf = assignment_wf.start_assignment_workflow(
+        assignment_wf.ENTITY_TASK,
+        int(tid),
+        assigner_employee_id=scope.employee_id,
+        assigner_name=data.get("assigned_by") or "",
+        is_org_manager=scope.can_manage_org,
+        remarks=data.get("assign_remarks") or "",
+        attachment_links=links,
+        voice_note_url=voice,
+    )
+    return {"ok": True, "id": tid, **wf}
 
 
 @router.patch("/one-time-tasks/{task_id}")
@@ -1828,6 +2014,7 @@ def del_one_time_task(task_id: int, request: Request):
     assert_employee_in_scope(scope, owner)
     assert_hrm_delete_allowed(scope)
     cancel_one_time_task(task_id)
+    assignment_wf.mark_cancelled_if_open(assignment_wf.ENTITY_TASK, task_id)
     return {"ok": True}
 
 
@@ -1910,15 +2097,33 @@ def post_complete_one_time_task(task_id: int, body: OneTimeTaskNotesIn, request:
     return {"ok": True}
 
 
+def _assert_may_review_one_time(scope: HrmScope, task_id: int, owner: int) -> None:
+    """HOD/Admin in scope, or the person who assigned the task / its accountable person."""
+    if scope.employee_id and int(scope.employee_id) != int(owner):
+        conn = H._connect()
+        try:
+            row = conn.execute(
+                "SELECT assigned_by_employee_id, linked_to_employee_id FROM one_time_tasks WHERE id=?",
+                (int(task_id),),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row:
+            approver = row["linked_to_employee_id"] or row["assigned_by_employee_id"]
+            if approver and int(approver) == int(scope.employee_id):
+                return
+    assert_employee_in_scope(scope, owner)
+    if scope.is_employee:
+        raise HTTPException(403, "HOD approval required")
+
+
 @router.post("/one-time-tasks/{task_id}/approve")
 def post_approve_one_time_task(task_id: int, body: OneTimeTaskApprovalIn, request: Request):
     scope = _scope_from_request(request)
     owner = get_one_time_task_owner(task_id)
     if owner is None:
         raise HTTPException(404, "Task not found")
-    assert_employee_in_scope(scope, owner)
-    if scope.is_employee:
-        raise HTTPException(403, "HOD approval required")
+    _assert_may_review_one_time(scope, task_id, owner)
     if body.achievement_pct is None or not 0 <= body.achievement_pct <= 100:
         raise HTTPException(400, "Enter achieved % from 0 to 100")
     ok = approve_one_time_task(task_id, body.approved_by or "", body.notes or "", body.achievement_pct)
@@ -1935,9 +2140,7 @@ def post_reject_one_time_task(task_id: int, body: OneTimeTaskApprovalIn, request
     owner = get_one_time_task_owner(task_id)
     if owner is None:
         raise HTTPException(404, "Task not found")
-    assert_employee_in_scope(scope, owner)
-    if scope.is_employee:
-        raise HTTPException(403, "HOD approval required")
+    _assert_may_review_one_time(scope, task_id, owner)
     if body.achievement_pct is None or not 0 <= body.achievement_pct <= 100:
         raise HTTPException(400, "Enter achieved % from 0 to 100")
     ok = reject_one_time_task(task_id, body.approved_by or "", body.notes or "", body.achievement_pct)

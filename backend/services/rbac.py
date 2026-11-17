@@ -112,6 +112,15 @@ class HrmScope:
         return self.can_manage_org or self.is_hod
 
     @property
+    def can_assign_work(self) -> bool:
+        """Create Responsibilities / Tasks for any active employee (org-wide).
+
+        Admin-tier and HOD, plus any employee with an HR profile. HOD/Employee cannot assign to
+        themselves; the assignee's HOD then reviews cross-department work.
+        """
+        return self.can_manage_org or self.is_hod or (self.is_employee and self.employee_id is not None)
+
+    @property
     def can_mutate_assignment_records(self) -> bool:
         """Edit/delete responsibility & task master data — Admin / Super Admin / Sir only."""
         return self.can_manage_org
@@ -320,7 +329,7 @@ def assert_assignment_target_employee(scope: HrmScope, employee_id: int) -> None
     """
     from fastapi import HTTPException
 
-    if scope.can_edit_assignments:
+    if scope.can_assign_work:
         from ..db.hrm_db import list_employees
 
         rows = list_employees(None, "Active", employee_id=int(employee_id))

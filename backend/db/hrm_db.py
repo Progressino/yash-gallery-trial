@@ -828,6 +828,10 @@ def init_db():
             conn.execute(idx_sql)
         except sqlite3.OperationalError:
             pass
+    # Cross-department assignment workflow (columns on responsibilities/one_time_tasks + tables)
+    from ..services import hrm_assignment_workflow as _assignment_wf
+
+    _assignment_wf.ensure_schema(conn)
     conn.commit()
     conn.close()
 
@@ -2754,7 +2758,7 @@ def mark_task(
 
     conn = _connect()
     resp = conn.execute(
-        """SELECT employee_id, department_id, linked_to_employee_id
+        """SELECT employee_id, department_id, linked_to_employee_id, assigned_by_employee_id
            FROM responsibilities WHERE id=?""",
         (responsibility_id,),
     ).fetchone()
@@ -2777,7 +2781,16 @@ def mark_task(
     ).fetchone()
     if mgr and mgr["reports_to_employee_id"]:
         manager_id = int(mgr["reports_to_employee_id"])
-    approver_id = linked_id or (manager_id if manager_id and manager_id != owner_id else None)
+    # No accountable person: completion approval goes to whoever assigned the work.
+    assigner_id = None
+    if resp["assigned_by_employee_id"]:
+        try:
+            assigner_id = int(resp["assigned_by_employee_id"])
+        except (TypeError, ValueError):
+            assigner_id = None
+        if assigner_id == owner_id:
+            assigner_id = None
+    approver_id = linked_id or assigner_id or (manager_id if manager_id and manager_id != owner_id else None)
 
     # Done/Partial/N/A go to the accountable person, or the HOD when none is set.
     # Missed and Blocked are saved directly and do not wait for approval.
@@ -3047,10 +3060,12 @@ def list_pending_linked_approvals(linked_employee_id: int) -> list[dict]:
           AND (
             (r.linked_to_employee_id=? AND r.linked_to_employee_id != tl.employee_id)
             OR tl.approval_employee_id=?
+            OR (r.linked_to_employee_id IS NULL AND r.assigned_by_employee_id=?
+                AND r.assigned_by_employee_id != tl.employee_id)
           )
         ORDER BY tl.log_date DESC, tl.id DESC
         """,
-        (int(linked_employee_id), int(linked_employee_id)),
+        (int(linked_employee_id), int(linked_employee_id), int(linked_employee_id)),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -3069,10 +3084,12 @@ def list_linked_approval_bucket(linked_employee_id: int) -> list[dict]:
                   t.employee_id as assignee_employee_id, e.name as assignee_name
            FROM one_time_tasks t
            JOIN employees e ON e.id=t.employee_id
-           WHERE t.linked_to_employee_id=? AND t.active=1 AND t.status='Done'
-             AND t.linked_to_employee_id != t.employee_id
+           WHERE t.active=1 AND t.status='Done'
+             AND ((t.linked_to_employee_id=? AND t.linked_to_employee_id != t.employee_id)
+                  OR (t.linked_to_employee_id IS NULL AND t.assigned_by_employee_id=?
+                      AND t.assigned_by_employee_id != t.employee_id))
            ORDER BY t.due_date, t.id""",
-        (linked,),
+        (linked, linked),
     ).fetchall()
     for r in done_rows:
         d = dict(r)
@@ -3083,12 +3100,14 @@ def list_linked_approval_bucket(linked_employee_id: int) -> list[dict]:
                   t.employee_id as assignee_employee_id, e.name as assignee_name
            FROM one_time_tasks t
            JOIN employees e ON e.id=t.employee_id
-           WHERE t.linked_to_employee_id=? AND t.active=1
+           WHERE t.active=1
+             AND ((t.linked_to_employee_id=? AND t.linked_to_employee_id != t.employee_id)
+                  OR (t.linked_to_employee_id IS NULL AND t.assigned_by_employee_id=?
+                      AND t.assigned_by_employee_id != t.employee_id))
              AND t.status IN ('Pending','In Progress','Rejected')
              AND IFNULL(t.due_date,'') != '' AND t.due_date < ?
-             AND t.linked_to_employee_id != t.employee_id
            ORDER BY t.due_date, t.id""",
-        (linked, today),
+        (linked, linked, today),
     ).fetchall()
     now = _now_iso()
     for r in overdue:
@@ -3146,7 +3165,11 @@ def extend_one_time_deadline(task_id: int, new_due: str, actor_employee_id: int)
     row = dict(row)
     linked = row.get("linked_to_employee_id")
     try:
-        linked_ok = linked is not None and int(linked) == int(actor_employee_id)
+        if linked is not None:
+            linked_ok = int(linked) == int(actor_employee_id)
+        else:  # no accountable person: the assigner owns the deadline
+            by = row.get("assigned_by_employee_id")
+            linked_ok = by is not None and int(by) == int(actor_employee_id)
     except (TypeError, ValueError):
         linked_ok = False
     if not linked_ok:
@@ -4096,7 +4119,7 @@ def approve_task_log(
     conn = _connect()
     row = conn.execute(
         """
-        SELECT tl.*, r.linked_to_employee_id, r.title, r.frequency
+        SELECT tl.*, r.linked_to_employee_id, r.title, r.frequency, r.assigned_by_employee_id
         FROM task_logs tl
         JOIN responsibilities r ON r.id=tl.responsibility_id
         WHERE tl.id=?
@@ -4107,6 +4130,9 @@ def approve_task_log(
         conn.close()
         return False
     linked = row["linked_to_employee_id"] if "linked_to_employee_id" in row.keys() else None
+    if not linked and row["assigned_by_employee_id"] and row["approval_employee_id"] is None:
+        # No accountable person: only the assigner approves.
+        linked = row["assigned_by_employee_id"]
     assignee_id = int(row["employee_id"])
     # Assigned employee cannot approve/cancel their own responsibility mark
     if (
@@ -4186,7 +4212,8 @@ def approve_task_log(
     )
     # Clear inbox notifications for this approval
     try:
-        linked_clear = int(row["linked_to_employee_id"]) if row["linked_to_employee_id"] else None
+        clear_src = row["linked_to_employee_id"] or row["approval_employee_id"]
+        linked_clear = int(clear_src) if clear_src else None
     except (TypeError, ValueError, KeyError):
         linked_clear = None
     if linked_clear:

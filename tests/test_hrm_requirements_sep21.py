@@ -241,11 +241,13 @@ def test_self_assign_task_http(client, hrm, monkeypatch):
         json={"employee_id": a, "title": "Boss asked now", "priority": "High"},
     )
     assert ok.status_code == 403, ok.text
-    blocked = client.post(
+    # Employees may now assign to *other* people (reviewed by the assignee's HOD / accepted by them)
+    other = client.post(
         "/api/hrm/one-time-tasks",
         json={"employee_id": b, "title": "Other person", "priority": "High"},
     )
-    assert blocked.status_code == 403
+    assert other.status_code == 200
+    assert other.json()["workflow_status"] in ("pending_hod_review", "pending_employee_acceptance")
 
 
 def test_import_http_template(client, auth_token):

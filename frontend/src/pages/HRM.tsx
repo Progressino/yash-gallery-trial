@@ -10,8 +10,12 @@ import {
   AttendanceReport, BreakConfirmModal, DwrReport, HolidayModal, HoldModal, OfficeTimeBar, ScheduleRuleInput, SlotList,
   WeekdayPairInput, weekdayPairValid, WorkingHoursReport, sendWithOverlapConfirm, type BreakInfo,
 } from './hrmWorkTime'
+import {
+  AssignExtraFields, AssignViewToggle, AssignedByMeTable, AssignmentAcceptanceGate, AssignmentReviewList,
+  EMPTY_ASSIGN_EXTRA, WorkTrackerTab, assignExtraPayload, type AssignExtra, type AssignView,
+} from './hrmAssignments'
 
-type Tab = 'dashboard' | 'check' | 'approvals' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'reports' | 'hierarchy'
+type Tab = 'dashboard' | 'check' | 'approvals' | 'tracker' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'reports' | 'hierarchy'
 
 const FREQ_HEADING_ORDER = ['Daily', 'Twice a Week', 'Weekly', 'Fortnightly', 'Monthly', 'Quarterly', 'Yearly']
 
@@ -173,7 +177,8 @@ export default function HRM() {
   const isHodSelfCheck = userRole === 'HOD' || !!scope?.is_hod
   const canAssignTasks = !isEmployeeScope
   const canSelfAssignTask = false
-  const canCreateTask = canAssignTasks || canSelfAssignTask
+  const canAssignWork = scope?.can_assign_work ?? !isEmployeeScope
+  const canCreateTask = canAssignWork || canSelfAssignTask
   const canEditAssignments = scope?.can_edit_assignments ?? (canManageOrg || userRole === 'HOD')
   const canMutateRecords = canManageOrg || userRole === 'HOD' || !!scope?.is_hod || (scope?.can_mutate_assignment_records ?? false)
   const canDeleteHrm = scope?.can_delete_hrm_records ?? canManageOrg
@@ -303,6 +308,8 @@ export default function HRM() {
     schedule_month: 0, schedule_rule: '', expected_time: '', kpi_weightage: '' as any, linked_to_employee_id: '' as any,
     backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
   })
+  const [assignExtra, setAssignExtra] = useState<AssignExtra>(EMPTY_ASSIGN_EXTRA)
+  const [assignView, setAssignView] = useState<AssignView>('to_me')
   const [showQuickResp, setShowQuickResp] = useState(false)
   const [voiceText, setVoiceText] = useState('')
   const [isListening, setIsListening] = useState(false)
@@ -414,6 +421,16 @@ export default function HRM() {
     enabled: !!scope?.employee_id,
     refetchInterval: 60_000,
   })
+  const { data: assignSummary } = useQuery({
+    queryKey: ['hrm-assign', 'summary', scope?.employee_id],
+    queryFn: () => api.get('/hrm/assignments/summary').then(r => r.data),
+    enabled: !!scope?.employee_id,
+    refetchInterval: 60_000,
+  })
+  const trackerBadge = assignSummary
+    ? (assignSummary.assigned_to_me?.needs_my_action || 0) + (assignSummary.assigned_by_me?.needs_my_action || 0)
+      + (assignSummary.hod_inbox?.needs_my_action || 0)
+    : 0
   const { data: responsibilities = [] } = useQuery({
     queryKey: ['hrm-resps', selDept, selEmp],
     queryFn: () => api.get(`/hrm/responsibilities${selDept ? `?department_id=${selDept}` : ''}${selEmp ? `${selDept ? '&' : '?'}employee_id=${selEmp}` : ''}`).then(r => r.data)
@@ -507,9 +524,17 @@ export default function HRM() {
   })
   const updateEmpMut = useMutation({ mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/hrm/employees/${id}`, data), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }); setEditEmp(null) } })
   const deleteEmpMut = useMutation({ mutationFn: (id: number) => api.delete(`/hrm/employees/${id}`), onSuccess: () => { qc.invalidateQueries({ queryKey: ['hrm-emps'] }); qc.invalidateQueries({ queryKey: ['hrm-all-emps'] }) } })
+  const announceAssignment = (wfStatus?: string) => {
+    setAssignExtra(EMPTY_ASSIGN_EXTRA)
+    if (wfStatus === 'pending_hod_review') alert("Sent to the employee's HOD for review. You can track it in Work Tracker.")
+    else if (wfStatus === 'pending_employee_acceptance') alert('Sent to the employee for acceptance. You can track it in Work Tracker.')
+  }
   const createRespMut = useMutation({
     mutationFn: (b: object) => api.post('/hrm/responsibilities', b),
-    onSuccess: () => {
+    onSuccess: (res: any) => {
+      announceAssignment(res?.data?.workflow_status)
+      qc.invalidateQueries({ queryKey: ['hrm-assign'] })
+      qc.invalidateQueries({ queryKey: ['hrm-assigned-by-me'] })
       qc.invalidateQueries({ queryKey: ['hrm-resps'] })
       qc.invalidateQueries({ queryKey: ['hrm-hod'] })
       setShowRespForm(false)
@@ -800,7 +825,10 @@ export default function HRM() {
   })
   const createOneTimeTaskMut = useMutation({
     mutationFn: (b: object) => api.post('/hrm/one-time-tasks', b),
-    onSuccess: () => {
+    onSuccess: (res: any) => {
+      announceAssignment(res?.data?.workflow_status)
+      qc.invalidateQueries({ queryKey: ['hrm-assign'] })
+      qc.invalidateQueries({ queryKey: ['hrm-assigned-by-me'] })
       invalidateTaskMetrics()
       setShowTaskForm(false)
       setShowQuickResp(false)
@@ -896,7 +924,7 @@ export default function HRM() {
   })
   const submitAssign = (form: typeof quickResp) => {
     if (!form.employee_id || !form.title) return
-    if (form.mode !== 'task' && !form.linked_to_employee_id) {
+    if (form.mode !== 'task' && !form.linked_to_employee_id && !scope?.employee_id) {
       alert('Accountable person is required')
       return
     }
@@ -920,6 +948,7 @@ export default function HRM() {
         assigned_by: form.added_by || '',
         priority: form.priority || 'Medium',
         linked_to_employee_id: form.linked_to_employee_id ? +form.linked_to_employee_id : null,
+        ...assignExtraPayload(assignExtra),
       })
     } else {
       const rule = SCHEDULE_RULE_FREQS.includes(form.frequency) ? (form.schedule_rule || '').trim() : ''
@@ -957,6 +986,7 @@ export default function HRM() {
         kpi_weightage: form.kpi_weightage === '' || form.kpi_weightage == null ? 0 : +form.kpi_weightage,
         linked_to_employee_id: form.linked_to_employee_id ? +form.linked_to_employee_id : null,
         ...backupPayload,
+        ...assignExtraPayload(assignExtra),
       })
     }
   }
@@ -1356,6 +1386,7 @@ export default function HRM() {
     ['dashboard', `📊 ${t(lang, 'dashboard')}`],
     ['check', `🔎 ${t(lang, 'check')}`],
     ['approvals', `✅ Approvals`],
+    ['tracker', `🧭 Work Tracker`],
     ['employees', `👥 ${t(lang, 'employees')}`],
     ['responsibilities', `📋 ${t(lang, 'responsibilities')}`],
     ['tasks', `✅ ${t(lang, 'tasks')}`],
@@ -1382,7 +1413,7 @@ export default function HRM() {
       tabs = tabs.filter(([k]) => k !== 'hierarchy')
     }
     if (scopeLevel === 'self') {
-      tabs = tabs.filter(([k]) => ['check', 'approvals', 'responsibilities', 'tasks', 'issues', 'appraisal', 'reports'].includes(k) || (canViewDashboard && k === 'dashboard'))
+      tabs = tabs.filter(([k]) => ['check', 'approvals', 'tracker', 'responsibilities', 'tasks', 'issues', 'appraisal', 'reports'].includes(k) || (canViewDashboard && k === 'dashboard'))
       // Employees never see dashboard (canViewDashboard false for Employee)
       tabs = tabs.filter(([k]) => k !== 'dashboard')
     }
@@ -1416,10 +1447,13 @@ export default function HRM() {
     }
     return rows
   }, [pickersEmps, allEmps, isEmployeeScope, scope?.employee_id])
-  const teamEmps = useMemo(
-    () => pickerEmps.filter((e: any) => !(isHodSelfCheck && Number(e.id) === Number(scope?.employee_id))),
-    [pickerEmps, isHodSelfCheck, scope?.employee_id],
-  )
+  const teamEmps = useMemo(() => {
+    // Employees (and HODs) can assign to anyone in the org except themselves
+    const rows = isEmployeeScope
+      ? ((pickersEmps as any[]).length ? (pickersEmps as any[]) : (allEmps as any[]))
+      : pickerEmps
+    return rows.filter((e: any) => !((isHodSelfCheck || isEmployeeScope) && Number(e.id) === Number(scope?.employee_id)))
+  }, [pickerEmps, pickersEmps, allEmps, isEmployeeScope, isHodSelfCheck, scope?.employee_id])
 
   /** Full peer list for Linked To + Backup Person (never limited to self-only). */
   const assignPickers = useMemo(() => {
@@ -1477,6 +1511,7 @@ export default function HRM() {
 
   return (
     <div className="space-y-4">
+      <AssignmentAcceptanceGate employeeId={scope?.employee_id} />
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-gray-800">{t(lang, 'title')}</h1>
@@ -1499,9 +1534,14 @@ export default function HRM() {
           <button key={key} onClick={() => setTab(key)}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${tab === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
             {label}
-            {key === 'approvals' && (pendingApprovals?.pending?.length || 0) > 0 && (
+            {key === 'approvals' && (pendingApprovals?.pending?.length || 0) + (pendingApprovals?.assignment_reviews?.length || 0) > 0 && (
               <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-indigo-600 text-white text-[10px]">
-                {pendingApprovals.pending.length}
+                {(pendingApprovals?.pending?.length || 0) + (pendingApprovals?.assignment_reviews?.length || 0)}
+              </span>
+            )}
+            {key === 'tracker' && trackerBadge > 0 && (
+              <span className="ml-1 inline-flex items-center justify-center min-w-[1.1rem] h-4 px-1 rounded-full bg-indigo-600 text-white text-[10px]">
+                {trackerBadge}
               </span>
             )}
           </button>
@@ -2085,8 +2125,18 @@ export default function HRM() {
               </button>
             )}
           </div>
+          <AssignmentReviewList rows={pendingApprovals?.assignment_reviews || []} />
           {renderApprovalInbox()}
         </div>
+      )}
+
+      {/* ── WORK TRACKER (cross-department assignments) ── */}
+      {tab === 'tracker' && (
+        <WorkTrackerTab
+          employeeId={scope?.employee_id}
+          depts={depts as any[]}
+          showHodInbox={isHodSelfCheck || canManageOrg || (pendingApprovals?.assignment_reviews?.length || 0) > 0}
+        />
       )}
 
       {/* ── EMPLOYEES ── */}
@@ -2212,6 +2262,8 @@ export default function HRM() {
       {/* ── RESPONSIBILITIES ── */}
       {tab === 'responsibilities' && (
         <div className="space-y-4">
+          {!!scope?.employee_id && <AssignViewToggle value={assignView} onChange={setAssignView} />}
+          {assignView === 'by_me' && <AssignedByMeTable kind="responsibility" onOpenTracker={() => setTab('tracker')} />}
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex gap-2">
               {!isEmployeeScope && (
@@ -2228,7 +2280,7 @@ export default function HRM() {
               )}
             </div>
             <div className="flex gap-2 flex-wrap">
-            {canEditAssignments && (
+            {canAssignWork && (
             <button onClick={() => setShowRespForm(true)} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm font-medium">
               + Assign Item
             </button>
@@ -2306,7 +2358,7 @@ export default function HRM() {
                 )}
                 <div><label className="text-xs text-gray-500">Linked Person (supervisor / approver)</label>
                   <select value={respForm.linked_to_employee_id} onChange={e => setRespForm(f => ({ ...f, linked_to_employee_id: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
-                    <option value="">Self-complete (no approval)</option>
+                    <option value="">{scope?.employee_id ? 'Me (assigner) approves completion' : 'Select accountable person'}</option>
                     {assignPickers.map((e: any) => <option key={e.id} value={e.id}>{e.name} ({e.department_name || '—'})</option>)}
                   </select>
                   <p className="text-[10px] text-gray-400 mt-0.5">Anyone in the organization. Shown on Employee Check so the employee knows who supervises or approves this task.</p>
@@ -2349,6 +2401,7 @@ export default function HRM() {
                     {assigneeOptions.map(n => <option key={n}>{n}</option>)}
                   </select>
                 </div>
+                <AssignExtraFields value={assignExtra} onChange={setAssignExtra} />
               </div>
               <div className="flex gap-2">
                 <button type="button" onClick={() => submitAssign({ ...respForm, mode: 'responsibility' as const, department_id: '', due_date: '' })} disabled={!respForm.employee_id || !respForm.title || (respForm.mandatory && !respForm.backup_employee_id) || createRespMut.isPending} className="px-4 py-2 bg-[#002B5B] text-white rounded-lg text-sm disabled:opacity-50">{createRespMut.isPending ? 'Saving…' : 'Assign'}</button>
@@ -2356,7 +2409,7 @@ export default function HRM() {
               </div>
             </div>
           )}
-          {(() => {
+          {assignView === 'to_me' && (() => {
             const grouped: Record<string, any[]> = {}
             ;filteredResponsibilities.forEach((r: any) => { const key = r.employee_name || 'Unknown'; if (!grouped[key]) grouped[key] = []; grouped[key].push(r) })
             return (
@@ -2540,6 +2593,8 @@ export default function HRM() {
       {/* ── ONE-TIME TASKS ── */}
       {tab === 'tasks' && (
         <div className="space-y-4">
+          {!!scope?.employee_id && <AssignViewToggle value={assignView} onChange={setAssignView} />}
+          {assignView === 'by_me' && <AssignedByMeTable kind="task" onOpenTracker={() => setTab('tracker')} />}
           <div className="bg-blue-50 border border-blue-100 rounded-xl px-4 py-3 text-sm text-blue-900">
             <b>Tasks</b> are one-time assignments with HOD approval. Start, pause and complete them in <b>Employee Check</b> (time slots).
             Recurring daily/weekly work stays under <b>Responsibilities</b> and the HOD view.
@@ -2634,6 +2689,7 @@ export default function HRM() {
                     ))}
                   </select>
                 </div>
+                <AssignExtraFields value={assignExtra} onChange={setAssignExtra} />
               </div>
               <div className="flex gap-2">
                 <button
@@ -2670,6 +2726,7 @@ export default function HRM() {
             </div>
           )}
 
+          {assignView === 'to_me' && (
           <div className="bg-white rounded-xl border overflow-hidden">
             <div className="px-3 py-2 flex flex-wrap gap-2 text-xs border-b">
               <input placeholder="Title" value={taskTitleFilter} onChange={e => setTaskTitleFilter(e.target.value)} className="border rounded px-2 py-1" />
@@ -2794,6 +2851,7 @@ export default function HRM() {
               <p className="text-center text-gray-400 py-8 text-sm">No one-time tasks yet.</p>
             )}
           </div>
+          )}
         </div>
       )}
 

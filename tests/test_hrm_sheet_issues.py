@@ -278,6 +278,14 @@ def test_hod_can_assign_one_time_task_cross_department(env, monkeypatch):
     assert body.get("ok") is True
     tid = body.get("id")
     assert tid
+    # Cross-department: waits for the assignee's HOD review, then employee acceptance
+    assert body.get("workflow_status") in ("pending_hod_review", "pending_employee_acceptance")
+    from backend.services import hrm_assignment_workflow as wf
+
+    conn = hrm_db._connect()
+    conn.execute("UPDATE one_time_tasks SET workflow_status=?, active=1 WHERE id=?", (wf.ACCEPTED, tid))
+    conn.commit()
+    conn.close()
     row = next(t for t in hrm_db.list_one_time_tasks(employee_id=harsh) if t["id"] == tid)
     assert row["title"] == "New design of Label and Tag"
     assert int(row["linked_to_employee_id"] or 0) == int(c)
@@ -449,8 +457,18 @@ def test_row6_accountable_person_required(env, monkeypatch):
         "backend.routers.hrm._scope_from_request",
         lambda request: HrmScope(level="all", role="Admin", user_id=1, employee_id=h),
     )
+    # Accountable person is optional when the assigner is a known employee (approval -> assigner)
+    # but still required when no assigner identity exists.
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="all", role="Admin", user_id=1, employee_id=None),
+    )
     missing = client.post("/api/hrm/responsibilities", json={"employee_id": a, "title": "No owner", "frequency": "Daily"})
     assert missing.status_code == 400
+    monkeypatch.setattr(
+        "backend.routers.hrm._scope_from_request",
+        lambda request: HrmScope(level="all", role="Admin", user_id=1, employee_id=h),
+    )
     assert "Accountable" in missing.json()["detail"]
     same = client.post(
         "/api/hrm/responsibilities",
