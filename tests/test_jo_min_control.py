@@ -138,14 +138,14 @@ def _checked_available(grey_path: str, code: str) -> float:
     return float(v[0]) if v else 0.0
 
 
-def _make_jo(client, dbs, *, stock: float = 1000.0) -> dict:
+def _make_jo(client, dbs, *, stock: float = 1000.0, planned: int = 100) -> dict:
     _seed_bom(dbs["ITEM_DB_PATH"])
     _set_item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN", stock)
     r = client.post(
         "/api/production/orders",
         json={
             "jo_date": "2026-05-15", "so_number": "SO-MIN-1", "so_source": "manual", "sku": "STYLE1", "sku_name": "Printed shirt",
-            "process": "Cutting", "planned_qty": 100,
+            "process": "Cutting", "planned_qty": planned,
             "fabric_code": "FAB-CTN", "fabric_qty": 100, "fabric_unit": "MTR",
         },
     )
@@ -154,6 +154,14 @@ def _make_jo(client, dbs, *, stock: float = 1000.0) -> dict:
     jo = next(o for o in client.get("/api/production/orders").json() if o["jo_number"] == jo_num)
     note = client.get(f"/api/production/orders/{jo['id']}/issue-note").json()
     return {"jo": jo, "note": note, "line": next(l for l in note["lines"] if l["material_code"] == "FAB-CTN")}
+
+
+def _as(monkeypatch, user: str, role: str = "Manager") -> None:
+    """Switch the authenticated test user (token decode is patched in conftest)."""
+    monkeypatch.setattr(
+        "backend.main.decode_token",
+        lambda t: {"sub": user, "role": role, "permissions": []} if t == "test-token" else None,
+    )
 
 
 def _patch(client, note_id, line_id, qty, reason="", remarks=""):
@@ -316,7 +324,10 @@ def test_partial_issue_then_additional_for_remaining(dbs, client, monkeypatch):
 
     # Partial first issue (90 of 150 = -40%) → approval needed (Stock Shortage).
     assert _patch(client, nid, lid, 90, "Stock Shortage").json()["status"] == "Pending Approval"
-    assert client.post(f"/api/production/issue-notes/{nid}/approve").status_code == 200  # tester = Admin
+    assert client.post(f"/api/production/issue-notes/{nid}/approve").status_code == 400  # issuer ≠ approver
+    _as(monkeypatch, "mgr1")
+    assert client.post(f"/api/production/issue-notes/{nid}/approve").status_code == 200
+    _as(monkeypatch, "tester", "Admin")
     assert client.post(f"/api/production/issue-notes/{nid}/confirm").status_code == 200
     assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(910.0)
 
@@ -344,14 +355,14 @@ def test_partial_issue_then_additional_for_remaining(dbs, client, monkeypatch):
     assert c["confirmed_issued_qty"] == pytest.approx(150.0) and c["remaining_qty"] == pytest.approx(0.0)
     assert len(cum2["additional_notes"]) == 1
 
-    # Nothing left against BOM → default additional rejected; explicit extra needs approval.
+    # Nothing left against BOM → default additional rejected; explicit extra is judged on the cumulative.
     assert client.post(f"/api/production/orders/{joid}/issue-notes/additional").status_code == 400
     ex = client.post(
         f"/api/production/orders/{joid}/issue-notes/additional",
-        json={"lines": [{"material_code": "FAB-CTN", "issue_qty": 5, "reason": "Wastage"}]},
+        json={"lines": [{"material_code": "FAB-CTN", "issue_qty": 30, "reason": "Wastage"}]},
     )
     assert ex.status_code == 200, ex.text
-    assert ex.json()["status"] == "Pending Approval"  # issue against zero remaining BOM
+    assert ex.json()["status"] == "Pending Approval"  # 150 + 30 = 180 vs BOM 150 → +20% > 10%
 
     # "Extra issue" with no explicit lines: zero-qty Draft lines the issuer edits (cancel the open one first).
     assert client.post(f"/api/production/issue-notes/{ex.json()['issue_note']['id']}/cancel").status_code == 200
@@ -477,3 +488,212 @@ def test_purchase_min_over_tolerance_needs_approval(tmp_path, monkeypatch):
     purchase_db.update_min_status(mid, "Confirmed")
     done = purchase_db.get_min_by_number(num)
     assert done["status"] == "Confirmed" and done["stock_posted"] == 1
+
+
+# ── reserved printed fabric is consumable on Confirm (SO-13 / 7081YKPINK regression) ─────────────
+
+def _seed_reserved(grey_path, *, reserved, free=0.0, so="SO-MIN-1", sku="STYLE1", status="Active", code="FAB-CTN"):
+    """Checked printed stock after an SO allocation: metres moved available → reserved."""
+    conn = sqlite3.connect(grey_path)
+    conn.execute(
+        """INSERT INTO printed_fabric_checked_stock(fabric_code, fabric_name, checked_qty, passed_qty,
+               reserved_qty, available_qty) VALUES(?,?,?,?,?,?)""",
+        (code, "Cotton Fabric", reserved + free, reserved + free, reserved, free),
+    )
+    conn.execute(
+        """INSERT INTO printed_fabric_reservations(fabric_code, fabric_name, so_number, sku, qty, unit, status)
+           VALUES(?,?,?,?,?,'MTR',?)""",
+        (code, "Cotton Fabric", so, sku, reserved, status),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _stock_row(grey_path, code="FAB-CTN"):
+    conn = sqlite3.connect(grey_path)
+    r = conn.execute(
+        "SELECT available_qty, reserved_qty FROM printed_fabric_checked_stock WHERE fabric_code=?", (code,)
+    ).fetchone()
+    conn.close()
+    return float(r[0]), float(r[1])
+
+
+def _reservations(grey_path, code="FAB-CTN"):
+    conn = sqlite3.connect(grey_path)
+    rows = conn.execute(
+        "SELECT status, qty FROM printed_fabric_reservations WHERE fabric_code=? ORDER BY id", (code,)
+    ).fetchall()
+    conn.close()
+    return [(r[0], float(r[1])) for r in rows]
+
+
+@pytest.mark.parametrize("res_status", ["Active", "JO Created"])
+def test_reserved_only_fabric_confirms_for_matching_so_jo(dbs, client, res_status):
+    ctx = _make_jo(client, dbs)  # BOM 150, SO-MIN-1 / STYLE1
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=150.0, free=0.0, status=res_status)
+    nid, joid = ctx["note"]["id"], ctx["jo"]["id"]
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (0.0, 150.0)  # free = 0 — the old confirm refused here
+
+    r = client.post(f"/api/production/issue-notes/{nid}/confirm")
+    assert r.status_code == 200, r.text
+
+    # Physical stock leaves once: Item Master −150, reservation consumed, free untouched (no double deduct).
+    assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(850.0)
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (0.0, 0.0)
+    assert _reservations(dbs["GREY_DB_PATH"]) == [("CUTTING_ISSUED", 150.0)]
+    jo = client.get(f"/api/production/orders/{joid}").json()
+    assert [i["issued_qty"] for i in jo["fabric_issues"]] == [150.0]
+
+
+def test_reserved_plus_free_used_when_issue_exceeds_reservation(dbs, client):
+    ctx = _make_jo(client, dbs)  # issue 150
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=100.0, free=80.0)
+    nid = ctx["note"]["id"]
+    assert client.post(f"/api/production/issue-notes/{nid}/confirm").status_code == 200
+    # 100 from the reservation + 50 from free; free 80 → 30, reserved fully consumed.
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (pytest.approx(30.0), 0.0)
+    assert _reservations(dbs["GREY_DB_PATH"]) == [("CUTTING_ISSUED", 100.0)]
+    assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(850.0)
+
+
+def test_partial_issue_splits_reservation_and_keeps_the_rest_reserved(dbs, client):
+    ctx = _make_jo(client, dbs)
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=150.0, free=0.0)
+    nid, lid = ctx["note"]["id"], ctx["line"]["id"]
+    assert _patch(client, nid, lid, 140, "Wastage").status_code == 200
+    assert client.post(f"/api/production/issue-notes/{nid}/confirm").status_code == 200
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (0.0, pytest.approx(10.0))
+    assert sorted(_reservations(dbs["GREY_DB_PATH"])) == [("Active", 10.0), ("CUTTING_ISSUED", 140.0)]
+
+
+def test_reserved_for_other_so_or_insufficient_total_still_blocked(dbs, client):
+    ctx = _make_jo(client, dbs)
+    nid = ctx["note"]["id"]
+    # Another SO's reservation is not consumable by this JO.
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=150.0, free=0.0, so="SO-OTHER", sku="STYLE1")
+    r = client.post(f"/api/production/issue-notes/{nid}/confirm")
+    assert r.status_code == 400 and "insufficient checked printed fabric" in r.json()["detail"].lower()
+    assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(1000.0)
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (0.0, 150.0)
+    assert client.get(f"/api/production/issue-notes/{nid}").json()["status"] == "Draft"
+
+
+def test_own_reservation_short_of_issue_with_no_free_blocked(dbs, client):
+    ctx = _make_jo(client, dbs)  # needs 150, only 100 reserved + 20 free
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=100.0, free=20.0)
+    nid = ctx["note"]["id"]
+    r = client.post(f"/api/production/issue-notes/{nid}/confirm")
+    assert r.status_code == 400 and "checked printed fabric" in r.json()["detail"].lower()
+    assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(1000.0)
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (pytest.approx(20.0), pytest.approx(100.0))
+    assert _reservations(dbs["GREY_DB_PATH"]) == [("Active", 100.0)]
+
+
+# ── interim approval: maker-checker, reject, send back ───────────────────────
+
+def _pending(client, dbs, monkeypatch):
+    ctx = _make_jo(client, dbs)
+    nid, lid = ctx["note"]["id"], ctx["line"]["id"]
+    _as(monkeypatch, "issuer1", "Clerk")
+    assert _patch(client, nid, lid, 200, "Mini CAD Average Change").json()["status"] == "Pending Approval"
+    return ctx, nid, lid
+
+
+def test_issuer_cannot_approve_own_pending_min(dbs, client, monkeypatch):
+    ctx, nid, lid = _pending(client, dbs, monkeypatch)
+    _as(monkeypatch, "issuer1", "Manager")  # even with a Manager role
+    r = client.post(f"/api/production/issue-notes/{nid}/approve")
+    assert r.status_code == 400 and "different" in r.json()["detail"].lower()
+    assert client.get(f"/api/production/issue-notes/{nid}").json()["status"] == "Pending Approval"
+
+    _as(monkeypatch, "mgr2", "Manager")
+    a = client.post(f"/api/production/issue-notes/{nid}/approve", json={"remarks": "OK per Sir"})
+    assert a.status_code == 200, a.text
+    note = a.json()["issue_note"]
+    assert note["approved_by"] == "mgr2" and note["approval_status"] == "Approved"
+    assert note["approval_remarks"] == "OK per Sir"
+    # Stock moves only on Confirm after approval.
+    assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(1000.0)
+    assert client.post(f"/api/production/issue-notes/{nid}/confirm").status_code == 200
+    assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(800.0)
+
+
+def test_send_back_requires_remarks_then_resubmit_and_approve(dbs, client, monkeypatch):
+    ctx, nid, lid = _pending(client, dbs, monkeypatch)
+    _as(monkeypatch, "mgr2", "Manager")
+    assert client.post(f"/api/production/issue-notes/{nid}/send-back", json={}).status_code == 400
+    sb = client.post(f"/api/production/issue-notes/{nid}/send-back", json={"remarks": "Why 200? Recheck marker"})
+    assert sb.status_code == 200, sb.text
+    note = sb.json()["issue_note"]
+    assert note["status"] == "Draft" and note["approval_status"] == "Sent Back"
+    assert note["approval_remarks"] == "Why 200? Recheck marker"
+    # Cannot be confirmed while over tolerance and unapproved.
+    assert client.post(f"/api/production/issue-notes/{nid}/confirm").status_code == 400
+
+    _as(monkeypatch, "issuer1", "Clerk")
+    rs = client.post(f"/api/production/issue-notes/{nid}/resubmit", json={"remarks": "Marker verified"})
+    assert rs.status_code == 200 and rs.json()["issue_note"]["status"] == "Pending Approval"
+
+    audit = client.get(f"/api/production/issue-notes/{nid}/adjustments").json()
+    phases = [a["phase"] for a in audit]
+    assert "SENT_BACK" in phases and "RESUBMITTED" in phases
+    assert any(a["phase"] == "SENT_BACK" and a["remarks"] == "Why 200? Recheck marker" for a in audit)
+
+
+def test_reject_primary_resets_to_bom_and_additional_is_closed(dbs, client, monkeypatch):
+    ctx, nid, lid = _pending(client, dbs, monkeypatch)
+    _as(monkeypatch, "mgr2", "Manager")
+    assert client.post(f"/api/production/issue-notes/{nid}/reject", json={}).status_code == 400
+    rj = client.post(f"/api/production/issue-notes/{nid}/reject", json={"remarks": "Not justified"})
+    assert rj.status_code == 200, rj.text
+    note = rj.json()["issue_note"]
+    assert note["status"] == "Draft" and note["approval_status"] == "Rejected"
+    assert note["lines"][0]["issue_qty"] == pytest.approx(150.0)  # reset to BOM
+    assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(1000.0)
+    assert any(a["phase"] == "REJECTED" for a in client.get(f"/api/production/issue-notes/{nid}/adjustments").json())
+
+    # Clerks cannot decide.
+    _as(monkeypatch, "clerk1", "Clerk")
+    assert client.post(f"/api/production/issue-notes/{nid}/reject", json={"remarks": "x"}).status_code == 403
+    assert client.post(f"/api/production/issue-notes/{nid}/send-back", json={"remarks": "x"}).status_code == 403
+
+    # Additional MIN → Rejected (closed, no stock).
+    _as(monkeypatch, "tester", "Admin")
+    assert client.post(f"/api/production/issue-notes/{nid}/confirm").status_code == 200
+    joid = ctx["jo"]["id"]
+    ex = client.post(f"/api/production/orders/{joid}/issue-notes/additional",
+                     json={"lines": [{"material_code": "FAB-CTN", "issue_qty": 40, "reason": "Wastage"}]})
+    assert ex.json()["status"] == "Pending Approval"
+    _as(monkeypatch, "mgr2", "Manager")
+    r2 = client.post(f"/api/production/issue-notes/{ex.json()['issue_note']['id']}/reject", json={"remarks": "No"})
+    assert r2.status_code == 200 and r2.json()["issue_note"]["status"] == "Rejected"
+    assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(850.0)
+
+
+# ── Additional MIN: cumulative tolerance vs BOM ──────────────────────────────
+
+def test_additional_min_tolerance_is_cumulative_vs_bom(dbs, client, monkeypatch):
+    ctx = _make_jo(client, dbs, planned=350)  # BOM 350 × 1.5 = 525
+    nid, joid = ctx["note"]["id"], ctx["jo"]["id"]
+    assert ctx["line"]["bom_required_qty"] == pytest.approx(525.0)
+    assert client.post(f"/api/production/issue-notes/{nid}/confirm").status_code == 200
+
+    # 525 + 20 = 545 vs BOM 525 → +3.81% (within 10%) → Draft, own number / date / user.
+    add = client.post(f"/api/production/orders/{joid}/issue-notes/additional",
+                      json={"lines": [{"material_code": "FAB-CTN", "issue_qty": 20, "reason": "Wastage"}]})
+    assert add.status_code == 200, add.text
+    extra = add.json()["issue_note"]
+    assert add.json()["status"] == "Draft"
+    assert extra["in_number"] != ctx["note"]["in_number"] and extra["parent_in_id"] == nid
+    assert extra["created_by"] == "tester" and extra["in_date"]
+    ln = extra["lines"][0]
+    assert ln["cum_prior_issued_qty"] == pytest.approx(525.0) and ln["cum_total_qty"] == pytest.approx(545.0)
+    assert ln["variance_pct"] == pytest.approx(3.81, abs=0.01)
+    assert client.post(f"/api/production/issue-notes/{extra['id']}/confirm").status_code == 200
+    assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(1000.0 - 545.0)
+
+    # Another +80 → 625 vs 525 = +19.05% → needs approval.
+    again = client.post(f"/api/production/orders/{joid}/issue-notes/additional",
+                        json={"lines": [{"material_code": "FAB-CTN", "issue_qty": 80, "reason": "Wastage"}]})
+    assert again.status_code == 200 and again.json()["status"] == "Pending Approval"
+    assert again.json()["issue_note"]["lines"][0]["variance_pct"] == pytest.approx(19.05, abs=0.01)

@@ -2002,11 +2002,41 @@ def patch_issue_note_line(in_id: int, line_id: int, body: JOMinQtyIn, request: R
     )
 
 
-@router.post("/issue-notes/{in_id}/approve")
-def approve_issue_note(in_id: int, request: Request):
+class JOMinDecisionIn(BaseModel):
+    remarks: Optional[str] = ""
+
+
+def _min_require_approver(request: Request, action: str) -> None:
+    # INTERIM role gate (Manager / Admin / Super Admin / Sir) — replaced by the central Approval Workflow later.
     if not min_tolerance.may_approve(str(_min_auth(request).get("role", "") or "")):
-        raise HTTPException(403, "Only Manager / Admin can approve an over-tolerance Material Issue.")
-    return _min_call(jo_min_control.approve, in_id, user_name=_min_actor(request))
+        raise HTTPException(403, f"Only Manager / Admin can {action} an over-tolerance Material Issue.")
+
+
+@router.post("/issue-notes/{in_id}/approve")
+def approve_issue_note(in_id: int, request: Request, body: Optional[JOMinDecisionIn] = None):
+    _min_require_approver(request, "approve")
+    return _min_call(jo_min_control.approve, in_id, user_name=_min_actor(request),
+                     remarks=(body.remarks if body else "") or "")
+
+
+@router.post("/issue-notes/{in_id}/reject")
+def reject_issue_note(in_id: int, request: Request, body: Optional[JOMinDecisionIn] = None):
+    _min_require_approver(request, "reject")
+    return _min_call(jo_min_control.reject, in_id, user_name=_min_actor(request),
+                     remarks=(body.remarks if body else "") or "")
+
+
+@router.post("/issue-notes/{in_id}/send-back")
+def send_back_issue_note(in_id: int, request: Request, body: Optional[JOMinDecisionIn] = None):
+    _min_require_approver(request, "send back")
+    return _min_call(jo_min_control.send_back, in_id, user_name=_min_actor(request),
+                     remarks=(body.remarks if body else "") or "")
+
+
+@router.post("/issue-notes/{in_id}/resubmit")
+def resubmit_issue_note(in_id: int, request: Request, body: Optional[JOMinDecisionIn] = None):
+    return _min_call(jo_min_control.resubmit, in_id, user_name=_min_actor(request),
+                     remarks=(body.remarks if body else "") or "")
 
 
 @router.post("/issue-notes/{in_id}/confirm")

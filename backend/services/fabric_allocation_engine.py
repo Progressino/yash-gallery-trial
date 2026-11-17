@@ -843,6 +843,53 @@ def release_printed_allocation(
         conn.close()
 
 
+def _matching_reservations(
+    conn: sqlite3.Connection, fabric_code: str, so_number: str, sku: str
+) -> list[sqlite3.Row]:
+    """Open (Active / JO Created) printed reservations for a fabric + SO (+ SKU).
+
+    Shared by :func:`lock_printed_on_cutting_issue` and :func:`reserved_consumable_qty` so the
+    Confirm-time stock check and the actual cutting-issue lock always agree on which
+    reservation a JO may consume. Requires an SO or SKU so a JO never eats another SO's metres.
+    """
+    if not (so_number or sku):
+        return []
+    q = """SELECT * FROM printed_fabric_reservations
+           WHERE TRIM(fabric_code)=? AND status IN ('Active','JO Created')"""
+    params: list[Any] = [fabric_code]
+    if so_number:
+        q += " AND TRIM(so_number)=?"
+        params.append(so_number)
+    if sku:
+        q += " AND TRIM(sku)=?"
+        params.append(sku)
+    return conn.execute(q + " ORDER BY id", tuple(params)).fetchall()
+
+
+def reserved_consumable_qty(fabric_code: str, so_number: str = "", sku: str = "") -> float:
+    """Metres of SO-reserved checked printed fabric a JO for this SO/SKU may consume on issue.
+
+    SO allocation moves metres ``available_qty → reserved_qty`` on checked stock, so a reserved
+    fabric shows *free = 0*. This is the reserved pool the JO's own reservation owns, capped by
+    the warehouse ``reserved_qty`` so a stale reservation row can never over-promise.
+    """
+    code = (fabric_code or "").strip()
+    if not code:
+        return 0.0
+    conn = _conn()
+    try:
+        rows = _matching_reservations(conn, code, (so_number or "").strip(), (sku or "").strip())
+        total = sum(float(r["qty"] or 0) for r in rows)
+        st = conn.execute(
+            "SELECT COALESCE(reserved_qty,0) FROM printed_fabric_checked_stock WHERE TRIM(fabric_code)=?",
+            (code,),
+        ).fetchone()
+        warehouse_reserved = float(st[0]) if st else 0.0
+        return round(max(0.0, min(total, warehouse_reserved)), 3)
+    finally:
+        conn.close()
+
+
 def lock_printed_on_cutting_issue(
     *,
     jo_id: int,
@@ -852,70 +899,97 @@ def lock_printed_on_cutting_issue(
     issued_qty: float = 0,
     user_name: str = "",
 ) -> dict[str, Any]:
-    """Stage 5: mark printed allocations locked when fabric is issued to Cutting."""
+    """Stage 5: consume the JO's SO reservation and lock it when fabric is issued to Cutting.
+
+    Consumes ``reserved_qty`` (not free ``available_qty``). ``reserved_consumed`` in the result is
+    the metres taken from the reservation so the caller deducts only the *remainder* from free
+    stock (no double deduct). A partial issue splits the reservation: the issued part is locked
+    (``CUTTING_ISSUED``), the unissued rest stays open for the next MIN.
+    """
     fabric_code = (fabric_code or "").strip()
     so_number = (so_number or "").strip()
     sku = (sku or "").strip()
     issued_qty = float(issued_qty or 0)
     if not fabric_code or issued_qty <= 0:
-        return {"ok": False, "message": "skip"}
+        return {"ok": False, "message": "skip", "reserved_consumed": 0.0}
 
     conn = _conn()
     try:
-        q = """SELECT * FROM printed_fabric_reservations
-               WHERE TRIM(fabric_code)=? AND status IN ('Active','JO Created')"""
-        params: list[Any] = [fabric_code]
-        if so_number:
-            q += " AND TRIM(so_number)=?"
-            params.append(so_number)
-        if sku:
-            q += " AND TRIM(sku)=?"
-            params.append(sku)
-        rows = conn.execute(q, tuple(params)).fetchall()
+        rows = _matching_reservations(conn, fabric_code, so_number, sku)
+        st = conn.execute(
+            "SELECT COALESCE(reserved_qty,0) FROM printed_fabric_checked_stock WHERE TRIM(fabric_code)=?",
+            (fabric_code,),
+        ).fetchone()
+        warehouse_reserved = float(st[0]) if st else 0.0
         locked_ids = []
         remaining = issued_qty
+        consumed_total = 0.0
         for row in rows:
+            if remaining <= 0.0005 or warehouse_reserved <= 0.0005:
+                break
             rid = int(row["id"])
-            # Deduct reserved warehouse first, then any free if legacy issue path
             r_qty = float(row["qty"] or 0)
-            deduct = min(remaining, r_qty) if remaining > 0 else 0
-            conn.execute(
-                """UPDATE printed_fabric_reservations SET
-                    status='CUTTING_ISSUED',
-                    stage='CUTTING_ISSUED',
-                    locked_at=?,
-                    locked_reason='Cutting issue',
-                    jo_id=COALESCE(jo_id, ?),
-                    cutting_issued_qty = COALESCE(cutting_issued_qty,0) + ?
-                   WHERE id=?""",
-                (_now(), jo_id, deduct or issued_qty, rid),
-            )
-            if deduct > 0:
-                conn.execute(
-                    """UPDATE printed_fabric_checked_stock
-                       SET reserved_qty = MAX(0, COALESCE(reserved_qty,0) - ?)
-                       WHERE TRIM(fabric_code)=?""",
-                    (deduct, fabric_code),
+            deduct = round(min(remaining, r_qty, warehouse_reserved), 3)
+            if deduct <= 0:
+                continue
+            lock_rid = rid
+            if deduct < r_qty - 0.001:
+                # Partial: split — locked slice gets its own row, original keeps the unissued rest.
+                cols = [k for k in row.keys() if k != "id"]
+                vals = {k: row[k] for k in cols}
+                vals.update(qty=deduct, status="CUTTING_ISSUED", stage="CUTTING_ISSUED",
+                            locked_at=_now(), locked_reason="Cutting issue",
+                            jo_id=row["jo_id"] if row["jo_id"] is not None else jo_id,
+                            cutting_issued_qty=deduct)
+                cur = conn.execute(
+                    f"INSERT INTO printed_fabric_reservations({','.join(cols)}) "
+                    f"VALUES ({','.join('?' for _ in cols)})",
+                    tuple(vals[k] for k in cols),
                 )
-                remaining = max(0.0, remaining - deduct)
+                lock_rid = int(cur.lastrowid)
+                conn.execute(
+                    "UPDATE printed_fabric_reservations SET qty = qty - ? WHERE id=?", (deduct, rid)
+                )
+            else:
+                conn.execute(
+                    """UPDATE printed_fabric_reservations SET
+                        status='CUTTING_ISSUED',
+                        stage='CUTTING_ISSUED',
+                        locked_at=?,
+                        locked_reason='Cutting issue',
+                        jo_id=COALESCE(jo_id, ?),
+                        cutting_issued_qty = COALESCE(cutting_issued_qty,0) + ?
+                       WHERE id=?""",
+                    (_now(), jo_id, deduct, rid),
+                )
+            conn.execute(
+                """UPDATE printed_fabric_checked_stock
+                   SET reserved_qty = MAX(0, COALESCE(reserved_qty,0) - ?)
+                   WHERE TRIM(fabric_code)=?""",
+                (deduct, fabric_code),
+            )
+            remaining = max(0.0, remaining - deduct)
+            warehouse_reserved = max(0.0, warehouse_reserved - deduct)
+            consumed_total += deduct
             _audit(
                 conn,
                 event_type=EVENT_PF_LOCK,
                 entity_type="printed_reservation",
-                entity_id=rid,
+                entity_id=lock_rid,
                 printed_code=fabric_code,
                 from_so=row["so_number"] or "",
                 from_sku=row["sku"] or "",
-                qty=deduct or issued_qty,
+                qty=deduct,
                 old_status=row["status"] or "",
                 new_status="CUTTING_ISSUED",
                 user_name=user_name,
                 reason="Cutting issue",
                 document_ref=f"JO:{jo_id}",
             )
-            locked_ids.append(rid)
+            locked_ids.append(lock_rid)
         conn.commit()
-        return {"ok": True, "locked_reservation_ids": locked_ids, "jo_id": jo_id}
+        return {"ok": True, "locked_reservation_ids": locked_ids, "jo_id": jo_id,
+                "reserved_consumed": round(consumed_total, 3)}
     except Exception:
         conn.rollback()
         raise

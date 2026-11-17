@@ -106,6 +106,13 @@ def init_issue_note_tables():
         "approval_required": "INTEGER DEFAULT 0",
         "approved_by": "TEXT DEFAULT ''",
         "approved_at": "TEXT DEFAULT ''",
+        # Interim approval trail (Phase 1.1) — shaped so a centralized ERP Approval Workflow can
+        # replace the actions later: approval_status = Approved | Rejected | Sent Back | ''.
+        "created_by": "TEXT DEFAULT ''",
+        "approval_status": "TEXT DEFAULT ''",
+        "approval_remarks": "TEXT DEFAULT ''",
+        "approval_actor": "TEXT DEFAULT ''",
+        "approval_actor_at": "TEXT DEFAULT ''",
     })
     _ensure_columns(conn, "jo_issue_note_lines", {
         "bom_required_qty": "REAL",
@@ -506,6 +513,7 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
             """UPDATE jo_issue_notes SET in_date=?, jo_date=?, so_number=?, process=?,
                finished_item_code=?, finished_item_name=?, planned_qty=?, status='Draft',
                approval_required=0, approved_by='', approved_at='',
+               approval_status='', approval_remarks='', approval_actor='', approval_actor_at='',
                remarks=? WHERE id=?""",
             (
                 datetime.now().strftime("%Y-%m-%d"),
@@ -576,6 +584,28 @@ def create_issue_note_for_jo(joid: int, jo_number: str, jo: dict, jo_lines: list
     return get_issue_note_by_jo_id(joid) or {"in_number": in_num, "lines": material_lines}
 
 
+def cumulative_context(conn, jo_id: int, note_id: int, material_code: str) -> tuple[float, float]:
+    """(prior confirmed issue on OTHER notes, frozen primary-note BOM total) for one material of a JO.
+
+    Additional MIN tolerance is judged on the cumulative: prior confirmed + this note's issue vs the
+    JO's BOM (e.g. 525 + 20 = 545 vs BOM 525 → +3.81%).
+    """
+    code = str(material_code or "").strip()
+    prior = conn.execute(
+        """SELECT COALESCE(SUM(COALESCE(l.issue_qty, l.required_qty)),0)
+           FROM jo_issue_note_lines l JOIN jo_issue_notes n ON n.id = l.issue_note_id
+           WHERE n.jo_id=? AND n.id!=? AND n.status='Confirmed' AND TRIM(l.material_code)=?""",
+        (jo_id, note_id, code),
+    ).fetchone()[0]
+    bom = conn.execute(
+        """SELECT COALESCE(SUM(COALESCE(l.bom_required_qty, l.required_qty)),0)
+           FROM jo_issue_note_lines l JOIN jo_issue_notes n ON n.id = l.issue_note_id
+           WHERE n.jo_id=? AND COALESCE(n.parent_in_id,0)=0 AND TRIM(l.material_code)=?""",
+        (jo_id, code),
+    ).fetchone()[0]
+    return round(float(prior or 0), 3), round(float(bom or 0), 3)
+
+
 def _note_with_lines(conn, row) -> dict:
     note = dict(row)
     note["lines"] = [
@@ -585,6 +615,14 @@ def _note_with_lines(conn, row) -> dict:
             (note["id"],),
         ).fetchall()
     ]
+    if int(note.get("parent_in_id") or 0):
+        # Additional MIN: expose the cumulative basis so the UI / print show cumulative variance.
+        for ln in note["lines"]:
+            prior, bom = cumulative_context(conn, int(note["jo_id"]), int(note["id"]), ln.get("material_code"))
+            issue = float(ln.get("issue_qty") if ln.get("issue_qty") is not None else ln.get("required_qty") or 0)
+            ln["cum_prior_issued_qty"] = prior
+            ln["cum_bom_qty"] = bom
+            ln["cum_total_qty"] = round(prior + issue, 3)
     return note
 
 
@@ -599,7 +637,7 @@ def jo_cumulative_issue(conn, joid: int) -> list[dict]:
     rows = conn.execute(
         """SELECT n.id AS note_id, n.status, n.parent_in_id, l.*
            FROM jo_issue_note_lines l JOIN jo_issue_notes n ON n.id = l.issue_note_id
-           WHERE n.jo_id=? AND n.status != 'Cancelled' ORDER BY n.id, l.line_no, l.id""",
+           WHERE n.jo_id=? AND n.status NOT IN ('Cancelled','Rejected') ORDER BY n.id, l.line_no, l.id""",
         (joid,),
     ).fetchall()
     by_mat: dict[str, dict] = {}

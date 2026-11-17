@@ -283,6 +283,11 @@ interface IssueNoteLine {
   variance_pct?: number | null
   variance_reason?: string
   variance_remarks?: string
+  // Additional MIN only: cumulative basis (prior confirmed issue + this issue vs JO BOM)
+  cum_prior_issued_qty?: number
+  cum_bom_qty?: number
+  cum_total_qty?: number
+  revised_by?: string
 }
 
 interface IssueNoteCumulative {
@@ -320,6 +325,11 @@ interface IssueNote {
   approval_required?: number
   approved_by?: string
   approved_at?: string
+  approval_status?: string
+  approval_remarks?: string
+  approval_actor?: string
+  approval_actor_at?: string
+  created_by?: string
   additional_notes?: IssueNote[]
   cumulative?: IssueNoteCumulative[]
   total_issue_qty?: number
@@ -355,6 +365,7 @@ const MIN_STATUS_COLORS: Record<string, string> = {
   'Pending Approval': 'bg-orange-100 text-orange-800 border-orange-200',
   Confirmed: 'bg-green-100 text-green-800 border-green-200',
   Cancelled: 'bg-red-100 text-red-700 border-red-200',
+  Rejected: 'bg-red-100 text-red-700 border-red-200',
 }
 
 interface MinSettings { tolerance_pct: number; reasons: string[] }
@@ -483,18 +494,21 @@ function invalidateJoMinQueries(qc: ReturnType<typeof useQueryClient>, joId?: nu
 }
 
 function JOIssueLineRow({
-  note, line, tolerancePct, reasons, canCorrect, onSaved,
+  note, line, tolerancePct, reasons, canCorrect, correctMode, onCorrectMode, onSaved,
 }: {
   note: IssueNote
   line: IssueNoteLine
   tolerancePct: number
   reasons: string[]
   canCorrect: boolean
+  correctMode: boolean
+  onCorrectMode: (on: boolean) => void
   onSaved: () => void
 }) {
   const confirmed = note.status === 'Confirmed'
   const editableDraft = note.status === 'Draft' || note.status === 'Pending Approval'
-  const [correcting, setCorrecting] = useState(false)
+  const correcting = correctMode
+  const setCorrecting = onCorrectMode
   const editing = editableDraft || (confirmed && canCorrect && correcting)
   const bom = minBomQty(line)
   const current = minIssueQty(line)
@@ -513,12 +527,19 @@ function JOIssueLineRow({
   const n = Number(qty)
   const nValid = qty.trim() !== '' && Number.isFinite(n) && n >= 0
   const shown = editing && nValid ? n : current
-  const diff = minR3(shown - bom)
-  const pct = minVariancePct(bom, shown)
+  // Additional MIN: variance / tolerance are cumulative (prior confirmed + this issue vs JO BOM).
+  const isCum = line.cum_bom_qty != null
+  const cumBom = Number(line.cum_bom_qty ?? 0)
+  const cumPrior = Number(line.cum_prior_issued_qty ?? 0)
+  const cumTotal = minR3(cumPrior + shown)
+  const diff = isCum ? minR3(cumTotal - cumBom) : minR3(shown - bom)
+  const pct = isCum ? minVariancePct(cumBom, cumTotal) : minVariancePct(bom, shown)
   const differs = Math.abs(diff) > MIN_EPS
-  const over = minOverTolerance(bom, shown, tolerancePct)
+  const over = isCum
+    ? shown > MIN_EPS && cumTotal > cumBom + MIN_EPS && minOverTolerance(cumBom, cumTotal, tolerancePct)
+    : minOverTolerance(bom, shown, tolerancePct)
   const changed = editing && nValid && Math.abs(n - current) > MIN_EPS
-  const needReason = confirmed ? true : differs
+  const needReason = confirmed ? true : (isCum ? (Math.abs(shown - bom) > MIN_EPS || diff > MIN_EPS) : differs)
   const tone = over ? 'text-red-600 font-semibold' : differs ? (diff > 0 ? 'text-orange-700' : 'text-blue-700') : 'text-gray-400'
 
   const save = async () => {
@@ -563,7 +584,12 @@ function JOIssueLineRow({
         )}
         <span className="block text-gray-400">BOM / unit {line.bom_qty_per_unit}</span>
       </td>
-      <td className="px-3 py-2 text-right text-gray-600">{bom}</td>
+      <td className="px-3 py-2 text-right text-gray-600">
+        {bom}
+        {isCum && (
+          <span className="block text-[10px] text-gray-400" title="Remaining BOM on this additional MIN">remaining</span>
+        )}
+      </td>
       <td className="px-3 py-2 text-right">
         {editing ? (
           <input type="number" min={0} step="0.001" value={qty} onChange={e => { setQty(e.target.value); setErr('') }}
@@ -572,7 +598,14 @@ function JOIssueLineRow({
           <span className="font-bold text-indigo-700">{current}</span>
         )}
       </td>
-      <td className={`px-3 py-2 text-right ${tone}`}>{differs ? fmtSigned(diff) : '—'}</td>
+      <td className={`px-3 py-2 text-right ${tone}`}>
+        {differs ? fmtSigned(diff) : '—'}
+        {isCum && shown > MIN_EPS && (
+          <span className="block text-[10px] font-normal text-gray-500">
+            cumulative {cumPrior} + {minR3(shown)} = {cumTotal} vs BOM {cumBom}
+          </span>
+        )}
+      </td>
       <td className={`px-3 py-2 text-right ${tone}`}>
         {differs ? fmtSigned(pct, '%') : '—'}
         {editing && over && (
@@ -623,7 +656,7 @@ function JOIssueLineRow({
         )}
         {confirmed && canCorrect && !correcting && (
           <button type="button" onClick={() => setCorrecting(true)}
-            className="text-[11px] px-2 py-1 rounded border border-amber-300 text-amber-800 bg-white hover:bg-amber-50">Correct</button>
+            className="text-[11px] px-2 py-1 rounded border border-amber-300 text-amber-800 bg-white hover:bg-amber-50">✎ Correct</button>
         )}
       </td>
     </tr>
@@ -637,10 +670,13 @@ function JOMinAdjustmentHistory({ noteId }: { noteId: number }) {
   })
   if (!data.length) return null
   const phaseLabel = (p: string) =>
-    p === 'POST_ISSUE' ? 'Correction after issue' : p === 'APPROVED' ? 'Approved' : 'Before issue'
+    p === 'POST_ISSUE' ? 'Correction after issue' : p === 'APPROVED' ? 'Approved'
+      : p === 'REJECTED' ? 'Rejected' : p === 'SENT_BACK' ? 'Sent back' : p === 'RESUBMITTED' ? 'Resubmitted' : 'Before issue'
   return (
-    <details className="text-xs px-3 pb-2">
-      <summary className="cursor-pointer text-indigo-700 font-medium">Issue qty change history ({data.length})</summary>
+    <details className="text-xs px-3 pb-2" open={data.some(a => a.phase === 'POST_ISSUE') || undefined}>
+      <summary className="cursor-pointer text-indigo-700 font-medium">
+        Issue qty change &amp; approval history ({data.length}) — original and corrections
+      </summary>
       <table className="w-full mt-1">
         <thead>
           <tr className="text-gray-500 border-b">
@@ -682,6 +718,13 @@ function JOIssueNoteCard({
 }) {
   const [issuedBy, setIssuedBy] = useState(note.issued_by || '')
   const [receivedBy, setReceivedBy] = useState(note.received_by || '')
+  const [correctMode, setCorrectMode] = useState(false)
+  const me = String(useAuth(s => s.user)?.username || '').trim().toLowerCase()
+  // Maker-checker (server enforces): whoever prepared / revised this MIN cannot approve it.
+  const isMaker = !!me && (
+    String(note.created_by || '').trim().toLowerCase() === me
+    || note.lines.some(l => String(l.revised_by || '').trim().toLowerCase() === me)
+  )
   const onError = (fallback: string) => (e: unknown) => alert(apiErrorMessage(e, fallback))
   const confirmMut = useMutation({
     mutationFn: () => api.post(`/production/issue-notes/${note.id}/confirm`, { issued_by: issuedBy, received_by: receivedBy }),
@@ -693,6 +736,21 @@ function JOIssueNoteCard({
     onSuccess: onChanged,
     onError: onError('Could not approve issue note'),
   })
+  // INTERIM approval actions — will be replaced by the centralized ERP Approval Workflow.
+  const decideMut = useMutation({
+    mutationFn: ({ action, remarks }: { action: 'reject' | 'send-back' | 'resubmit'; remarks: string }) =>
+      api.post(`/production/issue-notes/${note.id}/${action}`, { remarks }),
+    onSuccess: onChanged,
+    onError: onError('Could not update approval'),
+  })
+  const decide = (action: 'reject' | 'send-back') => {
+    const remarks = window.prompt(
+      action === 'reject' ? 'Reject this issue — remarks (required):' : 'Send back to issuer — remarks (required):',
+    )
+    if (remarks == null) return
+    if (!remarks.trim()) { alert('Remarks are required'); return }
+    decideMut.mutate({ action, remarks: remarks.trim() })
+  }
   const cancelMut = useMutation({
     mutationFn: () => api.post(`/production/issue-notes/${note.id}/cancel`),
     onSuccess: onChanged,
@@ -742,9 +800,33 @@ function JOIssueNoteCard({
             </>
           )}
           {note.status === 'Pending Approval' && canApprove && (
-            <button type="button" disabled={approveMut.isPending} onClick={() => approveMut.mutate()}
-              className="text-xs px-2 py-1 rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
-              {approveMut.isPending ? '…' : '✔ Approve over-tolerance issue'}
+            <>
+              <button type="button" disabled={approveMut.isPending || isMaker} onClick={() => approveMut.mutate()}
+                title={isMaker ? 'You prepared this issue — another Manager / Admin must approve' : undefined}
+                className="text-xs px-2 py-1 rounded bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+                {approveMut.isPending ? '…' : '✔ Approve over-tolerance issue'}
+              </button>
+              <button type="button" disabled={decideMut.isPending} onClick={() => decide('send-back')}
+                className="text-xs px-2 py-1 rounded border border-amber-300 text-amber-800 bg-white hover:bg-amber-50 disabled:opacity-50">
+                ↩ Send Back
+              </button>
+              <button type="button" disabled={decideMut.isPending} onClick={() => decide('reject')}
+                className="text-xs px-2 py-1 rounded border border-red-300 text-red-700 bg-white hover:bg-red-50 disabled:opacity-50">
+                ✕ Reject
+              </button>
+            </>
+          )}
+          {note.status === 'Draft' && note.approval_status === 'Sent Back' && (
+            <button type="button" disabled={decideMut.isPending}
+              onClick={() => decideMut.mutate({ action: 'resubmit', remarks: '' })}
+              className="text-xs px-2 py-1 rounded border border-orange-300 text-orange-800 bg-white hover:bg-orange-50 disabled:opacity-50">
+              ↪ Resubmit for approval
+            </button>
+          )}
+          {note.status === 'Confirmed' && canApprove && (
+            <button type="button" onClick={() => setCorrectMode(m => !m)}
+              className={`text-xs px-2 py-1 rounded border ${correctMode ? 'bg-amber-600 text-white border-amber-600' : 'border-amber-400 text-amber-800 bg-white hover:bg-amber-50'}`}>
+              ✎ {correctMode ? 'Close correction' : 'Correct issue qty'}
             </button>
           )}
           <button type="button" onClick={() => void printIssueNote(note.id).catch(e => alert(apiErrorMessage(e, 'Could not print')))}
@@ -774,7 +856,37 @@ function JOIssueNoteCard({
       {note.status === 'Pending Approval' && (
         <p className="text-xs text-orange-800 bg-orange-50 border-b border-orange-200 px-3 py-1">
           <strong>Pending Approval</strong> — issue qty is outside the ±{tol}% BOM tolerance.
-          {canApprove ? ' Approve to allow confirmation.' : ' A Manager / Admin must approve before this can be confirmed.'}
+          {canApprove
+            ? (isMaker
+              ? ' You prepared this issue, so another Manager / Admin must approve (stock moves only on Confirm).'
+              : ' Approve, Send Back or Reject — stock moves only on Confirm after approval.')
+            : ' A Manager / Admin must approve before this can be confirmed.'}
+          <span className="text-orange-600"> (Interim approval — will move to the central Approval Workflow.)</span>
+        </p>
+      )}
+      {(note.approval_status === 'Sent Back' || note.approval_status === 'Rejected') && (
+        <p className="text-xs text-red-800 bg-red-50 border-b border-red-200 px-3 py-1">
+          <strong>{note.approval_status}</strong>
+          {note.approval_actor ? ` by ${note.approval_actor}` : ''}{note.approval_actor_at ? ` · ${note.approval_actor_at}` : ''}
+          {note.approval_remarks ? ` — “${note.approval_remarks}”` : ''}
+          {note.approval_status === 'Sent Back' ? ' Revise the issue qty / reason, or resubmit for approval.' : ''}
+        </p>
+      )}
+      {note.status === 'Rejected' && (
+        <p className="text-xs text-red-800 bg-red-50 border-b border-red-200 px-3 py-1">
+          Rejected — no stock was moved. Create a new Additional MIN if more material is needed.
+        </p>
+      )}
+      {note.status === 'Confirmed' && correctMode && (
+        <p className="text-xs text-amber-900 bg-amber-50 border-b border-amber-200 px-3 py-1.5">
+          <strong>Post-confirm correction</strong> — fix the <em>recorded</em> issue qty (e.g. data-entry mistake).
+          Only the stock <strong>difference</strong> is posted; a reason is mandatory; the original and the correction both stay in the history below.
+          {' '}<strong>Fabric physically coming back?</strong> Use the <strong>Return</strong> process (not Correction).
+        </p>
+      )}
+      {note.status === 'Confirmed' && canApprove && !correctMode && (
+        <p className="text-[11px] text-gray-500 px-3 py-1 border-b border-gray-100">
+          Wrong qty recorded? Use <strong>✎ Correct issue qty</strong>. Physical returns: use the Return process.
         </p>
       )}
       {note.lines.length === 0 ? (
@@ -798,7 +910,8 @@ function JOIssueNoteCard({
             <tbody>
               {note.lines.map(ln => (
                 <JOIssueLineRow key={ln.id} note={note} line={ln} tolerancePct={tol}
-                  reasons={settings.reasons} canCorrect={canApprove} onSaved={onChanged} />
+                  reasons={settings.reasons} canCorrect={canApprove} correctMode={correctMode}
+                  onCorrectMode={setCorrectMode} onSaved={onChanged} />
               ))}
             </tbody>
           </table>
@@ -850,7 +963,7 @@ function JOIssueNotePanel({ joId, joNumber }: { joId: number; joNumber: string }
   const extras = note.additional_notes || []
   const hasOpenExtra = extras.some(x => x.status === 'Draft' || x.status === 'Pending Approval')
   const cumulative = note.cumulative || []
-  const canAddExtra = note.status === 'Confirmed' && !hasOpenExtra
+  const primaryConfirmed = note.status === 'Confirmed'
   const nothingRemaining = cumulative.every(c => c.remaining_qty <= MIN_EPS)
 
   return (
@@ -875,11 +988,26 @@ function JOIssueNotePanel({ joId, joNumber }: { joId: number; joNumber: string }
         <JOIssueNoteCard key={x.id} note={x} settings={settings} isPrimary={false}
           canApprove={canApprove} onChanged={refresh} />
       ))}
-      {canAddExtra && (
-        <button type="button" onClick={() => additionalMut.mutate(nothingRemaining)} disabled={additionalMut.isPending}
-          className="text-xs px-3 py-1.5 rounded border border-indigo-300 text-indigo-700 bg-white hover:bg-indigo-50 disabled:opacity-50">
-          {additionalMut.isPending ? '…' : nothingRemaining ? '＋ Extra Issue (beyond BOM — needs reason + approval)' : '＋ Additional Issue (remaining BOM qty)'}
-        </button>
+      {primaryConfirmed ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => additionalMut.mutate(nothingRemaining)}
+            disabled={additionalMut.isPending || hasOpenExtra}
+            title={hasOpenExtra ? 'Confirm or cancel the open additional MIN first' : undefined}
+            className="text-sm font-semibold px-3 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed">
+            {additionalMut.isPending ? '…' : '+ Additional MIN'}
+          </button>
+          <span className="text-xs text-gray-500">
+            {hasOpenExtra
+              ? 'Confirm or cancel the open additional MIN before creating another.'
+              : nothingRemaining
+                ? 'BOM fully issued — an extra issue needs a reason; tolerance is checked on the cumulative (all MINs) vs BOM.'
+                : 'Issues the remaining BOM qty as a separate MIN (own number, date, user & history). Tolerance is checked on the cumulative vs BOM.'}
+          </span>
+        </div>
+      ) : (
+        <p className="text-xs text-gray-400">
+          <strong>+ Additional MIN</strong> becomes available once this primary MIN is Confirmed.
+        </p>
       )}
     </div>
   )

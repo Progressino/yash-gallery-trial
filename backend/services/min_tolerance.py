@@ -4,6 +4,9 @@ Issue qty may differ from the frozen BOM requirement. Within ``tolerance %`` a D
 confirmed by the issuer; beyond it the note moves to ``Pending Approval`` and only
 Manager / Admin / Super Admin / Sir may approve it before it can be confirmed.
 
+Interim approval (maker-checker, approver != issuer; approve / reject / send back with remarks) is a
+stop-gap that will be replaced by the centralized ERP Approval Workflow — see ``jo_min_control``.
+
 Tolerance is configurable via ``MIN_ISSUE_TOLERANCE_PCT`` (default 10).
 """
 from __future__ import annotations
@@ -17,6 +20,7 @@ STATUS_DRAFT = "Draft"
 STATUS_PENDING = "Pending Approval"
 STATUS_CONFIRMED = "Confirmed"
 STATUS_CANCELLED = "Cancelled"
+STATUS_REJECTED = "Rejected"  # additional MIN rejected by the approver (interim approval)
 
 # Production (Cutting / Stitching / Finishing) JO MIN variance reasons.
 PRODUCTION_VARIANCE_REASONS = (
