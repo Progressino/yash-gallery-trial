@@ -41,6 +41,15 @@ def _dir(value: str) -> str:
     return v
 
 
+def _cat(value: str) -> str:
+    v = (value or fw.DEFAULT_STOCK_CATEGORY).strip().lower()
+    if v not in fw.STOCK_CATEGORIES:
+        raise HTTPException(
+            status_code=400, detail=f"stock_category must be one of {', '.join(fw.STOCK_CATEGORIES)}",
+        )
+    return v
+
+
 @router.get("/dashboard")
 def get_dashboard(
     from_date: str = "",
@@ -48,6 +57,7 @@ def get_dashboard(
     pcode: str = "",
     warehouse: str = "all",
     txn_type: str = "",
+    stock_category: str = "sfg",
 ):
     """Opening, Today IN/OUT, Closing, SO Allocated, Advance Reserved, Free, Returns/Adj, Pending Unchecked."""
     return fw.dashboard(
@@ -56,13 +66,14 @@ def get_dashboard(
         pcode=pcode,
         warehouse=_wh(warehouse),
         txn_type=txn_type,
+        stock_category=_cat(stock_category),
     )
 
 
 @router.get("/stock")
-def get_stock(pcode: str = "", q: str = ""):
+def get_stock(pcode: str = "", q: str = "", stock_category: str = "sfg"):
     """Per P-Code: physical, checked, unchecked, SO allocated, advance reserved, free, location."""
-    rows = fw.stock_by_pcode(pcode=pcode, q=q)
+    rows = fw.stock_by_pcode(pcode=pcode, q=q, stock_category=_cat(stock_category))
     return {"rows": rows, "count": len(rows)}
 
 
@@ -75,6 +86,7 @@ def get_ledger(
     direction: str = "all",
     txn_type: str = "",
     q: str = "",
+    stock_category: str = "sfg",
     order: str = "desc",
     limit: int = Query(200, ge=1, le=2000),
     offset: int = Query(0, ge=0),
@@ -88,6 +100,7 @@ def get_ledger(
         direction=_dir(direction),
         txn_type=txn_type,
         q=q,
+        stock_category=_cat(stock_category),
     )
     rows = res["rows"]
     if (order or "desc").lower() != "asc":
@@ -113,6 +126,7 @@ def export_ledger(
     direction: str = "all",
     txn_type: str = "",
     q: str = "",
+    stock_category: str = "sfg",
 ):
     fmt = (format or "xlsx").strip().lower()
     if fmt not in ("csv", "xlsx"):
@@ -125,9 +139,10 @@ def export_ledger(
         direction=_dir(direction),
         txn_type=txn_type,
         q=q,
+        stock_category=_cat(stock_category),
     )
     rows = res["rows"]
-    name = f"fabric_ledger_{fw.stamp()}"
+    name = f"fabric_ledger_{res['stock_category']}_{fw.stamp()}"
     if fmt == "csv":
         return Response(
             content=fw.export_csv(rows),

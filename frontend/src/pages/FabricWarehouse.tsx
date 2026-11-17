@@ -6,6 +6,13 @@ import { useTrackTab } from '../lib/usageTracker'
 
 type Warehouse = 'all' | 'checked' | 'unchecked'
 type Direction = 'all' | 'in' | 'out' | 'alloc'
+type StockCategory = 'sfg' | 'grey' | 'all'
+
+const CATEGORY_LABEL: Record<StockCategory, string> = {
+  sfg: 'SFG (Printed / Dyed)',
+  grey: 'Grey Fabric',
+  all: 'All',
+}
 type View = 'stock' | 'ledger'
 
 interface Dashboard {
@@ -106,6 +113,7 @@ interface Filters {
   to: string
   pcode: string
   warehouse: Warehouse
+  category: StockCategory
   direction: Direction
   txnType: string
   q: string
@@ -140,7 +148,9 @@ export default function FabricWarehouse() {
   const initial = useMemo<Partial<Filters> & { view?: View }>(() => {
     const p = new URLSearchParams(window.location.search)
     const wh = p.get('warehouse')
+    const cat = p.get('category')
     return {
+      category: (cat === 'grey' || cat === 'all' ? cat : 'sfg') as StockCategory,
       pcode: p.get('pcode') || '',
       warehouse: wh === 'checked' || wh === 'unchecked' ? wh : 'all',
       view: p.get('tab') === 'ledger' ? 'ledger' : undefined,
@@ -154,6 +164,7 @@ export default function FabricWarehouse() {
     to: todayIso(),
     pcode: initial.pcode ?? '',
     warehouse: (initial.warehouse as Warehouse) ?? 'all',
+    category: initial.category ?? 'sfg',
     direction: 'all',
     txnType: '',
     q: '',
@@ -173,6 +184,7 @@ export default function FabricWarehouse() {
       from_date: filters.from,
       to_date: filters.to,
       warehouse: filters.warehouse,
+      stock_category: filters.category,
     }
     if (filters.pcode.trim()) p.pcode = filters.pcode.trim()
     if (filters.txnType) p.txn_type = filters.txnType
@@ -186,9 +198,9 @@ export default function FabricWarehouse() {
   })
 
   const stock = useQuery<{ rows: StockRow[] }>({
-    queryKey: ['fw-stock', filters.pcode],
+    queryKey: ['fw-stock', filters.pcode, filters.category],
     queryFn: async () =>
-      (await api.get('/fabric-warehouse/stock', { params: { q: filters.pcode.trim() } })).data,
+      (await api.get('/fabric-warehouse/stock', { params: { q: filters.pcode.trim(), stock_category: filters.category } })).data,
     staleTime: 15_000,
   })
 
@@ -231,7 +243,7 @@ export default function FabricWarehouse() {
       const url = URL.createObjectURL(res.data as Blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `fabric_ledger_${filters.from}_${filters.to}.${format}`
+      a.download = `fabric_ledger_${filters.category}_${filters.from}_${filters.to}.${format}`
       a.click()
       URL.revokeObjectURL(url)
     } catch {
@@ -275,7 +287,7 @@ export default function FabricWarehouse() {
         <div>
           <h1 className="text-lg sm:text-xl font-semibold text-[#002B5B]">Fabric Warehouse</h1>
           <p className="text-xs text-gray-500">
-            Printed fabric by P-Code — Checked / Unchecked, allocations and a date-wise ledger from existing documents.
+            {CATEGORY_LABEL[filters.category]} by P-Code — Checked / Unchecked, allocations and a date-wise ledger from existing documents.
           </p>
         </div>
         <div className="flex gap-2 print:hidden">
@@ -316,7 +328,7 @@ export default function FabricWarehouse() {
             Filters
           </button>
         </div>
-        <div className={`${filtersOpen ? 'grid' : 'hidden'} sm:grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2 mt-2`}>
+        <div className={`${filtersOpen ? 'grid' : 'hidden'} sm:grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 mt-2`}>
           <label className="text-[11px] text-gray-500">From
             <input type="date" value={filters.from} max={filters.to}
               onChange={e => set({ from: e.target.value || today })}
@@ -326,6 +338,14 @@ export default function FabricWarehouse() {
             <input type="date" value={filters.to} min={filters.from}
               onChange={e => set({ to: e.target.value || today })}
               className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm text-gray-800" />
+          </label>
+          <label className="text-[11px] text-gray-500">Stock category
+            <select value={filters.category} onChange={e => set({ category: e.target.value as StockCategory })}
+              className="mt-0.5 w-full border rounded-lg px-2 py-1.5 text-sm text-gray-800">
+              <option value="grey">Grey Fabric</option>
+              <option value="sfg">SFG (Printed / Dyed)</option>
+              <option value="all">All</option>
+            </select>
           </label>
           <label className="text-[11px] text-gray-500">Warehouse
             <select value={filters.warehouse} onChange={e => set({ warehouse: e.target.value as Warehouse })}
@@ -363,7 +383,7 @@ export default function FabricWarehouse() {
       <div>
         <div className="flex items-baseline justify-between mb-1.5">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-            Period {rangeLabel} · {filters.warehouse === 'all' ? 'All warehouses' : filters.warehouse}
+            {CATEGORY_LABEL[filters.category]} · Period {rangeLabel} · {filters.warehouse === 'all' ? 'All warehouses' : filters.warehouse}
           </h2>
           {dash.isFetching && <span className="text-[10px] text-gray-400">Refreshing…</span>}
         </div>
@@ -440,7 +460,7 @@ export default function FabricWarehouse() {
           {stock.isLoading ? (
             <div className="p-6 text-sm text-gray-500">Loading stock…</div>
           ) : stockRows.length === 0 ? (
-            <div className="p-6 text-sm text-gray-500">No printed fabric stock found.</div>
+            <div className="p-6 text-sm text-gray-500">No {CATEGORY_LABEL[filters.category]} stock found.</div>
           ) : (
             <>
               <div className="hidden md:block overflow-x-auto">

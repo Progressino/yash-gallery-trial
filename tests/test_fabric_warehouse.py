@@ -220,3 +220,116 @@ def test_api_endpoints(client):
     x = client.get("/api/fabric-warehouse/ledger/export", params={"format": "xlsx"})
     assert x.status_code == 200 and x.content[:2] == b"PK"
     assert client.get("/api/fabric-warehouse/ledger", params={"warehouse": "bad"}).status_code == 400
+
+
+# ── Stock Category (Phase 2): sfg (default) | grey | all ─────────────────────
+
+def _seed_grey(code="G100", received=200.0, passed=150.0, rejected=10.0, reserve=30.0):
+    """Grey tracker receipt + grey QC (check log / checked stock) + SO hard reservation."""
+    conn = sqlite3.connect(grey_db._DB)
+    conn.execute(
+        "INSERT INTO grey_tracker(tracker_key,po_number,material_code,material_name,supplier,"
+        "received_qty,qc_date) VALUES('GT-0001','PO-G1',?,?,?,?,?)",
+        (code, "Grey Cotton", "MillCo", received, "2026-01-03"),
+    )
+    conn.execute(
+        "INSERT INTO fabric_check_log(fabric_code,fabric_name,check_date,checked_by,checked_qty,"
+        "passed_qty,rejected_qty) VALUES(?,?,?,?,?,?,?)",
+        (code, "Grey Cotton", "2026-01-04", "QC", passed + rejected, passed, rejected),
+    )
+    conn.execute(
+        "INSERT INTO fabric_checked_stock(fabric_code,fabric_name,checked_qty,passed_qty,"
+        "reserved_qty,available_qty) VALUES(?,?,?,?,?,?)",
+        (code, "Grey Cotton", passed + rejected, passed, reserve, passed - reserve),
+    )
+    conn.execute(
+        "INSERT INTO hard_reservations(fabric_code,fabric_name,so_number,sku,qty,status,reserved_date) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (code, "Grey Cotton", "SO-7", "SKU-G", reserve, "Active", "2026-01-05"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _codes(rows):
+    return {r["pcode"] for r in rows}
+
+
+def test_default_category_is_sfg_and_excludes_grey_only_codes():
+    _receive_and_qc()
+    _seed_grey()
+    assert fw.DEFAULT_STOCK_CATEGORY == "sfg"
+    assert _codes(_rows()) == {"P100"}                       # default
+    assert _codes(_rows(stock_category="sfg")) == {"P100"}
+    assert _codes(fw.stock_by_pcode()) == {"P100"}
+    assert fw.dashboard(from_date="2026-01-01", to_date="2026-12-31")["pcode_count"] == 1
+
+
+def test_grey_category_only_grey_and_all_includes_both():
+    _receive_and_qc()
+    _seed_grey()
+    grey_rows = _rows(stock_category="grey")
+    assert _codes(grey_rows) == {"G100"}
+    assert [r["txn_type"] for r in grey_rows if r["physical_move"]] == [
+        fw.T_GRN, fw.T_QC_PASS, fw.T_QC_REJECT]
+    assert _codes(_rows(stock_category="all")) == {"P100", "G100"}
+    assert _codes(fw.stock_by_pcode(stock_category="grey")) == {"G100"}
+    assert _codes(fw.stock_by_pcode(stock_category="all")) == {"P100", "G100"}
+    g = fw.stock_by_pcode(stock_category="grey")[0]
+    assert (g["checked"], g["unchecked"], g["so_allocated"], g["free"]) == (150.0, 40.0, 30.0, 120.0)
+
+
+def test_category_applies_to_dashboard_kpis_and_is_independent_of_warehouse():
+    _receive_and_qc()
+    _seed_grey()
+    rng = dict(from_date="2026-01-01", to_date="2026-12-31")
+    sfg = fw.dashboard(**rng)
+    grey = fw.dashboard(stock_category="grey", **rng)
+    both = fw.dashboard(stock_category="all", **rng)
+    assert sfg["stock_category"] == "sfg" and grey["stock_category"] == "grey"
+    assert grey["pending_unchecked"] == 40.0 and grey["so_allocated"] == 30.0
+    assert sfg["so_allocated"] == 0.0
+    assert both["pcode_count"] == 2
+    assert both["in_qty"] == sfg["in_qty"] + grey["in_qty"]
+    # Warehouse (Checked / Unchecked) still works inside a category
+    chk = fw.dashboard(stock_category="grey", warehouse="checked", **rng)
+    assert chk["in_qty"] == 150.0 and chk["warehouse"] == "checked"
+    led = fw.build_ledger(stock_category="grey", warehouse="unchecked")
+    assert led["rows"][-1]["balance"] == 40.0 and led["stock_category"] == "grey"
+
+
+def test_grey_min_issue_is_grey_category_only():
+    _receive_and_qc()
+    _seed_grey()
+    _seed_min(code="G100", qty=25)
+    assert fw.T_MIN not in {r["txn_type"] for r in _rows()}
+    grey = fw.build_ledger(pcode="G100", warehouse="checked", stock_category="grey")
+    assert grey["total_out"] == 25.0
+
+
+def test_item_master_grey_fabric_type_classifies_opening_as_grey():
+    gf = next(t["id"] for t in item_db.list_item_types() if t["code"] == "GF")
+    item_id = item_db.create_item(item_code="G200", item_name="Grey Opening", item_type_id=gf)
+    item_db.adjust_item_stock(item_id, 80, "IN", entry_date="2026-01-02",
+                              reason="Opening Stock", created_by="admin")
+    assert "G200" not in _codes(_rows())
+    assert _codes(_rows(stock_category="grey")) == {"G200"}
+    assert "G200" in _codes(_rows(stock_category="all"))
+
+
+def test_category_api_and_export(client):
+    _receive_and_qc()
+    _seed_grey()
+    base = "/api/fabric-warehouse"
+    assert client.get(f"{base}/dashboard").json()["stock_category"] == "sfg"
+    assert {r["pcode"] for r in client.get(f"{base}/stock").json()["rows"]} == {"P100"}
+    assert {r["pcode"] for r in client.get(
+        f"{base}/stock", params={"stock_category": "grey"}).json()["rows"]} == {"G100"}
+    led = client.get(f"{base}/ledger", params={"stock_category": "all", "limit": 500}).json()
+    assert {r["pcode"] for r in led["rows"]} == {"P100", "G100"}
+    csv_all = client.get(f"{base}/ledger/export", params={"format": "csv", "stock_category": "all"})
+    assert b"G100" in csv_all.content and b"P100" in csv_all.content
+    csv_def = client.get(f"{base}/ledger/export", params={"format": "csv"})
+    assert b"G100" not in csv_def.content and b"P100" in csv_def.content
+    assert "fabric_ledger_sfg_" in csv_def.headers["content-disposition"]
+    assert client.get(f"{base}/ledger", params={"stock_category": "bad"}).status_code == 400

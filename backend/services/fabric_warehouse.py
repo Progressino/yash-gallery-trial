@@ -20,6 +20,17 @@ Reservations set ``physical_move=False`` and only ever touch the allocation delt
 they reduce *Free* but never count as OUT.
 
 Free = physical (checked + opening pool) - SO allocated - Advance reserved.
+
+Stock Category (Phase 2) — ``stock_category`` = ``sfg`` (default) | ``grey`` | ``all``:
+
+    SFG   printed / dyed fabric (everything above).  A P-Code is SFG when it appears in any
+          ``printed_fabric_*`` table, or Item Master type is SFG, or it is not known as grey.
+    Grey  grey (greige) fabric — Item Master type "Grey Fabric" (GF), or the code appears in the
+          grey tracker / grey checked stock / grey hard reservations and is not printed.
+          Grey events come from grey_tracker (receipt), fabric_check_log (QC pass / reject),
+          hard_reservations (SO allocation), confirmed MINs and Item Master opening / adjustments.
+
+The category is independent of the Checked / Unchecked warehouse filter.
 """
 from __future__ import annotations
 
@@ -34,6 +45,11 @@ _EPS = 1e-6
 
 WAREHOUSES = ("all", "checked", "unchecked")
 DIRECTIONS = ("all", "in", "out", "alloc")
+STOCK_CATEGORIES = ("sfg", "grey", "all")
+DEFAULT_STOCK_CATEGORY = "sfg"
+
+_GREY_TYPE_CODES = {"GF", "GREY", "GREIGE"}
+_GREY_TYPE_NAMES = {"grey fabric", "greige", "greige fabric"}
 
 # Ledger txn types (stable strings — the UI filters on them).
 T_GRN = "GRN Receipt"
@@ -125,6 +141,56 @@ def _day(v: Any) -> str:
 
 def _norm(code: Any) -> str:
     return str(code or "").strip()
+
+
+def norm_category(value: Any) -> str:
+    v = str(value or DEFAULT_STOCK_CATEGORY).strip().lower()
+    return v if v in STOCK_CATEGORIES else DEFAULT_STOCK_CATEGORY
+
+
+def _grey_code_set(grey: Optional[sqlite3.Connection]) -> set:
+    """Upper-cased P-Codes classified as Grey Fabric (everything else is SFG).
+
+    Precedence: printed_fabric_* tables (SFG) > Item Master type SFG (SFG) >
+    Item Master type Grey Fabric / grey tracker-checked-reservation tables (Grey) > SFG.
+    """
+    printed: set = set()
+    for tbl in ("printed_fabric_stock", "printed_fabric_checked_stock",
+                "printed_fabric_reservations", "printed_fabric_opening_conversions"):
+        for r in _rows(grey, f"SELECT DISTINCT UPPER(TRIM(fabric_code)) AS c FROM {tbl}"):
+            if r["c"]:
+                printed.add(str(r["c"]))
+    grey_codes: set = set()
+    sfg_typed: set = set()
+    for r in _items_rows(
+        """SELECT UPPER(TRIM(i.item_code)) AS c, UPPER(COALESCE(t.code,'')) AS tcode,
+                  LOWER(COALESCE(t.name,'')) AS tname
+           FROM items i JOIN item_types t ON t.id = i.item_type_id"""
+    ):
+        if not r["c"]:
+            continue
+        if r["tcode"] in _GREY_TYPE_CODES or r["tname"] in _GREY_TYPE_NAMES:
+            grey_codes.add(str(r["c"]))
+        elif r["tcode"] == "SFG":
+            sfg_typed.add(str(r["c"]))
+    for tbl, col in (
+        ("grey_tracker", "material_code"),
+        ("fabric_checked_stock", "fabric_code"),
+        ("fabric_check_log", "fabric_code"),
+        ("hard_reservations", "fabric_code"),
+    ):
+        for r in _rows(grey, f"SELECT DISTINCT UPPER(TRIM({col})) AS c FROM {tbl}"):
+            if r["c"] and str(r["c"]) not in sfg_typed:
+                grey_codes.add(str(r["c"]))
+    return grey_codes - printed
+
+
+def category_of(code: Any, grey_codes: set) -> str:
+    return "grey" if _norm(code).upper() in grey_codes else "sfg"
+
+
+def _cat_ok(category: str, want: str) -> bool:
+    return want == "all" or category == want
 
 
 def _event(
@@ -404,14 +470,78 @@ def _collect_reservations(grey: Optional[sqlite3.Connection]) -> List[Dict[str, 
     return out
 
 
+def _collect_grey(grey: Optional[sqlite3.Connection]) -> List[Dict[str, Any]]:
+    """Grey fabric events (read-only): tracker receipt, grey QC (check log), SO hard reservations."""
+    out: List[Dict[str, Any]] = []
+    for r in _rows(grey, "SELECT * FROM grey_tracker"):
+        code = _norm(r["material_code"])
+        recv = _f(r["received_qty"])
+        if not code or recv <= _EPS:
+            continue
+        day = (r["qc_date"] or "") or _day(r["created_at"])
+        out.append(_event(
+            day=day, ts=f"{_day(day)} 00:{int(r['id']):08d}", pcode=code,
+            name=r["material_name"] or "", txn_type=T_GRN, ref_type="GREY",
+            ref_no=r["po_number"] or r["tracker_key"] or "",
+            from_wh=r["supplier"] or "Supplier", to_wh="Unchecked", qty=recv, unchecked=recv,
+            so_ref=r["so_reference"] or "", remarks=f"Tracker {r['tracker_key'] or ''}".strip(),
+            source="grey_tracker",
+        ))
+    for r in _rows(grey, "SELECT * FROM fabric_check_log"):
+        code = _norm(r["fabric_code"])
+        if not code:
+            continue
+        day = r["check_date"] or _day(r["created_at"])
+        ts = f"{_day(day)} 99:{int(r['id']):08d}"
+        passed, rejected = _f(r["passed_qty"]), _f(r["rejected_qty"])
+        ref = f"GCHK-{r['id']}"
+        if passed > _EPS:
+            out.append(_event(
+                day=day, ts=ts, pcode=code, name=r["fabric_name"] or "", txn_type=T_QC_PASS,
+                ref_type="GREY", ref_no=ref, from_wh="Unchecked", to_wh="Checked", qty=passed,
+                unchecked=-passed, checked=passed, user=r["checked_by"] or "",
+                remarks=r["remarks"] or "", source="fabric_check_log",
+            ))
+        if rejected > _EPS:
+            out.append(_event(
+                day=day, ts=ts, pcode=code, name=r["fabric_name"] or "", txn_type=T_QC_REJECT,
+                ref_type="GREY", ref_no=ref, from_wh="Unchecked", to_wh="Rejected / Return",
+                qty=rejected, unchecked=-rejected, user=r["checked_by"] or "",
+                remarks=r["remarks"] or "", source="fabric_check_log",
+            ))
+    for r in _rows(grey, "SELECT * FROM hard_reservations WHERE status='Active'"):
+        code = _norm(r["fabric_code"])
+        qty = _f(r["qty"])
+        if not code or qty <= _EPS:
+            continue
+        out.append(_event(
+            day=r["reserved_date"], ts=r["reserved_date"], pcode=code, name=r["fabric_name"] or "",
+            txn_type=T_RESERVE_SO, ref_type="GREY", ref_no=f"HRES-{r['id']}", from_wh="Free",
+            to_wh="SO Allocated", qty=qty, so_alloc=qty, physical_move=False,
+            so_ref=r["so_number"] or "",
+            remarks=" ".join(x for x in [r["sku"] or "", r["remarks"] or ""] if x).strip(),
+            source="hard_reservations",
+        ))
+    return out
+
+
 def _fabric_universe(grey: Optional[sqlite3.Connection], prod: Optional[sqlite3.Connection]) -> set:
-    """P-Codes = every code seen in a printed-fabric table / cutting issue / opening adjustment."""
+    """P-Codes = every code seen in a printed/grey fabric table / cutting issue / opening adjustment."""
     codes: set = set()
     for tbl, col in (
         ("printed_fabric_stock", "fabric_code"),
         ("printed_fabric_checked_stock", "fabric_code"),
         ("printed_fabric_reservations", "fabric_code"),
         ("printed_fabric_opening_conversions", "fabric_code"),
+    ):
+        for r in _rows(grey, f"SELECT DISTINCT TRIM({col}) AS c FROM {tbl}"):
+            if r["c"]:
+                codes.add(str(r["c"]))
+    for tbl, col in (
+        ("grey_tracker", "material_code"),
+        ("fabric_checked_stock", "fabric_code"),
+        ("fabric_check_log", "fabric_code"),
+        ("hard_reservations", "fabric_code"),
     ):
         for r in _rows(grey, f"SELECT DISTINCT TRIM({col}) AS c FROM {tbl}"):
             if r["c"]:
@@ -444,6 +574,7 @@ def collect_events() -> List[Dict[str, Any]]:
         universe = _fabric_universe(grey, prod)
         events: List[Dict[str, Any]] = []
         events += _collect_grn_and_qc(grey)
+        events += _collect_grey(grey)
         events += _collect_opening(grey)
         events += _collect_min(pur, universe)
         events += _collect_jo(prod)
@@ -453,6 +584,7 @@ def collect_events() -> List[Dict[str, Any]]:
             e for e in events
             if e["pcode"] in universe or e["source"] not in ("item_stock_adjustments",)
         ]
+        grey_codes = _grey_code_set(grey)
     finally:
         for c in (grey, pur, prod):
             if c is not None:
@@ -469,6 +601,7 @@ def collect_events() -> List[Dict[str, Any]]:
     events.sort(key=lambda e: (e["date"], e["ts"], order.get(e["txn_type"], 99)))
     for i, e in enumerate(events):
         e["seq"] = i + 1
+        e["category"] = category_of(e["pcode"], grey_codes)
     return events
 
 
@@ -519,12 +652,15 @@ def build_ledger(
     direction: str = "all",
     txn_type: str = "",
     q: str = "",
+    stock_category: str = DEFAULT_STOCK_CATEGORY,
     events: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Date-wise register with per-P-Code running balance for the selected warehouse scope."""
     warehouse = warehouse if warehouse in WAREHOUSES else "all"
     direction = direction if direction in DIRECTIONS else "all"
+    category = norm_category(stock_category)
     evs = events if events is not None else collect_events()
+    evs = [e for e in evs if _cat_ok(e.get("category", "sfg"), category)]
     code_f = _norm(pcode).upper()
     q_f = (q or "").strip().lower()
     types_f = _types(txn_type)
@@ -578,6 +714,7 @@ def build_ledger(
         # Period closing for the code/warehouse scope (independent of type/search filters).
         "closing": round(opening + range_net, 3),
         "warehouse": warehouse,
+        "stock_category": category,
     }
 
 
@@ -591,6 +728,8 @@ def doc_link(row: Dict[str, Any]) -> Dict[str, str]:
         return {"path": "/purchase", "query": f"tab=min&doc={ref}", "label": f"Open MIN {ref}"}
     if rt == "JO" and ref:
         return {"path": "/production", "query": f"jo={ref}", "label": f"Open JO {ref}"}
+    if rt == "GREY":
+        return {"path": "/grey", "query": "", "label": "Open Grey Fabric"}
     if rt in ("QC", "RES", "OPENING"):
         return {"path": "/grey", "query": "tab=printed-fabric", "label": "Open Grey › Printed Fabric"}
     if rt == "ADJ":
@@ -600,8 +739,61 @@ def doc_link(row: Dict[str, Any]) -> Dict[str, str]:
 
 # ── Live stock (authoritative tables, not ledger) ────────────────────────────
 
-def stock_by_pcode(pcode: str = "", q: str = "") -> List[Dict[str, Any]]:
+def _grey_stock_rows(grey: Optional[sqlite3.Connection], needle: str) -> List[Dict[str, Any]]:
+    """Grey checked stock (fabric_checked_stock) + tracker receipts still awaiting QC."""
+    names: Dict[str, str] = {}
+    checked: Dict[str, Dict[str, float]] = {}
+    for r in _rows(grey, "SELECT * FROM fabric_checked_stock"):
+        c = _norm(r["fabric_code"])
+        if not c:
+            continue
+        names[c] = r["fabric_name"] or ""
+        reserved = _f(r["reserved_qty"])
+        avail = _f(r["available_qty"])
+        checked[c] = {"checked": round(avail + reserved, 3), "reserved": round(reserved, 3),
+                      "free": round(max(avail, 0.0), 3)}
+    received: Dict[str, float] = {}
+    for r in _rows(
+        grey,
+        """SELECT TRIM(material_code) AS c, MAX(material_name) AS n, SUM(COALESCE(received_qty,0)) AS q
+           FROM grey_tracker GROUP BY TRIM(material_code)""",
+    ):
+        if r["c"]:
+            received[str(r["c"])] = _f(r["q"])
+            names.setdefault(str(r["c"]), r["n"] or "")
+    logged: Dict[str, float] = {}
+    for r in _rows(
+        grey,
+        """SELECT TRIM(fabric_code) AS c, SUM(COALESCE(passed_qty,0)+COALESCE(rejected_qty,0)) AS q
+           FROM fabric_check_log GROUP BY TRIM(fabric_code)""",
+    ):
+        if r["c"]:
+            logged[str(r["c"])] = _f(r["q"])
+    out: List[Dict[str, Any]] = []
+    for c in sorted(set(checked) | set(received)):
+        if needle and needle not in c.lower() and needle not in names.get(c, "").lower():
+            continue
+        ck = checked.get(c, {"checked": 0.0, "reserved": 0.0, "free": 0.0})
+        unch = round(max(received.get(c, 0.0) - logged.get(c, 0.0), 0.0), 3)
+        if ck["checked"] <= _EPS and unch <= _EPS:
+            continue
+        out.append({
+            "pcode": c, "name": names.get(c, ""),
+            "physical": round(ck["checked"] + unch, 3), "checked": ck["checked"],
+            "unchecked": unch, "so_allocated": ck["reserved"], "advance_reserved": 0.0,
+            "free": ck["free"], "opening_pool": 0.0,
+            "location": "Checked" if ck["checked"] > _EPS and unch <= _EPS
+            else ("Checked + Unchecked" if ck["checked"] > _EPS else "Unchecked"),
+        })
+    return out
+
+
+def stock_by_pcode(
+    pcode: str = "", q: str = "", stock_category: str = DEFAULT_STOCK_CATEGORY,
+) -> List[Dict[str, Any]]:
     from ..db import grey_db
+
+    category = norm_category(stock_category)
 
     code = _norm(pcode)
     vis = grey_db.printed_stock_visibility(code if code and not q else "")
@@ -653,6 +845,18 @@ def stock_by_pcode(pcode: str = "", q: str = "") -> List[Dict[str, Any]]:
             "so_allocated": 0.0, "advance_reserved": 0.0, "free": 0.0, "opening_pool": 0.0,
             "location": "Unchecked",
         })
+    grey2 = _open(_grey_path())
+    try:
+        grey_codes = _grey_code_set(grey2)
+        if category != "sfg":
+            have = {r["pcode"].upper() for r in out}
+            out += [r for r in _grey_stock_rows(grey2, needle) if r["pcode"].upper() not in have]
+    finally:
+        if grey2 is not None:
+            grey2.close()
+    out = [r for r in out if _cat_ok(category_of(r["pcode"], grey_codes), category)]
+    for r in out:
+        r["category"] = category_of(r["pcode"], grey_codes)
     out.sort(key=lambda r: r["pcode"])
     return out
 
@@ -670,6 +874,7 @@ def dashboard(
     pcode: str = "",
     warehouse: str = "all",
     txn_type: str = "",
+    stock_category: str = DEFAULT_STOCK_CATEGORY,
     events: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """KPI strip. Period metrics come from the ledger; Free/SO/Advance/Pending are live stock."""
@@ -677,7 +882,9 @@ def dashboard(
     today = _today()
     frm = from_date or today
     to = to_date or today
+    category = norm_category(stock_category)
     evs = events if events is not None else collect_events()
+    evs = [e for e in evs if _cat_ok(e.get("category", "sfg"), category)]
     code_f = _norm(pcode).upper()
     types_f = _types(txn_type)
 
@@ -717,7 +924,7 @@ def dashboard(
 
     # txn_type filter makes opening/closing partial — keep closing arithmetic honest.
     closing = opening + in_q - out_q
-    stock = stock_by_pcode(pcode)
+    stock = stock_by_pcode(pcode, stock_category=category)
     so_alloc = sum(r["so_allocated"] for r in stock)
     adv = sum(r["advance_reserved"] for r in stock)
     free = sum(r["free"] for r in stock)
@@ -730,6 +937,7 @@ def dashboard(
         "to_date": to,
         "today": today,
         "warehouse": warehouse,
+        "stock_category": category,
         "opening": round(opening, 3),
         "in_qty": round(in_q, 3),
         "out_qty": round(out_q, 3),
