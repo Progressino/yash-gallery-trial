@@ -38,6 +38,14 @@ Where: left menu **Fabric Warehouse** (next to Grey; same access as the Grey mod
 - **Export**: Excel (xlsx) or CSV from the ledger toolbar, using the current filters. Print view is available.
 - Click a Ref to jump to the GRN / MIN / JO / Grey / Item Master record.
 
+## 3a. Production MIN Confirm — multi-size / same-style reservations
+
+- A Cutting JO header shows only the **first size**; the other sizes sit in the JO lines. On **Confirm**, the MIN now counts the SO reservations of **every size on the JO**, plus any other size of the **same style on the same SO** (size shift). Reservations of another SO are never used.
+- Confirm can issue at most: SO-reserved (all matching sizes) + free checked stock + eligible opening stock. If it is short, the message shows required, available (reserved / free / opening) and the shortage.
+- Reservations flip to JO Created for **all sizes** when the Cutting JO is created, and are locked (Cutting issued) for all sizes when the MIN is confirmed.
+- Example **PJO-9216 / D2Lycra2**: reserved 133 + 45.5 + 175 + 105 = **458.5** across sizes, free 0. MIN asks 560 → Confirm of ≤ 458.5 works; 560 still fails because only 458.5 is checked (shortage 101.5). Check/allocate more fabric, or reduce the MIN qty, to issue 560.
+- Fabric Allocation (MRP): the cap is now per **style** (sum of sizes ≤ style requirement), so metres can be moved between sizes of a style. Use **Allocate by Cutting PCS** to enter pcs and let the screen convert to metres.
+
 ## 4. Not in Phase 3 yet (do not rely on these)
 
 - Full reconciliation report (Opening + IN − OUT ± Adj = Closing vs Item Master vs Checked stock). The dashboard shows live figures but does not reconcile them.

@@ -2,13 +2,13 @@
 import io
 
 import pandas as pd
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, List
 from ..db.sales_db import (
     list_demands, create_demand, update_demand_status, get_demand_by_number,
-    list_orders, create_order, update_order, update_so_line, get_open_orders
+    list_orders, create_order, update_order, update_so_line, get_open_orders, delete_so_line
 )
 from ..services.sales_import import (
     demand_import_template_csv,
@@ -166,6 +166,21 @@ def patch_order(soid: int, body: dict):
 def patch_so_line(lid: int, body: SOLineUpdate):
     update_so_line(lid, {k: v for k, v in body.model_dump().items() if v is not None})
     return {"ok": True}
+
+
+@router.delete("/orders/lines/{lid}")
+def remove_so_line(lid: int, request: Request):
+    """Remove a style from an SO — Manager / Admin only, blocked once production/allocation exists."""
+    auth = getattr(request.state, "auth", None) or {}
+    from ..services.min_tolerance import may_approve
+
+    if not may_approve(str(auth.get("role", "") or "")):
+        raise HTTPException(403, "Only Manager / Admin can remove a style from a Sales Order.")
+    try:
+        return delete_so_line(lid, actor=str(auth.get("sub", "") or ""))
+    except ValueError as e:
+        msg = str(e)
+        raise HTTPException(404 if "not found" in msg else 400, msg)
 
 
 @router.get("/orders/import-template")

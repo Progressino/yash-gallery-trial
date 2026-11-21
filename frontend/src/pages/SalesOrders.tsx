@@ -308,6 +308,11 @@ export default function SalesOrders() {
     mutationFn: ({ id, data }: { id: number; data: object }) => api.patch(`/sales/orders/lines/${id}`, data),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['sales-orders'] }); qc.invalidateQueries({ queryKey: ['sales-orders-all'] }); setEditingLineId(null) }
   })
+  const removeSOLineMut = useMutation({
+    mutationFn: (id: number) => api.delete(`/sales/orders/lines/${id}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['sales-orders'] }); qc.invalidateQueries({ queryKey: ['sales-orders-all'] }) },
+    onError: (e: any) => window.alert(e?.response?.data?.detail || 'Could not remove this style from the SO.'),
+  })
   const resetModuleMut = useMutation({
     mutationFn: (module: string) => resetErpModuleData(module),
     onSuccess: (res) => {
@@ -1267,6 +1272,13 @@ export default function SalesOrders() {
                               <td className="py-1.5 pl-2">
                                 <button onClick={() => { setEditingLineId(l.id); setEditLineForm({ qty: l.qty, rate: l.rate || 0, delivery_date: l.delivery_date || '', remarks: l.remarks || '', produced_qty: l.produced_qty || 0, dispatch_qty: l.dispatch_qty || 0, received_qty: l.received_qty || 0, procurement_override: l.procurement_override || '' }) }}
                                   className="text-xs text-blue-500 hover:text-blue-700 hover:underline">Edit</button>
+                                {mayAccessErpAdmin(authUser) && (
+                                  <button
+                                    onClick={() => {
+                                      if (window.confirm(`Remove style ${l.sku} from ${o.so_number}? This is blocked if production, fabric or dispatch exists for it.`)) removeSOLineMut.mutate(l.id)
+                                    }}
+                                    className="ml-2 text-xs text-red-500 hover:text-red-700 hover:underline">Remove Style</button>
+                                )}
                               </td>
                             </tr>
                           )

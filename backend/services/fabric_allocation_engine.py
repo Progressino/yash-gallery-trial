@@ -843,34 +843,69 @@ def release_printed_allocation(
         conn.close()
 
 
+def _norm_skus(skus: "list[str] | tuple[str, ...] | set[str] | str | None") -> list[str]:
+    """Distinct, non-empty, trimmed SKUs from a single string or an iterable (order kept)."""
+    if skus is None:
+        return []
+    if isinstance(skus, str):
+        skus = [skus]
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in skus:
+        t = str(s or "").strip()
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def _matching_reservations(
-    conn: sqlite3.Connection, fabric_code: str, so_number: str, sku: str
+    conn: sqlite3.Connection,
+    fabric_code: str,
+    so_number: str,
+    skus: "list[str] | str | None" = None,
 ) -> list[sqlite3.Row]:
-    """Open (Active / JO Created) printed reservations for a fabric + SO (+ SKU).
+    """Open (Active / JO Created) printed reservations for a fabric + SO (+ SKUs).
 
     Shared by :func:`lock_printed_on_cutting_issue` and :func:`reserved_consumable_qty` so the
     Confirm-time stock check and the actual cutting-issue lock always agree on which
-    reservation a JO may consume. Requires an SO or SKU so a JO never eats another SO's metres.
+    reservation a JO may consume.
+
+    ``skus`` is every SKU of the JO (header + main + all lines). A reservation matches when its
+    SKU is in that list, or when it shares a ``style_base`` with one of them (same-style size
+    shift on the same SO). Without ``skus`` the SO alone is used. A JO-derived SKU list is never
+    matched without an SO number, so a JO can never eat another SO's metres.
     """
-    if not (so_number or sku):
+    sku_list = _norm_skus(skus)
+    if not so_number:
         return []
     q = """SELECT * FROM printed_fabric_reservations
-           WHERE TRIM(fabric_code)=? AND status IN ('Active','JO Created')"""
-    params: list[Any] = [fabric_code]
-    if so_number:
-        q += " AND TRIM(so_number)=?"
-        params.append(so_number)
-    if sku:
-        q += " AND TRIM(sku)=?"
-        params.append(sku)
-    return conn.execute(q + " ORDER BY id", tuple(params)).fetchall()
+           WHERE TRIM(fabric_code)=? AND status IN ('Active','JO Created')
+             AND TRIM(so_number)=?"""
+    rows = conn.execute(q + " ORDER BY id", (fabric_code, so_number)).fetchall()
+    if not sku_list:
+        return list(rows)
+    from .printed_flexibility import style_base
+
+    exact = set(sku_list)
+    bases = {style_base(x) for x in sku_list if style_base(x)}
+    out = []
+    for r in rows:
+        rs = str(r["sku"] or "").strip()
+        if rs in exact or (rs and style_base(rs) in bases):
+            out.append(r)
+    # Exact-SKU rows are consumed first, then same-style siblings.
+    out.sort(key=lambda r: (0 if str(r["sku"] or "").strip() in exact else 1, int(r["id"])))
+    return out
 
 
-def reserved_consumable_qty(fabric_code: str, so_number: str = "", sku: str = "") -> float:
-    """Metres of SO-reserved checked printed fabric a JO for this SO/SKU may consume on issue.
+def reserved_consumable_qty(
+    fabric_code: str, so_number: str = "", sku: "list[str] | str | None" = ""
+) -> float:
+    """Metres of SO-reserved checked printed fabric a JO for this SO/SKUs may consume on issue.
 
     SO allocation moves metres ``available_qty → reserved_qty`` on checked stock, so a reserved
-    fabric shows *free = 0*. This is the reserved pool the JO's own reservation owns, capped by
+    fabric shows *free = 0*. This is the reserved pool the JO's own reservations own, capped by
     the warehouse ``reserved_qty`` so a stale reservation row can never over-promise.
     """
     code = (fabric_code or "").strip()
@@ -878,7 +913,7 @@ def reserved_consumable_qty(fabric_code: str, so_number: str = "", sku: str = ""
         return 0.0
     conn = _conn()
     try:
-        rows = _matching_reservations(conn, code, (so_number or "").strip(), (sku or "").strip())
+        rows = _matching_reservations(conn, code, (so_number or "").strip(), sku)
         total = sum(float(r["qty"] or 0) for r in rows)
         st = conn.execute(
             "SELECT COALESCE(reserved_qty,0) FROM printed_fabric_checked_stock WHERE TRIM(fabric_code)=?",
@@ -895,7 +930,7 @@ def lock_printed_on_cutting_issue(
     jo_id: int,
     fabric_code: str,
     so_number: str = "",
-    sku: str = "",
+    sku: "list[str] | str | None" = "",
     issued_qty: float = 0,
     user_name: str = "",
 ) -> dict[str, Any]:
@@ -908,7 +943,7 @@ def lock_printed_on_cutting_issue(
     """
     fabric_code = (fabric_code or "").strip()
     so_number = (so_number or "").strip()
-    sku = (sku or "").strip()
+    sku = _norm_skus(sku)
     issued_qty = float(issued_qty or 0)
     if not fabric_code or issued_qty <= 0:
         return {"ok": False, "message": "skip", "reserved_consumed": 0.0}

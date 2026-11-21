@@ -589,6 +589,218 @@ def test_own_reservation_short_of_issue_with_no_free_blocked(dbs, client):
     assert _reservations(dbs["GREY_DB_PATH"]) == [("Active", 100.0)]
 
 
+# ── multi-size / same-style reservations (PJO-9276 P747Floral, PJO-9216 D2Lycra2) ─────────────
+
+def _add_reservation(grey_path, *, qty, sku, so="SO-MIN-1", status="Active", code="FAB-CTN"):
+    """Extra reservation row (another size) — warehouse reserved_qty grows with it."""
+    conn = sqlite3.connect(grey_path)
+    conn.execute(
+        """INSERT INTO printed_fabric_reservations(fabric_code, fabric_name, so_number, sku, qty, unit, status)
+           VALUES(?,?,?,?,?,'MTR',?)""",
+        (code, "Cotton Fabric", so, sku, qty, status),
+    )
+    conn.execute(
+        """UPDATE printed_fabric_checked_stock SET reserved_qty = reserved_qty + ?,
+           checked_qty = checked_qty + ?, passed_qty = passed_qty + ? WHERE fabric_code=?""",
+        (qty, qty, qty, code),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _add_jo_line(prod_path, jo_id, sku, so="SO-MIN-1", planned=10):
+    conn = sqlite3.connect(prod_path)
+    conn.execute(
+        "INSERT INTO jo_lines(jo_id, so_number, sku, planned_qty) VALUES(?,?,?,?)", (jo_id, so, sku, planned)
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_jo_so_skus_collects_header_and_line_skus(dbs, client):
+    from backend.services import jo_min_control as jmc
+
+    ctx = _make_jo(client, dbs)
+    jid = ctx["jo"]["id"]
+    _add_jo_line(dbs["PRODUCTION_DB_PATH"], jid, "STYLE1-XL")
+    _add_jo_line(dbs["PRODUCTION_DB_PATH"], jid, "STYLE1-2XL")
+    _add_jo_line(dbs["PRODUCTION_DB_PATH"], jid, "STYLE1-XL")  # duplicate ignored
+    so, skus = jmc._jo_so_skus(jid)
+    assert so == "SO-MIN-1"
+    assert skus[0] == "STYLE1" and set(skus) == {"STYLE1", "STYLE1-XL", "STYLE1-2XL"}
+    assert jmc._jo_so_sku(jid) == ("SO-MIN-1", "STYLE1")
+
+
+def test_multi_size_jo_confirm_consumes_every_size_reservation(dbs, client):
+    ctx = _make_jo(client, dbs)  # BOM 150, header SKU STYLE1
+    jid, nid = ctx["jo"]["id"], ctx["note"]["id"]
+    # Header size holds 30; the other two sizes (jo_lines, different style codes) hold 70 + 50. free = 0.
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=30.0, free=0.0, sku="STYLE1")
+    _add_reservation(dbs["GREY_DB_PATH"], qty=70.0, sku="OTHER-4XL")
+    _add_reservation(dbs["GREY_DB_PATH"], qty=50.0, sku="OTHER-5XL", status="JO Created")
+    for sk in ("OTHER-4XL", "OTHER-5XL"):
+        _add_jo_line(dbs["PRODUCTION_DB_PATH"], jid, sk)
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (0.0, 150.0)
+
+    r = client.post(f"/api/production/issue-notes/{nid}/confirm")
+    assert r.status_code == 200, r.text
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (0.0, 0.0)
+    assert all(st == "CUTTING_ISSUED" for st, _ in _reservations(dbs["GREY_DB_PATH"]))
+    assert sum(q for _, q in _reservations(dbs["GREY_DB_PATH"])) == pytest.approx(150.0)
+    assert _item_stock(dbs["ITEM_DB_PATH"], "FAB-CTN") == pytest.approx(850.0)
+
+
+def test_multi_size_reservation_not_on_jo_lines_still_blocked_without_style_match(dbs, client):
+    ctx = _make_jo(client, dbs)
+    nid = ctx["note"]["id"]
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=30.0, free=0.0, sku="STYLE1")
+    _add_reservation(dbs["GREY_DB_PATH"], qty=120.0, sku="UNRELATED-4XL")  # not on JO, other style
+    r = client.post(f"/api/production/issue-notes/{nid}/confirm")
+    assert r.status_code == 400
+    detail = r.json()["detail"].lower()
+    assert "insufficient checked printed fabric" in detail and "shortage" in detail and "required" in detail
+
+
+def test_same_style_sibling_reservation_is_consumable(dbs, client):
+    ctx = _make_jo(client, dbs)  # header sku STYLE1 → style_base STYLE1
+    nid = ctx["note"]["id"]
+    # Reservation for a sibling size of the same style on the same SO, not on jo_lines.
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=40.0, free=0.0, sku="STYLE1")
+    _add_reservation(dbs["GREY_DB_PATH"], qty=110.0, sku="STYLE1-6XL")
+    r = client.post(f"/api/production/issue-notes/{nid}/confirm")
+    assert r.status_code == 200, r.text
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (0.0, 0.0)
+    assert sum(q for st, q in _reservations(dbs["GREY_DB_PATH"]) if st == "CUTTING_ISSUED") == pytest.approx(150.0)
+
+
+def test_same_style_reservation_on_other_so_still_blocked(dbs, client):
+    ctx = _make_jo(client, dbs)
+    nid = ctx["note"]["id"]
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=40.0, free=0.0, sku="STYLE1")
+    _add_reservation(dbs["GREY_DB_PATH"], qty=110.0, sku="STYLE1-6XL", so="SO-OTHER")
+    r = client.post(f"/api/production/issue-notes/{nid}/confirm")
+    assert r.status_code == 400
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (0.0, 150.0)
+
+
+def test_matching_reservations_never_matches_without_so(dbs):
+    from backend.services import fabric_allocation_engine as fae
+
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=10.0, free=0.0)
+    assert fae.reserved_consumable_qty("FAB-CTN", "", ["STYLE1"]) == 0.0
+    assert fae.reserved_consumable_qty("FAB-CTN", "SO-MIN-1", "STYLE1") == pytest.approx(10.0)
+    assert fae.reserved_consumable_qty("FAB-CTN", "SO-MIN-1", ["NOPE-1", "STYLE1"]) == pytest.approx(10.0)
+
+
+def test_d2lycra2_confirm_limited_to_checked_stock(dbs, client):
+    """458.5 reserved across sizes: a Confirm of 560 fails on physical shortfall, ≤458.5 works."""
+    ctx = _make_jo(client, dbs)  # BOM 150
+    jid, nid, lid = ctx["jo"]["id"], ctx["note"]["id"], ctx["line"]["id"]
+    sizes = [("STYLE1", 133.0), ("D2-2XL", 45.5), ("D2-3XL", 175.0), ("D2-4XL", 105.0)]
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=sizes[0][1], free=0.0, sku=sizes[0][0])
+    for sk, q in sizes[1:]:
+        _add_reservation(dbs["GREY_DB_PATH"], qty=q, sku=sk)
+        _add_jo_line(dbs["PRODUCTION_DB_PATH"], jid, sk)
+    assert _stock_row(dbs["GREY_DB_PATH"]) == (0.0, 458.5)
+    # Raise issue above 560 is over tolerance; use a separate pure check on the helper instead.
+    from backend.services import jo_min_control as jmc
+
+    so, skus = jmc._jo_so_skus(jid)
+    jmc._check_stock_available({"FAB-CTN": 458.5}, so_number=so, sku=skus)
+    with pytest.raises(ValueError) as ei:
+        jmc._check_stock_available({"FAB-CTN": 560.0}, so_number=so, sku=skus)
+    msg = str(ei.value)
+    assert "required 560.000" in msg and "SO-reserved 458.500" in msg and "shortage 101.500" in msg
+
+
+def test_close_printed_reservations_flips_every_size_on_cutting_jo(dbs, client, monkeypatch):
+    from backend.db import grey_db
+
+    monkeypatch.setattr(grey_db, "_PRODUCTION_DB", dbs["PRODUCTION_DB_PATH"])
+
+    ctx = _make_jo(client, dbs)  # Cutting JO header STYLE1 planned 100
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=30.0, free=0.0, sku="STYLE1")
+    _add_reservation(dbs["GREY_DB_PATH"], qty=70.0, sku="OTHER-4XL")
+    _add_reservation(dbs["GREY_DB_PATH"], qty=20.0, sku="UNRELATED-1", status="Active")
+    grey_db.close_printed_reservations_when_fully_planned(
+        "SO-MIN-1", ["STYLE1", "OTHER-4XL"], "FAB-CTN"
+    )
+    st = [x[0] for x in _reservations(dbs["GREY_DB_PATH"])]
+    assert st == ["JO Created", "JO Created", "Active"]
+    assert ctx["jo"]["id"]
+
+
+# ── MRP Item Master lookup is case-insensitive ───────────────────────────────
+
+def test_item_lookup_is_case_insensitive(dbs):
+    from backend.routers import production as prod_router
+    from backend.services import jo_issue_notes
+
+    conn = sqlite3.connect(dbs["ITEM_DB_PATH"])
+    tid = conn.execute("SELECT id FROM item_types LIMIT 1").fetchone()[0]
+    conn.execute("INSERT INTO items (item_code, item_name, item_type_id) VALUES ('295YK148checks-L','x',?)", (tid,))
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+    for fn in (prod_router._get_item_by_code, jo_issue_notes._get_item_by_code):
+        hit = fn(conn, " 295YK148CHECKS-L ")
+        assert hit and hit["item_code"] == "295YK148checks-L"
+    conn.close()
+
+
+# ── Remove style from SO ─────────────────────────────────────────────────────
+
+def _make_so(client, skus=("STYLE1", "STYLE2")):
+    r = client.post("/api/sales/orders", json={
+        "buyer": "B", "lines": [{"sku": k, "sku_name": k, "qty": 10} for k in skus]})
+    assert r.status_code == 200, r.text
+    so = r.json()["so_number"]
+    o = next(x for x in client.get("/api/sales/orders").json() if x["so_number"] == so)
+    return so, {l["sku"]: l["id"] for l in o["lines"]}
+
+
+def test_remove_style_from_so_ok_then_blocked_cases(dbs, client):
+    so, ids = _make_so(client)
+    # Free style → removed, audit row written.
+    r = client.delete(f"/api/sales/orders/lines/{ids['STYLE2']}")
+    assert r.status_code == 200, r.text
+    conn = sqlite3.connect(dbs["SALES_DB_PATH"])
+    assert conn.execute("SELECT COUNT(*) FROM so_line_audit WHERE so_number=? AND sku='STYLE2'", (so,)).fetchone()[0] == 1
+    conn.close()
+    # Only remaining line → blocked.
+    r = client.delete(f"/api/sales/orders/lines/{ids['STYLE1']}")
+    assert r.status_code == 400 and "only line" in r.json()["detail"]
+
+
+def test_remove_style_blocked_by_reservation_jo_and_dispatch(dbs, client):
+    so, ids = _make_so(client, ("STYLE1", "STYLE2", "STYLE3", "STYLE4"))
+    # Active printed reservation
+    _seed_reserved(dbs["GREY_DB_PATH"], reserved=5.0, so=so, sku="STYLE2")
+    r = client.delete(f"/api/sales/orders/lines/{ids['STYLE2']}")
+    assert r.status_code == 400 and "reservation" in r.json()["detail"]
+    # Non-cancelled JO via jo_lines
+    conn = sqlite3.connect(dbs["PRODUCTION_DB_PATH"])
+    jid = conn.execute(
+        "INSERT INTO job_orders(jo_number, jo_date, so_number, sku, process, status) VALUES('JO-X','2026-01-01',?,?,?,?)",
+        (so, "STYLE1", "Cutting", "Created"),
+    ).lastrowid
+    conn.execute("INSERT INTO jo_lines(jo_id, so_number, sku) VALUES(?,?,?)", (jid, so, "STYLE3"))
+    conn.commit()
+    conn.close()
+    r = client.delete(f"/api/sales/orders/lines/{ids['STYLE3']}")
+    assert r.status_code == 400 and "Job Order" in r.json()["detail"]
+    # Dispatched qty
+    assert client.patch(f"/api/sales/orders/lines/{ids['STYLE4']}", json={"dispatch_qty": 3}).status_code == 200
+    r = client.delete(f"/api/sales/orders/lines/{ids['STYLE4']}")
+    assert r.status_code == 400 and "dispatched" in r.json()["detail"]
+
+
+def test_remove_style_requires_manager_role(dbs, client, monkeypatch):
+    so, ids = _make_so(client)
+    _as(monkeypatch, "clerk", role="Staff")
+    r = client.delete(f"/api/sales/orders/lines/{ids['STYLE2']}")
+    assert r.status_code == 403
+
+
 # ── interim approval: maker-checker, reject, send back ───────────────────────
 
 def _pending(client, dbs, monkeypatch):

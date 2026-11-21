@@ -82,6 +82,11 @@ def init_db():
             conn.execute(col_ddl)
         except Exception:
             pass
+    conn.execute("""CREATE TABLE IF NOT EXISTS so_line_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        so_id INTEGER, so_number TEXT DEFAULT '', sku TEXT DEFAULT '',
+        action TEXT DEFAULT '', qty REAL DEFAULT 0, actor TEXT DEFAULT '', note TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now')))""")
     conn.commit()
     conn.close()
 
@@ -208,6 +213,90 @@ def update_so_line(lid: int, data: dict):
     conn = _connect()
     conn.execute(f"UPDATE so_lines SET {sets} WHERE id=?", vals)
     conn.commit(); conn.close()
+
+def _so_line_blockers(so_number: str, sku: str) -> list[str]:
+    """Why a style cannot be removed from an SO (empty list = safe). Reads production + grey DBs."""
+    blockers: list[str] = []
+    so_number, sku = (so_number or "").strip(), (sku or "").strip()
+    try:
+        from . import production_db
+
+        pc = production_db._connect()
+        try:
+            jos = pc.execute(
+                """SELECT DISTINCT jo.jo_number FROM job_orders jo
+                   WHERE TRIM(jo.so_number)=? AND COALESCE(jo.status,'')!='Cancelled'
+                     AND (TRIM(jo.sku)=? OR TRIM(COALESCE(jo.main_sku,''))=?
+                          OR EXISTS (SELECT 1 FROM jo_lines l WHERE l.jo_id=jo.id AND TRIM(l.sku)=?))""",
+                (so_number, sku, sku, sku),
+            ).fetchall()
+        finally:
+            pc.close()
+        if jos:
+            blockers.append("Job Order exists (" + ", ".join(str(r[0]) for r in jos[:5]) + ")")
+    except Exception:
+        pass
+    try:
+        from . import grey_db
+
+        gc = grey_db._connect()
+        try:
+            n = gc.execute(
+                """SELECT COUNT(*) FROM printed_fabric_reservations
+                   WHERE TRIM(so_number)=? AND TRIM(sku)=?
+                     AND status IN ('Active','JO Created','CUTTING_ISSUED')""",
+                (so_number, sku),
+            ).fetchone()[0]
+            if n:
+                blockers.append(f"{n} printed-fabric reservation(s) are Active / JO Created / Cutting-issued")
+            n = gc.execute(
+                """SELECT COUNT(*) FROM grey_fabric_allocations
+                   WHERE TRIM(so_number)=? AND TRIM(fg_sku)=?
+                     AND COALESCE(status,'') NOT IN ('Released','Cancelled')""",
+                (so_number, sku),
+            ).fetchone()[0]
+            if n:
+                blockers.append(f"{n} grey fabric allocation(s) exist")
+        finally:
+            gc.close()
+    except Exception:
+        pass
+    return blockers
+
+
+def delete_so_line(lid: int, actor: str = "") -> dict:
+    """Remove one style (line) from a Sales Order. Raises ValueError with a clear reason if unsafe."""
+    conn = _connect()
+    try:
+        ln = conn.execute(
+            """SELECT l.*, so.so_number FROM so_lines l JOIN sales_orders so ON so.id=l.so_id WHERE l.id=?""",
+            (lid,),
+        ).fetchone()
+        if not ln:
+            raise ValueError("SO line not found")
+        ln = dict(ln)
+        so_number, sku = str(ln["so_number"] or "").strip(), str(ln["sku"] or "").strip()
+        reasons: list[str] = []
+        n_lines = conn.execute("SELECT COUNT(*) FROM so_lines WHERE so_id=?", (ln["so_id"],)).fetchone()[0]
+        if n_lines <= 1:
+            reasons.append("it is the only line on the SO (cancel the SO instead)")
+        for col, label in (("produced_qty", "produced"), ("dispatch_qty", "dispatched"), ("received_qty", "received")):
+            if float(ln.get(col) or 0) > 0:
+                reasons.append(f"{label} qty is {float(ln[col]):g}")
+        reasons += _so_line_blockers(so_number, sku)
+        if reasons:
+            raise ValueError(f"Cannot remove {sku} from {so_number}: " + "; ".join(reasons) + ".")
+        conn.execute("DELETE FROM so_lines WHERE id=?", (lid,))
+        conn.execute(
+            "INSERT INTO so_line_audit(so_id, so_number, sku, action, qty, actor, note) VALUES(?,?,?,?,?,?,?)",
+            (ln["so_id"], so_number, sku, "REMOVE_STYLE", float(ln.get("qty") or 0), actor or "",
+             f"Style {sku} (qty {float(ln.get('qty') or 0):g}) removed from {so_number}"),
+        )
+        conn.commit()
+        return {"ok": True, "so_number": so_number, "sku": sku, "qty": float(ln.get("qty") or 0)}
+    finally:
+        conn.close()
+
 
 def get_open_orders():
     """Returns open SOs suitable for MRP/Production"""

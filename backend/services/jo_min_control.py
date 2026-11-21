@@ -201,25 +201,50 @@ def _checked_stock(code: str) -> dict | None:
         return None
 
 
-def _jo_so_sku(jo_id: int) -> tuple[str, str]:
-    """SO number + SKU of the JO — the key of the reservation this MIN may consume."""
+def _jo_so_skus(jo_id: int) -> tuple[str, list[str]]:
+    """SO number + every distinct SKU of the JO (header, main_sku, all jo_lines).
+
+    A Cutting JO header carries only the first size; the other sizes live in ``jo_lines`` and
+    each may hold its own printed-fabric reservation.
+    """
     from ..db import production_db
 
     conn = production_db._connect()
     try:
-        r = conn.execute("SELECT so_number, sku FROM job_orders WHERE id=?", (jo_id,)).fetchone()
+        r = conn.execute(
+            "SELECT so_number, sku, main_sku FROM job_orders WHERE id=?", (jo_id,)
+        ).fetchone()
+        if not r:
+            return "", []
+        skus: list[str] = []
+        for v in (r["sku"], r["main_sku"]):
+            t = str(v or "").strip()
+            if t and t not in skus:
+                skus.append(t)
+        try:
+            lines = conn.execute("SELECT sku FROM jo_lines WHERE jo_id=?", (jo_id,)).fetchall()
+        except sqlite3.Error:
+            lines = []
+        for ln in lines:
+            t = str(ln["sku"] or "").strip()
+            if t and t not in skus:
+                skus.append(t)
+        return str(r["so_number"] or "").strip(), skus
     finally:
         conn.close()
-    if not r:
-        return "", ""
-    return str(r["so_number"] or "").strip(), str(r["sku"] or "").strip()
 
 
-def _printed_issuable(code: str, so_number: str, sku: str) -> dict[str, float]:
-    """What a JO for (SO, SKU) may issue of a printed fabric on Confirm.
+def _jo_so_sku(jo_id: int) -> tuple[str, str]:
+    """SO number + header SKU of the JO (display only; use ``_jo_so_skus`` for reservations)."""
+    so, skus = _jo_so_skus(jo_id)
+    return so, (skus[0] if skus else "")
+
+
+def _printed_issuable(code: str, so_number: str, sku: "list[str] | str") -> dict[str, float]:
+    """What a JO for (SO, SKUs) may issue of a printed fabric on Confirm.
 
     SO allocation moves metres ``available_qty → reserved_qty``, so reserved fabric shows free = 0.
-    Issuable = this JO's SO reservation (consumed by ``lock_printed_on_cutting_issue``)
+    Issuable = this JO's SO reservations (consumed by ``lock_printed_on_cutting_issue``)
              + free checked stock + eligible Item Master opening stock not yet checked.
     """
     from . import fabric_allocation_engine as fae
@@ -240,12 +265,15 @@ def _printed_issuable(code: str, so_number: str, sku: str) -> dict[str, float]:
             "total": r3(reserved + free + opening)}
 
 
-def _check_stock_available(qty_by_code: dict[str, float], *, so_number: str = "", sku: str = "") -> None:
+def _check_stock_available(
+    qty_by_code: dict[str, float], *, so_number: str = "", sku: "list[str] | str" = ""
+) -> None:
     """Block negative stock — Item Master and, for printed fabric, Checked stock.
 
-    Printed fabric: the JO's own SO reservation counts as issuable (it is consumed on Confirm via
-    ``issue_fabric`` → ``lock_printed_on_cutting_issue``); anything beyond it must fit in free
-    checked + eligible opening stock, so another SO's reservation can never be taken.
+    Printed fabric: the JO's own SO reservations (all its sizes / same style) count as issuable
+    (consumed on Confirm via ``issue_fabric`` → ``lock_printed_on_cutting_issue``); anything
+    beyond it must fit in free checked + eligible opening stock, so another SO's reservation can
+    never be taken.
     """
     from ..db.item_db import get_item_by_code
 
@@ -263,10 +291,12 @@ def _check_stock_available(qty_by_code: dict[str, float], *, so_number: str = ""
         if chk is not None:
             pool = _printed_issuable(code, so_number, sku)
             if pool["total"] + 0.001 < qty:
+                shortage = r3(qty - pool["total"])
                 raise ValueError(
-                    f"Insufficient checked printed fabric for {code} — available {pool['total']:.3f} "
-                    f"(SO-reserved {pool['reserved']:.3f} + free checked {pool['free']:.3f} + opening "
-                    f"{pool['opening']:.3f}), issue qty {qty:.3f}"
+                    f"Insufficient checked printed fabric for {code} — required {qty:.3f}, "
+                    f"available {pool['total']:.3f} (SO-reserved {pool['reserved']:.3f} + free checked "
+                    f"{pool['free']:.3f} + opening {pool['opening']:.3f}); shortage {shortage:.3f}. "
+                    f"Only checked stock can be issued — get more fabric checked/allocated, or reduce the MIN qty."
                 )
 
 
@@ -613,7 +643,7 @@ def confirm(in_id: int, *, user_name: str = "", issued_by: str = "", received_by
     for ln in issue_lines:
         code = str(ln["material_code"]).strip()
         qty_by_code[code] = r3(qty_by_code.get(code, 0.0) + _issue_qty(ln))
-    so_number, sku = _jo_so_sku(int(note["jo_id"]))
+    so_number, sku = _jo_so_skus(int(note["jo_id"]))
     so_number = so_number or str(note.get("so_number") or "").strip()
     _check_stock_available(qty_by_code, so_number=so_number, sku=sku)
 
@@ -674,7 +704,7 @@ def correct(in_id: int, line_id: int, new_issue_qty: float, *, reason: str, rema
     code = str(line.get("material_code") or "").strip()
     direction = "OUT" if delta > 0 else "IN"
     if delta > 0:
-        so_number, sku = _jo_so_sku(int(note["jo_id"]))
+        so_number, sku = _jo_so_skus(int(note["jo_id"]))
         _check_stock_available({code: delta}, so_number=so_number or str(note.get("so_number") or ""), sku=sku)
     applied = _apply_item_stock([(code, abs(delta), direction)])
     try:

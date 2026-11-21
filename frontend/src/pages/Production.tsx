@@ -1460,6 +1460,8 @@ function PrintedInlineAllocPanel({
 }) {
   const userName = useAuth(s => s.user?.username || '')
   const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [pcsDrafts, setPcsDrafts] = useState<Record<string, string>>({})
+  const [inputMode, setInputMode] = useState<'MTR' | 'PCS'>('MTR')
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
   const unit = String(mat.unit || 'MTR')
@@ -1472,23 +1474,59 @@ function PrintedInlineAllocPanel({
   const rowKey = (b: any, i: number) => `${b.so_no || b.so_number || ''}|${b.sku || b.fg_sku || ''}|${i}`
   const rowRemaining = (b: any) => Math.max(0, r3(Number(b.qty_req || 0) - Number(b.allocated_qty || 0)))
   const rowLocked = (b: any) => String(b.status || '') === 'Locked-Cut'
+  const rowSo = (b: any) => String(b.so_no || b.so_number || '').trim()
+  const rowSku = (b: any) => String(b.sku || b.fg_sku || '').trim()
+  // Style = SKU without its trailing size token (same rule as backend printed_flexibility.style_base)
+  const styleOf = (b: any) => {
+    const sk = rowSku(b).toUpperCase()
+    return sk.includes('-') ? sk.slice(0, sk.lastIndexOf('-')) : sk
+  }
+  const styleKey = (b: any) => `${rowSo(b)}|${styleOf(b)}`
+  const bomPerPc = (b: any) => Number(b.bom_per_pc || 0)
+  // Draft MTR for a row: MTR mode = typed MTR; PCS mode = pcs × bom_per_pc (manual MTR fallback when no BOM/pc)
+  const rowDraftMtr = (b: any, i: number): number => {
+    const key = rowKey(b, i)
+    if (inputMode === 'MTR') return Number(drafts[key]) || 0
+    const bpp = bomPerPc(b)
+    if (bpp > 0) return r3((Number(pcsDrafts[key]) || 0) * bpp)
+    return Number(drafts[key]) || 0
+  }
   const alreadyTotal = breakdown.reduce((s: number, b: any) => s + (Number(b.allocated_qty) || 0), 0)
-  const draftTotal = r3(breakdown.reduce((s: number, b: any, i: number) => s + (Number(drafts[rowKey(b, i)]) || 0), 0))
+  const draftTotal = r3(breakdown.reduce((s: number, b: any, i: number) => s + rowDraftMtr(b, i), 0))
   const remainingFree = r3(freeQty - draftTotal)
   const over = draftTotal > freeQty + 0.001
-  const overRow = breakdown.find((b: any, i: number) => (Number(drafts[rowKey(b, i)]) || 0) > rowRemaining(b) + 0.001)
+  // Style-level cap: Σ(draft + already allocated) ≤ Σ qty_req for each SO + style (size shift allowed)
+  const styleTotals = (() => {
+    const m: Record<string, { req: number; alloc: number; draft: number; label: string }> = {}
+    breakdown.forEach((b: any, i: number) => {
+      const k = styleKey(b)
+      if (!m[k]) m[k] = { req: 0, alloc: 0, draft: 0, label: `${rowSo(b)} · ${styleOf(b)}` }
+      m[k].req += Number(b.qty_req || 0)
+      m[k].alloc += Number(b.allocated_qty || 0)
+      m[k].draft += rowDraftMtr(b, i)
+    })
+    return m
+  })()
+  const overStyle = Object.values(styleTotals).find(t => t.alloc + t.draft > t.req + 0.001)
 
   const fillRemaining = () => {
+    // Fill each row up to its own remaining, never beyond the style-level remaining, within free stock.
     let pool = freeQty
     const next: Record<string, string> = {}
+    const styleLeft: Record<string, number> = {}
+    Object.entries(styleTotals).forEach(([k, t]) => { styleLeft[k] = Math.max(0, r3(t.req - t.alloc)) })
     breakdown.forEach((b: any, i: number) => {
       if (rowLocked(b) || pool <= 0) return
-      const take = r3(Math.min(rowRemaining(b), pool))
+      const k = styleKey(b)
+      const take = r3(Math.min(rowRemaining(b), styleLeft[k] ?? 0, pool))
       if (take > 0) {
         next[rowKey(b, i)] = String(take)
         pool = r3(pool - take)
+        styleLeft[k] = r3((styleLeft[k] ?? 0) - take)
       }
     })
+    setInputMode('MTR')
+    setPcsDrafts({})
     setDrafts(next)
     setMsg(Object.keys(next).length ? '' : 'Nothing left to allocate — requirements are covered or no free stock')
   }
@@ -1496,14 +1534,14 @@ function PrintedInlineAllocPanel({
   const save = async () => {
     const rows = breakdown
       .map((b: any, i: number) => ({
-        qty: Number(drafts[rowKey(b, i)]) || 0,
-        so_number: String(b.so_no || b.so_number || ''),
-        fg_sku: String(b.sku || b.fg_sku || ''),
+        qty: rowDraftMtr(b, i),
+        so_number: rowSo(b),
+        fg_sku: rowSku(b),
       }))
       .filter((r: { qty: number }) => r.qty > 0)
     if (!rows.length) { setMsg('Enter allocation qty on at least one SO/SKU'); return }
     if (over) { setMsg(`Total allocation ${draftTotal} exceeds free printed stock ${freeQty} ${unit}`); return }
-    if (overRow) { setMsg(`Allocation for ${overRow.sku || overRow.fg_sku} exceeds its remaining requirement`); return }
+    if (overStyle) { setMsg(`Allocation for ${overStyle.label} exceeds the style requirement (${r3(overStyle.req)} ${unit})`); return }
     setSaving(true)
     setMsg('')
     try {
@@ -1515,6 +1553,7 @@ function PrintedInlineAllocPanel({
       })
       const fromOpening = Number(res.data?.opening_converted || 0)
       setDrafts({})
+      setPcsDrafts({})
       setMsg(
         `Allocated ${draftTotal} ${unit} across ${rows.length} SKU${rows.length === 1 ? '' : 's'}`
         + (fromOpening > 0 ? ` (${fromOpening} ${unit} from opening stock)` : '')
@@ -1550,7 +1589,21 @@ function PrintedInlineAllocPanel({
         </p>
       )}
       {over && <p className="text-[11px] text-red-700">Total allocation exceeds free printed stock — reduce quantities before saving.</p>}
-      {overRow && <p className="text-[11px] text-red-700">An allocation is larger than that SKU's remaining requirement.</p>}
+      {overStyle && <p className="text-[11px] text-red-700">Allocation for {overStyle.label} is larger than the style requirement ({r3(overStyle.req)} {unit}) — sizes may shift within a style, but the style total cannot exceed it.</p>}
+      <div className="flex items-center gap-2 text-xs" onClick={e => e.stopPropagation()}>
+        <span className="text-gray-500">Allocate by:</span>
+        {(['MTR', 'PCS'] as const).map(m => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => setInputMode(m)}
+            className={`px-2.5 py-1 rounded border font-medium ${inputMode === m ? 'bg-[#002B5B] text-white border-[#002B5B]' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}
+          >
+            {m === 'MTR' ? 'MTR' : 'Cutting PCS'}
+          </button>
+        ))}
+        {inputMode === 'PCS' && <span className="text-[11px] text-gray-500">Enter planned pcs — MTR = pcs × BOM per pc (rows without BOM/pc take MTR directly).</span>}
+      </div>
       <table className="w-full text-xs">
         <thead>
           <tr className="text-gray-400">
@@ -1573,7 +1626,9 @@ function PrintedInlineAllocPanel({
                     : 'text-red-700 bg-red-50'
             const key = rowKey(b, i)
             const rem = rowRemaining(b)
-            const disabled = !inChecked || rowLocked(b) || rem <= 0
+            const disabled = !inChecked || rowLocked(b)
+            const bpp = bomPerPc(b)
+            const pcsRow = inputMode === 'PCS' && bpp > 0
             return (
               <tr key={i} className="border-t border-blue-100">
                 <td className="py-1 pr-3 font-semibold text-[#002B5B]">{b.so_no}</td>
@@ -1582,16 +1637,35 @@ function PrintedInlineAllocPanel({
                 <td className="py-1 pr-3 text-right font-semibold text-gray-700">{Number(b.allocated_qty || 0)} {unit}</td>
                 <td className="py-1 pr-3 text-right text-gray-700">{rem} {unit}</td>
                 <td className="py-1 pr-3 text-right" onClick={e => e.stopPropagation()}>
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.001"
-                    disabled={disabled}
-                    value={drafts[key] ?? ''}
-                    placeholder={disabled ? '—' : '0'}
-                    onChange={e => setDrafts(d => ({ ...d, [key]: e.target.value }))}
-                    className="w-24 border border-gray-200 rounded px-1.5 py-0.5 text-right font-mono disabled:bg-gray-50"
-                  />
+                  {pcsRow ? (
+                    <div className="flex flex-col items-end">
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          min={0}
+                          step="1"
+                          disabled={disabled}
+                          value={pcsDrafts[key] ?? ''}
+                          placeholder={disabled ? '—' : '0 pcs'}
+                          onChange={e => setPcsDrafts(d => ({ ...d, [key]: e.target.value }))}
+                          className="w-20 border border-gray-200 rounded px-1.5 py-0.5 text-right font-mono disabled:bg-gray-50"
+                        />
+                        <span className="text-[10px] text-gray-400">pcs</span>
+                      </div>
+                      <span className="text-[10px] text-gray-500 font-mono">= {rowDraftMtr(b, i)} {unit} @ {bpp}/pc</span>
+                    </div>
+                  ) : (
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.001"
+                      disabled={disabled}
+                      value={drafts[key] ?? ''}
+                      placeholder={disabled ? '—' : (inputMode === 'PCS' ? 'MTR (no BOM/pc)' : '0')}
+                      onChange={e => setDrafts(d => ({ ...d, [key]: e.target.value }))}
+                      className="w-24 border border-gray-200 rounded px-1.5 py-0.5 text-right font-mono disabled:bg-gray-50"
+                    />
+                  )}
                 </td>
                 <td className="py-1">
                   <span className={`inline-block px-1.5 py-0.5 rounded text-[11px] font-semibold ${statusColor}`}>{status}</span>
@@ -1612,7 +1686,7 @@ function PrintedInlineAllocPanel({
         </button>
         <button
           type="button"
-          disabled={saving || over || !!overRow || draftTotal <= 0}
+          disabled={saving || over || !!overStyle || draftTotal <= 0}
           onClick={save}
           className="text-xs px-3 py-1.5 rounded-lg bg-[#002B5B] text-white font-medium hover:bg-blue-900 disabled:opacity-40"
         >

@@ -61,7 +61,7 @@ def _item_connect():
 
 def _get_item_by_code(conn, code):
     row = conn.execute(
-        "SELECT i.*, t.name AS item_type_name FROM items i JOIN item_types t ON t.id=i.item_type_id WHERE i.item_code=?", (code,)
+        "SELECT i.*, t.name AS item_type_name FROM items i JOIN item_types t ON t.id=i.item_type_id WHERE UPPER(TRIM(i.item_code))=UPPER(TRIM(?))", (code,)
     ).fetchone()
     return dict(row) if row else None
 
@@ -280,6 +280,9 @@ def calculate_mrp(so_numbers):
                 'p_code': p_code,
                 'printed_code': p_code,
                 'qty_req': total,
+                # MTR per FG piece (incl. shrinkage/wastage) — only known when the fabric sits directly
+                # on the FG BOM; lets "Allocate by Cutting PCS" convert pcs → metres.
+                'bom_per_pc': round(adj_qty, 4) if depth == 0 else None,
                 'allocated_qty': 0.0,
                 'status': 'Pending',
             })

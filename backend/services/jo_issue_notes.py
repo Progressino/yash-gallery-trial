@@ -162,7 +162,7 @@ def _next_in_number(conn) -> str:
 def _get_item_by_code(conn, code: str):
     row = conn.execute(
         "SELECT i.*, t.code AS type_code FROM items i "
-        "JOIN item_types t ON t.id = i.item_type_id WHERE i.item_code = ?",
+        "JOIN item_types t ON t.id = i.item_type_id WHERE UPPER(TRIM(i.item_code)) = UPPER(TRIM(?))",
         (code,),
     ).fetchone()
     return dict(row) if row else None

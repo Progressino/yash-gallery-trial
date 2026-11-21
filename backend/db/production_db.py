@@ -2672,8 +2672,10 @@ def _create_single_jo(data: dict) -> str:
         try:
             from .grey_db import close_printed_reservations_when_fully_planned
 
+            _cut_skus = [(data.get("sku") or "").strip(), str(data.get("main_sku") or "").strip()]
+            _cut_skus += [str((ln or {}).get("sku") or "").strip() for ln in line_snapshots]
             close_printed_reservations_when_fully_planned(
-                so_number, (data.get("sku") or "").strip(), fabric_code
+                so_number, _cut_skus, fabric_code
             )
         except Exception:
             pass
@@ -2994,6 +2996,20 @@ def issue_fabric(joid: int, data: dict):
         raise ValueError("JO not found")
     _assert_jo_mutable(jo, action="issue fabric")
     issued = float(data.get('issued_qty', 0))
+    # Every SKU of the JO (header + main + all size lines): the cutting header carries only the
+    # first size, but each size may hold its own printed-fabric reservation.
+    jo_skus: list[str] = []
+    for _v in (jo.get("sku"), data.get("sku"), jo.get("main_sku")):
+        _t = str(_v or "").strip()
+        if _t and _t not in jo_skus:
+            jo_skus.append(_t)
+    try:
+        for _r in conn.execute("SELECT sku FROM jo_lines WHERE jo_id=?", (joid,)).fetchall():
+            _t = str(_r["sku"] or "").strip()
+            if _t and _t not in jo_skus:
+                jo_skus.append(_t)
+    except Exception:
+        pass
     conn.execute("""INSERT INTO jo_fabric_issues(jo_id,jo_line_id,issue_date,fabric_code,fabric_name,issued_qty,unit,issued_by,remarks)
         VALUES(?,?,?,?,?,?,?,?,?)""",
         (joid, data.get('jo_line_id'),
@@ -3020,7 +3036,7 @@ def issue_fabric(joid: int, data: dict):
                 jo_id=joid,
                 fabric_code=fabric_code,
                 so_number=(jo.get("so_number") or data.get("so_number") or "").strip(),
-                sku=(jo.get("sku") or data.get("sku") or "").strip(),
+                sku=jo_skus,
                 issued_qty=issued,
                 user_name=(data.get("issued_by") or "").strip(),
             )

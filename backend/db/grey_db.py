@@ -1306,25 +1306,39 @@ def _active_printed_reserve_so_sku(fabric_code: str = "") -> set:
 
 
 def close_printed_reservations_when_fully_planned(
-    so_number: str, sku: str, fabric_code: str = ""
+    so_number: str, sku: "str | list[str] | tuple[str, ...]", fabric_code: str = ""
 ) -> None:
-    """Mark Active reservations as JO Created once a Cutting job order exists."""
+    """Mark Active reservations as JO Created once a Cutting job order exists.
+
+    ``sku`` may be one SKU or the list of every SKU on the JO (header + all size lines): each
+    size's reservation on that SO/fabric is flipped, not just the header SKU's.
+    """
     so_number = (so_number or "").strip()
-    sku = (sku or "").strip()
     fabric_code = (fabric_code or "").strip()
-    if not so_number or not sku:
+    if isinstance(sku, str):
+        sku = [sku]
+    skus: list[str] = []
+    for x in sku or []:
+        t = str(x or "").strip()
+        if t and t not in skus:
+            skus.append(t)
+    if not so_number or not skus:
         return
-    if _cutting_jo_planned_by_so_sku().get((so_number, sku), 0.0) <= 0:
+    planned = _cutting_jo_planned_by_so_sku()
+    # Header SKU carries the planned qty; once any SKU of the JO is planned, every size line of
+    # the same Cutting JO is considered planned too.
+    if not any(planned.get((so_number, x), 0.0) > 0 for x in skus):
         return
     conn = _connect()
     try:
-        params: tuple = (so_number, sku)
-        q = """UPDATE printed_fabric_reservations SET status = 'JO Created'
-               WHERE status = 'Active' AND TRIM(so_number) = ? AND TRIM(sku) = ?"""
+        ph = ",".join("?" for _ in skus)
+        params: list = [so_number, *skus]
+        q = f"""UPDATE printed_fabric_reservations SET status = 'JO Created'
+               WHERE status = 'Active' AND TRIM(so_number) = ? AND TRIM(sku) IN ({ph})"""
         if fabric_code:
             q += " AND TRIM(fabric_code) = ?"
-            params = (so_number, sku, fabric_code)
-        conn.execute(q, params)
+            params.append(fabric_code)
+        conn.execute(q, tuple(params))
         conn.commit()
     finally:
         conn.close()
