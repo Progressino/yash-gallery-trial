@@ -11,7 +11,7 @@ import {
   WeekdayPairInput, weekdayPairValid, WorkingHoursReport, sendWithOverlapConfirm, type BreakInfo,
 } from './hrmWorkTime'
 import {
-  AssignExtraFields, AssignViewToggle, AssignedByMeTable, AssignmentAcceptanceGate, AssignmentReviewList,
+  AssignExtraFields, AssignViewToggle, AssignedByMeTable, AssignmentMandatoryActionGate, AssignmentReviewList,
   EMPTY_ASSIGN_EXTRA, WorkTrackerTab, assignExtraPayload, type AssignExtra, type AssignView,
 } from './hrmAssignments'
 
@@ -235,6 +235,12 @@ export default function HRM() {
   const [approvalPct, setApprovalPct] = useState('')
   const [inboxPct, setInboxPct] = useState<Record<string, string>>({})
   const [extendDue, setExtendDue] = useState<Record<number, string>>({})
+  const [approvalEmpFilter, setApprovalEmpFilter] = useState('')
+  const [approvalTypeFilter, setApprovalTypeFilter] = useState('')
+  const [approvalStatusFilter, setApprovalStatusFilter] = useState('')
+  const [approvalDateFrom, setApprovalDateFrom] = useState('')
+  const [approvalDateTo, setApprovalDateTo] = useState('')
+  const [approvalDetailKey, setApprovalDetailKey] = useState<string | null>(null)
   const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks'>('responsibilities')
   const [reportsSubTab, setReportsSubTab] = useState<'attendance' | 'dwr' | 'hours' | 'performance' | 'tasks' | 'faults' | 'appraisal'>('attendance')
   const [reportsDept, setReportsDept] = useState<any>('')
@@ -260,12 +266,12 @@ export default function HRM() {
   const [empForm, setEmpForm] = useState({ name: '', emp_code: '', department_id: '' as any, designation: '', phone: '', email: '', join_date: '', reports_to_employee_id: '' as any })
   const [respForm, setRespForm] = useState({
     employee_id: '' as any, title: '', description: '', frequency: 'Daily', category: 'General',
-    added_by: '', priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
+    added_by: '', assigned_by_employee_id: '' as any, priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
     schedule_month: 0, schedule_rule: '', expected_time: '', kpi_weightage: '' as any, linked_to_employee_id: '' as any,
     backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
   })
   const [taskForm, setTaskForm] = useState({
-    employee_id: '' as any, title: '', description: '', due_date: '', assigned_by: '', priority: 'Medium',
+    employee_id: '' as any, title: '', description: '', due_date: '', assigned_by: '', assigned_by_employee_id: '' as any, priority: 'Medium',
     linked_to_employee_id: '' as any,
   })
   const [reassignForm, setReassignForm] = useState({
@@ -303,7 +309,7 @@ export default function HRM() {
   const [quickResp, setQuickResp] = useState({
     mode: 'responsibility' as 'responsibility' | 'task',
     employee_id: '' as any, department_id: '' as any, title: '', description: '',
-    frequency: 'Daily', category: 'General', added_by: '', due_date: '',
+    frequency: 'Daily', category: 'General', added_by: '', assigned_by_employee_id: '' as any, due_date: '',
     priority: 'Medium', mandatory: false, schedule_weekday: '', schedule_month_day: 0,
     schedule_month: 0, schedule_rule: '', expected_time: '', kpi_weightage: '' as any, linked_to_employee_id: '' as any,
     backup_employee_id: '' as any, backup_allocation_value: 1, backup_allocation_unit: 'days',
@@ -587,8 +593,12 @@ export default function HRM() {
     onError: (err: any) => alert(err?.response?.data?.detail || 'Reassignment failed'),
   })
   const approveLogMut = useMutation({
-    mutationFn: ({ id, action, achievement_pct }: { id: number; action: string; achievement_pct: number }) =>
-      api.post(`/hrm/tasks/logs/${id}/approve`, { action, achievement_pct }),
+    mutationFn: ({ id, action, achievement_pct, notes }: { id: number; action: string; achievement_pct?: number; notes?: string }) =>
+      api.post(`/hrm/tasks/logs/${id}/approve`, {
+        action,
+        notes: notes || '',
+        ...(achievement_pct != null ? { achievement_pct } : {}),
+      }),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: ['hrm-employee-check'] })
       qc.invalidateQueries({ queryKey: ['hrm-appraisal'] })
@@ -836,7 +846,7 @@ export default function HRM() {
       setAiParsed(null)
       setVoiceText('')
       setTaskForm({
-        employee_id: '', title: '', description: '', due_date: '', assigned_by: '', priority: 'Medium',
+        employee_id: '', title: '', description: '', due_date: '', assigned_by: '', assigned_by_employee_id: '', priority: 'Medium',
         linked_to_employee_id: '',
       })
     },
@@ -889,8 +899,8 @@ export default function HRM() {
     },
   })
   const rejectOneTimeTaskMut = useMutation({
-    mutationFn: ({ id, notes, achievement_pct }: { id: number; notes: string; achievement_pct: number }) =>
-      api.post(`/hrm/one-time-tasks/${id}/reject`, { notes, achievement_pct }),
+    mutationFn: ({ id, notes }: { id: number; notes: string }) =>
+      api.post(`/hrm/one-time-tasks/${id}/reject`, { notes }),
     onSuccess: () => {
       invalidateTaskMetrics()
       qc.invalidateQueries({ queryKey: ['hrm-pending-approvals'] })
@@ -898,6 +908,7 @@ export default function HRM() {
       setApprovalNotes('')
       setApprovalPct('')
     },
+    onError: (err: any) => alert(err?.response?.data?.detail || 'Reject failed'),
   })
   const extendDeadlineMut = useMutation({
     mutationFn: ({ id, due_date }: { id: number; due_date: string }) =>
@@ -946,6 +957,7 @@ export default function HRM() {
         description: form.description || '',
         due_date: form.due_date || '',
         assigned_by: form.added_by || '',
+        assigned_by_employee_id: form.assigned_by_employee_id ? +form.assigned_by_employee_id : null,
         priority: form.priority || 'Medium',
         linked_to_employee_id: form.linked_to_employee_id ? +form.linked_to_employee_id : null,
         ...assignExtraPayload(assignExtra),
@@ -976,6 +988,7 @@ export default function HRM() {
         frequency: form.frequency,
         category: form.category,
         added_by: form.added_by || '',
+        assigned_by_employee_id: form.assigned_by_employee_id ? +form.assigned_by_employee_id : null,
         priority: form.priority || 'Medium',
         mandatory: !!form.mandatory,
         schedule_weekday: form.schedule_weekday || '',
@@ -1306,80 +1319,6 @@ export default function HRM() {
     )
   }
 
-  const renderApprovalInbox = () => (
-    !!scope?.employee_id && Array.isArray(pendingApprovals?.pending) && pendingApprovals.pending.length > 0 ? (
-      <div className="space-y-3">
-        {pendingApprovals.pending.map((p: any) => {
-          const rowKey = `${p.kind || 'responsibility'}-${p.task_log_id || p.task_id}`
-          const isDeadline = p.kind === 'deadline'
-          const isOneTime = p.kind === 'one_time'
-          return (
-            <div key={rowKey} className="bg-white border border-indigo-100 rounded-lg px-3 py-3 flex flex-wrap items-center justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-gray-900">{p.title}</p>
-                <p className="text-xs text-gray-500">
-                  {p.assignee_name}
-                  {isDeadline
-                    ? ` · deadline ${p.due_date} · ${p.status} · needs a new deadline`
-                    : ` · ${p.log_date || p.due_date || ''} · ${p.status} · Awaiting approval`}
-                  {p.frequency ? ` · ${p.frequency}` : ''}
-                  {p.work_seconds ? ` · worked ${Math.floor(Number(p.work_seconds) / 3600)}h ${Math.floor((Number(p.work_seconds) % 3600) / 60)}m` : ''}
-                  {p.kpi_weightage ? ` · weight ${p.kpi_weightage}%` : ''}
-                </p>
-                {(p.message || p.remarks) && <p className="text-xs text-gray-600 mt-1">{p.message || p.remarks}</p>}
-              </div>
-              {isDeadline ? (
-                <div className="flex items-center gap-1">
-                  <input
-                    type="date"
-                    value={extendDue[p.task_id] || ''}
-                    onChange={e => setExtendDue(prev => ({ ...prev, [p.task_id]: e.target.value }))}
-                    className="border rounded px-1 py-1 text-xs"
-                  />
-                  <button type="button" className="text-xs px-2 py-1 bg-indigo-700 text-white rounded" onClick={() => {
-                    const due = extendDue[p.task_id]
-                    if (!due || (p.due_date && due <= String(p.due_date).slice(0, 10))) {
-                      alert('Pick a deadline later than the current one')
-                      return
-                    }
-                    extendDeadlineMut.mutate({ id: p.task_id, due_date: due })
-                  }}>Extend deadline</button>
-                </div>
-              ) : (
-                <div className="flex items-center gap-1">
-                  <label className="text-[10px] text-gray-500">Achieved %
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={inboxPct[rowKey] ?? ''}
-                      onChange={e => setInboxPct(prev => ({ ...prev, [rowKey]: e.target.value }))}
-                      className="ml-1 w-16 border rounded px-1 py-1 text-xs"
-                    />
-                  </label>
-                  <button type="button" className="text-xs px-2 py-1 bg-green-700 text-white rounded" onClick={() => {
-                    const n = achievedPctOrNull(inboxPct[rowKey])
-                    if (n == null) return
-                    if (isOneTime) approveOneTimeTaskMut.mutate({ id: p.task_id, notes: '', achievement_pct: n })
-                    else approveLogMut.mutate({ id: p.task_log_id, action: 'Approved', achievement_pct: n })
-                  }}>Approve</button>
-                  <button type="button" className="text-xs px-2 py-1 bg-red-700 text-white rounded" onClick={() => {
-                    const n = achievedPctOrNull(inboxPct[rowKey])
-                    if (n == null) return
-                    if (isOneTime) rejectOneTimeTaskMut.mutate({ id: p.task_id, notes: '', achievement_pct: n })
-                    else approveLogMut.mutate({ id: p.task_log_id, action: 'Cancelled', achievement_pct: n })
-                  }}>Reject</button>
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    ) : (
-      <p className="text-sm text-gray-400 py-8 text-center">No tasks awaiting your approval.</p>
-    )
-  )
-
   const deptName = (id: any) => (depts as any[]).find(d => d.id === id)?.name || '—'
 
   const ALL_TABS: [Tab, string][] = [
@@ -1463,15 +1402,30 @@ export default function HRM() {
 
   const assigneeOptions = useMemo(() => {
     const names = new Set<string>()
-    const opts: string[] = []
+    const opts: { name: string; employee_id: number | null }[] = []
     for (const a of assignees as any[]) {
       const n = (a.name || a.username || '').trim()
-      if (n && !names.has(n)) { names.add(n); opts.push(n) }
+      if (n && !names.has(n)) {
+        names.add(n)
+        opts.push({ name: n, employee_id: a.employee_id ? Number(a.employee_id) : null })
+      }
     }
-    if (authUser?.full_name && !names.has(authUser.full_name)) opts.unshift(authUser.full_name)
-    if (authUser?.username && !names.has(authUser.username)) opts.push(authUser.username)
+    if (authUser?.full_name && !names.has(authUser.full_name)) {
+      opts.unshift({ name: authUser.full_name, employee_id: scope?.employee_id ? Number(scope.employee_id) : null })
+    }
+    if (authUser?.username && !names.has(authUser.username)) {
+      opts.push({ name: authUser.username, employee_id: scope?.employee_id ? Number(scope.employee_id) : null })
+    }
     return opts
-  }, [assignees, authUser])
+  }, [assignees, authUser, scope?.employee_id])
+
+  const setAssignedBy = (form: 'resp' | 'task' | 'quick', name: string) => {
+    const hit = assigneeOptions.find(o => o.name === name)
+    const eid = hit?.employee_id || ''
+    if (form === 'resp') setRespForm(f => ({ ...f, added_by: name, assigned_by_employee_id: eid }))
+    else if (form === 'task') setTaskForm(f => ({ ...f, assigned_by: name, assigned_by_employee_id: eid }))
+    else setQuickResp(f => ({ ...f, added_by: name, assigned_by_employee_id: eid }))
+  }
 
   const startIssueAudio = async () => {
     try {
@@ -1511,7 +1465,7 @@ export default function HRM() {
 
   return (
     <div className="space-y-4">
-      <AssignmentAcceptanceGate employeeId={scope?.employee_id} />
+      <AssignmentMandatoryActionGate employeeId={scope?.employee_id} />
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-gray-800">{t(lang, 'title')}</h1>
@@ -1792,10 +1746,10 @@ export default function HRM() {
                       className="w-full border rounded px-2 py-1.5 text-sm mt-1" /></div>
                 )}
                 <div><label className="text-xs text-gray-500">{t(lang, 'assignedBy')}</label>
-                  <select value={quickResp.added_by} onChange={e => setQuickResp(f => ({ ...f, added_by: e.target.value }))}
+                  <select value={quickResp.added_by} onChange={e => setAssignedBy('quick', e.target.value)}
                     className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
-                    {assigneeOptions.map(n => <option key={n}>{n}</option>)}
+                    {assigneeOptions.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
                   </select>
                 </div>
                 <div><label className="text-xs text-gray-500">{t(lang, 'priority')}</label>
@@ -1900,12 +1854,8 @@ export default function HRM() {
             </button>
           </div>
 
-          {!!scope?.employee_id && Array.isArray(pendingApprovals?.pending) && pendingApprovals.pending.length > 0 && (
-            <div className="bg-indigo-50/70 border border-indigo-100 rounded-xl p-3 space-y-2">
-              <h3 className="text-sm font-semibold text-indigo-950">Approval bucket</h3>
-              {renderApprovalInbox()}
-            </div>
-          )}
+          {/* Verifier actions for other employees' work live only under the Approvals tab.
+              Own-work "Awaiting approval" labels on Employee Check remain below. */}
 
           {!!scope?.employee_id && Array.isArray(pendingApprovals?.notifications) && pendingApprovals.notifications.filter((n: any) => !n.is_read).length > 0 && isEmployeeScope && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900">
@@ -2108,12 +2058,31 @@ export default function HRM() {
       )}
 
       {/* ── APPROVALS (Linked Person inbox) ── */}
-      {tab === 'approvals' && (
+      {tab === 'approvals' && (() => {
+        const pending = (pendingApprovals?.pending || []) as any[]
+        const empIds = Array.from(new Set(pending.map(p => Number(p.assignee_employee_id)).filter(Boolean)))
+        const empName = (id: number) => pending.find(p => Number(p.assignee_employee_id) === id)?.assignee_name || `Employee #${id}`
+        const filtered = pending.filter(p => {
+          if (approvalEmpFilter && Number(p.assignee_employee_id) !== Number(approvalEmpFilter)) return false
+          if (approvalTypeFilter === 'Tasks' && p.kind === 'responsibility') return false
+          if (approvalTypeFilter === 'Responsibilities' && p.kind !== 'responsibility') return false
+          if (approvalStatusFilter && String(p.status || '') !== approvalStatusFilter) return false
+          const wd = String(p.log_date || p.due_date || '').slice(0, 10)
+          if (approvalDateFrom && wd && wd < approvalDateFrom) return false
+          if (approvalDateTo && wd && wd > approvalDateTo) return false
+          return true
+        })
+        const fmtDur = (sec: number) => {
+          const s = Math.max(0, Number(sec) || 0)
+          const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60)
+          return h ? `${h}h ${m}m` : `${m}m`
+        }
+        return (
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div>
               <h3 className="font-semibold text-gray-800">Approval bucket</h3>
-              <p className="text-xs text-gray-500">Approve finished work with achieved %, or extend a one-time deadline that was missed.</p>
+              <p className="text-xs text-gray-500">Approve finished work with achieved %, or extend a one-time deadline that was missed. Verification requests for other employees appear only here.</p>
             </div>
             {(pendingApprovals?.unread || 0) > 0 && (
               <button
@@ -2125,10 +2094,137 @@ export default function HRM() {
               </button>
             )}
           </div>
+          <div className="bg-white rounded-xl border p-3 flex flex-wrap gap-2 text-xs items-center">
+            <span className="font-semibold text-gray-500">Filters:</span>
+            <select value={approvalEmpFilter} onChange={e => setApprovalEmpFilter(e.target.value)} className="border rounded px-2 py-1">
+              <option value="">All Employees</option>
+              {empIds.map(id => <option key={id} value={id}>{empName(id)}</option>)}
+            </select>
+            <select value={approvalTypeFilter} onChange={e => setApprovalTypeFilter(e.target.value)} className="border rounded px-2 py-1">
+              <option value="">Work Type: All</option>
+              <option value="Tasks">Tasks</option>
+              <option value="Responsibilities">Responsibilities</option>
+            </select>
+            <select value={approvalStatusFilter} onChange={e => setApprovalStatusFilter(e.target.value)} className="border rounded px-2 py-1">
+              <option value="">Status: all</option>
+              {Array.from(new Set(pending.map(p => String(p.status || '')).filter(Boolean))).map(s => <option key={s}>{s}</option>)}
+            </select>
+            <label className="text-gray-500">From
+              <input type="date" value={approvalDateFrom} onChange={e => setApprovalDateFrom(e.target.value)} className="ml-1 border rounded px-1 py-1" />
+            </label>
+            <label className="text-gray-500">To
+              <input type="date" value={approvalDateTo} onChange={e => setApprovalDateTo(e.target.value)} className="ml-1 border rounded px-1 py-1" />
+            </label>
+            <button type="button" className="px-2 py-1 border rounded text-gray-600"
+              onClick={() => { setApprovalEmpFilter(''); setApprovalTypeFilter(''); setApprovalStatusFilter(''); setApprovalDateFrom(''); setApprovalDateTo('') }}>
+              Clear Filters
+            </button>
+            <button type="button" className="px-2 py-1 border rounded text-gray-600" onClick={() => refetchPendingApprovals()}>Refresh</button>
+          </div>
           <AssignmentReviewList rows={pendingApprovals?.assignment_reviews || []} />
-          {renderApprovalInbox()}
+          {filtered.length === 0 ? (
+            <p className="text-sm text-gray-400 py-8 text-center">No tasks awaiting your approval.</p>
+          ) : (
+            <div className="space-y-3">
+              {filtered.map((p: any) => {
+                const rowKey = `${p.kind || 'responsibility'}-${p.task_log_id || p.task_id}`
+                const isDeadline = p.kind === 'deadline'
+                const isOneTime = p.kind === 'one_time'
+                const open = approvalDetailKey === rowKey
+                return (
+                  <div key={rowKey} className="bg-white border border-indigo-100 rounded-lg px-3 py-3 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-900">{p.title}</p>
+                        <p className="text-xs text-gray-500">
+                          {p.assignee_name}
+                          {isDeadline
+                            ? ` · deadline ${p.due_date} · ${p.status} · needs a new deadline`
+                            : ` · ${p.log_date || p.due_date || ''} · ${p.status} · Awaiting approval`}
+                          {p.frequency ? ` · ${p.frequency}` : ''}
+                          {p.work_seconds || p.actual_working_time ? ` · worked ${fmtDur(p.actual_working_time || p.work_seconds)}` : ''}
+                          {p.kpi_weightage ? ` · weight ${p.kpi_weightage}%` : ''}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1 flex-wrap">
+                        <button type="button" className="text-xs px-2 py-1 border rounded text-indigo-700"
+                          onClick={() => setApprovalDetailKey(open ? null : rowKey)}>
+                          {open ? 'Hide details' : 'View details'}
+                        </button>
+                        {isDeadline ? (
+                          <>
+                            <input type="date" value={extendDue[p.task_id] || ''} onChange={e => setExtendDue(prev => ({ ...prev, [p.task_id]: e.target.value }))} className="border rounded px-1 py-1 text-xs" />
+                            <button type="button" className="text-xs px-2 py-1 bg-indigo-700 text-white rounded" onClick={() => {
+                              const due = extendDue[p.task_id]
+                              if (!due || (p.due_date && due <= String(p.due_date).slice(0, 10))) { alert('Pick a deadline later than the current one'); return }
+                              extendDeadlineMut.mutate({ id: p.task_id, due_date: due })
+                            }}>Extend deadline</button>
+                          </>
+                        ) : (
+                          <>
+                            <label className="text-[10px] text-gray-500">Achieved %
+                              <input type="number" min={1} max={100} value={inboxPct[rowKey] ?? ''} onChange={e => setInboxPct(prev => ({ ...prev, [rowKey]: e.target.value }))} className="ml-1 w-16 border rounded px-1 py-1 text-xs" />
+                            </label>
+                            <button type="button" className="text-xs px-2 py-1 bg-green-700 text-white rounded" onClick={() => {
+                              const n = achievedPctOrNull(inboxPct[rowKey])
+                              if (n == null) return
+                              if (isOneTime) approveOneTimeTaskMut.mutate({ id: p.task_id, notes: '', achievement_pct: n })
+                              else approveLogMut.mutate({ id: p.task_log_id, action: 'Approved', achievement_pct: n })
+                            }}>Approve</button>
+                            <button type="button" className="text-xs px-2 py-1 bg-red-700 text-white rounded" onClick={() => {
+                              const reason = window.prompt('Rejection reason (required)')
+                              if (reason == null) return
+                              if (!String(reason).trim()) { alert('Enter a rejection reason'); return }
+                              if (isOneTime) rejectOneTimeTaskMut.mutate({ id: p.task_id, notes: String(reason).trim() })
+                              else approveLogMut.mutate({ id: p.task_log_id, action: 'Cancelled', notes: String(reason).trim() })
+                            }}>Reject</button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    {open && (
+                      <div className="bg-slate-50 border rounded-lg p-3 text-xs space-y-2 text-gray-700">
+                        <p><b>Employee:</b> {p.assignee_name}</p>
+                        <p><b>Task/Responsibility:</b> {p.title}</p>
+                        {p.description && <p><b>Description:</b> {p.description}</p>}
+                        <p><b>Frequency / Date:</b> {p.frequency || 'One-time'} · {p.log_date || p.due_date || '—'}</p>
+                        <p><b>Submitted status:</b> {p.status} · {p.approval_status || 'Pending'}</p>
+                        {(p.remarks || p.message) && <p><b>Notes:</b> {p.remarks || p.message}</p>}
+                        <p><b>Weightage %:</b> {p.kpi_weightage ?? '—'} · <b>Expected time:</b> {p.expected_time || '—'}</p>
+                        <p><b>Actual working time:</b> {fmtDur(p.actual_working_time || p.work_seconds || 0)}</p>
+                        {Array.isArray(p.time_slots) && p.time_slots.length > 0 && (
+                          <div>
+                            <b>Time slots:</b>
+                            <ul className="mt-1 space-y-0.5">
+                              {p.time_slots.map((s: any, i: number) => (
+                                <li key={i}>{s.start_at || '—'} → {s.end_at || '—'} · {fmtDur(s.duration_seconds || 0)}{s.notes ? ` · ${s.notes}` : ''}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {Array.isArray(p.rejection_history) && p.rejection_history.length > 0 && (
+                          <div>
+                            <b>Previous rejection history:</b>
+                            <ul className="mt-1 space-y-0.5">
+                              {p.rejection_history.map((h: any, i: number) => (
+                                <li key={i}>{h.log_date || h.approved_at || '—'} · {h.approval_status || h.status} · {h.approved_by || '—'}{h.remarks ? ` — ${h.remarks}` : ''}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          <p className="text-[11px] text-gray-400">
+            Approval window: work date + 2 IST days, or within 48 hours of when the approval request was sent. Older requests show “Approval window closed”.
+          </p>
         </div>
-      )}
+        )
+      })()}
 
       {/* ── WORK TRACKER (cross-department assignments) ── */}
       {tab === 'tracker' && (
@@ -2396,9 +2492,9 @@ export default function HRM() {
                   </select>
                 </div>
                 <div><label className="text-xs text-gray-500">{t(lang, 'assignedBy')}</label>
-                  <select value={respForm.added_by} onChange={e => setRespForm(f => ({ ...f, added_by: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                  <select value={respForm.added_by} onChange={e => setAssignedBy('resp', e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
-                    {assigneeOptions.map(n => <option key={n}>{n}</option>)}
+                    {assigneeOptions.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
                   </select>
                 </div>
                 <AssignExtraFields value={assignExtra} onChange={setAssignExtra} />
@@ -2676,9 +2772,9 @@ export default function HRM() {
                   </select>
                 </div>
                 <div><label className="text-xs text-gray-500">{t(lang, 'assignedBy')}</label>
-                  <select value={taskForm.assigned_by} onChange={e => setTaskForm(f => ({ ...f, assigned_by: e.target.value }))} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
+                  <select value={taskForm.assigned_by} onChange={e => setAssignedBy('task', e.target.value)} className="w-full border rounded px-2 py-1.5 text-sm mt-1">
                     <option value="">Select</option>
-                    {assigneeOptions.map(n => <option key={n}>{n}</option>)}
+                    {assigneeOptions.map(o => <option key={o.name} value={o.name}>{o.name}</option>)}
                   </select>
                 </div>
                 <div><label className="text-xs text-gray-500">Linked Person (optional)</label>
@@ -2703,6 +2799,7 @@ export default function HRM() {
                     frequency: 'Daily',
                     category: 'General',
                     added_by: taskForm.assigned_by,
+                    assigned_by_employee_id: taskForm.assigned_by_employee_id || '',
                     due_date: taskForm.due_date,
                     priority: taskForm.priority,
                     mandatory: false,
@@ -3767,25 +3864,29 @@ export default function HRM() {
               {approvalModal.action === 'approve' ? '✅ Approve task' : '↩ Reject task'}
             </h3>
             <p className="text-sm text-gray-600">{approvalModal.title}</p>
+            {approvalModal.action === 'approve' && (
+              <div>
+                <label className="text-xs text-gray-500">Achieved % (0–100) *</label>
+                <input type="number" min={0} max={100} value={approvalPct} onChange={e => setApprovalPct(e.target.value)}
+                  className="w-full border rounded px-2 py-1.5 text-sm mt-1" placeholder="How much of this task was achieved?" />
+              </div>
+            )}
             <div>
-              <label className="text-xs text-gray-500">Achieved % (0–100)</label>
-              <input type="number" min={0} max={100} value={approvalPct} onChange={e => setApprovalPct(e.target.value)}
-                className="w-full border rounded px-2 py-1.5 text-sm mt-1" placeholder="How much of this task was achieved?" />
-            </div>
-            <div>
-              <label className="text-xs text-gray-500">Notes (optional)</label>
+              <label className="text-xs text-gray-500">{approvalModal.action === 'approve' ? 'Notes (optional)' : 'Rejection reason *'}</label>
               <textarea value={approvalNotes} onChange={e => setApprovalNotes(e.target.value)} rows={3}
-                className="w-full border rounded px-2 py-1.5 text-sm mt-1" />
+                className="w-full border rounded px-2 py-1.5 text-sm mt-1"
+                placeholder={approvalModal.action === 'approve' ? '' : 'Why is this being rejected?'} />
             </div>
             <div className="flex gap-2">
               <button
                 onClick={() => {
-                  const n = achievedPctOrNull(approvalPct)
-                  if (n == null) return
                   if (approvalModal.action === 'approve') {
+                    const n = achievedPctOrNull(approvalPct)
+                    if (n == null) return
                     approveOneTimeTaskMut.mutate({ id: approvalModal.id, notes: approvalNotes, achievement_pct: n })
                   } else {
-                    rejectOneTimeTaskMut.mutate({ id: approvalModal.id, notes: approvalNotes, achievement_pct: n })
+                    if (!approvalNotes.trim()) { alert('Enter a rejection reason'); return }
+                    rejectOneTimeTaskMut.mutate({ id: approvalModal.id, notes: approvalNotes.trim() })
                   }
                 }}
                 disabled={approveOneTimeTaskMut.isPending || rejectOneTimeTaskMut.isPending}

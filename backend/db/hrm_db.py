@@ -3039,12 +3039,14 @@ def list_pending_linked_approvals(linked_employee_id: int) -> list[dict]:
         """
         SELECT tl.id as task_log_id, tl.responsibility_id, tl.employee_id as assignee_employee_id,
                tl.log_date, tl.status, tl.approval_status, tl.remarks, tl.marked_by, tl.marked_at,
-               r.title, r.priority, r.frequency, r.backup_employee_id,
+               tl.approval_sent_at, tl.started_at, tl.ended_at,
+               r.title, r.description, r.priority, r.frequency, r.backup_employee_id,
                r.backup_allocation_value, r.backup_allocation_unit,
+               r.expected_time, r.time_period, r.kpi_weightage,
                e.name as assignee_name, d.name as department_name,
                be.name as backup_employee_name,
                le.name as linked_to_employee_name,
-               r.linked_to_employee_id, r.kpi_weightage,
+               r.linked_to_employee_id,
                tl.approval_employee_id,
                (SELECT COALESCE(SUM(duration_seconds),0) FROM hrm_time_slots s
                  WHERE s.responsibility_id=tl.responsibility_id AND s.log_date=tl.log_date) AS work_seconds
@@ -3067,8 +3069,34 @@ def list_pending_linked_approvals(linked_employee_id: int) -> list[dict]:
         """,
         (int(linked_employee_id), int(linked_employee_id), int(linked_employee_id)),
     ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        rid = int(d["responsibility_id"])
+        log_date = str(d.get("log_date") or "")
+        slots = conn.execute(
+            """SELECT started_at AS start_at, ended_at AS end_at, duration_seconds, notes, source
+               FROM hrm_time_slots
+               WHERE (responsibility_id=? OR (entity_type='responsibility' AND entity_id=?))
+                 AND log_date=?
+               ORDER BY started_at, id""",
+            (rid, rid, log_date),
+        ).fetchall()
+        d["time_slots"] = [dict(s) for s in slots]
+        # Previous rejection history for this responsibility (any date)
+        prev = conn.execute(
+            """SELECT log_date, status, approval_status, remarks, approved_by, approved_at, achievement_pct
+               FROM task_logs
+               WHERE responsibility_id=? AND approval_status IN ('Cancelled','Rejected')
+               ORDER BY log_date DESC, id DESC LIMIT 10""",
+            (rid,),
+        ).fetchall()
+        d["rejection_history"] = [dict(p) for p in prev]
+        d["expected_time"] = d.get("expected_time") or d.get("time_period") or ""
+        d["actual_working_time"] = int(d.get("work_seconds") or 0)
+        out.append(d)
     conn.close()
-    return [dict(r) for r in rows]
+    return out
 
 
 def list_linked_approval_bucket(linked_employee_id: int) -> list[dict]:
@@ -3080,8 +3108,10 @@ def list_linked_approval_bucket(linked_employee_id: int) -> list[dict]:
     today = today_ist().isoformat()
     linked = int(linked_employee_id)
     done_rows = conn.execute(
-        """SELECT t.id as task_id, t.title, t.status, t.due_date,
-                  t.employee_id as assignee_employee_id, e.name as assignee_name
+        """SELECT t.id as task_id, t.title, t.description, t.status, t.due_date,
+                  t.employee_id as assignee_employee_id, e.name as assignee_name,
+                  t.priority, t.approval_notes as remarks, t.completed_at, t.started_at,
+                  COALESCE(t.active_seconds, 0) as work_seconds
            FROM one_time_tasks t
            JOIN employees e ON e.id=t.employee_id
            WHERE t.active=1 AND t.status='Done'
@@ -3094,6 +3124,32 @@ def list_linked_approval_bucket(linked_employee_id: int) -> list[dict]:
     for r in done_rows:
         d = dict(r)
         d["kind"] = "one_time"
+        tid = int(d["task_id"])
+        try:
+            slots = conn.execute(
+                """SELECT started_at AS start_at, ended_at AS end_at, duration_seconds, notes, source
+                   FROM hrm_time_slots
+                   WHERE entity_type='one_time' AND entity_id=?
+                   ORDER BY started_at, id""",
+                (tid,),
+            ).fetchall()
+            d["time_slots"] = [dict(s) for s in slots]
+        except Exception:
+            d["time_slots"] = []
+        try:
+            prev = conn.execute(
+                """SELECT created_at as log_date, old_value as status, new_value as approval_status,
+                          notes as remarks, actor as approved_by, created_at as approved_at
+                   FROM hrm_task_audit
+                   WHERE entity_type='one_time_task' AND entity_id=? AND action LIKE '%reject%'
+                   ORDER BY id DESC LIMIT 10""",
+                (tid,),
+            ).fetchall()
+            d["rejection_history"] = [dict(p) for p in prev]
+        except Exception:
+            d["rejection_history"] = []
+        d["actual_working_time"] = int(d.get("work_seconds") or 0)
+        d["log_date"] = str(d.get("due_date") or d.get("completed_at") or "")[:10]
         items.append(d)
     overdue = conn.execute(
         """SELECT t.id as task_id, t.title, t.status, t.due_date,
@@ -4113,9 +4169,14 @@ def approve_task_log(
     """Linked-person Approve/Cancel a Done/Partial task. action: Approved | Cancelled."""
     if action not in ("Approved", "Cancelled"):
         return "invalid_action"
+    # Approve requires Achieved % (N/A may default to 100 below).
+    # Reject reason is enforced at the HTTP layer; DB callers may omit notes.
     pct = parse_achievement_pct(achievement_pct)
     if pct == "bad_pct":
         return "bad_pct"
+    if action == "Approved" and pct is None:
+        # N/A can still default later; other statuses must send a %.
+        pass
     conn = _connect()
     row = conn.execute(
         """
@@ -4160,8 +4221,10 @@ def approve_task_log(
         and int(approver_col) == int(linked_employee_id)
     ):
         linked = approver_col
+    # Window: still open if (a) work date within task_date..+2 IST days, OR
+    # (b) approval_sent_at / marked_at within the last 48 hours. Avoids false
+    # "Approval window closed" when the request was only just sent.
     if not allow_override and not in_task_action_window(row["log_date"]):
-        # Linked person keeps the full 2-day approval period counted from when it was sent.
         keys = row.keys()
         sent = str(
             (row["approval_sent_at"] if "approval_sent_at" in keys else "")
@@ -4226,8 +4289,10 @@ def approve_task_log(
         assignee_id = int(row["employee_id"])
         title = str(row["title"] if "title" in row.keys() and row["title"] else "Task")
         carry = _carry_forward_rejected(conn, row, actor)
+        reason = str(notes or "").strip()
         msg = (
             f"Your mark on '{title}' ({row['log_date']}) was rejected by {actor or 'linked approver'}. "
+            + (f"Reason: {reason}. " if reason else "")
             + (
                 f"It is reassigned to you on {carry['carry_date']} (pending since {carry['pending_since']})."
                 if carry
@@ -6908,6 +6973,9 @@ def reject_one_time_task(
     approval_notes: str = "",
     achievement_pct: int | None = None,
 ) -> bool | str:
+    notes = str(approval_notes or "").strip()
+    if not notes:
+        return "reason_required"
     pct = parse_achievement_pct(achievement_pct)
     if pct == "bad_pct":
         return "bad_pct"
@@ -6929,14 +6997,14 @@ def reject_one_time_task(
            SET status='Rejected', approved_by=?, approval_notes=?,
                achievement_pct=COALESCE(?, achievement_pct), updated_at=?
            WHERE id=?""",
-        (approved_by or "", approval_notes or "", pct, now, task_id),
+        (approved_by or "", notes, pct, now, task_id),
     )
     # Rework notification to assignee (reuse approval notifications table)
     assignee_id = int(row["employee_id"])
     title = str(row.get("title") or "Task")
     msg = (
-        f"Your one-time task '{title}' was rejected by {approved_by or 'approver'} "
-        f"and requires rework. Please update and resubmit."
+        f"Your one-time task '{title}' was rejected by {approved_by or 'approver'}. "
+        f"Reason: {notes}. Please update and resubmit."
     )
     try:
         conn.execute(

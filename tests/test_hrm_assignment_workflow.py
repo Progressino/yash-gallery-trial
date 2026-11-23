@@ -383,3 +383,52 @@ def test_notifications_and_summary_endpoints(env):
     assert data["unread"] == 1
     assert env["client"].post("/api/hrm/assignments/notifications/read").json()["marked"] == 1
     assert env["client"].get("/api/hrm/assignments/notifications").json()["unread"] == 0
+
+
+def test_assigned_by_selected_person_not_login(env):
+    """Create with Assigned By = another employee must land in that person's Assigned By Me."""
+    ids = env["ids"]
+    # sales_emp (Sana Sales) is the selected Assigned By; login is prod_hod
+    env["act_as"]("HOD", "prod_hod", env["dept"]["prod"])
+    r = env["client"].post(
+        "/api/hrm/one-time-tasks",
+        json={
+            "employee_id": ids["lone"],
+            "title": "For Sana tracking",
+            "assigned_by": "Sana Sales",
+            "assigned_by_employee_id": ids["sales_emp"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    tid = r.json()["id"]
+    env["act_as"]("Employee", "sales_emp", env["dept"]["sales"])
+    by_me = _tracker(env, "assigned_by_me")["rows"]
+    assert any(row["id"] == tid for row in by_me)
+    hist = env["client"].get(
+        "/api/hrm/assignments/history", params={"entity_type": "task", "entity_id": tid}
+    ).json()
+    events = hist.get("events") if isinstance(hist, dict) else hist
+    assert isinstance(events, list)
+    assert any(e.get("event_type") == "created_by_login" for e in events), hist
+    env["act_as"]("HOD", "prod_hod", env["dept"]["prod"])
+    creator_rows = [row for row in _tracker(env, "assigned_by_me")["rows"] if row["id"] == tid]
+    assert not creator_rows
+
+
+def test_reject_one_time_without_achieved_pct_requires_reason(env):
+    ids = env["ids"]
+    env["act_as"]("HOD", "prod_hod", env["dept"]["prod"])
+    tid = _assign_task(env, "prod_emp")["id"]
+    env["act_as"]("Employee", "prod_emp", env["dept"]["prod"])
+    _action(env, "accept", "task", tid)
+    hrm_db.start_one_time_task(tid)
+    hrm_db.complete_one_time_task(tid, "done")
+    env["act_as"]("Employee", "prod_hod", env["dept"]["prod"])
+    bad = env["client"].post(f"/api/hrm/one-time-tasks/{tid}/reject", json={})
+    assert bad.status_code == 400
+    ok = env["client"].post(
+        f"/api/hrm/one-time-tasks/{tid}/reject", json={"notes": "Incomplete evidence"}
+    )
+    assert ok.status_code == 200, ok.text
+    notes = hrm_db.list_approval_notifications(ids["prod_emp"])
+    assert any("Incomplete evidence" in str(n.get("message") or "") for n in notes)

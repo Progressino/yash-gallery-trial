@@ -210,6 +210,168 @@ export function AssignmentActions({ row, onChanged, compact }: { row: Row; onCha
   )
 }
 
+/** Latest clarification question from assignment history (for mandatory popups). */
+function latestClarificationQuestion(events: any[]): string {
+  for (const ev of [...(events || [])].reverse()) {
+    const t = String(ev.event_type || '')
+    if ((t.includes('clarif') || t.includes('explanation') || t === 'clarify') && ev.remarks) {
+      return String(ev.remarks)
+    }
+  }
+  return ''
+}
+
+/** Blocking popup for HOD review / assigner clarification / employee acceptance. */
+export function AssignmentMandatoryActionGate({ employeeId }: { employeeId?: number | null }) {
+  const refresh = useRefreshAssignments()
+  const [busy, setBusy] = useState(false)
+  const [remarks, setRemarks] = useState('')
+  const [history, setHistory] = useState<any[] | null>(null)
+  const [mode, setMode] = useState<'act' | 'clarify' | 'reply' | 'reject'>('act')
+
+  const { data: toMe } = useQuery({
+    queryKey: ['hrm-assign', 'gate-to-me', employeeId],
+    queryFn: () => api.get('/hrm/assignments/tracker', { params: { view: 'assigned_to_me' } }).then(r => r.data),
+    enabled: !!employeeId,
+    refetchInterval: 45_000,
+  })
+  const { data: byMe } = useQuery({
+    queryKey: ['hrm-assign', 'gate-by-me', employeeId],
+    queryFn: () => api.get('/hrm/assignments/tracker', { params: { view: 'assigned_by_me', status: 'clarification_required' } }).then(r => r.data),
+    enabled: !!employeeId,
+    refetchInterval: 45_000,
+  })
+  const { data: hod } = useQuery({
+    queryKey: ['hrm-assign', 'gate-hod', employeeId],
+    queryFn: () => api.get('/hrm/assignments/tracker', { params: { view: 'hod_inbox' } }).then(r => r.data),
+    enabled: !!employeeId,
+    refetchInterval: 45_000,
+  })
+
+  const candidates: Row[] = []
+  for (const r of (toMe?.rows || []) as Row[]) {
+    if (r.workflow_status === 'pending_employee_acceptance' || r.actions?.can_accept) candidates.push({ ...r, _gate: 'accept' })
+  }
+  for (const r of (byMe?.rows || []) as Row[]) {
+    if (r.actions?.can_reply || r.workflow_status === 'clarification_required') candidates.push({ ...r, _gate: 'reply' })
+  }
+  for (const r of (hod?.rows || []) as Row[]) {
+    if (r.actions?.can_forward || r.workflow_status === 'pending_hod_review') candidates.push({ ...r, _gate: 'hod' })
+  }
+  const row = candidates[0]
+  const { data: histData } = useQuery({
+    queryKey: ['hrm-assign', 'gate-hist', row?.entity_type, row?.id],
+    queryFn: () => api.get('/hrm/assignments/history', { params: { entity_type: row.entity_type, entity_id: row.id } }).then(r => r.data),
+    enabled: !!row,
+  })
+  const question = latestClarificationQuestion(histData?.events || [])
+
+  if (!row) return null
+
+  const run = async (endpoint: string, required = false) => {
+    if (required && !remarks.trim()) { alert('Please enter the details first'); return }
+    setBusy(true)
+    try {
+      await api.post(`/hrm/assignments/${endpoint}`, { entity_type: row.entity_type, entity_id: row.id, remarks })
+      setRemarks(''); setMode('act'); setHistory(null)
+      refresh()
+    } catch (e: any) {
+      alert(errText(e, 'Action failed'))
+    } finally { setBusy(false) }
+  }
+
+  const title =
+    row._gate === 'hod' ? 'Assignment needs your review'
+      : row._gate === 'reply' ? 'Clarification requested — please reply'
+        : 'New work assigned to you'
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4" role="dialog" aria-modal="true">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-5 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-base font-bold text-[#002B5B]">{title}</h3>
+          {candidates.length > 1 && <span className="text-[11px] text-gray-500">1 of {candidates.length}</span>}
+        </div>
+        <div className="bg-blue-50 border border-blue-100 rounded-lg p-3 space-y-1 text-sm">
+          <p className="font-semibold text-gray-800">{row.title}</p>
+          {row.description && <p className="text-xs text-gray-600">{row.description}</p>}
+          <p className="text-xs text-gray-600">
+            {row.type} · For <b>{row.employee_name}</b> · Assigned by <b>{row.assigned_by_name || '—'}</b>
+            {row.hod_name ? <> · HOD <b>{row.hod_name}</b></> : null}
+          </p>
+          <p className="text-xs text-gray-600">Deadline: <b>{row.deadline || '—'}</b> · Priority: {row.priority}</p>
+          {row.assign_remarks && <p className="text-xs text-gray-700">“{row.assign_remarks}”</p>}
+          {question && (
+            <div className="mt-2 bg-purple-50 border border-purple-200 rounded p-2 text-xs text-purple-900">
+              <b>Question:</b> {question}
+            </div>
+          )}
+          <AttachmentLinks links={row.attachment_links} voice={row.voice_note_url} />
+        </div>
+
+        {mode === 'clarify' || mode === 'reply' || mode === 'reject' ? (
+          <div className="space-y-2">
+            <textarea rows={3} autoFocus value={remarks} onChange={e => setRemarks(e.target.value)}
+              placeholder={mode === 'reject' ? 'Reason for rejection *' : mode === 'reply' ? 'Your explanation *' : 'What needs to be explained? *'}
+              className="w-full border rounded px-2 py-1.5 text-sm" />
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setMode('act')} className="px-3 py-1.5 border rounded text-sm">Back</button>
+              <button type="button" disabled={busy} onClick={() => run(
+                mode === 'reject' ? 'hod-reject' : mode === 'reply' ? 'clarify-reply' : 'clarify', true,
+              )} className={`px-3 py-1.5 rounded text-sm text-white disabled:opacity-50 ${mode === 'reject' ? 'bg-red-600' : 'bg-purple-600'}`}>
+                {busy ? 'Saving…' : mode === 'reject' ? 'Reject' : mode === 'reply' ? 'Send explanation' : 'Send question'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap justify-end gap-2">
+            <button type="button" onClick={async () => {
+              try {
+                const r = await api.get('/hrm/assignments/history', { params: { entity_type: row.entity_type, entity_id: row.id } })
+                setHistory(r.data.events || [])
+              } catch (e: any) { alert(errText(e, 'Could not load history')) }
+            }} className="px-3 py-2 rounded-lg text-sm border text-gray-700">View History</button>
+            {row._gate === 'accept' && (
+              <>
+                <button type="button" onClick={() => setMode('clarify')} className="px-4 py-2 rounded-lg text-sm border border-purple-600 text-purple-700">Explanation Required</button>
+                <button type="button" disabled={busy} onClick={() => run('accept')} className="px-4 py-2 rounded-lg text-sm text-white bg-green-600 disabled:opacity-50">{busy ? 'Saving…' : 'Accept'}</button>
+              </>
+            )}
+            {row._gate === 'reply' && (
+              <button type="button" onClick={() => setMode('reply')} className="px-4 py-2 rounded-lg text-sm text-white bg-indigo-600">Reply with explanation</button>
+            )}
+            {row._gate === 'hod' && (
+              <>
+                <button type="button" onClick={() => setMode('clarify')} className="px-3 py-2 rounded-lg text-sm border border-purple-600 text-purple-700">Ask assigner</button>
+                <button type="button" onClick={() => setMode('reject')} className="px-3 py-2 rounded-lg text-sm text-white bg-red-600">Reject</button>
+                <button type="button" disabled={busy} onClick={() => run('hod-forward')} className="px-4 py-2 rounded-lg text-sm text-white bg-green-600 disabled:opacity-50">{busy ? 'Saving…' : 'Forward to employee'}</button>
+              </>
+            )}
+          </div>
+        )}
+        <p className="text-[11px] text-gray-400">This popup stays until you take an action.</p>
+
+        {history && (
+          <div className="fixed inset-0 z-[80] bg-black/40 flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-lg p-4 space-y-3 max-h-[80vh] overflow-y-auto">
+              <h4 className="font-semibold text-gray-800">History — {row.title}</h4>
+              <ol className="space-y-2">
+                {history.map(ev => (
+                  <li key={ev.id} className="text-xs border-l-2 border-blue-300 pl-2">
+                    <b>{String(ev.event_type).replace(/_/g, ' ')}</b> · {ev.actor_name || '—'} · <span className="text-gray-400">{ev.created_at}</span>
+                    {ev.remarks && <p className="text-gray-700 mt-0.5">{ev.remarks}</p>}
+                  </li>
+                ))}
+              </ol>
+              <div className="text-right"><button type="button" onClick={() => setHistory(null)} className="px-3 py-1.5 border rounded text-sm">Close</button></div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /** Blocking popup: the assignee must Accept or ask for an explanation before continuing. */
 export function AssignmentAcceptanceGate({ employeeId }: { employeeId?: number | null }) {
   const refresh = useRefreshAssignments()
@@ -450,6 +612,10 @@ export function WorkTrackerTab({ employeeId, showHodInbox, depts }: { employeeId
         <div>
           <h3 className="font-semibold text-gray-800">Work Tracker</h3>
           <p className="text-xs text-gray-500">Track work assigned across departments — who has it, what it is waiting on and what is overdue.</p>
+          <p className="text-[11px] text-gray-400 mt-1">
+            Status legend: Pending HOD Review → Explanation Required / Pending Acceptance → Accepted (then work status: Pending / In Progress / Done / Approved…).
+            Pending With shows who must act next (Employee HOD, Employee, Assigner, Approver).
+          </p>
         </div>
         <div className="inline-flex gap-1 bg-gray-100 p-1 rounded-lg">
           {tabBtn('assigned_to_me', 'Assigned To Me')}
@@ -491,7 +657,7 @@ export function WorkTrackerTab({ employeeId, showHodInbox, depts }: { employeeId
         <table className="w-full text-sm min-w-[1250px]">
           <thead className="text-gray-400 text-xs uppercase bg-gray-50">
             <tr>
-              {['Employee', 'Dept', 'Title', 'Type', 'Assigned By', 'Assign Date', 'Deadline', 'Priority', 'Status', 'Pending With', 'Due / Overdue', 'Actions'].map(h => (
+              {['Employee', 'Dept', 'Title', 'Type', 'Assigned By', 'Assign Date', 'Deadline', 'Priority', 'Status', 'Pending With', 'Working Time', 'Due / Overdue', 'Actions'].map(h => (
                 <th key={h} className="text-left px-3 py-2 whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -504,6 +670,7 @@ export function WorkTrackerTab({ employeeId, showHodInbox, depts }: { employeeId
                 <td className="px-3 py-2 min-w-[200px]">
                   <p className="font-medium text-gray-800">{r.title}</p>
                   {r.assign_remarks && <p className="text-[11px] text-gray-500">“{r.assign_remarks}”</p>}
+                  {r.notes && <p className="text-[11px] text-gray-600 mt-0.5">Notes: {r.notes}</p>}
                   <AttachmentLinks links={r.attachment_links} voice={r.voice_note_url} />
                 </td>
                 <td className="px-3 py-2 text-xs whitespace-nowrap">{r.type}{r.frequency ? ` · ${r.frequency}` : ''}</td>
@@ -514,9 +681,14 @@ export function WorkTrackerTab({ employeeId, showHodInbox, depts }: { employeeId
                 <td className="px-3 py-2">
                   <WorkflowBadge status={r.workflow_status} />
                   {r.workflow_status === 'accepted' && r.task_status && <p className="text-[10px] text-gray-500 mt-0.5">{r.task_status}</p>}
+                  {r.approval_status && <p className="text-[10px] text-indigo-700 mt-0.5">Approval: {r.approval_status}</p>}
                   {r.acceptance_mode === 'accepted_with_clarification' && <p className="text-[10px] text-purple-700 mt-0.5">after explanation</p>}
+                  {r.acceptance_mode === 'accepted_without_clarification' && <p className="text-[10px] text-green-700 mt-0.5">Accepted without clarification</p>}
                 </td>
                 <td className="px-3 py-2 text-xs whitespace-nowrap">{r.pending_with ? <>{r.pending_with}<span className="text-gray-400"> ({r.pending_with_role})</span></> : '—'}</td>
+                <td className="px-3 py-2 text-xs whitespace-nowrap">
+                  {r.total_working_time_label || (r.time_slot_count ? `${r.time_slot_count} slots` : '—')}
+                </td>
                 <td className="px-3 py-2 text-xs whitespace-nowrap">
                   {r.due_state ? <span className={r.due_state === 'Overdue' ? 'text-red-700 font-semibold' : 'text-amber-700'}>{r.due_state}</span> : '—'}
                 </td>
@@ -524,7 +696,7 @@ export function WorkTrackerTab({ employeeId, showHodInbox, depts }: { employeeId
               </tr>
             ))}
             {!isLoading && rows.length === 0 && (
-              <tr><td colSpan={12} className="px-4 py-8 text-center text-gray-400 text-sm">Nothing here</td></tr>
+              <tr><td colSpan={13} className="px-4 py-8 text-center text-gray-400 text-sm">Nothing here</td></tr>
             )}
           </tbody>
         </table>

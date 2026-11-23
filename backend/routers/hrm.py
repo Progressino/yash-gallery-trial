@@ -277,6 +277,7 @@ class ResponsibilityIn(BaseModel):
     frequency: Optional[str] = "Daily"
     category: Optional[str] = "General"
     added_by: Optional[str] = ""
+    assigned_by_employee_id: Optional[int] = None  # Assigned By person (may differ from login)
     priority: Optional[str] = "Medium"
     mandatory: Optional[bool] = False
     schedule_weekday: Optional[str] = ""
@@ -490,6 +491,7 @@ class OneTimeTaskIn(BaseModel):
     description: Optional[str] = ""
     due_date: Optional[str] = ""
     assigned_by: Optional[str] = ""
+    assigned_by_employee_id: Optional[int] = None  # Assigned By person (may differ from login)
     priority: Optional[str] = "Medium"
     linked_to_employee_id: Optional[int] = None
     backup_employee_id: Optional[int] = None
@@ -810,6 +812,13 @@ def post_responsibility(body: ResponsibilityIn, request: Request):
     _, name = _recorder_from_request(request)
     if not (data.get("added_by") or "").strip():
         data["added_by"] = name
+    assigner_id, assigner_name = assignment_wf.resolve_assigned_by(
+        assigned_by_employee_id=data.get("assigned_by_employee_id"),
+        assigned_by_name=data.get("added_by") or "",
+        fallback_employee_id=scope.employee_id,
+        fallback_name=name,
+    )
+    data["added_by"] = assigner_name or data.get("added_by") or name
     try:
         rid = create_responsibility(data)
     except ValueError as e:
@@ -817,12 +826,14 @@ def post_responsibility(body: ResponsibilityIn, request: Request):
     wf = assignment_wf.start_assignment_workflow(
         assignment_wf.ENTITY_RESPONSIBILITY,
         int(rid),
-        assigner_employee_id=scope.employee_id,
-        assigner_name=name,
+        assigner_employee_id=assigner_id,
+        assigner_name=assigner_name or name,
         is_org_manager=scope.can_manage_org,
         remarks=data.get("assign_remarks") or "",
         attachment_links=links,
         voice_note_url=voice,
+        created_by_name=name,
+        created_by_employee_id=scope.employee_id,
     )
     return {"ok": True, "id": rid, **wf}
 
@@ -1113,19 +1124,26 @@ def post_approve_task_log(log_id: int, body: TaskApproveIn, request: Request):
     """Linked person (or HOD/Admin) approves or cancels a Done/Partial mark."""
     scope = _scope_from_request(request)
     _, name = _recorder_from_request(request)
-    if body.achievement_pct is None or not 0 <= body.achievement_pct <= 100:
-        raise HTTPException(400, "Enter achieved % from 0 to 100")
+    action = body.action or "Approved"
+    notes = (body.notes or "").strip()
+    if action == "Approved":
+        if body.achievement_pct is None or not 0 <= body.achievement_pct <= 100:
+            raise HTTPException(400, "Enter achieved % from 0 to 100")
+    else:
+        # Reject / Cancel: reason required; achieved % is not.
+        if not notes:
+            raise HTTPException(400, "Enter a rejection reason")
     ok = approve_task_log(
         log_id,
         actor=body.approved_by or name,
         linked_employee_id=scope.employee_id,
-        action=body.action or "Approved",
-        notes=body.notes or "",
+        action=action,
+        notes=notes,
         allow_override=scope.can_edit_assignments,
-        achievement_pct=body.achievement_pct,
+        achievement_pct=body.achievement_pct if action == "Approved" else None,
     )
     if ok is True:
-        return {"ok": True, "achievement_pct": body.achievement_pct}
+        return {"ok": True, "achievement_pct": body.achievement_pct if action == "Approved" else None}
     if ok == "self_forbidden":
         raise HTTPException(403, "You cannot approve or cancel your own responsibility")
     if ok == "forbidden":
@@ -1133,7 +1151,11 @@ def post_approve_task_log(log_id: int, body: TaskApproveIn, request: Request):
     if ok == "not_pending":
         raise HTTPException(409, "Task is not awaiting linked approval")
     if ok == "window_closed":
-        raise HTTPException(409, "Approval window closed")
+        raise HTTPException(
+            409,
+            "Approval window closed — the work date is older than 2 days and the request "
+            "was sent more than 48 hours ago",
+        )
     if ok == "invalid_action":
         raise HTTPException(400, "action must be Approved or Cancelled")
     if ok == "bad_pct":
@@ -1951,9 +1973,16 @@ def post_one_time_task(body: OneTimeTaskIn, request: Request):
         if int(linked_id) == int(body.employee_id):
             raise HTTPException(400, "Linked person must be different from the assigned employee")
         assert_assignment_target_employee(scope, int(linked_id))
+    _, name = _recorder_from_request(request)
     if not (data.get("assigned_by") or "").strip():
-        _, name = _recorder_from_request(request)
         data["assigned_by"] = name if not scope.is_employee else (name or "Self")
+    assigner_id, assigner_name = assignment_wf.resolve_assigned_by(
+        assigned_by_employee_id=data.get("assigned_by_employee_id"),
+        assigned_by_name=data.get("assigned_by") or "",
+        fallback_employee_id=scope.employee_id,
+        fallback_name=name,
+    )
+    data["assigned_by"] = assigner_name or data.get("assigned_by") or name
     try:
         tid = create_one_time_task(data)
     except ValueError as e:
@@ -1961,12 +1990,14 @@ def post_one_time_task(body: OneTimeTaskIn, request: Request):
     wf = assignment_wf.start_assignment_workflow(
         assignment_wf.ENTITY_TASK,
         int(tid),
-        assigner_employee_id=scope.employee_id,
-        assigner_name=data.get("assigned_by") or "",
+        assigner_employee_id=assigner_id,
+        assigner_name=assigner_name or data.get("assigned_by") or "",
         is_org_manager=scope.can_manage_org,
         remarks=data.get("assign_remarks") or "",
         attachment_links=links,
         voice_note_url=voice,
+        created_by_name=name,
+        created_by_employee_id=scope.employee_id,
     )
     return {"ok": True, "id": tid, **wf}
 
@@ -2119,6 +2150,7 @@ def _assert_may_review_one_time(scope: HrmScope, task_id: int, owner: int) -> No
 
 @router.post("/one-time-tasks/{task_id}/approve")
 def post_approve_one_time_task(task_id: int, body: OneTimeTaskApprovalIn, request: Request):
+    # Approve requires Achieved %; Reject is handled by the reject endpoint.
     scope = _scope_from_request(request)
     owner = get_one_time_task_owner(task_id)
     if owner is None:
@@ -2141,14 +2173,16 @@ def post_reject_one_time_task(task_id: int, body: OneTimeTaskApprovalIn, request
     if owner is None:
         raise HTTPException(404, "Task not found")
     _assert_may_review_one_time(scope, task_id, owner)
-    if body.achievement_pct is None or not 0 <= body.achievement_pct <= 100:
-        raise HTTPException(400, "Enter achieved % from 0 to 100")
-    ok = reject_one_time_task(task_id, body.approved_by or "", body.notes or "", body.achievement_pct)
-    if ok == "bad_pct":
-        raise HTTPException(400, "Enter achieved % from 0 to 100")
+    notes = (body.notes or "").strip()
+    if not notes:
+        raise HTTPException(400, "Enter a rejection reason")
+    # Reject: reason mandatory; Achieved % is not required.
+    ok = reject_one_time_task(task_id, body.approved_by or "", notes, None)
+    if ok == "reason_required":
+        raise HTTPException(400, "Enter a rejection reason")
     if not ok:
         raise HTTPException(400, "Task must be Done to reject")
-    return {"ok": True, "achievement_pct": body.achievement_pct}
+    return {"ok": True}
 
 
 @router.post("/one-time-tasks/{task_id}/manual-duration")
@@ -2576,7 +2610,7 @@ def task_based_report(
 
 @router.get("/assignees")
 def list_assignees(request: Request, q: str = ""):
-    """Authorized users for Assigned By dropdown."""
+    """Authorized users for Assigned By dropdown (includes linked employee_id when present)."""
     _scope_from_request(request)
     users = search_active_users(q or "", limit=50)
     return [
@@ -2585,6 +2619,7 @@ def list_assignees(request: Request, q: str = ""):
             "name": (u.get("full_name") or u.get("username") or "").strip(),
             "username": u.get("username"),
             "role": u.get("role_name"),
+            "employee_id": u.get("employee_id"),
         }
         for u in users
         if (u.get("full_name") or u.get("username"))

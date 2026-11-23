@@ -432,13 +432,19 @@ def test_stray_approval_records_achievement_pct(env, monkeypatch):
     )
     missing = client.post(f"/api/hrm/tasks/logs/{log_id}/approve", json={"action": "Approved"})
     assert missing.status_code == 400
+    # Reject: reason required; Achieved % is not.
+    no_reason = client.post(
+        f"/api/hrm/tasks/logs/{log_id}/approve",
+        json={"action": "Cancelled"},
+    )
+    assert no_reason.status_code == 400
     saved = client.post(
         f"/api/hrm/tasks/logs/{log_id}/approve",
-        json={"action": "Cancelled", "achievement_pct": 40},
+        json={"action": "Cancelled", "notes": "Needs rework"},
     )
     assert saved.status_code == 200
     item = _check_item(a, rid, MON)
-    assert item["status"] == "Missed" and item["achievement_pct"] == 40
+    assert item["status"] == "Missed"
 
     tid = _task(a, "One-time review")
     assert hrm_db.start_one_time_task(tid) is True

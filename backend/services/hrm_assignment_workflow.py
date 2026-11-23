@@ -347,6 +347,55 @@ def _kind_label(et: str) -> str:
 # ── Workflow start ───────────────────────────────────────────────────────────
 
 
+def resolve_assigned_by(
+    *,
+    assigned_by_employee_id: int | None = None,
+    assigned_by_name: str = "",
+    fallback_employee_id: int | None = None,
+    fallback_name: str = "",
+) -> tuple[int | None, str]:
+    """Resolve the person shown as Assigned By (may differ from the login that created the row).
+
+    Order: explicit employee id → exact active employee name match → login fallback.
+    """
+    name = (assigned_by_name or "").strip()
+    if assigned_by_employee_id:
+        try:
+            eid = int(assigned_by_employee_id)
+        except (TypeError, ValueError):
+            eid = 0
+        if eid > 0:
+            conn = H._connect()
+            try:
+                row = conn.execute(
+                    "SELECT id, name FROM employees WHERE id=? AND status='Active'", (eid,)
+                ).fetchone()
+            finally:
+                conn.close()
+            if row:
+                return int(row["id"]), str(row["name"] or name or "").strip()
+    if name:
+        conn = H._connect()
+        try:
+            row = conn.execute(
+                """SELECT id, name FROM employees
+                   WHERE status='Active' AND LOWER(TRIM(name))=LOWER(TRIM(?))
+                   LIMIT 1""",
+                (name,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row:
+            return int(row["id"]), str(row["name"] or name).strip()
+    fb_name = (fallback_name or name or "").strip()
+    if fallback_employee_id:
+        try:
+            return int(fallback_employee_id), fb_name
+        except (TypeError, ValueError):
+            pass
+    return None, fb_name
+
+
 def start_assignment_workflow(
     entity_type: str,
     entity_id: int,
@@ -357,6 +406,8 @@ def start_assignment_workflow(
     remarks: str = "",
     attachment_links: Iterable[str] | None = None,
     voice_note_url: str = "",
+    created_by_name: str = "",
+    created_by_employee_id: int | None = None,
 ) -> dict:
     """Call right after a responsibility/task is created.
 
@@ -405,6 +456,29 @@ def start_assignment_workflow(
             actor_name=assigner_name,
             remarks=str(remarks or "").strip(),
         )
+        creator = (created_by_name or "").strip()
+        if creator and (
+            not assigner_name
+            or creator.lower() != assigner_name.lower()
+            or (
+                created_by_employee_id
+                and assigner_employee_id
+                and int(created_by_employee_id) != int(assigner_employee_id)
+            )
+            or (created_by_employee_id and not assigner_employee_id)
+        ):
+            _log_event(
+                conn,
+                et,
+                entity_id,
+                "created_by_login",
+                actor_employee_id=created_by_employee_id,
+                actor_name=creator,
+                remarks=(
+                    f"Created by {creator}"
+                    + (f" (Assigned By: {assigner_name})" if assigner_name else "")
+                ),
+            )
         title = _title(row)
         kind = _kind_label(et)
         who = assigner_name or "Management"
@@ -821,9 +895,81 @@ def _fetch_rows(conn, *, side: str, viewer_id: int | None, org: bool) -> list[di
     return out
 
 
-def _shape(row: dict, viewer_id: int | None, org: bool, today: str, names: dict[int, str]) -> dict:
+def _fmt_work_seconds(sec: int) -> str:
+    s = max(0, int(sec or 0))
+    h, rem = divmod(s, 3600)
+    m = rem // 60
+    if h:
+        return f"{h}h {m}m"
+    return f"{m}m"
+
+
+def _work_metrics(conn, row: dict) -> dict:
+    """Working time / notes / approval status for accepted tracker rows."""
+    et = row.get("entity_type")
+    eid = int(row.get("id") or 0)
+    out = {
+        "total_working_seconds": 0,
+        "total_working_time_label": "—",
+        "time_slot_count": 0,
+        "notes": "",
+        "approval_status": "",
+    }
+    try:
+        if et == ENTITY_TASK:
+            r = conn.execute(
+                """SELECT COALESCE(active_seconds,0) AS sec,
+                          COALESCE(NULLIF(completion_notes,''), approval_notes, '') AS notes,
+                          status
+                   FROM one_time_tasks WHERE id=?""",
+                (eid,),
+            ).fetchone()
+            if r:
+                out["total_working_seconds"] = int(r["sec"] or 0)
+                out["notes"] = str(r["notes"] or "")
+                out["approval_status"] = str(r["status"] or "")
+            try:
+                n = conn.execute(
+                    "SELECT COUNT(*) FROM hrm_time_slots WHERE entity_type='one_time' AND entity_id=?",
+                    (eid,),
+                ).fetchone()
+                out["time_slot_count"] = int((n[0] if n else 0) or 0)
+            except Exception:
+                out["time_slot_count"] = 0
+        else:
+            r = conn.execute(
+                """SELECT COALESCE(SUM(duration_seconds),0) FROM hrm_time_slots
+                   WHERE responsibility_id=? OR (entity_type='responsibility' AND entity_id=?)""",
+                (eid, eid),
+            ).fetchone()
+            out["total_working_seconds"] = int((r[0] if r else 0) or 0)
+            n = conn.execute(
+                """SELECT COUNT(*) FROM hrm_time_slots
+                   WHERE responsibility_id=? OR (entity_type='responsibility' AND entity_id=?)""",
+                (eid, eid),
+            ).fetchone()
+            out["time_slot_count"] = int((n[0] if n else 0) or 0)
+            last = conn.execute(
+                """SELECT remarks, approval_status, status FROM task_logs
+                   WHERE responsibility_id=? ORDER BY log_date DESC, id DESC LIMIT 1""",
+                (eid,),
+            ).fetchone()
+            if last:
+                out["notes"] = str(last["remarks"] or "")
+                out["approval_status"] = str(last["approval_status"] or last["status"] or "")
+    except Exception:
+        pass
+    if out["total_working_seconds"]:
+        out["total_working_time_label"] = _fmt_work_seconds(out["total_working_seconds"])
+    elif out["time_slot_count"]:
+        out["total_working_time_label"] = f"{out['time_slot_count']} slots"
+    return out
+
+
+def _shape(row: dict, viewer_id: int | None, org: bool, today: str, names: dict[int, str], work: dict | None = None) -> dict:
     label, pw_id = _pending_with(row)
     freq = str(row.get("frequency") or "")
+    work = work or {}
     return {
         "entity_type": row["entity_type"],
         "id": int(row["id"]),
@@ -860,6 +1006,11 @@ def _shape(row: dict, viewer_id: int | None, org: bool, today: str, names: dict[
         "accepted_at": row.get("accepted_at") or "",
         "cancel_reason": row.get("cancel_reason") or "",
         "clarification_from": row.get("clarification_from") or "",
+        "total_working_seconds": work.get("total_working_seconds") or 0,
+        "total_working_time_label": work.get("total_working_time_label") or "—",
+        "time_slot_count": work.get("time_slot_count") or 0,
+        "notes": work.get("notes") or "",
+        "approval_status": work.get("approval_status") or "",
         "actions": _actions(row, viewer_id, org),
     }
 
@@ -906,7 +1057,10 @@ def list_tracker(
         if side != "to":
             raw = [r for r in raw if str(r.get("workflow_status") or "").strip()]
         names = _load_names(conn, raw)
-        shaped = [_shape(r, viewer_employee_id, is_org_manager, today, names) for r in raw]
+        shaped = []
+        for r in raw:
+            work = _work_metrics(conn, r) if effective_status(r) == ACCEPTED else {}
+            shaped.append(_shape(r, viewer_employee_id, is_org_manager, today, names, work))
     finally:
         conn.close()
     summary = _summarize(shaped)
