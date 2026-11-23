@@ -826,7 +826,10 @@ _OPENING_REASON_WORDS = ("opening", "existing")
 
 
 def opening_stock_for_code(item_code: str) -> dict:
-    """Net manual Opening/Existing Stock Adjustments + current stock for one exact item code."""
+    """Net manual Opening/Existing Stock Adjustments + current stock for one item code.
+
+    Match is case-insensitive on TRIM(item_code); returns the canonical item_code casing.
+    """
     code = str(item_code or "").strip()
     out = {"item_code": code, "found": False, "stock": 0.0, "opening_net": 0.0}
     if not code:
@@ -834,17 +837,21 @@ def opening_stock_for_code(item_code: str) -> dict:
     conn = _connect()
     try:
         row = conn.execute(
-            "SELECT stock FROM items WHERE TRIM(item_code) = ? LIMIT 1", (code,)
+            """SELECT item_code, stock FROM items
+               WHERE UPPER(TRIM(item_code)) = UPPER(TRIM(?)) LIMIT 1""",
+            (code,),
         ).fetchone()
         if row is None:
             return out
+        canonical = str(row["item_code"] or code).strip() or code
+        out["item_code"] = canonical
         out["found"] = True
         out["stock"] = round(float(row["stock"] or 0), 3)
         net = 0.0
         for adj in conn.execute(
             """SELECT direction, qty, reason, reference_no FROM item_stock_adjustments
-               WHERE TRIM(item_code) = ?""",
-            (code,),
+               WHERE UPPER(TRIM(item_code)) = UPPER(TRIM(?))""",
+            (canonical,),
         ).fetchall():
             reason = str(adj["reason"] or "").strip().lower()
             if is_document_auto_adjustment(reason, adj["reference_no"] or ""):

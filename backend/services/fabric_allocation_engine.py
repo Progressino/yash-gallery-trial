@@ -454,19 +454,23 @@ def _printed_opening_snapshot(conn: sqlite3.Connection, printed_code: str) -> di
         return snap
     if not im.get("found"):
         return snap
+    # Prefer Item Master casing so TRIM exact matches still work on mixed-case rows.
+    code = str(im.get("item_code") or code).strip() or code
     st = conn.execute(
         """SELECT COALESCE(available_qty,0), COALESCE(reserved_qty,0)
-           FROM printed_fabric_checked_stock WHERE TRIM(fabric_code)=?""",
+           FROM printed_fabric_checked_stock
+           WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?))""",
         (code,),
     ).fetchone()
     tracked = (float(st[0]) + float(st[1])) if st else 0.0
     unchecked = conn.execute(
         """SELECT COALESCE(SUM(qty),0) FROM printed_fabric_stock
-           WHERE TRIM(fabric_code)=? AND status='Unchecked'""",
+           WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?)) AND status='Unchecked'""",
         (code,),
     ).fetchone()[0]
     converted = conn.execute(
-        "SELECT COALESCE(SUM(qty),0) FROM printed_fabric_opening_conversions WHERE TRIM(fabric_code)=?",
+        """SELECT COALESCE(SUM(qty),0) FROM printed_fabric_opening_conversions
+           WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?))""",
         (code,),
     ).fetchone()[0]
     snap["opening_net"] = float(im["opening_net"])

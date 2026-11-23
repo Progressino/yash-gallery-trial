@@ -550,7 +550,7 @@ def _fabric_universe(grey: Optional[sqlite3.Connection], prod: Optional[sqlite3.
         for r in _rows(prod, f"SELECT DISTINCT TRIM(fabric_code) AS c FROM {tbl}"):
             if r["c"]:
                 codes.add(str(r["c"]))
-    # Opening-only fabrics (never QC'd) — skip obvious non-fabric item types.
+    # Opening-only fabrics (never QC'd) — keep SFG / GF / RM; drop finished goods & non-fabric.
     for r in _items_rows(
         """SELECT DISTINCT TRIM(a.item_code) AS c, t.code AS tcode
            FROM item_stock_adjustments a
@@ -560,7 +560,7 @@ def _fabric_universe(grey: Optional[sqlite3.Connection], prod: Optional[sqlite3.
               OR LOWER(COALESCE(a.reason,'')) LIKE '%existing%'"""
     ):
         tcode = str(r["tcode"] or "").upper()
-        if r["c"] and tcode not in ("FG", "SFG", "ACC", "PKG", "FUEL", "SVC"):
+        if r["c"] and tcode not in ("FG", "ACC", "PKG", "FUEL", "SVC"):
             codes.add(str(r["c"]))
     return codes
 
@@ -572,6 +572,7 @@ def collect_events() -> List[Dict[str, Any]]:
     prod = _open(_production_path())
     try:
         universe = _fabric_universe(grey, prod)
+        universe_u = {str(c).upper() for c in universe}
         events: List[Dict[str, Any]] = []
         events += _collect_grn_and_qc(grey)
         events += _collect_grey(grey)
@@ -582,7 +583,8 @@ def collect_events() -> List[Dict[str, Any]]:
         # Opening-only adjustments are only P-Codes in the universe (item type filtered above).
         events = [
             e for e in events
-            if e["pcode"] in universe or e["source"] not in ("item_stock_adjustments",)
+            if str(e["pcode"]).upper() in universe_u
+            or e["source"] not in ("item_stock_adjustments",)
         ]
         grey_codes = _grey_code_set(grey)
     finally:

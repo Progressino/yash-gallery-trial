@@ -1631,7 +1631,17 @@ def printed_stock_visibility(fabric_code: str = "") -> List[Dict[str, Any]]:
     opening_codes: list[str] = []
     if code:
         if code not in seen:
-            opening_codes = [code]
+            # Resolve canonical Item Master casing — opening_stock lookups used to fail
+            # when callers passed UPPER(code) from the visibility filter.
+            canonical = code
+            try:
+                from ..db.item_db import opening_stock_for_code
+                im = opening_stock_for_code(code)
+                if im.get("found") and im.get("item_code"):
+                    canonical = str(im["item_code"])
+            except Exception:
+                pass
+            opening_codes = [canonical]
     else:
         try:
             from ..db.item_db import list_opening_printed_fabric_codes

@@ -174,6 +174,39 @@ def test_opening_conversion_and_adjustment(monkeypatch):
     # (free math is owned by printed_stock_visibility; ledger just reports movement).
 
 
+def test_sfg_opening_stock_live_kpis_and_period_in():
+    """SFG Opening Stock must feed ledger + live Physical/Free even with a same-day date filter.
+
+    Regression: (1) SFG was excluded from the fabric universe so Opening ADJs vanished;
+    (2) exact pcode visibility uppercased the code and missed case-sensitive Item Master stock.
+    """
+    sfg = next(t["id"] for t in item_db.list_item_types() if t["code"] == "SFG")
+    code = "P1158Multi Patch Polyster"
+    item_id = item_db.create_item(item_code=code, item_name=code, item_type_id=sfg)
+    item_db.adjust_item_stock(
+        item_id, 517, "IN", entry_date="2026-11-23",
+        reason="Opening Stock", created_by="admin",
+    )
+    # Live stock by exact pcode (any casing) — independent of date range
+    for needle in (code, code.upper(), code.lower()):
+        rows = fw.stock_by_pcode(needle)
+        assert len(rows) == 1 and rows[0]["physical"] == 517.0
+        assert rows[0]["free"] == 517.0
+    # Period covering the entry date: Opening Balance = 0, IN = 517, Closing = 517
+    d = fw.dashboard(from_date="2026-11-23", to_date="2026-11-23", pcode=code)
+    assert d["physical_now"] == 517.0 and d["free"] == 517.0
+    assert d["opening"] == 0.0
+    assert d["in_qty"] == 517.0
+    assert d["out_qty"] == 0.0
+    assert d["closing"] == 517.0
+    # Day after entry: stock rolls into Opening Balance, not IN
+    d2 = fw.dashboard(from_date="2026-11-24", to_date="2026-11-24", pcode=code)
+    assert d2["physical_now"] == 517.0 and d2["free"] == 517.0
+    assert (d2["opening"], d2["in_qty"], d2["out_qty"], d2["closing"]) == (517.0, 0.0, 0.0, 517.0)
+    types = [r["txn_type"] for r in _rows(pcode=code)]
+    assert fw.T_OPENING in types
+
+
 def test_period_opening_closing_and_date_filter():
     _receive_and_qc(day="2026-01-05")
     _seed_jo_issue(qty=30, day="2026-01-10")
