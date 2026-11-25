@@ -4224,7 +4224,9 @@ def approve_task_log(
     # Window: still open if (a) work date within task_date..+2 IST days, OR
     # (b) approval_sent_at / marked_at within the last 48 hours. Avoids false
     # "Approval window closed" when the request was only just sent.
-    if not allow_override and not in_task_action_window(row["log_date"]):
+    # Reject (Cancelled) stays allowed after the window so verifiers can clear
+    # stuck items from the Approvals bucket; Approve remains windowed.
+    if action != "Cancelled" and not allow_override and not in_task_action_window(row["log_date"]):
         keys = row.keys()
         sent = str(
             (row["approval_sent_at"] if "approval_sent_at" in keys else "")
@@ -7090,22 +7092,35 @@ def process_approval_auto_closures(*, now: str | None = None, actor: str = AUTO_
     conn = _connect()
     logs = conn.execute(
         """
-        SELECT id, log_date,
+        SELECT id, log_date, status,
                COALESCE(NULLIF(approval_sent_at,''), marked_at, '') AS sent_at,
                responsibility_id
         FROM task_logs
-        WHERE approval_status='Pending' AND status IN ('Done','Partial')
+        WHERE approval_status='Pending' AND status IN ('Done','Partial','N/A')
           AND COALESCE(NULLIF(approval_sent_at,''), marked_at, '') != ''
           AND COALESCE(NULLIF(approval_sent_at,''), marked_at) <= ?
         """,
         (cutoff,),
     ).fetchall()
     for lg in logs:
-        conn.execute(
-            """UPDATE task_logs SET approval_status='Auto-Approved', approved_by=?, approved_at=?
-               WHERE id=? AND approval_status='Pending'""",
-            (actor, stamp, int(lg["id"])),
-        )
+        # N/A left untouched → auto-close (Rejected) so it leaves the Approvals bucket.
+        # Done/Partial → Auto-Approved as before.
+        if str(lg["status"] or "") == "N/A":
+            conn.execute(
+                """UPDATE task_logs SET status='Pending', approval_status='Rejected',
+                   approved_by=?, approved_at=?,
+                   remarks=COALESCE(NULLIF(remarks,''), 'Auto-closed: no verifier action within 48 hours')
+                   WHERE id=? AND approval_status='Pending'""",
+                (actor, stamp, int(lg["id"])),
+            )
+            audit_action, new_val = "auto_closed", "Rejected"
+        else:
+            conn.execute(
+                """UPDATE task_logs SET approval_status='Auto-Approved', approved_by=?, approved_at=?
+                   WHERE id=? AND approval_status='Pending'""",
+                (actor, stamp, int(lg["id"])),
+            )
+            audit_action, new_val = "auto_approved", "Auto-Approved"
         conn.execute(
             "UPDATE task_approval_notifications SET is_read=1 WHERE task_log_id=?",
             (int(lg["id"]),),
@@ -7113,9 +7128,9 @@ def process_approval_auto_closures(*, now: str | None = None, actor: str = AUTO_
         write_task_audit(
             "task_log",
             int(lg["id"]),
-            "auto_approved",
+            audit_action,
             old_value="Pending",
-            new_value="Auto-Approved",
+            new_value=new_val,
             actor=actor,
             notes=f"No action by linked person within 2 days (sent {lg['sent_at']}, log_date={lg['log_date']})",
             conn=conn,
@@ -7985,8 +8000,16 @@ def process_leave_restorations(*, as_of: date | None = None, actor: str = "syste
 
 def run_hrm_automations() -> dict:
     """Scheduler entry: approval auto-closure, hold auto-resume, leave restoration."""
+    from ..services import hrm_assignment_workflow as _aw
+
+    backfill = {}
+    try:
+        backfill = _aw.backfill_assigned_by_employee_ids()
+    except Exception:
+        backfill = {"ok": False}
     return {
         "approvals": process_approval_auto_closures(),
         "hold": process_task_hold_resume(),
         "leave": process_leave_restorations(),
+        "assigned_by_backfill": backfill,
     }

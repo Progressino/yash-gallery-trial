@@ -874,8 +874,27 @@ def _fetch_rows(conn, *, side: str, viewer_id: int | None, org: bool) -> list[di
         where = [_VISIBLE_SQL]
         params: list[Any] = []
         if side == "by":
-            where.append("x.assigned_by_employee_id=?")
-            params.append(int(viewer_id or -1))
+            # Prefer id match; also include legacy rows where only the display name was stored.
+            viewer_name = ""
+            if viewer_id:
+                try:
+                    nr = conn.execute(
+                        "SELECT name FROM employees WHERE id=?", (int(viewer_id),)
+                    ).fetchone()
+                    viewer_name = str((nr["name"] if nr else "") or "").strip()
+                except Exception:
+                    viewer_name = ""
+            if viewer_name:
+                by_col = "added_by" if et == ENTITY_RESPONSIBILITY else "assigned_by"
+                where.append(
+                    f"(x.assigned_by_employee_id=? OR ("
+                    f"x.assigned_by_employee_id IS NULL AND LOWER(TRIM(COALESCE(x.{by_col},'')))=LOWER(TRIM(?))"
+                    f"))"
+                )
+                params.extend([int(viewer_id), viewer_name])
+            else:
+                where.append("x.assigned_by_employee_id=?")
+                params.append(int(viewer_id or -1))
         elif side == "to":
             where.append("x.employee_id=?")
             params.append(int(viewer_id or -1))
@@ -1127,13 +1146,30 @@ def list_assigned_by_me(entity_type: str, employee_id: int | None) -> list[dict]
     et = normalize_entity_type(entity_type)
     if not employee_id:
         return []
+    viewer_name = ""
+    conn = H._connect()
+    try:
+        nr = conn.execute(
+            "SELECT name FROM employees WHERE id=?", (int(employee_id),)
+        ).fetchone()
+        viewer_name = str((nr["name"] if nr else "") or "").strip().lower()
+    finally:
+        conn.close()
     if et == ENTITY_RESPONSIBILITY:
         rows = H.list_responsibilities(active_only=False)
+        by_key = "added_by"
     else:
         rows = H.list_one_time_tasks(active_only=False, include_hold=True)
+        by_key = "assigned_by"
     out = []
     for r in rows:
-        if not r.get("assigned_by_employee_id") or int(r["assigned_by_employee_id"]) != int(employee_id):
+        aid = r.get("assigned_by_employee_id")
+        name_match = (
+            not aid
+            and viewer_name
+            and str(r.get(by_key) or "").strip().lower() == viewer_name
+        )
+        if not ((aid and int(aid) == int(employee_id)) or name_match):
             continue
         ws = str(r.get("workflow_status") or "")
         if not int(r.get("active") or 0) and ws not in _VISIBLE_INACTIVE:
@@ -1142,6 +1178,40 @@ def list_assigned_by_me(entity_type: str, employee_id: int | None) -> list[dict]
         r["attachment_links_list"] = parse_links(r.get("attachment_links"))
         out.append(r)
     return out
+
+
+def backfill_assigned_by_employee_ids() -> dict:
+    """Fill assigned_by_employee_id from display name for legacy rows (idempotent)."""
+    conn = H._connect()
+    updated = {"responsibilities": 0, "one_time_tasks": 0}
+    try:
+        for table, col, key in (
+            ("responsibilities", "added_by", "responsibilities"),
+            ("one_time_tasks", "assigned_by", "one_time_tasks"),
+        ):
+            cur = conn.execute(
+                f"""
+                UPDATE {table}
+                SET assigned_by_employee_id = (
+                    SELECT e.id FROM employees e
+                    WHERE e.status='Active'
+                      AND LOWER(TRIM(e.name))=LOWER(TRIM({table}.{col}))
+                    LIMIT 1
+                )
+                WHERE assigned_by_employee_id IS NULL
+                  AND TRIM(COALESCE({col},'')) != ''
+                  AND EXISTS (
+                    SELECT 1 FROM employees e
+                    WHERE e.status='Active'
+                      AND LOWER(TRIM(e.name))=LOWER(TRIM({table}.{col}))
+                  )
+                """
+            )
+            updated[key] = int(cur.rowcount or 0)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, **updated}
 
 
 # ── Notifications & history ──────────────────────────────────────────────────

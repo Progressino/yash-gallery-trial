@@ -203,6 +203,33 @@ def test_free_time_union_no_double_count():
     assert sum(g["seconds"] for g in gaps) == (60 + 150 + 180) * 60
 
 
+def test_free_gaps_match_free_seconds_with_deduct_break(hrm, clock):
+    """Deduct-mode lunch overlap is free time and must appear in free_gaps."""
+    a, _, _ = _emps(hrm)
+    tid = hrm.create_one_time_task({"employee_id": a, "title": "Long stretch"})
+    clock.t = f"{DAY} 09:00:00"
+    hrm_worktime.office_start(a)
+    clock.t = f"{DAY} 18:00:00"
+    hrm_worktime.office_close(a)
+    # Slot 12:00–14:00 with lunch deducted → 30m lunch is free, not working.
+    conn = hrm._connect()
+    conn.execute(
+        """INSERT INTO hrm_time_slots(
+            entity_type, entity_id, employee_id, log_date, started_at, ended_at,
+            duration_seconds, break_mode, break_deduct_seconds, source)
+           VALUES ('task',?,?,?,?,?,?, 'deduct', 1800, 'manual')""",
+        (tid, a, DAY, f"{DAY} 12:00:00", f"{DAY} 14:00:00", 2 * 3600),
+    )
+    conn.commit()
+    conn.close()
+    out = hrm_worktime.day_time_summary(a, DAY, now=f"{DAY} 18:00:00")
+    gap_sum = sum(int(g["seconds"]) for g in out["free_gaps"])
+    assert out["free_seconds"] == gap_sum
+    assert out["free_seconds"] == out["office_seconds"] - out["working_seconds"]
+    # Working = 90m (2h − 30m lunch); free includes that 30m plus other idle gaps.
+    assert out["working_seconds"] == 90 * 60
+
+
 def test_working_hours_report(hrm, clock):
     a, _, _ = _emps(hrm)
     tid = hrm.create_one_time_task({"employee_id": a, "title": "Work"})
@@ -221,6 +248,44 @@ def test_working_hours_report(hrm, clock):
 
 
 # ── Approval auto-closure ────────────────────────────────────────────────────
+
+
+def test_reject_still_allowed_after_approval_window(hrm, clock, monkeypatch):
+    """Linked verifier can Reject after 48h to clear Approvals; Approve stays blocked."""
+    from datetime import date as _date, timedelta as _td
+
+    def _real_window(task_date: str, *, as_of=None) -> bool:
+        try:
+            d = _date.fromisoformat(str(task_date)[:10])
+        except ValueError:
+            return False
+        today = as_of or _date.fromisoformat(clock.t[:10])
+        return d <= today <= d + _td(days=2)
+
+    # Fixture forces the window open — use a real date window for this case.
+    monkeypatch.setattr(hrm_db, "in_task_action_window", _real_window)
+
+    a, _, boss = _emps(hrm)
+    rid = _resp(a, linked_to_employee_id=boss)
+    hrm.mark_task(rid, DAY, "N/A", "Worker A", allow_override=True)
+    conn = hrm._connect()
+    log_id = conn.execute(
+        "SELECT id FROM task_logs WHERE responsibility_id=? AND log_date=?", (rid, DAY)
+    ).fetchone()["id"]
+    conn.execute(
+        "UPDATE task_logs SET approval_sent_at=?, marked_at=? WHERE id=?",
+        (f"{DAY} 10:00:00", f"{DAY} 10:00:00", log_id),
+    )
+    conn.commit()
+    conn.close()
+    # Far past the 48h / +2 day window
+    clock.t = "2026-09-10 12:00:00"
+    assert hrm.approve_task_log(
+        log_id, actor="Boss C", linked_employee_id=boss, action="Approved", achievement_pct=100
+    ) == "window_closed"
+    assert hrm.approve_task_log(
+        log_id, actor="Boss C", linked_employee_id=boss, action="Cancelled", notes="Clear bucket"
+    ) is True
 
 
 def test_auto_approve_after_two_days_keeps_manual(hrm, clock):

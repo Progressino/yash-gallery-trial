@@ -14,6 +14,7 @@ import {
   AssignExtraFields, AssignViewToggle, AssignedByMeTable, AssignmentMandatoryActionGate, AssignmentReviewList,
   EMPTY_ASSIGN_EXTRA, WorkTrackerTab, assignExtraPayload, type AssignExtra, type AssignView,
 } from './hrmAssignments'
+import { AttendanceMonitorReport } from './hrmAttendanceMonitor'
 
 type Tab = 'dashboard' | 'check' | 'approvals' | 'tracker' | 'employees' | 'responsibilities' | 'tasks' | 'hod' | 'issues' | 'appraisal' | 'performance' | 'reports' | 'hierarchy'
 
@@ -242,7 +243,7 @@ export default function HRM() {
   const [approvalDateTo, setApprovalDateTo] = useState('')
   const [approvalDetailKey, setApprovalDetailKey] = useState<string | null>(null)
   const [hodSubTab, setHodSubTab] = useState<'responsibilities' | 'tasks'>('responsibilities')
-  const [reportsSubTab, setReportsSubTab] = useState<'attendance' | 'dwr' | 'hours' | 'performance' | 'tasks' | 'faults' | 'appraisal'>('attendance')
+  const [reportsSubTab, setReportsSubTab] = useState<'monitor' | 'attendance' | 'dwr' | 'hours' | 'performance' | 'tasks' | 'faults' | 'appraisal'>('monitor')
   const [reportsDept, setReportsDept] = useState<any>('')
   const [reportsEmp, setReportsEmp] = useState<any>('')
   const [checkTitleFilter, setCheckTitleFilter] = useState('')
@@ -1483,7 +1484,7 @@ export default function HRM() {
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-1 bg-gray-100 p-1 rounded-lg">
+      <div className="hrm-sticky-tabs flex flex-wrap gap-1 bg-gray-100 p-1 rounded-lg shadow-sm">
         {TABS.map(([key, label]) => (
           <button key={key} onClick={() => setTab(key)}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${tab === key ? 'bg-white text-[#002B5B] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
@@ -2220,7 +2221,8 @@ export default function HRM() {
             </div>
           )}
           <p className="text-[11px] text-gray-400">
-            Approval window: work date + 2 IST days, or within 48 hours of when the approval request was sent. Older requests show “Approval window closed”.
+            Approval window for Approve: work date + 2 IST days, or within 48 hours of when the request was sent.
+            After that window, use Reject (with a reason) to clear the item from your Approvals bucket. Expired N/A items are also auto-closed after 48 hours.
           </p>
         </div>
         )
@@ -3634,6 +3636,7 @@ export default function HRM() {
         <div className="space-y-4">
           <div className="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit flex-wrap">
             {([
+              ['monitor', 'Attendance Monitor'],
               ['attendance', 'Attendance & Time'],
               ['dwr', 'Daily Working Report'],
               ['hours', 'Working Hours'],
@@ -3695,6 +3698,23 @@ export default function HRM() {
           </div>
           <p className="text-[11px] text-gray-500">These filters apply to every report below. Free time = office time − working time.</p>
 
+          {reportsSubTab === 'monitor' && (canManageOrg || canEditAssignments) && (
+            <AttendanceMonitorReport
+              depts={depts as any[]}
+              emps={pickerEmps as any[]}
+              onOpenDwr={(employeeId, d) => {
+                setReportsEmp(employeeId)
+                setFromDate(d)
+                setToDate(d)
+                setReportsSubTab('dwr')
+              }}
+            />
+          )}
+          {reportsSubTab === 'monitor' && !(canManageOrg || canEditAssignments) && (
+            <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
+              Attendance Monitor is available to Sir, HR and Admin only.
+            </div>
+          )}
           {reportsSubTab === 'attendance' && (
             <AttendanceReport employeeId={reportEmpId} departmentId={reportDeptId} from={fromDate} to={toDate} />
           )}

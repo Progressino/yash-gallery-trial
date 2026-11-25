@@ -1154,7 +1154,7 @@ def post_approve_task_log(log_id: int, body: TaskApproveIn, request: Request):
         raise HTTPException(
             409,
             "Approval window closed — the work date is older than 2 days and the request "
-            "was sent more than 48 hours ago",
+            "was sent more than 48 hours ago. You can still Reject to clear it from your Approvals bucket.",
         )
     if ok == "invalid_action":
         raise HTTPException(400, "action must be Approved or Cancelled")
@@ -2608,19 +2608,116 @@ def task_based_report(
     )
 
 
+@router.get("/reports/attendance-monitor")
+def get_attendance_monitor(
+    request: Request,
+    work_date: Optional[str] = None,
+    department_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    reporting_hod_id: Optional[int] = None,
+    attendance_status: str = "",
+    hrm_started: str = "",
+    work_started: str = "",
+):
+    """Sir / HR / Admin: biometric + HRM office + work-start monitoring for one day."""
+    scope = _scope_from_request(request)
+    if not (scope.can_manage_org or scope.can_edit_assignments):
+        raise HTTPException(403, "Attendance monitor is available to Sir, HR and Admin only")
+    from ..services.hrm_attendance_monitor import attendance_monitor_dashboard
+    dept_f, emp_f = hrm_scope_filters(scope, department_id=department_id, employee_id=employee_id)
+    if dept_f == -1 or emp_f == -1:
+        return {"work_date": work_date or "", "rows": [], "summary": {}, "sync": {}}
+    return attendance_monitor_dashboard(
+        work_date=work_date or "",
+        department_id=dept_f,
+        employee_id=emp_f,
+        reporting_hod_id=reporting_hod_id,
+        attendance_status=attendance_status or "",
+        hrm_started=hrm_started or "",
+        work_started=work_started or "",
+    )
+
+
+@router.post("/reports/attendance-monitor/remind")
+def post_attendance_reminder(request: Request, body: dict):
+    scope = _scope_from_request(request)
+    if not (scope.can_manage_org or scope.can_edit_assignments):
+        raise HTTPException(403, "Only Sir, HR and Admin can send attendance reminders")
+    from ..services.hrm_attendance_monitor import send_attendance_reminder
+    _, name = _recorder_from_request(request)
+    res = send_attendance_reminder(
+        int(body.get("employee_id") or 0),
+        work_date=str(body.get("work_date") or ""),
+        kind=str(body.get("kind") or ""),
+        actor=name,
+        actor_employee_id=scope.employee_id,
+    )
+    if res == "bad_kind":
+        raise HTTPException(400, "kind must be start_hrm or start_work")
+    if res == "not_found":
+        raise HTTPException(404, "Employee not found")
+    return res
+
+
+@router.post("/reports/attendance-monitor/import-punches")
+def post_import_biometric_punches(request: Request, body: dict):
+    scope = _scope_from_request(request)
+    if not (scope.can_manage_org or scope.can_edit_assignments):
+        raise HTTPException(403, "Only Sir, HR and Admin can import biometric punches")
+    from ..services.hrm_attendance_monitor import import_biometric_punches
+    _, name = _recorder_from_request(request)
+    rows = body.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(400, "Provide rows: [{biometric_code|emp_code|employee_id, punch_at, punch_type?}]")
+    return import_biometric_punches(rows, source=str(body.get("source") or "import"), actor=name)
+
+
 @router.get("/assignees")
 def list_assignees(request: Request, q: str = ""):
-    """Authorized users for Assigned By dropdown (includes linked employee_id when present)."""
+    """Assigned By picker: Active employees (with id) plus ERP users that have a linked employee.
+
+    Prefer employee records so Assigned By Me always keys off ``assigned_by_employee_id``.
+    """
     _scope_from_request(request)
-    users = search_active_users(q or "", limit=50)
-    return [
-        {
+    needle = (q or "").strip().lower()
+    out: list[dict] = []
+    seen_eid: set[int] = set()
+    for e in list_employees(None, "Active"):
+        name = str(e.get("name") or "").strip()
+        if not name:
+            continue
+        if needle and needle not in name.lower():
+            continue
+        eid = int(e["id"])
+        seen_eid.add(eid)
+        out.append({
+            "id": eid,
+            "name": name,
+            "username": "",
+            "role": "Employee",
+            "employee_id": eid,
+            "department_name": e.get("department_name") or "",
+        })
+    # Also surface ERP users whose linked employee was missed above (name variants).
+    for u in search_active_users(q or "", limit=80):
+        eid = u.get("employee_id")
+        try:
+            eid_i = int(eid) if eid not in (None, "", 0, "0") else 0
+        except (TypeError, ValueError):
+            eid_i = 0
+        if not eid_i or eid_i in seen_eid:
+            continue
+        name = (u.get("full_name") or u.get("username") or "").strip()
+        if not name:
+            continue
+        seen_eid.add(eid_i)
+        out.append({
             "id": u.get("id"),
-            "name": (u.get("full_name") or u.get("username") or "").strip(),
+            "name": name,
             "username": u.get("username"),
             "role": u.get("role_name"),
-            "employee_id": u.get("employee_id"),
-        }
-        for u in users
-        if (u.get("full_name") or u.get("username"))
-    ]
+            "employee_id": eid_i,
+            "department_name": "",
+        })
+    out.sort(key=lambda r: str(r.get("name") or "").lower())
+    return out[:200]

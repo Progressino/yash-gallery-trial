@@ -42,3 +42,37 @@ body {
 .sidebar-nav-scroll::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
+
+/* HRM wide tables: keep horizontal scrollbar at the bottom of the visible pane */
+.hrm-sticky-scroll {
+  overflow: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #94a3b8 #f1f5f9;
+}
+.hrm-sticky-scroll::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+.hrm-sticky-scroll::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 6px;
+}
+.hrm-sticky-scroll::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+.hrm-sticky-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: #f8f9fa;
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+}
+.hrm-sticky-title {
+  position: sticky;
+  top: 2.75rem;
+  z-index: 29;
+  background: #f8f9fa;
+  padding-bottom: 0.35rem;
+}

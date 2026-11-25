@@ -292,7 +292,9 @@ export function OfficeTimeBar({
           <Stat label="Free Time" value={fmtHM(s.free_seconds)} tone="text-amber-700" />
           {Number(s.break_seconds) > 0 && <Stat label="Lunch/Tea Break" value={fmtHM(s.break_seconds)} />}
         </div>
-        <p className="text-[10px] text-gray-400">Free time = office time − working time. Lunch and tea with no work recorded are included in free time.</p>
+        <p className="text-[10px] text-gray-400">
+          Free time = office time − working time. Listed free gaps use the same busy intervals (lunch/tea overlap on deduct slots counts as free), so gap totals match Free Time.
+        </p>
         {(s.free_gaps || []).length > 0 && (
           <button type="button" onClick={() => setShowGaps(v => !v)} className="text-xs text-blue-600 underline">
             {showGaps ? 'Hide' : 'Show'} free gaps ({s.free_gaps.length})

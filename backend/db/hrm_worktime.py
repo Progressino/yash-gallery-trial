@@ -317,11 +317,14 @@ def day_time_summary(employee_id: int, day: str, *, conn=None, now: str | None =
             continue
         is_deduct = str(s.get("break_mode") or "") == "deduct" and s.get("ended_at")
         (deduct if is_deduct else plain).append((lo, hi))
-    busy = plain + deduct
-    working = _union_seconds(plain + _subtract(deduct, _break_intervals(w0, w1)))
+    # Working excludes lunch/tea when a deduct-mode slot covers them (those minutes are free).
+    # Gaps must use the same busy set so "Show free gaps" sums to Free Time.
+    break_holes = _break_intervals(w0, w1)
+    busy_for_work = plain + _subtract(deduct, break_holes)
+    working = _union_seconds(busy_for_work)
     if office_seconds:
         working = min(working, office_seconds)
-    gaps = free_time_gaps(o_start, o_end, busy) if office_seconds else []
+    gaps = free_time_gaps(o_start, o_end, busy_for_work) if office_seconds else []
     free_seconds = max(0, office_seconds - working) if office_seconds else sum(g["seconds"] for g in gaps)
     break_seconds = 0
     return {

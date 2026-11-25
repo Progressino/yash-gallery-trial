@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { PRIORITIES, priorityStyle } from './hrmConstants'
@@ -474,40 +474,114 @@ export function AssignmentReviewList({ rows }: { rows: Row[] }) {
   )
 }
 
+function ColFilter({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <th className="text-left px-2 py-1.5 align-bottom sticky top-0 z-10 bg-gray-50">
+      <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">{label}</div>
+      <div className="mt-0.5">{children}</div>
+    </th>
+  )
+}
+
 /** Rows the current user assigned (any department) — same data as the list endpoints with assigned_by_me=1. */
 export function AssignedByMeTable({ kind, onOpenTracker }: { kind: 'responsibility' | 'task'; onOpenTracker?: () => void }) {
   const { data: rows = [], isLoading } = useQuery({
     queryKey: ['hrm-assigned-by-me', kind],
     queryFn: () => api.get(kind === 'responsibility' ? '/hrm/responsibilities' : '/hrm/one-time-tasks', { params: { assigned_by_me: 1 } }).then(r => r.data),
   })
+  const [fTitle, setFTitle] = useState('')
+  const [fTo, setFTo] = useState('')
+  const [fDept, setFDept] = useState('')
+  const [fDeadline, setFDeadline] = useState('')
+  const [fPriority, setFPriority] = useState('')
+  const [fWorkflow, setFWorkflow] = useState('')
+  const [fStatus, setFStatus] = useState('')
+  const [fAssignFrom, setFAssignFrom] = useState('')
+  const [fAssignTo, setFAssignTo] = useState('')
+
+  const assignedDateOf = (r: Row) =>
+    String(r.accepted_at || r.updated_at || r.created_at || '').slice(0, 10)
+
+  const filtered = useMemo(() => {
+    return (rows as Row[]).filter(r => {
+      if (fTitle && !String(r.title || '').toLowerCase().includes(fTitle.toLowerCase())) return false
+      if (fTo && !String(r.employee_name || '').toLowerCase().includes(fTo.toLowerCase())) return false
+      if (fDept && !String(r.department_name || '').toLowerCase().includes(fDept.toLowerCase())) return false
+      const deadline = kind === 'task' ? String(r.due_date || '') : String(r.frequency || '')
+      if (fDeadline && !deadline.toLowerCase().includes(fDeadline.toLowerCase())) return false
+      if (fPriority && String(r.priority || 'Medium') !== fPriority) return false
+      if (fWorkflow && String(r.workflow_status || '') !== fWorkflow) return false
+      const st = kind === 'task' ? String(r.status || '') : String(r.linked_to_employee_name || 'You (assigner)')
+      if (fStatus && !st.toLowerCase().includes(fStatus.toLowerCase())) return false
+      const ad = assignedDateOf(r)
+      if (fAssignFrom && ad && ad < fAssignFrom) return false
+      if (fAssignTo && ad && ad > fAssignTo) return false
+      return true
+    })
+  }, [rows, fTitle, fTo, fDept, fDeadline, fPriority, fWorkflow, fStatus, fAssignFrom, fAssignTo, kind])
+
+  const workflowOpts = useMemo(() => {
+    const s = new Set<string>()
+    ;(rows as Row[]).forEach(r => { if (r.workflow_status) s.add(String(r.workflow_status)) })
+    return [...s].sort()
+  }, [rows])
+
+  const inp = 'w-full border rounded px-1.5 py-1 text-xs text-gray-700 bg-white'
   return (
     <div className="bg-white rounded-xl border overflow-hidden">
       <div className="px-4 py-2 bg-gray-50 border-b flex items-center justify-between flex-wrap gap-2">
         <p className="text-xs text-gray-600">
           {kind === 'responsibility' ? 'Responsibilities' : 'Tasks'} you assigned to people in any department. Reminders and replies are in the Work Tracker.
         </p>
-        {onOpenTracker && <button type="button" onClick={onOpenTracker} className="text-xs text-[#002B5B] underline">Open Work Tracker →</button>}
+        <div className="flex items-center gap-2">
+          <button type="button" className="text-[11px] text-gray-500 underline"
+            onClick={() => { setFTitle(''); setFTo(''); setFDept(''); setFDeadline(''); setFPriority(''); setFWorkflow(''); setFStatus(''); setFAssignFrom(''); setFAssignTo('') }}>
+            Clear filters
+          </button>
+          {onOpenTracker && <button type="button" onClick={onOpenTracker} className="text-xs text-[#002B5B] underline">Open Work Tracker →</button>}
+        </div>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm min-w-[820px]">
-          <thead className="text-gray-400 text-xs uppercase bg-gray-50">
+      <div className="hrm-sticky-scroll max-h-[70vh] overflow-auto">
+        <table className="w-full text-sm min-w-[1100px]">
+          <thead className="text-gray-400 text-xs uppercase">
             <tr>
-              <th className="text-left px-4 py-2">Title</th>
-              <th className="text-left px-4 py-2">Assigned To</th>
-              <th className="text-left px-4 py-2">Department</th>
-              <th className="text-left px-4 py-2">{kind === 'task' ? 'Deadline' : 'Frequency'}</th>
-              <th className="text-left px-4 py-2">Priority</th>
-              <th className="text-left px-4 py-2">Workflow</th>
-              <th className="text-left px-4 py-2">{kind === 'task' ? 'Task Status' : 'Linked Person'}</th>
-              <th className="text-left px-4 py-2">Attachments</th>
+              <ColFilter label="Title"><input className={inp} value={fTitle} onChange={e => setFTitle(e.target.value)} placeholder="Search…" /></ColFilter>
+              <ColFilter label="Assigned To"><input className={inp} value={fTo} onChange={e => setFTo(e.target.value)} placeholder="Name…" /></ColFilter>
+              <ColFilter label="Department"><input className={inp} value={fDept} onChange={e => setFDept(e.target.value)} placeholder="Dept…" /></ColFilter>
+              <ColFilter label="Assigned Date">
+                <div className="flex gap-0.5">
+                  <input type="date" className={inp} value={fAssignFrom} onChange={e => setFAssignFrom(e.target.value)} title="From" />
+                  <input type="date" className={inp} value={fAssignTo} onChange={e => setFAssignTo(e.target.value)} title="To" />
+                </div>
+              </ColFilter>
+              <ColFilter label={kind === 'task' ? 'Deadline' : 'Frequency'}>
+                <input className={inp} value={fDeadline} onChange={e => setFDeadline(e.target.value)} placeholder={kind === 'task' ? 'Date…' : 'Freq…'} />
+              </ColFilter>
+              <ColFilter label="Priority">
+                <select className={inp} value={fPriority} onChange={e => setFPriority(e.target.value)}>
+                  <option value="">All</option>
+                  {['Critical', 'High', 'Medium', 'Low'].map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </ColFilter>
+              <ColFilter label="Workflow">
+                <select className={inp} value={fWorkflow} onChange={e => setFWorkflow(e.target.value)}>
+                  <option value="">All</option>
+                  {workflowOpts.map(w => <option key={w} value={w}>{w.replace(/_/g, ' ')}</option>)}
+                </select>
+              </ColFilter>
+              <ColFilter label={kind === 'task' ? 'Task Status' : 'Linked Person'}>
+                <input className={inp} value={fStatus} onChange={e => setFStatus(e.target.value)} placeholder="Filter…" />
+              </ColFilter>
+              <th className="text-left px-2 py-1.5 sticky top-0 z-10 bg-gray-50 text-[10px] font-semibold text-gray-500 uppercase">Attachments</th>
             </tr>
           </thead>
           <tbody>
-            {(rows as Row[]).map(r => (
+            {filtered.map(r => (
               <tr key={r.id} className="border-t align-top">
                 <td className="px-4 py-2"><p className="font-medium text-gray-800">{r.title}</p>{r.description && <p className="text-xs text-gray-400">{r.description}</p>}</td>
                 <td className="px-4 py-2">{r.employee_name || '—'}</td>
                 <td className="px-4 py-2 text-xs text-gray-600">{r.department_name || '—'}</td>
+                <td className="px-4 py-2 text-xs text-gray-600 whitespace-nowrap">{assignedDateOf(r) || '—'}</td>
                 <td className="px-4 py-2 text-gray-600">{kind === 'task' ? (r.due_date || '—') : (r.frequency || '—')}</td>
                 <td className="px-4 py-2"><span className={`text-xs px-1.5 py-0.5 rounded ${priorityStyle(r.priority || 'Medium')}`}>{r.priority || 'Medium'}</span></td>
                 <td className="px-4 py-2"><WorkflowBadge status={r.workflow_status} /></td>
@@ -515,8 +589,12 @@ export function AssignedByMeTable({ kind, onOpenTracker }: { kind: 'responsibili
                 <td className="px-4 py-2"><AttachmentLinks links={r.attachment_links_list} voice={r.voice_note_url} /></td>
               </tr>
             ))}
-            {!isLoading && (rows as Row[]).length === 0 && (
-              <tr><td colSpan={8} className="px-4 py-6 text-center text-gray-400 text-sm">You have not assigned any {kind === 'task' ? 'tasks' : 'responsibilities'} yet</td></tr>
+            {!isLoading && filtered.length === 0 && (
+              <tr><td colSpan={9} className="px-4 py-6 text-center text-gray-400 text-sm">
+                {(rows as Row[]).length === 0
+                  ? `You have not assigned any ${kind === 'task' ? 'tasks' : 'responsibilities'} yet`
+                  : 'No rows match the current filters'}
+              </td></tr>
             )}
           </tbody>
         </table>
