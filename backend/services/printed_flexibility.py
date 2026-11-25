@@ -349,15 +349,31 @@ def advance_options(fabric_code: str = "") -> dict:
             fabric_filter_active = bool(mapped)
             parents: set[str] = set()
             sizes: set[str] = set()
+            try:
+                from .set_components import parse_component_sku
+                from .helpers import get_parent_sku
+            except Exception:
+                parse_component_sku = None  # type: ignore
+                get_parent_sku = None  # type: ignore
             for code in mapped:
                 u = code.strip().upper()
                 if not u:
                     continue
-                if "-" in u:
-                    sizes.add(u)
-                    parents.add(u.rsplit("-", 1)[0])
+                main = u
+                if parse_component_sku is not None:
+                    base, comp = parse_component_sku(u)
+                    if base:
+                        main = base
+                        sizes.add(u)
+                if "-" in main and get_parent_sku is not None:
+                    parent = str(get_parent_sku(main) or main).strip().upper() or main
+                elif "-" in main:
+                    parent = main.rsplit("-", 1)[0]
                 else:
-                    parents.add(u)
+                    parent = main
+                parents.add(parent)
+                if "-" in u and u != parent:
+                    sizes.add(u)
             # Prefer real Item Master parents when available
             try:
                 from ..db import item_db

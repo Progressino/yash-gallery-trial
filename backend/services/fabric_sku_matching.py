@@ -167,79 +167,17 @@ def set_bom_skus_using_fabric(fabric_code: str) -> set[str]:
             bom = get_set_bom(sk)
             if not bom:
                 continue
-            matched = False
             for ln in bom.get("lines") or []:
                 for m in ln.get("materials") or []:
                     if _norm(m.get("material_code")) == fabric:
                         out.add(sk)
-                        matched = True
                         break
-                if matched:
-                    break
-            if matched:
-                continue
-            # Fallback: TOP/PANT materials live on component Item Master BOMs.
-            for ln in bom.get("lines") or []:
-                candidates: list[str] = []
-                for key in ("component_sku", "sku", "item_code"):
-                    v = _norm(ln.get(key) or "")
-                    if v:
-                        candidates.append(v)
-                cc = _norm(ln.get("component_code") or "")
-                if cc:
-                    candidates.append(f"{sk}-{cc}")
-                for cand in candidates:
-                    if _component_item_uses_fabric(cand, fabric):
-                        out.add(sk)
-                        matched = True
-                        break
-                if matched:
-                    break
+                else:
+                    continue
+                break
     except Exception:
         _log.exception("set_bom_skus_using_fabric failed")
     return out
-
-
-def _component_item_uses_fabric(item_code: str, fabric: str) -> bool:
-    """True when any BOM on this exact item lists the fabric (no full-catalog scan)."""
-    code = _norm(item_code)
-    fabric_u = _norm(fabric)
-    if not code or not fabric_u:
-        return False
-    try:
-        from .jo_issue_notes import _item_connect, _get_item_by_code
-    except Exception:
-        return False
-    try:
-        conn = _item_connect()
-    except Exception:
-        return False
-    try:
-        item = _get_item_by_code(conn, code)
-        if not item:
-            return False
-        match = _fabric_match_sql()
-        row = conn.execute(
-            f"""
-            SELECT 1
-            FROM bom_lines l
-            JOIN bom_headers h ON h.id = l.bom_id
-            LEFT JOIN items ci ON ci.id = l.component_item_id
-            WHERE h.item_id = ?
-              AND UPPER(COALESCE(l.component_type, 'RM')) NOT IN ('SVC', 'SERVICE', 'PROCESS')
-              AND ({match})
-            LIMIT 1
-            """,
-            (int(item["id"]), fabric_u, fabric_u),
-        ).fetchone()
-        return row is not None
-    except Exception:
-        return False
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 
 def skus_using_fabric(fabric_code: str) -> set[str]:
