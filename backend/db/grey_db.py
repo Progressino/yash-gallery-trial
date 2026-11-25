@@ -1394,9 +1394,10 @@ def printed_fabric_reserve_options(fabric_code: str | None = None) -> dict:
                 continue
             if fabric_mapping_active and allowed_skus is not None:
                 try:
-                    from ..services.fabric_sku_matching import sku_uses_fabric
+                    from ..services.fabric_sku_matching import sku_in_fabric_map
 
-                    if not sku_uses_fabric(sku, fabric_filter):
+                    # Reuse the precomputed fabric→SKU map (do not rescan BOMs per line).
+                    if not sku_in_fabric_map(sku, allowed_skus):
                         continue
                 except Exception:
                     pass

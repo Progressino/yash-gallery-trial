@@ -188,6 +188,25 @@ def skus_using_fabric(fabric_code: str) -> set[str]:
     return item_master_skus_using_fabric(fabric) | set_bom_skus_using_fabric(fabric)
 
 
+def sku_in_fabric_map(sku: str, mapped: set[str]) -> bool:
+    """Membership check against a precomputed ``skus_using_fabric`` result."""
+    sku_u = _norm(sku)
+    if not sku_u:
+        return False
+    if not mapped:
+        return True
+    if sku_u in mapped:
+        return True
+    for m in mapped:
+        if sku_u == m or sku_u.startswith(m + "-") or m.startswith(sku_u + "-"):
+            return True
+        if sku_u.startswith(m) or m.startswith(sku_u.split("-")[0] if "-" in sku_u else sku_u):
+            base = sku_u.rsplit("-", 1)[0] if "-" in sku_u else sku_u
+            if base == m or base.startswith(m) or m.startswith(base):
+                return True
+    return False
+
+
 def sku_uses_fabric(sku: str, fabric_code: str) -> bool:
     """True when the FG/size SKU (or its style root) is linked to the fabric.
 
@@ -199,19 +218,4 @@ def sku_uses_fabric(sku: str, fabric_code: str) -> bool:
     sku_u = _norm(sku)
     if not fabric or not sku_u:
         return False
-    mapped = skus_using_fabric(fabric)
-    if not mapped:
-        return True
-    if sku_u in mapped:
-        return True
-    # Strip size suffix STYLE-3XL → match STYLE base or progressive prefixes
-    for m in mapped:
-        if sku_u == m or sku_u.startswith(m + "-") or m.startswith(sku_u + "-"):
-            return True
-        # common: style key without size vs size SKU
-        if sku_u.startswith(m) or m.startswith(sku_u.split("-")[0] if "-" in sku_u else sku_u):
-            # tighter: first token style code overlap
-            base = sku_u.rsplit("-", 1)[0] if "-" in sku_u else sku_u
-            if base == m or base.startswith(m) or m.startswith(base):
-                return True
-    return False
+    return sku_in_fabric_map(sku_u, skus_using_fabric(fabric))
