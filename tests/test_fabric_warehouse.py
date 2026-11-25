@@ -174,6 +174,25 @@ def test_opening_conversion_and_adjustment(monkeypatch):
     # (free math is owned by printed_stock_visibility; ledger just reports movement).
 
 
+def test_period_in_out_kpis_match_date_range():
+    _receive_and_qc(day="2026-01-05")
+    _seed_jo_issue(qty=30, day="2026-01-10")
+    d = fw.dashboard(from_date="2026-01-08", to_date="2026-01-31", pcode="P100", warehouse="checked")
+    assert d["in_qty"] == 0.0 and d["out_qty"] == 30.0
+    # today_in/today_out are aliases of period totals (UI: Period IN / Period OUT)
+    assert d["today_in"] == d["in_qty"] and d["today_out"] == d["out_qty"]
+    assert d["opening"] + d["in_qty"] - d["out_qty"] == d["closing"]
+
+
+def test_exact_pcode_filter_does_not_partial_match():
+    _receive_and_qc(code="P2035Musturd Dupatta", qty=245, passed=245, failed=0)
+    _receive_and_qc(code="P2035Extra", qty=10, passed=10, failed=0)
+    d = fw.dashboard(from_date="2026-01-01", to_date="2026-12-31", pcode="P2035Musturd Dupatta")
+    assert d["physical_now"] == 245.0 and d["pcode_count"] == 1
+    rows = fw.stock_by_pcode(pcode="P2035Musturd Dupatta")
+    assert len(rows) == 1 and rows[0]["pcode"] == "P2035Musturd Dupatta"
+
+
 def test_sfg_opening_stock_live_kpis_and_period_in():
     """SFG Opening Stock must feed ledger + live Physical/Free even with a same-day date filter.
 

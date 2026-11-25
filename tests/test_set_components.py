@@ -16,6 +16,12 @@ def test_set_component_helpers():
     assert component_sku("1001-XS", "Pant") == "1001-XS-PANT"
     assert parse_component_sku("1001-XS-TOP") == ("1001-XS", "TOP")
     assert parse_component_sku("1001-XS") == (None, None)
+    # Kids / waist band sizes are main SKUs, not set components
+    assert parse_component_sku("313KD411BLUE-11-12") == (None, None)
+    assert parse_component_sku("313KD411BLUE-7-8") == (None, None)
+    assert parse_component_sku("7211YKOFFWHITE-34-36") == (None, None)
+    assert parse_component_sku("STYLE-2Y") == (None, None)
+    assert parse_component_sku("1742YKBLUE-8XL-PANT") == ("1742YKBLUE-8XL", "PANT")
 
     result = compute_complete_sets(
         [

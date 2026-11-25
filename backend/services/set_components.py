@@ -20,6 +20,10 @@ from typing import Any, Optional
 from .helpers import get_parent_sku
 
 _COMP_TOKEN_RE = re.compile(r"^[A-Z0-9][A-Z0-9_]{0,24}$")
+_LETTER_SIZES = {
+    "XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL", "5XL", "6XL", "7XL", "8XL",
+}
+_YEAR_SIZE_RE = re.compile(r"^\d{1,2}Y$", re.IGNORECASE)
 
 
 def normalize_component_code(raw: str) -> str:
@@ -27,7 +31,7 @@ def normalize_component_code(raw: str) -> str:
     if not code or not _COMP_TOKEN_RE.match(code):
         raise ValueError(f"Invalid component code: {raw!r}")
     # Avoid colliding with size tokens that get_parent_sku strips.
-    if code in {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL", "5XL", "6XL", "7XL", "8XL"}:
+    if code in _LETTER_SIZES or code.isdigit() or _YEAR_SIZE_RE.match(code):
         raise ValueError(f"Component code must not be a size token: {code}")
     return code
 
@@ -41,14 +45,21 @@ def component_sku(main_sku: str, component_code: str) -> str:
 
 
 def parse_component_sku(sku: str) -> tuple[str, str] | tuple[None, None]:
-    """Return (main_sku, component_code) when ``sku`` looks like a set component."""
+    """Return (main_sku, component_code) when ``sku`` looks like a set component.
+
+    Kids/band sizes (``11-12``, ``7-8``, ``34-36``) and year sizes (``2Y``) are
+    **not** components — only tokens like TOP / PANT / DUPATTA are.
+    """
     s = str(sku or "").strip().upper()
     if "-" not in s:
         return None, None
     main, code = s.rsplit("-", 1)
     if not main or not code or not _COMP_TOKEN_RE.match(code):
         return None, None
-    if code in {"XS", "S", "M", "L", "XL", "XXL", "XXXL", "2XL", "3XL", "4XL", "5XL", "6XL", "7XL", "8XL"}:
+    if code in _LETTER_SIZES:
+        return None, None
+    # Numeric / year size tokens (kids bands, waist bands) are main size SKUs.
+    if code.isdigit() or _YEAR_SIZE_RE.match(code):
         return None, None
     return main, code
 

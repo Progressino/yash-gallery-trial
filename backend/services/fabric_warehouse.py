@@ -673,7 +673,7 @@ def build_ledger(
     range_net = 0.0                 # net physical effect of every in-range event (code filter only)
     for e in evs:
         code = e["pcode"]
-        if code_f and code_f not in code.upper():
+        if code_f and code.upper() != code_f:
             continue
         d = scope_delta(e, warehouse) if e["physical_move"] else 0.0
         if from_date and e["date"] < from_date:
@@ -891,7 +891,7 @@ def dashboard(
     types_f = _types(txn_type)
 
     def _match(e: Dict[str, Any]) -> bool:
-        if code_f and code_f not in e["pcode"].upper():
+        if code_f and e["pcode"].upper() != code_f:
             return False
         if types_f and e["txn_type"] not in types_f:
             return False
@@ -901,7 +901,7 @@ def dashboard(
     returns_in = adj_net = 0.0
     all_time_closing = 0.0
     for e in evs:
-        if code_f and code_f not in e["pcode"].upper():
+        if code_f and e["pcode"].upper() != code_f:
             continue
         d = scope_delta(e, warehouse) if e["physical_move"] else 0.0
         all_time_closing += d
@@ -918,7 +918,7 @@ def dashboard(
                 returns_in += d
             if e["txn_type"] == T_ADJ:
                 adj_net += d
-        if e["date"] == today:
+            # Period IN/OUT = movements inside the selected date range (not calendar today).
             if d > _EPS:
                 today_in += d
             elif d < -_EPS:

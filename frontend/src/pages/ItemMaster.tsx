@@ -199,7 +199,13 @@ export default function ItemMaster() {
       qc.invalidateQueries({ queryKey: ['items'] })
       setShowNewItem(false); setNewItem(blankItem()); setSizePreview([]); setNewItemErr('')
     },
-    onError: (e: any) => setNewItemErr(e?.response?.data?.detail ?? 'Failed to create item.'),
+    onError: (e: any) => {
+      const detail = e?.response?.data?.detail
+      if (typeof detail === 'string') setNewItemErr(detail)
+      else if (Array.isArray(detail)) {
+        setNewItemErr(detail.map((d: any) => d?.msg || JSON.stringify(d)).join('; ') || 'Failed to create item.')
+      } else setNewItemErr('Failed to create item.')
+    },
   })
 
   const deleteItemMut = useMutation({

@@ -28,6 +28,7 @@ DELETE /api/items/{id}/image                      — remove product image
 GET  /api/items/by-code/{item_code}/image         — serve mapped image (inherits parent)
 POST /api/items/images/bulk                       — ZIP bulk map by filename=item_code
 """
+import sqlite3
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Request
@@ -47,7 +48,7 @@ from ..db.item_db import (
     certify_bom, uncertify_bom,
     add_bom_line, update_bom_line, delete_bom_line, copy_bom,
     list_item_packaging, get_buyer_packaging, add_packaging_line, delete_packaging_line,
-    bulk_create_items, get_item_stats, list_all_boms,
+    bulk_create_items, get_item_stats, list_all_boms, get_item_by_code_ci,
     adjust_item_stock, list_stock_adjustments, book_stock_for_code, get_item_by_code,
 )
 from ..services.item_import import parse_item_import
@@ -297,29 +298,47 @@ def get_items(
 
 @router.post("")
 def add_item(body: ItemCreate):
-    item_id = create_item(
-        item_code         = body.item_code,
-        item_name         = body.item_name,
-        item_type_id      = body.item_type_id,
-        hsn_code          = body.hsn_code,
-        season            = body.season,
-        merchant_code     = body.merchant_code,
-        selling_price     = body.selling_price,
-        purchase_price    = body.purchase_price,
-        launch_date       = body.launch_date,
-        uom               = body.uom,
-        alias             = body.alias,
-        gst_applicability = body.gst_applicability,
-        type_of_supply    = body.type_of_supply,
-        gst_rate          = body.gst_rate,
-        procurement_type  = body.procurement_type,
-    )
-    variant_ids: list[int] = []
-    if body.sizes:
-        variant_ids = create_size_variants(item_id, body.sizes)
-    if body.routing_step_ids:
-        set_item_routing(item_id, body.routing_step_ids)
-    return {"ok": True, "id": item_id, "variant_count": len(variant_ids)}
+    code = str(body.item_code or "").strip()
+    existing = get_item_by_code_ci(code)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Item code already exists: {existing.get('item_code')}. "
+                "Open the existing style to add sizes or edit details."
+            ),
+        )
+    try:
+        item_id = create_item(
+            item_code         = code,
+            item_name         = body.item_name,
+            item_type_id      = body.item_type_id,
+            hsn_code          = body.hsn_code,
+            season            = body.season,
+            merchant_code     = body.merchant_code,
+            selling_price     = body.selling_price,
+            purchase_price    = body.purchase_price,
+            launch_date       = body.launch_date,
+            uom               = body.uom,
+            alias             = body.alias,
+            gst_applicability = body.gst_applicability,
+            type_of_supply    = body.type_of_supply,
+            gst_rate          = body.gst_rate,
+            procurement_type  = body.procurement_type,
+        )
+        variant_ids: list[int] = []
+        if body.sizes:
+            variant_ids = create_size_variants(item_id, body.sizes)
+        if body.routing_step_ids:
+            set_item_routing(item_id, body.routing_step_ids)
+        return {"ok": True, "id": item_id, "variant_count": len(variant_ids)}
+    except sqlite3.IntegrityError as e:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Item code already exists: {code}. Open the existing style to add sizes or edit details.",
+        ) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/search")

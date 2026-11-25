@@ -6,7 +6,7 @@ material lines. Does not require SQL FKs between grey and sales.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 _log = logging.getLogger(__name__)
 
@@ -15,18 +15,49 @@ def _norm(code: str) -> str:
     return str(code or "").strip().upper()
 
 
+def _row_code(row: Any) -> str:
+    if row is None:
+        return ""
+    if isinstance(row, dict):
+        return _norm(row.get("item_code"))
+    try:
+        return _norm(row["item_code"])
+    except Exception:
+        pass
+    try:
+        return _norm(row[0])
+    except Exception:
+        return ""
+
+
+def _fabric_match_sql() -> str:
+    """Match bom_lines to a fabric by component item_code or bare component_name."""
+    return """
+        UPPER(TRIM(COALESCE(ci.item_code, ''))) = ?
+        OR (
+            l.component_item_id IS NULL
+            AND UPPER(TRIM(
+                CASE
+                    WHEN INSTR(COALESCE(l.component_name, ''), ' — ') > 0
+                    THEN SUBSTR(l.component_name, 1, INSTR(l.component_name, ' — ') - 1)
+                    ELSE COALESCE(l.component_name, '')
+                END
+            )) = ?
+        )
+    """
+
+
 def item_master_skus_using_fabric(fabric_code: str) -> set[str]:
-    """FG / SFG item codes whose default BOM consumes ``fabric_code`` (direct or via one SFG hop)."""
+    """Item codes whose **any** BOM (default or size-wise) consumes ``fabric_code``.
+
+    Scans all ``bom_headers`` (not only ``is_default=1``), includes one SFG/FG hop,
+    then inherits size variants via ``parent_id``.
+    """
     fabric = _norm(fabric_code)
     if not fabric:
         return set()
     try:
-        from .jo_issue_notes import (
-            _get_default_bom,
-            _get_item_by_code,
-            _get_item_by_id,
-            _item_connect,
-        )
+        from .jo_issue_notes import _item_connect
     except Exception:
         return set()
     try:
@@ -35,99 +66,78 @@ def item_master_skus_using_fabric(fabric_code: str) -> set[str]:
         return set()
     out: set[str] = set()
     try:
-        # Item master has no `active` flag. Filtering on it made this query fail
-        # on production and silently returned no fabric mappings.
-        try:
-            items = conn.execute(
-                "SELECT id, item_code, parent_id FROM items"
+        match = _fabric_match_sql()
+        # Direct fabric on any BOM header for the item.
+        for r in conn.execute(
+            f"""
+            SELECT DISTINCT i.item_code
+            FROM bom_lines l
+            JOIN bom_headers h ON h.id = l.bom_id
+            JOIN items i ON i.id = h.item_id
+            LEFT JOIN items ci ON ci.id = l.component_item_id
+            WHERE UPPER(COALESCE(l.component_type, 'RM')) NOT IN ('SVC', 'SERVICE', 'PROCESS')
+              AND ({match})
+            """,
+            (fabric, fabric),
+        ).fetchall():
+            code = _row_code(r)
+            if code:
+                out.add(code)
+
+        # One hop: FG/style BOM consumes an SFG/FG that itself uses this fabric.
+        sfg_ids = [
+            int(r["id"] if hasattr(r, "keys") else r[0])
+            for r in conn.execute(
+                f"""
+                SELECT DISTINCT i.id
+                FROM bom_lines l
+                JOIN bom_headers h ON h.id = l.bom_id
+                JOIN items i ON i.id = h.item_id
+                LEFT JOIN items ci ON ci.id = l.component_item_id
+                WHERE UPPER(COALESCE(l.component_type, 'RM')) NOT IN ('SVC', 'SERVICE', 'PROCESS')
+                  AND ({match})
+                """,
+                (fabric, fabric),
             ).fetchall()
-        except Exception:
-            items = conn.execute("SELECT id, item_code FROM items").fetchall()
-        item_rows = [dict(it) for it in items]
-        code_by_id: dict[int, str] = {}
-        for it in item_rows:
-            try:
-                code_by_id[int(it["id"])] = _norm(it.get("item_code"))
-            except (TypeError, ValueError):
-                continue
-        for it in item_rows:
-            it = dict(it)
-            code = _norm(it.get("item_code"))
-            if not code:
-                continue
-            bom = _get_default_bom(conn, int(it["id"]))
-            if not bom:
-                continue
-            lines = conn.execute(
-                "SELECT * FROM bom_lines WHERE bom_id=?",
-                (int(bom["id"]),),
-            ).fetchall()
-            for ln in lines:
-                ln = dict(ln)
-                ctype = str(ln.get("component_type") or "RM").upper()
-                if ctype in ("SVC", "SERVICE", "PROCESS"):
-                    continue
-                comp = None
-                if ln.get("component_item_id"):
-                    comp = _get_item_by_id(conn, int(ln["component_item_id"]))
-                raw = str(ln.get("component_name") or "").strip()
-                guess = raw.split(" — ")[0].strip() if " — " in raw else raw
-                if not comp and guess:
-                    comp = _get_item_by_code(conn, guess)
-                ccode = _norm((comp or {}).get("item_code") or guess)
-                if not ccode:
-                    continue
-                if ccode == fabric:
+            if r is not None
+        ]
+        if sfg_ids:
+            placeholders = ",".join("?" * len(sfg_ids))
+            for r in conn.execute(
+                f"""
+                SELECT DISTINCT i.item_code
+                FROM bom_lines l
+                JOIN bom_headers h ON h.id = l.bom_id
+                JOIN items i ON i.id = h.item_id
+                WHERE l.component_item_id IN ({placeholders})
+                  AND UPPER(COALESCE(l.component_type, 'RM')) IN ('SFG', 'FG', 'SEMI')
+                """,
+                tuple(sfg_ids),
+            ).fetchall():
+                code = _row_code(r)
+                if code:
                     out.add(code)
-                    continue
-                # P-code SFG often sits between FG and grey — match fabric two hops when common.
-                if ctype in ("SFG", "FG", "SEMI"):
-                    try:
-                        sub_item = comp or _get_item_by_code(conn, ccode)
-                        if not sub_item:
-                            continue
-                        sub_bom = _get_default_bom(conn, int(sub_item["id"]))
-                        if not sub_bom:
-                            continue
-                        for sl in conn.execute(
-                            "SELECT * FROM bom_lines WHERE bom_id=?",
-                            (int(sub_bom["id"]),),
-                        ).fetchall():
-                            sl = dict(sl)
-                            sc = None
-                            if sl.get("component_item_id"):
-                                sc = _get_item_by_id(conn, int(sl["component_item_id"]))
-                            sraw = str(sl.get("component_name") or "").strip()
-                            sguess = sraw.split(" — ")[0].strip() if " — " in sraw else sraw
-                            if not sc and sguess:
-                                sc = _get_item_by_code(conn, sguess)
-                            scode = _norm((sc or {}).get("item_code") or sguess)
-                            if scode == fabric:
-                                out.add(code)
-                                break
-                    except Exception:
-                        continue
-        # Size SKUs usually have no BOM of their own. Inherit the parent style's fabric.
-        pending = list(item_rows)
-        progressed = True
-        while progressed:
-            progressed = False
-            still: list[dict] = []
-            for it in pending:
-                child = _norm(it.get("item_code"))
-                parent_id = it.get("parent_id")
-                if not child or child in out or not parent_id:
-                    continue
-                try:
-                    parent_code = code_by_id.get(int(parent_id))
-                except (TypeError, ValueError):
-                    parent_code = None
-                if parent_code and parent_code in out:
-                    out.add(child)
-                    progressed = True
-                else:
-                    still.append(it)
-            pending = still
+
+        # Size SKUs usually have no BOM of their own — inherit parent style fabric.
+        if out:
+            pending = set(out)
+            while pending:
+                placeholders = ",".join("?" * len(pending))
+                children = conn.execute(
+                    f"""
+                    SELECT child.item_code
+                    FROM items child
+                    JOIN items parent ON parent.id = child.parent_id
+                    WHERE UPPER(TRIM(parent.item_code)) IN ({placeholders})
+                    """,
+                    tuple(pending),
+                ).fetchall()
+                pending = set()
+                for r in children:
+                    code = _row_code(r)
+                    if code and code not in out:
+                        out.add(code)
+                        pending.add(code)
     except Exception:
         _log.exception("item_master_skus_using_fabric failed")
     finally:
@@ -144,7 +154,7 @@ def set_bom_skus_using_fabric(fabric_code: str) -> set[str]:
     if not fabric:
         return set()
     try:
-        from ..db.production_db import _connect, list_set_boms, get_set_bom
+        from ..db.production_db import list_set_boms, get_set_bom
     except Exception:
         return set()
     out: set[str] = set()
@@ -157,14 +167,79 @@ def set_bom_skus_using_fabric(fabric_code: str) -> set[str]:
             bom = get_set_bom(sk)
             if not bom:
                 continue
+            matched = False
             for ln in bom.get("lines") or []:
                 for m in ln.get("materials") or []:
                     if _norm(m.get("material_code")) == fabric:
                         out.add(sk)
+                        matched = True
                         break
+                if matched:
+                    break
+            if matched:
+                continue
+            # Fallback: TOP/PANT materials live on component Item Master BOMs.
+            for ln in bom.get("lines") or []:
+                candidates: list[str] = []
+                for key in ("component_sku", "sku", "item_code"):
+                    v = _norm(ln.get(key) or "")
+                    if v:
+                        candidates.append(v)
+                cc = _norm(ln.get("component_code") or "")
+                if cc:
+                    candidates.append(f"{sk}-{cc}")
+                for cand in candidates:
+                    if _component_item_uses_fabric(cand, fabric):
+                        out.add(sk)
+                        matched = True
+                        break
+                if matched:
+                    break
     except Exception:
         _log.exception("set_bom_skus_using_fabric failed")
     return out
+
+
+def _component_item_uses_fabric(item_code: str, fabric: str) -> bool:
+    """True when any BOM on this exact item lists the fabric (no full-catalog scan)."""
+    code = _norm(item_code)
+    fabric_u = _norm(fabric)
+    if not code or not fabric_u:
+        return False
+    try:
+        from .jo_issue_notes import _item_connect, _get_item_by_code
+    except Exception:
+        return False
+    try:
+        conn = _item_connect()
+    except Exception:
+        return False
+    try:
+        item = _get_item_by_code(conn, code)
+        if not item:
+            return False
+        match = _fabric_match_sql()
+        row = conn.execute(
+            f"""
+            SELECT 1
+            FROM bom_lines l
+            JOIN bom_headers h ON h.id = l.bom_id
+            LEFT JOIN items ci ON ci.id = l.component_item_id
+            WHERE h.item_id = ?
+              AND UPPER(COALESCE(l.component_type, 'RM')) NOT IN ('SVC', 'SERVICE', 'PROCESS')
+              AND ({match})
+            LIMIT 1
+            """,
+            (int(item["id"]), fabric_u, fabric_u),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def skus_using_fabric(fabric_code: str) -> set[str]:

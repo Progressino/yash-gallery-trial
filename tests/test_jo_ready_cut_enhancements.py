@@ -296,6 +296,7 @@ def test_size_sku_inherits_parent_printed_fabric(iso, tmp_path, monkeypatch):
     from backend.db import item_db
     from backend.services import jo_issue_notes
     from backend.services.fabric_sku_matching import item_master_skus_using_fabric, sku_uses_fabric
+    from backend.services.printed_flexibility import advance_options
 
     path = str(tmp_path / "items.db")
     monkeypatch.setattr(item_db, "DB_PATH", path)
@@ -309,9 +310,14 @@ def test_size_sku_inherits_parent_printed_fabric(iso, tmp_path, monkeypatch):
     item_db.create_item("2020YKWHITE-S", "White kurti S", fg, parent_id=parent, size_label="S")
     item_db.create_item("7104YKOFFWHITE-S-M", "Other", fg)
     fab = item_db.create_item("D2Slub1White", "Slub white", sfg, uom="MTR")
-    bom_id = item_db.create_bom(parent, "Default", is_default=0)
+    # Default BOM without the fabric + size-wise BOM with the fabric (must still resolve).
+    default_bom = item_db.create_bom(parent, "Default", is_default=1)
     item_db.add_bom_line(
-        bom_id, "D2Slub1White", component_type="SFG", quantity=1.98, unit="MTR", component_item_id=fab,
+        default_bom, "OtherTrim", component_type="ACC", quantity=1, unit="PCS",
+    )
+    size_bom = item_db.create_bom(parent, "Size-wise", is_default=0, applies_to="S")
+    item_db.add_bom_line(
+        size_bom, "D2Slub1White", component_type="SFG", quantity=1.98, unit="MTR", component_item_id=fab,
     )
     mapped = item_master_skus_using_fabric("D2Slub1White")
     assert "2020YKWHITE" in mapped
@@ -319,6 +325,8 @@ def test_size_sku_inherits_parent_printed_fabric(iso, tmp_path, monkeypatch):
     assert "7104YKOFFWHITE-S-M" not in mapped
     assert sku_uses_fabric("2020YKWHITE-S", "D2Slub1White") is True
     assert sku_uses_fabric("7104YKOFFWHITE-S-M", "D2Slub1White") is False
+    parents = {p["style_code"] for p in advance_options("D2Slub1White")["parent_styles"]}
+    assert "2020YKWHITE" in parents
 
 
 def test_set_component_without_materials_stays_ready_to_cut(monkeypatch):

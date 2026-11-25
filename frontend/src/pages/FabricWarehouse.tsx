@@ -1,8 +1,102 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import api from '../api/client'
 import { useTrackTab } from '../lib/usageTracker'
+
+type PcodeOption = { value: string; primary: string; secondary: string; haystack: string }
+
+function PcodeSearchSelect({
+  value,
+  onChange,
+  options,
+}: {
+  value: string
+  onChange: (v: string) => void
+  options: PcodeOption[]
+}) {
+  const [search, setSearch] = useState('')
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const selected = options.find(o => o.value === value)
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return options.slice(0, 80)
+    return options.filter(o => o.haystack.includes(q)).slice(0, 80)
+  }, [options, search])
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
+  const displayValue = open
+    ? search
+    : selected
+      ? (selected.secondary ? `${selected.primary} — ${selected.secondary}` : selected.primary)
+      : ''
+  return (
+    <div ref={wrapRef} className="relative flex-1 min-w-0">
+      <input
+        type="search"
+        placeholder="Search P-Code / fabric name — then select"
+        className="w-full border rounded-lg px-3 py-2 text-sm"
+        value={displayValue}
+        onChange={e => {
+          setSearch(e.target.value)
+          setOpen(true)
+          if (!e.target.value) onChange('')
+        }}
+        onFocus={() => {
+          setOpen(true)
+          setSearch('')
+        }}
+      />
+      {open && (
+        <ul className="absolute z-30 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white border rounded-lg shadow-lg">
+          {filtered.length === 0 ? (
+            <li className="px-3 py-2 text-xs text-gray-400">No matching fabrics</li>
+          ) : (
+            <>
+              <li>
+                <button
+                  type="button"
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 border-b border-gray-100 text-gray-600"
+                  onClick={() => {
+                    onChange('')
+                    setSearch('')
+                    setOpen(false)
+                  }}
+                >
+                  All fabrics in category
+                </button>
+              </li>
+              {filtered.map(o => (
+                <li key={o.value}>
+                  <button
+                    type="button"
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-blue-50 border-b border-gray-50 last:border-0"
+                    onClick={() => {
+                      onChange(o.value)
+                      setSearch('')
+                      setOpen(false)
+                    }}
+                  >
+                    <span className="font-mono font-semibold text-[#002B5B]">{o.primary}</span>
+                    {o.secondary && o.secondary !== o.primary && (
+                      <span className="text-gray-500 text-xs block">{o.secondary}</span>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </>
+          )}
+        </ul>
+      )}
+    </div>
+  )
+}
 
 type Warehouse = 'all' | 'checked' | 'unchecked'
 type Direction = 'all' | 'in' | 'out' | 'alloc'
@@ -197,12 +291,35 @@ export default function FabricWarehouse() {
     staleTime: 15_000,
   })
 
+  // Full category list for the searchable P-Code dropdown (independent of selection).
+  const stockCatalog = useQuery<{ rows: StockRow[] }>({
+    queryKey: ['fw-stock-catalog', filters.category],
+    queryFn: async () =>
+      (await api.get('/fabric-warehouse/stock', { params: { stock_category: filters.category } })).data,
+    staleTime: 30_000,
+  })
+
   const stock = useQuery<{ rows: StockRow[] }>({
     queryKey: ['fw-stock', filters.pcode, filters.category],
     queryFn: async () =>
-      (await api.get('/fabric-warehouse/stock', { params: { q: filters.pcode.trim(), stock_category: filters.category } })).data,
+      (await api.get('/fabric-warehouse/stock', {
+        params: {
+          ...(filters.pcode.trim() ? { pcode: filters.pcode.trim() } : {}),
+          stock_category: filters.category,
+        },
+      })).data,
     staleTime: 15_000,
   })
+
+  const pcodeOptions = useMemo<PcodeOption[]>(() => {
+    const rows = stockCatalog.data?.rows ?? []
+    return rows.map(r => ({
+      value: r.pcode,
+      primary: r.pcode,
+      secondary: r.name || '',
+      haystack: `${r.pcode} ${r.name}`.toLowerCase(),
+    }))
+  }, [stockCatalog.data])
 
   const ledgerParams = useMemo(
     () => ({
@@ -253,11 +370,7 @@ export default function FabricWarehouse() {
     }
   }
 
-  const stockRows = useMemo(() => {
-    const rows = stock.data?.rows ?? []
-    const q = filters.pcode.trim().toLowerCase()
-    return q ? rows.filter(r => r.pcode.toLowerCase().includes(q) || r.name.toLowerCase().includes(q)) : rows
-  }, [stock.data, filters.pcode])
+  const stockRows = stock.data?.rows ?? []
 
   const stockTotals = useMemo(
     () => stockRows.reduce(
@@ -307,19 +420,11 @@ export default function FabricWarehouse() {
       {/* Filters */}
       <div className="rounded-xl border bg-white p-3 print:hidden">
         <div className="flex gap-2">
-          <input
-            type="search"
-            list="fw-pcodes"
-            placeholder="Search P-Code / fabric name"
+          <PcodeSearchSelect
             value={filters.pcode}
-            onChange={e => set({ pcode: e.target.value })}
-            className="flex-1 min-w-0 border rounded-lg px-3 py-2 text-sm"
+            onChange={v => set({ pcode: v })}
+            options={pcodeOptions}
           />
-          <datalist id="fw-pcodes">
-            {(stock.data?.rows ?? []).slice(0, 300).map(r => (
-              <option key={r.pcode} value={r.pcode}>{r.name}</option>
-            ))}
-          </datalist>
           <button
             type="button"
             onClick={() => setFiltersOpen(o => !o)}
@@ -395,13 +500,13 @@ export default function FabricWarehouse() {
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
             <Kpi label="Opening" value={fmt(d?.opening)} sub="Before period start"
               onClick={() => openLedger({})} />
-            <Kpi label="Today IN" value={fmt(d?.today_in)} sub="Receipts, returns, openings"
+            <Kpi label="Period IN" value={fmt(d?.in_qty)} sub="Receipts, returns, openings in range"
               tone="border-green-200"
-              onClick={() => openLedger({ from: today, to: today, direction: 'in' })} />
-            <Kpi label="Today OUT" value={fmt(d?.today_out)} sub="MIN, JO issue, QC reject"
+              onClick={() => openLedger({ from: filters.from, to: filters.to, direction: 'in' })} />
+            <Kpi label="Period OUT" value={fmt(d?.out_qty)} sub="MIN, JO issue, QC reject in range"
               tone="border-orange-200"
-              onClick={() => openLedger({ from: today, to: today, direction: 'out' })} />
-            <Kpi label="Closing" value={fmt(d?.closing)} sub={`Opening + IN ${fmt(d?.in_qty)} − OUT ${fmt(d?.out_qty)}`}
+              onClick={() => openLedger({ from: filters.from, to: filters.to, direction: 'out' })} />
+            <Kpi label="Closing" value={fmt(d?.closing)} sub={`Opening + Period IN ${fmt(d?.in_qty)} − Period OUT ${fmt(d?.out_qty)}`}
               onClick={() => openLedger({})} />
             <Kpi label="Pending Unchecked" value={fmt(d?.pending_unchecked)}
               sub={`${d?.pending_unchecked_codes ?? 0} P-Code(s) awaiting QC`}
