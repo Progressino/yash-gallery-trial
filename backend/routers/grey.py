@@ -476,6 +476,13 @@ class PrintedReallocateIn(BaseModel):
 class PrintedReleaseIn(BaseModel):
     user_name: str = ""
     reason: str = ""
+    qty: Optional[float] = None
+
+
+class PrintedBulkReleaseIn(BaseModel):
+    reservation_ids: list[int]
+    user_name: str = ""
+    reason: str = ""
 
 
 class PrintedBulkRowIn(BaseModel):
@@ -576,17 +583,55 @@ def planning_release_printed(reservation_id: int, body: PrintedReleaseIn):
 
     try:
         return release_printed_allocation(
-            reservation_id, user_name=body.user_name, reason=body.reason
+            reservation_id,
+            user_name=body.user_name,
+            reason=body.reason,
+            qty=body.qty,
+        )
+    except FabricAllocationError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/planning/release-printed-bulk")
+def planning_release_printed_bulk(body: PrintedBulkReleaseIn):
+    from ..services.fabric_allocation_engine import (
+        FabricAllocationError,
+        release_printed_allocations_bulk,
+    )
+
+    try:
+        return release_printed_allocations_bulk(
+            body.reservation_ids, user_name=body.user_name, reason=body.reason
         )
     except FabricAllocationError as e:
         raise HTTPException(400, str(e)) from e
 
 
 @router.get("/planning/printed-allocations")
-def planning_printed_allocations(status: str = ""):
+def planning_printed_allocations(
+    status: str = "",
+    fabric_code: Optional[str] = None,
+    so_number: Optional[str] = None,
+    closed_jo_only: bool = False,
+    kind: str = "so",
+):
     from ..services.fabric_allocation_engine import list_printed_allocations
 
-    return list_printed_allocations(status)
+    return list_printed_allocations(
+        status,
+        fabric_code=fabric_code or "",
+        so_number=so_number or "",
+        closed_jo_only=bool(closed_jo_only),
+        kind=kind or "so",
+    )
+
+
+@router.post("/planning/merge-case-duplicates")
+def planning_merge_case_duplicates(dry_run: bool = False):
+    """Admin repair: merge printed stock rows that differ only by P-Code casing."""
+    from ..services.fabric_code_normalize import merge_printed_fabric_case_duplicates
+
+    return merge_printed_fabric_case_duplicates(dry_run=bool(dry_run))
 
 
 @router.get("/planning/history")

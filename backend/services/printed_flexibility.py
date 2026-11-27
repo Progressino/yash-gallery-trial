@@ -33,47 +33,30 @@ def _style_uses_fabric(style_code: str, fabric_code: str) -> None:
         return
 
 
-def _ensure_checked_free_for_advance(fabric_code: str, qty: float, *, user_name: str = "", reason: str = "") -> None:
-    """Pull free Opening Stock into checked free when advance reserve needs more metres."""
+def _checked_free_total(conn, fabric_code: str) -> float:
+    row = conn.execute(
+        """SELECT COALESCE(SUM(available_qty),0) AS q
+           FROM printed_fabric_checked_stock
+           WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?))""",
+        (fabric_code,),
+    ).fetchone()
+    return float(row["q"] or 0) if row else 0.0
+
+
+def reserve_for_style(data: dict) -> int:
+    """Block free printed metres for a parent style / size SKU (advance reservation).
+
+    Opening→Checked conversion (if needed) and the reservation itself share one
+    transaction so a failed reserve never leaves an orphan OPC conversion.
+    """
     from .fabric_allocation_engine import (
         FabricAllocationError,
         convert_printed_opening_to_checked,
         printed_opening_allocatable,
     )
+    from .fabric_code_normalize import canonical_printed_fabric_code
 
-    conn = gdb._connect()
-    try:
-        stock = conn.execute(
-            "SELECT available_qty FROM printed_fabric_checked_stock WHERE UPPER(TRIM(fabric_code))=?",
-            (fabric_code,),
-        ).fetchone()
-        free = float(stock["available_qty"] or 0) if stock else 0.0
-    finally:
-        conn.close()
-    if free + 1e-6 >= qty:
-        return
-    opening = float(printed_opening_allocatable(fabric_code).get("allocatable") or 0)
-    need = round(qty - free, 3)
-    if need > opening + 1e-6:
-        raise ValueError(
-            f"Only {free + opening:.1f} m is free for {fabric_code} "
-            f"({free:.1f} m checked + {opening:.1f} m opening). "
-            "A style reservation cannot use metres already reserved."
-        )
-    if need > 0:
-        try:
-            convert_printed_opening_to_checked(
-                fabric_code,
-                need,
-                user_name=user_name,
-                reason=reason or "Opening stock treated as checked (advance style reserve)",
-            )
-        except FabricAllocationError as e:
-            raise ValueError(str(e)) from e
-
-
-def reserve_for_style(data: dict) -> int:
-    fabric_code = (data.get("fabric_code") or "").strip().upper()
+    fabric_code = canonical_printed_fabric_code((data.get("fabric_code") or "").strip())
     style_code = (data.get("style_code") or "").strip().upper()
     sku = (data.get("sku") or "").strip().upper()
     qty = float(data.get("qty") or 0)
@@ -90,59 +73,117 @@ def reserve_for_style(data: dict) -> int:
         _style_uses_fabric(sku, fabric_code)
     else:
         _style_uses_fabric(style_code, fabric_code)
-    _ensure_checked_free_for_advance(fabric_code, qty, user_name=user_name, reason=reason)
+
+    # Collapse any leftover case-split stock rows before locking stock.
+    try:
+        from .fabric_code_normalize import merge_printed_fabric_case_duplicates
+
+        dup = gdb._connect()
+        try:
+            n = dup.execute(
+                """SELECT COUNT(*) AS n FROM printed_fabric_checked_stock
+                   WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?))""",
+                (fabric_code,),
+            ).fetchone()["n"]
+        finally:
+            dup.close()
+        if int(n or 0) > 1:
+            merge_printed_fabric_case_duplicates(dry_run=False)
+            fabric_code = canonical_printed_fabric_code(fabric_code)
+    except Exception:
+        pass
+
     conn = gdb._connect()
-    stock = conn.execute(
-        "SELECT * FROM printed_fabric_checked_stock WHERE UPPER(TRIM(fabric_code))=?",
-        (fabric_code,),
-    ).fetchone()
-    if not stock:
-        conn.close()
-        raise ValueError(f"No checked or opening stock for fabric {fabric_code}")
-    if float(stock["available_qty"] or 0) + 1e-6 < qty:
-        free = float(stock["available_qty"] or 0)
-        conn.close()
-        raise ValueError(
-            f"Only {free:.1f} m is free for {fabric_code}. "
-            "A style reservation cannot use metres already reserved."
-        )
-    existing = conn.execute(
-        """SELECT id FROM printed_fabric_reservations
-           WHERE UPPER(TRIM(fabric_code))=? AND UPPER(TRIM(style_code))=?
-             AND UPPER(TRIM(COALESCE(sku,'')))=?
-             AND COALESCE(reservation_kind,'so')='advance' AND status='Active'""",
-        (fabric_code, style_code, sku),
-    ).fetchone()
-    conn.execute(
-        "UPDATE printed_fabric_checked_stock SET available_qty = available_qty - ?, reserved_qty = reserved_qty + ? WHERE id=?",
-        (qty, qty, stock["id"]),
-    )
-    if existing:
-        rid = int(existing["id"])
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        free = _checked_free_total(conn, fabric_code)
+        if free + 1e-6 < qty:
+            opening = float(printed_opening_allocatable(fabric_code).get("allocatable") or 0)
+            need = round(qty - free, 3)
+            if need > opening + 1e-6:
+                raise ValueError(
+                    f"Only {free + opening:.1f} m is free for {fabric_code} "
+                    f"({free:.1f} m checked + {opening:.1f} m opening). "
+                    "A style reservation cannot use metres already reserved."
+                )
+            if need > 0:
+                try:
+                    convert_printed_opening_to_checked(
+                        fabric_code,
+                        need,
+                        user_name=user_name,
+                        reason=reason or "Opening stock treated as checked (advance style reserve)",
+                        conn=conn,
+                    )
+                except FabricAllocationError as e:
+                    raise ValueError(str(e)) from e
+            free = _checked_free_total(conn, fabric_code)
+        if free + 1e-6 < qty:
+            raise ValueError(
+                f"Only {free:.1f} m is free for {fabric_code}. "
+                "A style reservation cannot use metres already reserved."
+            )
+        stock = conn.execute(
+            """SELECT * FROM printed_fabric_checked_stock
+               WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?))
+               ORDER BY CASE WHEN TRIM(fabric_code)=? THEN 0 ELSE 1 END, id
+               LIMIT 1""",
+            (fabric_code, fabric_code),
+        ).fetchone()
+        if not stock:
+            raise ValueError(f"No checked or opening stock for fabric {fabric_code}")
+        # Prefer the survivor row's exact casing for reservation + stock updates.
+        fabric_code = str(stock["fabric_code"] or fabric_code).strip() or fabric_code
+        if float(stock["available_qty"] or 0) + 1e-6 < qty:
+            free2 = float(stock["available_qty"] or 0)
+            raise ValueError(
+                f"Only {free2:.1f} m is free for {fabric_code}. "
+                "A style reservation cannot use metres already reserved."
+            )
+        existing = conn.execute(
+            """SELECT id FROM printed_fabric_reservations
+               WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?)) AND UPPER(TRIM(style_code))=?
+                 AND UPPER(TRIM(COALESCE(sku,'')))=?
+                 AND COALESCE(reservation_kind,'so')='advance' AND status='Active'""",
+            (fabric_code, style_code, sku),
+        ).fetchone()
         conn.execute(
-            "UPDATE printed_fabric_reservations SET qty = qty + ?, reserved_by=? WHERE id=?",
-            (qty, user_name, rid),
+            "UPDATE printed_fabric_checked_stock SET available_qty = available_qty - ?, reserved_qty = reserved_qty + ? WHERE id=?",
+            (qty, qty, stock["id"]),
         )
-    else:
-        cur = conn.execute(
-            """INSERT INTO printed_fabric_reservations(
-                fabric_code, fabric_name, so_number, sku, qty, unit, status, remarks,
-                reservation_kind, style_code, reserved_by)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                fabric_code, stock["fabric_name"] or data.get("fabric_name") or "",
-                "", sku, qty, "MTR", "Active", reason,
-                "advance", style_code, user_name,
-            ),
+        if existing:
+            rid = int(existing["id"])
+            conn.execute(
+                "UPDATE printed_fabric_reservations SET qty = qty + ?, reserved_by=? WHERE id=?",
+                (qty, user_name, rid),
+            )
+        else:
+            cur = conn.execute(
+                """INSERT INTO printed_fabric_reservations(
+                    fabric_code, fabric_name, so_number, sku, qty, unit, status, remarks,
+                    reservation_kind, style_code, reserved_by)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    fabric_code, stock["fabric_name"] or data.get("fabric_name") or "",
+                    "", sku, qty, "MTR", "Active", reason,
+                    "advance", style_code, user_name,
+                ),
+            )
+            rid = int(cur.lastrowid)
+        gdb._audit_fabric(
+            conn, event_type="ADVANCE_RESERVE", fabric_code=fabric_code, qty=qty, reason=reason,
+            user_name=user_name, to_sku=sku or style_code, status_to="Active",
         )
-        rid = int(cur.lastrowid)
-    gdb._audit_fabric(
-        conn, event_type="ADVANCE_RESERVE", fabric_code=fabric_code, qty=qty, reason=reason,
-        user_name=user_name, to_sku=sku or style_code, status_to="Active",
-    )
-    conn.commit()
-    conn.close()
-    return rid
+        conn.commit()
+        return rid
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
 
 
 def _advance_row(conn, reservation_id: int):

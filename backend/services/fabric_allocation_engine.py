@@ -457,7 +457,7 @@ def _printed_opening_snapshot(conn: sqlite3.Connection, printed_code: str) -> di
     # Prefer Item Master casing so TRIM exact matches still work on mixed-case rows.
     code = str(im.get("item_code") or code).strip() or code
     st = conn.execute(
-        """SELECT COALESCE(available_qty,0), COALESCE(reserved_qty,0)
+        """SELECT COALESCE(SUM(available_qty),0), COALESCE(SUM(reserved_qty),0)
            FROM printed_fabric_checked_stock
            WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?))""",
         (code,),
@@ -492,34 +492,53 @@ def printed_opening_allocatable(printed_code: str) -> dict[str, float]:
 
 
 def convert_printed_opening_to_checked(
-    printed_code: str, qty: float, *, user_name: str = "", reason: str = ""
+    printed_code: str, qty: float, *, user_name: str = "", reason: str = "", conn: sqlite3.Connection | None = None
 ) -> dict[str, Any]:
-    """Move Item Master opening stock into free checked printed stock (migration only)."""
-    code = str(printed_code or "").strip()
+    """Move Item Master opening stock into free checked printed stock (migration only).
+
+    When ``conn`` is provided the caller owns the transaction (no commit/rollback here).
+    """
+    from .fabric_code_normalize import canonical_printed_fabric_code
+
+    code = canonical_printed_fabric_code(str(printed_code or "").strip())
     qty = round(float(qty or 0), 3)
     if not code or qty <= 0:
         raise FabricAllocationError("Printed fabric code and a positive qty are required")
-    conn = _conn()
+    owns = conn is None
+    if owns:
+        conn = _conn()
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if owns:
+            conn.execute("BEGIN IMMEDIATE")
         snap = _printed_opening_snapshot(conn, code)
         if qty > snap["allocatable"] + 0.001:
             raise FabricAllocationError(
                 f"Only {snap['allocatable']} of {code} opening stock can be treated as checked"
             )
-        name_row = conn.execute(
-            "SELECT fabric_name FROM printed_fabric_checked_stock WHERE TRIM(fabric_code)=?", (code,)
+        # Prefer updating an existing case-variant row so we never create PFOO / pfoo twins.
+        existing = conn.execute(
+            """SELECT id, fabric_code, fabric_name FROM printed_fabric_checked_stock
+               WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?)) ORDER BY id LIMIT 1""",
+            (code,),
         ).fetchone()
-        conn.execute(
-            """INSERT INTO printed_fabric_checked_stock(
-                fabric_code, fabric_name, checked_qty, passed_qty, available_qty)
-               VALUES (?,?,?,?,?)
-               ON CONFLICT(fabric_code) DO UPDATE SET
-               checked_qty = checked_qty + excluded.checked_qty,
-               passed_qty = passed_qty + excluded.passed_qty,
-               available_qty = available_qty + excluded.passed_qty""",
-            (code, (name_row[0] if name_row else "") or code, qty, qty, qty),
-        )
+        if existing:
+            code = str(existing["fabric_code"] or code).strip() or code
+            conn.execute(
+                """UPDATE printed_fabric_checked_stock
+                   SET checked_qty = COALESCE(checked_qty,0) + ?,
+                       passed_qty = COALESCE(passed_qty,0) + ?,
+                       available_qty = COALESCE(available_qty,0) + ?,
+                       fabric_name = COALESCE(NULLIF(fabric_name,''), ?)
+                   WHERE id=?""",
+                (qty, qty, qty, code, int(existing["id"])),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO printed_fabric_checked_stock(
+                    fabric_code, fabric_name, checked_qty, passed_qty, available_qty)
+                   VALUES (?,?,?,?,?)""",
+                (code, code, qty, qty, qty),
+            )
         why = reason or "Opening stock treated as checked"
         cur = conn.execute(
             """INSERT INTO printed_fabric_opening_conversions(
@@ -538,13 +557,16 @@ def convert_printed_opening_to_checked(
             user_name=user_name or "",
             reason=why,
         )
-        conn.commit()
+        if owns:
+            conn.commit()
         return {"ok": True, "printed_code": code, "converted_qty": qty}
     except Exception:
-        conn.rollback()
+        if owns:
+            conn.rollback()
         raise
     finally:
-        conn.close()
+        if owns:
+            conn.close()
 
 
 def allocate_printed_bulk(data: dict[str, Any]) -> dict[str, Any]:
@@ -796,9 +818,19 @@ def release_printed_allocation(
     *,
     user_name: str = "",
     reason: str = "",
+    qty: float | None = None,
 ) -> dict[str, Any]:
+    """Release SO-printed reservation metres back to Free Stock (physical unchanged).
+
+    ``qty`` None or >= held → full release. Partial keeps status Active with reduced qty.
+    Locked / cutting-issued rows cannot be released.
+    """
+    why = str(reason or "").strip()
+    if not why:
+        raise FabricAllocationError("A release reason is required")
     conn = _conn()
     try:
+        conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT * FROM printed_fabric_reservations WHERE id=?", (reservation_id,)
         ).fetchone()
@@ -808,21 +840,36 @@ def release_printed_allocation(
             raise FabricAllocationError(
                 "Cannot release: printed fabric already issued to Cutting (locked)"
             )
-        if (row["status"] or "") != "Active":
-            raise FabricAllocationError(f"Status is {row['status']}, cannot release")
-        qty = float(row["qty"] or 0)
+        status = str(row["status"] or "")
+        if status not in ("Active", "JO Created"):
+            raise FabricAllocationError(f"Status is {status}, cannot release")
+        kind = str(row["reservation_kind"] or "so")
+        if kind == "advance":
+            raise FabricAllocationError(
+                "Use Advance Reservation → Release for style advance holds"
+            )
+        held = float(row["qty"] or 0)
+        release_qty = held if qty is None else round(float(qty), 3)
+        if release_qty <= 0:
+            raise FabricAllocationError("Release quantity must be greater than zero")
+        if release_qty > held + 0.001:
+            raise FabricAllocationError(f"Only {held} m is still reserved")
         fabric_code = (row["fabric_code"] or "").strip()
+        left = round(held - release_qty, 3)
+        new_status = "Active" if left > 0.001 else "Released"
+        new_stage = str(row["stage"] or "") if left > 0.001 else "RELEASED"
         conn.execute(
-            """UPDATE printed_fabric_reservations SET status='Released', stage='RELEASED'
+            """UPDATE printed_fabric_reservations
+               SET qty=?, status=?, stage=?
                WHERE id=?""",
-            (reservation_id,),
+            (max(0.0, left), new_status, new_stage, reservation_id),
         )
         conn.execute(
             """UPDATE printed_fabric_checked_stock
                SET reserved_qty = MAX(0, COALESCE(reserved_qty,0) - ?),
                    available_qty = COALESCE(available_qty,0) + ?
-               WHERE TRIM(fabric_code)=?""",
-            (qty, qty, fabric_code),
+               WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?))""",
+            (release_qty, release_qty, fabric_code),
         )
         _audit(
             conn,
@@ -832,19 +879,51 @@ def release_printed_allocation(
             printed_code=fabric_code,
             from_so=row["so_number"] or "",
             from_sku=row["sku"] or "",
-            qty=qty,
-            old_status="Active",
-            new_status="Released",
+            qty=release_qty,
+            old_status=status,
+            new_status=new_status,
             user_name=user_name,
-            reason=reason,
+            reason=why,
         )
         conn.commit()
-        return {"ok": True, "reservation_id": reservation_id, "released_qty": qty}
+        return {
+            "ok": True,
+            "reservation_id": reservation_id,
+            "released_qty": release_qty,
+            "remaining_qty": max(0.0, left),
+            "status": new_status,
+        }
     except FabricAllocationError:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def release_printed_allocations_bulk(
+    reservation_ids: list[int],
+    *,
+    user_name: str = "",
+    reason: str = "",
+) -> dict[str, Any]:
+    """Full-release many SO reservations; skips locked rows and reports per-id results."""
+    why = str(reason or "").strip()
+    if not why:
+        raise FabricAllocationError("A release reason is required")
+    ids = [int(x) for x in (reservation_ids or []) if int(x or 0) > 0]
+    if not ids:
+        raise FabricAllocationError("Select at least one reservation")
+    results: list[dict[str, Any]] = []
+    ok_n = fail_n = 0
+    for rid in ids:
+        try:
+            r = release_printed_allocation(rid, user_name=user_name, reason=why)
+            results.append({"id": rid, "ok": True, **r})
+            ok_n += 1
+        except FabricAllocationError as e:
+            results.append({"id": rid, "ok": False, "error": str(e)})
+            fail_n += 1
+    return {"ok": fail_n == 0, "released": ok_n, "failed": fail_n, "results": results}
 
 
 def _norm_skus(skus: "list[str] | tuple[str, ...] | set[str] | str | None") -> list[str]:
@@ -884,7 +963,7 @@ def _matching_reservations(
     if not so_number:
         return []
     q = """SELECT * FROM printed_fabric_reservations
-           WHERE TRIM(fabric_code)=? AND status IN ('Active','JO Created')
+           WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?)) AND status IN ('Active','JO Created')
              AND TRIM(so_number)=?"""
     rows = conn.execute(q + " ORDER BY id", (fabric_code, so_number)).fetchall()
     if not sku_list:
@@ -1259,22 +1338,81 @@ def list_grey_allocations(status: str = "Active") -> list[dict]:
         conn.close()
 
 
-def list_printed_allocations(status: str = "") -> list[dict]:
+def list_printed_allocations(
+    status: str = "",
+    *,
+    fabric_code: str = "",
+    so_number: str = "",
+    closed_jo_only: bool = False,
+    kind: str = "so",
+    limit: int = 1000,
+) -> list[dict]:
+    """SO / advance printed reservations with optional JO closed flag for migration release."""
     conn = _conn()
     try:
+        q = """SELECT r.* FROM printed_fabric_reservations r WHERE 1=1"""
+        params: list[Any] = []
         if status:
-            rows = conn.execute(
-                """SELECT * FROM printed_fabric_reservations WHERE status=?
-                   ORDER BY id DESC LIMIT 500""",
-                (status,),
-            ).fetchall()
+            q += " AND r.status=?"
+            params.append(status)
         else:
-            rows = conn.execute(
-                "SELECT * FROM printed_fabric_reservations ORDER BY id DESC LIMIT 500"
-            ).fetchall()
-        return [dict(r) for r in rows]
+            q += " AND r.status IN ('Active','JO Created')"
+        if kind == "so":
+            q += " AND COALESCE(r.reservation_kind,'so')!='advance'"
+            q += " AND TRIM(COALESCE(r.so_number,''))!=''"
+        elif kind == "advance":
+            q += " AND COALESCE(r.reservation_kind,'so')='advance'"
+        if fabric_code.strip():
+            q += " AND UPPER(TRIM(r.fabric_code))=UPPER(TRIM(?))"
+            params.append(fabric_code.strip())
+        if so_number.strip():
+            q += " AND TRIM(r.so_number)=?"
+            params.append(so_number.strip())
+        q += " ORDER BY r.id DESC LIMIT ?"
+        params.append(int(limit))
+        rows = [dict(r) for r in conn.execute(q, tuple(params)).fetchall()]
     finally:
         conn.close()
+
+    # Enrich with Cutting JO status (closed / open) without coupling DBs tightly.
+    jo_by_so_sku: dict[tuple[str, str], dict[str, Any]] = {}
+    try:
+        from ..db import production_db as pdb
+
+        pconn = pdb._connect()
+        try:
+            for j in pconn.execute(
+                """SELECT jo_number, so_number, sku, status, completed_date, process
+                   FROM job_orders
+                   WHERE TRIM(COALESCE(so_number,''))!=''
+                     AND UPPER(TRIM(COALESCE(process,''))) LIKE '%CUT%'
+                   ORDER BY id DESC LIMIT 8000"""
+            ).fetchall():
+                key = (str(j["so_number"] or "").strip(), str(j["sku"] or "").strip().upper())
+                if key not in jo_by_so_sku:
+                    jo_by_so_sku[key] = dict(j)
+        finally:
+            pconn.close()
+    except Exception:
+        jo_by_so_sku = {}
+
+    out: list[dict] = []
+    for r in rows:
+        so = str(r.get("so_number") or "").strip()
+        sku = str(r.get("sku") or "").strip().upper()
+        jo = jo_by_so_sku.get((so, sku)) or {}
+        jo_status = str(jo.get("status") or "").strip()
+        jo_closed = bool(
+            jo.get("completed_date")
+            or jo_status.lower() in ("closed", "complete", "completed", "cancelled", "done")
+        )
+        r["jo_number"] = jo.get("jo_number") or ""
+        r["jo_status"] = jo_status
+        r["jo_closed"] = jo_closed
+        if closed_jo_only and not jo_closed:
+            continue
+        out.append(r)
+    return out
 
 
 def list_allocation_history(limit: int = 200, printed_code: str = "", grey_code: str = "") -> list[dict]:

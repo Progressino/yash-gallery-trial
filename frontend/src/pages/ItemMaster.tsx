@@ -628,6 +628,10 @@ export default function ItemMaster() {
     unmatched: string[]; errors: string[]; matched: { file: string; item_code: string; bytes: number }[]
   }>(null)
   const bulkImgRef = useRef<HTMLInputElement>(null)
+  const openingImportRef = useRef<HTMLInputElement>(null)
+  const [openingPreview, setOpeningPreview] = useState<any | null>(null)
+  const [openingMsg, setOpeningMsg] = useState('')
+  const [openingBusy, setOpeningBusy] = useState(false)
   const [editImgBusy, setEditImgBusy] = useState(false)
   const [editImgBust, setEditImgBust] = useState(0)
   const editImgRef = useRef<HTMLInputElement>(null)
@@ -657,6 +661,41 @@ export default function ItemMaster() {
     } catch (e: any) {
       setImportMsg('✗ ' + (e?.response?.data?.detail ?? 'Import failed.'))
     } finally { setImporting(false) }
+  }
+
+  async function handleOpeningPreview(file: File) {
+    if (!canAdjustStock) { setOpeningMsg('✗ Admin access required.'); return }
+    setOpeningBusy(true); setOpeningMsg(''); setOpeningPreview(null)
+    try {
+      const fd = new FormData(); fd.append('file', file)
+      const { data } = await api.post('/items/stock/opening-import/preview', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      setOpeningPreview(data)
+      setOpeningMsg(`Preview: ${data.actions} to adjust, ${data.conflicts} reservation conflict(s), ${data.total} row(s).`)
+    } catch (e: any) {
+      setOpeningMsg('✗ ' + (e?.response?.data?.detail ?? 'Preview failed.'))
+    } finally { setOpeningBusy(false) }
+  }
+
+  async function handleOpeningApply() {
+    if (!canAdjustStock || !openingImportRef.current?.files?.[0]) return
+    setOpeningBusy(true); setOpeningMsg('')
+    try {
+      const fd = new FormData(); fd.append('file', openingImportRef.current.files[0])
+      const { data } = await api.post('/items/stock/opening-import', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        params: { skip_conflicts: true },
+      })
+      setOpeningMsg(`✓ Applied ${data.applied_count}. Skipped ${data.skipped_count}. Errors ${data.error_count}.`)
+      setOpeningPreview(null)
+      if (openingImportRef.current) openingImportRef.current.value = ''
+      qc.invalidateQueries({ queryKey: ['items'] })
+      qc.invalidateQueries({ queryKey: ['fw-dash'] })
+      qc.invalidateQueries({ queryKey: ['fw-stock'] })
+    } catch (e: any) {
+      setOpeningMsg('✗ ' + (e?.response?.data?.detail ?? 'Import failed.'))
+    } finally { setOpeningBusy(false) }
   }
 
   async function handleBulkImageZip(file: File) {
@@ -2312,6 +2351,87 @@ export default function ItemMaster() {
                       </tbody>
                     </table>
                   </div>
+                </div>
+              )}
+
+              {canAdjustStock && (
+                <div className="border-t border-gray-200 pt-6 space-y-3">
+                  <h3 className="text-sm font-semibold text-[#002B5B]">Bulk Opening Stock (physical migration)</h3>
+                  <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-xs text-blue-900 space-y-1">
+                    <p>Upload target physical stock from Excel. Codes must already exist in Item Master (no duplicates created).</p>
+                    <p>Quantity is the <strong>target</strong> physical stock — the system posts the required IN/OUT adjustment automatically.</p>
+                    <p>Active SO / Advance reservations are flagged and skipped. Release old reservations first under Grey Fabric → Planning → Release SO.</p>
+                    <p>Re-uploading the same target is a no-op (no duplicate adjustments).</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <a
+                      href="/api/items/stock/opening-import/template"
+                      className="px-3 py-1.5 text-xs font-medium border border-[#002B5B] text-[#002B5B] rounded-lg hover:bg-blue-50"
+                      onClick={async e => {
+                        e.preventDefault()
+                        try {
+                          const res = await api.get('/items/stock/opening-import/template', { responseType: 'blob' })
+                          const url = URL.createObjectURL(res.data)
+                          const a = document.createElement('a')
+                          a.href = url
+                          a.download = 'fabric_opening_stock_template.xlsx'
+                          a.click()
+                          URL.revokeObjectURL(url)
+                        } catch {
+                          setOpeningMsg('✗ Could not download template (Admin login required).')
+                        }
+                      }}
+                    >Download Template</a>
+                    <button type="button"
+                      className="px-3 py-1.5 text-xs font-medium bg-[#002B5B] text-white rounded-lg disabled:opacity-50"
+                      disabled={openingBusy}
+                      onClick={() => openingImportRef.current?.click()}>
+                      {openingBusy ? 'Working…' : 'Upload Excel'}
+                    </button>
+                    <input ref={openingImportRef} type="file" accept=".xlsx,.xls" className="hidden"
+                      onChange={e => {
+                        const f = e.target.files?.[0]
+                        if (f) void handleOpeningPreview(f)
+                      }} />
+                    {openingPreview && (
+                      <button type="button"
+                        className="px-3 py-1.5 text-xs font-medium bg-green-600 text-white rounded-lg disabled:opacity-50"
+                        disabled={openingBusy || !(openingPreview.actions > 0)}
+                        onClick={() => void handleOpeningApply()}>
+                        Apply {openingPreview.actions} adjustment(s)
+                      </button>
+                    )}
+                  </div>
+                  {openingMsg && (
+                    <p className={`text-sm font-medium ${openingMsg.startsWith('✓') ? 'text-green-600' : openingMsg.startsWith('Preview') ? 'text-blue-700' : 'text-red-500'}`}>{openingMsg}</p>
+                  )}
+                  {openingPreview?.rows?.length > 0 && (
+                    <div className="overflow-x-auto rounded-xl border border-gray-200 max-h-64">
+                      <table className="w-full text-xs">
+                        <thead className="bg-gray-50 sticky top-0">
+                          <tr>
+                            {['item_code', 'current', 'target', 'delta', 'reserved', 'note'].map(h => (
+                              <th key={h} className="px-2 py-1.5 text-left text-gray-500 uppercase">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {openingPreview.rows.slice(0, 80).map((r: any, i: number) => (
+                            <tr key={i} className={`border-t ${r.reservation_conflict ? 'bg-amber-50' : r.ok === false ? 'bg-red-50' : ''}`}>
+                              <td className="px-2 py-1 font-mono">{r.item_code}</td>
+                              <td className="px-2 py-1 tabular-nums">{r.current_qty ?? '—'}</td>
+                              <td className="px-2 py-1 tabular-nums">{r.target_qty}</td>
+                              <td className="px-2 py-1 tabular-nums">{r.delta ?? '—'}</td>
+                              <td className="px-2 py-1 tabular-nums">{r.reserved_qty ?? 0}</td>
+                              <td className="px-2 py-1 text-gray-600">
+                                {r.error || (r.reservation_conflict ? 'Reservation conflict — release first' : r.noop ? 'Already at target' : r.direction || '')}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
               )}
 

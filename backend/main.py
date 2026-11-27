@@ -3387,12 +3387,29 @@ def _bootstrap_ops_pg_from_sqlite() -> None:
         log.exception("ops PG bootstrap from SQLite/disk failed")
 
 
+def _repair_printed_fabric_case_duplicates() -> None:
+    """One-shot repair: coalesce checked-stock rows that differ only by P-Code casing."""
+    try:
+        from .services.fabric_code_normalize import merge_printed_fabric_case_duplicates
+
+        report = merge_printed_fabric_case_duplicates(dry_run=False)
+        if report.get("merged"):
+            log.info(
+                "Merged %s printed fabric case-duplicate group(s): %s",
+                report["merged"],
+                [g.get("canonical") for g in (report.get("groups") or [])],
+            )
+    except Exception:
+        log.exception("printed fabric case-duplicate merge failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load warm cache in background — sync disk load at startup OOMs on large local catalogs.
     asyncio.create_task(run_heavy(_bootstrap_stitching_on_startup))
     asyncio.create_task(run_heavy(_do_load_warm_cache))
     asyncio.create_task(run_aux(_bootstrap_ops_pg_from_sqlite))
+    asyncio.create_task(run_aux(_repair_printed_fabric_case_duplicates))
     try:
         from .routers.data import _load_intelligence_bundle_cache_from_disk
 

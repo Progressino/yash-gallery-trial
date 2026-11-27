@@ -31,8 +31,8 @@ POST /api/items/images/bulk                       — ZIP bulk map by filename=i
 import sqlite3
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, UploadFile, File, Request, Query
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from ..services.permissions import may_access_erp_admin
@@ -378,6 +378,61 @@ async def bulk_upload_item_images(file: UploadFile = File(...)):
         return item_images.bulk_import_zip(raw)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/stock/opening-import/template")
+def opening_stock_import_template(request: Request):
+    """Download Excel template for bulk opening / physical stock migration (Admin)."""
+    role = str((getattr(request.state, "auth", None) or {}).get("role", "") or "")
+    if not may_access_erp_admin(role):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    from ..services.fabric_opening_import import template_xlsx_bytes
+
+    data = template_xlsx_bytes()
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="fabric_opening_stock_template.xlsx"'},
+    )
+
+
+@router.post("/stock/opening-import/preview")
+async def opening_stock_import_preview(request: Request, file: UploadFile = File(...)):
+    """Preview bulk opening import — flags reservation conflicts; no writes."""
+    role = str((getattr(request.state, "auth", None) or {}).get("role", "") or "")
+    if not may_access_erp_admin(role):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+    from ..services.fabric_opening_import import preview_opening_import
+
+    try:
+        return preview_opening_import(raw)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/stock/opening-import")
+async def opening_stock_import_apply(
+    request: Request,
+    file: UploadFile = File(...),
+    skip_conflicts: bool = Query(True),
+):
+    """Apply bulk opening import (target physical stock). Skips reservation conflicts by default."""
+    role = str((getattr(request.state, "auth", None) or {}).get("role", "") or "")
+    if not may_access_erp_admin(role):
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+    created_by = str((getattr(request.state, "auth", None) or {}).get("sub", "") or "")
+    from ..services.fabric_opening_import import apply_opening_import
+
+    try:
+        return apply_opening_import(raw, created_by=created_by, skip_conflicts=bool(skip_conflicts))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.post("/{item_id}/image")

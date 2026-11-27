@@ -262,3 +262,76 @@ def test_cutting_revision_uses_reserved_metres_then_free_stock(monkeypatch):
         apply_cutting_plan("SO-0009", "PFLEX004", [
             {"sku": "KURTI-XL", "so_qty": 0, "planned_qty": 100},
         ], "Too many", anchor_sku="KURTI-S")
+
+
+def test_case_duplicate_visibility_coalesces_and_merge_repairs():
+    from backend.services.fabric_code_normalize import merge_printed_fabric_case_duplicates
+
+    _item_opening("P356Blue Test", 1000)
+    # Two checked rows that differ only by case (the production bug).
+    conn = grey_db._connect()
+    conn.execute(
+        """INSERT INTO printed_fabric_checked_stock(
+            fabric_code, fabric_name, checked_qty, passed_qty, reserved_qty, available_qty)
+           VALUES (?,?,?,?,?,?),(?,?,?,?,?,?)""",
+        (
+            "P356Blue Test", "P356Blue Test", 400, 400, 100, 300,
+            "P356BLUE TEST", "P356BLUE TEST", 200, 200, 0, 200,
+        ),
+    )
+    conn.execute(
+        """INSERT INTO printed_fabric_reservations(
+            fabric_code, fabric_name, so_number, sku, qty, unit, status, remarks, reservation_kind)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        ("P356Blue Test", "P356Blue Test", "SO-1", "KURTI-S", 100, "MTR", "Active", "alloc", "so"),
+    )
+    conn.commit()
+    conn.close()
+
+    vis = grey_db.printed_stock_visibility("P356Blue Test")
+    assert len(vis) == 1
+    assert vis[0]["so_allocated"] == 100
+    assert vis[0]["free_available"] == pytest.approx(900, abs=0.1)  # 500 checked free + 400 opening
+
+    report = merge_printed_fabric_case_duplicates(dry_run=False)
+    assert report["merged"] >= 1
+    conn = grey_db._connect()
+    n = conn.execute(
+        "SELECT COUNT(*) c FROM printed_fabric_checked_stock WHERE UPPER(TRIM(fabric_code))='P356BLUE TEST'"
+    ).fetchone()["c"]
+    conn.close()
+    assert n == 1
+
+
+def test_advance_reserve_rolls_back_opening_convert_on_failure(monkeypatch):
+    """Opening→Checked must not commit if the advance reservation itself fails."""
+    from backend.services import printed_flexibility as pf
+
+    _item_opening("PFROLL1", 500)
+    # No checked stock yet — convert would be required.
+    # Force failure after convert by breaking the style check is already done;
+    # instead patch convert to succeed then make stock lookup fail mid-txn via monkeypatch
+    # on _audit_fabric raising.
+    calls = {"n": 0}
+    real_audit = grey_db._audit_fabric
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("audit boom")
+
+    monkeypatch.setattr(grey_db, "_audit_fabric", boom)
+    with pytest.raises(RuntimeError, match="audit boom"):
+        reserve_for_style({
+            "fabric_code": "PFROLL1", "style_code": "KURTI", "qty": 120, "reason": "Hold",
+        })
+    monkeypatch.setattr(grey_db, "_audit_fabric", real_audit)
+    # No orphan conversion, no reservation.
+    conn = grey_db._connect()
+    conv = conn.execute("SELECT COUNT(*) c FROM printed_fabric_opening_conversions").fetchone()["c"]
+    adv = conn.execute(
+        "SELECT COUNT(*) c FROM printed_fabric_reservations WHERE reservation_kind='advance'"
+    ).fetchone()["c"]
+    conn.close()
+    assert conv == 0
+    assert adv == 0
+    assert calls["n"] == 1

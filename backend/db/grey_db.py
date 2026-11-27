@@ -1575,42 +1575,76 @@ def _audit_fabric(conn, *, event_type: str, fabric_code: str, qty: float, reason
     )
 
 
-def printed_stock_visibility(fabric_code: str = "") -> List[Dict[str, Any]]:
-    """Total checked, SO allocated, style advance, and free metres — one stock row.
+def printed_stock_visibility(fabric_code: str = "", *, include_zero: bool = False) -> List[Dict[str, Any]]:
+    """Total checked, SO allocated, style advance, and free metres — one stock row per P-Code.
 
+    Rows that differ only by fabric_code casing are coalesced (Item Master casing preferred).
     Free includes Item Master Opening Stock that has not yet been converted into
     checked stock (same pool MRP allocation uses). Opening is never double-counted
     with checked free.
     """
     from ..services.fabric_allocation_engine import printed_opening_allocatable
+    from ..services.fabric_code_normalize import canonical_printed_fabric_code
 
     conn = _connect()
     code = (fabric_code or "").strip().upper()
     where = "WHERE UPPER(TRIM(s.fabric_code))=?" if code else ""
     params: tuple = (code,) if code else ()
     stocks = conn.execute(
-        f"SELECT fabric_code, fabric_name, checked_qty, passed_qty, reserved_qty, available_qty FROM printed_fabric_checked_stock s {where} ORDER BY fabric_code",
+        f"""SELECT fabric_code, fabric_name,
+                   COALESCE(checked_qty,0) checked_qty,
+                   COALESCE(passed_qty,0) passed_qty,
+                   COALESCE(reserved_qty,0) reserved_qty,
+                   COALESCE(available_qty,0) available_qty
+            FROM printed_fabric_checked_stock s {where} ORDER BY fabric_code""",
         params,
     ).fetchall()
-    out = []
-    seen: set[str] = set()
+    # Coalesce case-variants into one bucket keyed by UPPER(TRIM).
+    buckets: dict[str, dict[str, Any]] = {}
     for s in stocks:
         fc = str(s["fabric_code"] or "")
-        seen.add(fc.upper())
+        uk = fc.upper().strip()
+        if not uk:
+            continue
+        b = buckets.get(uk)
+        if not b:
+            try:
+                canon = canonical_printed_fabric_code(fc, conn=conn)
+            except Exception:
+                canon = fc
+            buckets[uk] = {
+                "fabric_code": canon or fc,
+                "fabric_name": s["fabric_name"] or canon or fc,
+                "checked_qty": 0.0,
+                "reserved_qty": 0.0,
+                "available_qty": 0.0,
+            }
+            b = buckets[uk]
+        b["checked_qty"] += float(s["checked_qty"] or 0)
+        b["reserved_qty"] += float(s["reserved_qty"] or 0)
+        b["available_qty"] += float(s["available_qty"] or 0)
+        if s["fabric_name"] and not b.get("fabric_name"):
+            b["fabric_name"] = s["fabric_name"]
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for uk, b in buckets.items():
+        fc = str(b["fabric_code"])
+        seen.add(uk)
         so_row = conn.execute(
             """SELECT COALESCE(SUM(qty),0) q FROM printed_fabric_reservations
-               WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?)) AND status='Active'
+               WHERE UPPER(TRIM(fabric_code))=? AND status='Active'
                  AND COALESCE(reservation_kind,'so')!='advance'
                  AND TRIM(COALESCE(so_number,''))!=''""",
-            (fc,),
+            (uk,),
         ).fetchone()
         adv_row = conn.execute(
             """SELECT COALESCE(SUM(qty),0) q FROM printed_fabric_reservations
-               WHERE UPPER(TRIM(fabric_code))=UPPER(TRIM(?)) AND status='Active'
+               WHERE UPPER(TRIM(fabric_code))=? AND status='Active'
                  AND COALESCE(reservation_kind,'so')='advance'""",
-            (fc,),
+            (uk,),
         ).fetchone()
-        checked_free = round(float(s["available_qty"] or 0), 3)
+        checked_free = round(float(b["available_qty"] or 0), 3)
         opening_free = 0.0
         try:
             opening_free = round(float(printed_opening_allocatable(fc).get("allocatable") or 0), 3)
@@ -1618,22 +1652,20 @@ def printed_stock_visibility(fabric_code: str = "") -> List[Dict[str, Any]]:
             opening_free = 0.0
         out.append({
             "fabric_code": fc,
-            "fabric_name": s["fabric_name"] or "",
-            "total_stock": round(checked_free + float(s["reserved_qty"] or 0) + opening_free, 3),
+            "fabric_name": b.get("fabric_name") or fc,
+            "total_stock": round(checked_free + float(b["reserved_qty"] or 0) + opening_free, 3),
             "so_allocated": round(float(so_row["q"] or 0), 3),
             "advance_reserved": round(float(adv_row["q"] or 0), 3),
             "free_available": round(checked_free + opening_free, 3),
             "checked_free": checked_free,
             "opening_free": opening_free,
-            "reserved_qty": round(float(s["reserved_qty"] or 0), 3),
+            "reserved_qty": round(float(b["reserved_qty"] or 0), 3),
         })
     conn.close()
-    # Opening-only fabrics (Item Master Opening Stock, never QC'd) still appear for advance reserve.
+    # Opening-only / Item Master fabrics (never QC'd) still appear.
     opening_codes: list[str] = []
     if code:
         if code not in seen:
-            # Resolve canonical Item Master casing — opening_stock lookups used to fail
-            # when callers passed UPPER(code) from the visibility filter.
             canonical = code
             try:
                 from ..db.item_db import opening_stock_for_code
@@ -1645,18 +1677,25 @@ def printed_stock_visibility(fabric_code: str = "") -> List[Dict[str, Any]]:
             opening_codes = [canonical]
     else:
         try:
-            from ..db.item_db import list_opening_printed_fabric_codes
-            opening_codes = list_opening_printed_fabric_codes()
+            from ..db.item_db import list_opening_printed_fabric_codes, list_items
+            opening_codes = list(list_opening_printed_fabric_codes() or [])
+            if include_zero:
+                # All active SFG parents for complete warehouse visibility (GF handled separately).
+                for it in list_items(parent_only=True, limit=20000) or []:
+                    tcode = str(it.get("item_type_code") or "").upper()
+                    if tcode == "SFG":
+                        opening_codes.append(str(it.get("item_code") or ""))
         except Exception:
-            opening_codes = []
+            pass
     for fc in opening_codes:
-        if fc.upper() in seen:
+        if not fc or fc.upper() in seen:
             continue
+        seen.add(fc.upper())
         try:
             opening_free = round(float(printed_opening_allocatable(fc).get("allocatable") or 0), 3)
         except Exception:
             opening_free = 0.0
-        if opening_free <= 0:
+        if opening_free <= 0 and not include_zero:
             continue
         out.append({
             "fabric_code": fc,

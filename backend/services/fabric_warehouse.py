@@ -741,7 +741,9 @@ def doc_link(row: Dict[str, Any]) -> Dict[str, str]:
 
 # ── Live stock (authoritative tables, not ledger) ────────────────────────────
 
-def _grey_stock_rows(grey: Optional[sqlite3.Connection], needle: str) -> List[Dict[str, Any]]:
+def _grey_stock_rows(
+    grey: Optional[sqlite3.Connection], needle: str, *, include_zero: bool = False,
+) -> List[Dict[str, Any]]:
     """Grey checked stock (fabric_checked_stock) + tracker receipts still awaiting QC."""
     names: Dict[str, str] = {}
     checked: Dict[str, Dict[str, float]] = {}
@@ -777,38 +779,50 @@ def _grey_stock_rows(grey: Optional[sqlite3.Connection], needle: str) -> List[Di
             continue
         ck = checked.get(c, {"checked": 0.0, "reserved": 0.0, "free": 0.0})
         unch = round(max(received.get(c, 0.0) - logged.get(c, 0.0), 0.0), 3)
-        if ck["checked"] <= _EPS and unch <= _EPS:
+        if ck["checked"] <= _EPS and unch <= _EPS and not include_zero:
             continue
         out.append({
             "pcode": c, "name": names.get(c, ""),
             "physical": round(ck["checked"] + unch, 3), "checked": ck["checked"],
             "unchecked": unch, "so_allocated": ck["reserved"], "advance_reserved": 0.0,
             "free": ck["free"], "opening_pool": 0.0,
-            "location": "Checked" if ck["checked"] > _EPS and unch <= _EPS
-            else ("Checked + Unchecked" if ck["checked"] > _EPS else "Unchecked"),
+            "location": (
+                "Zero" if ck["checked"] <= _EPS and unch <= _EPS
+                else ("Checked" if ck["checked"] > _EPS and unch <= _EPS
+                      else ("Checked + Unchecked" if ck["checked"] > _EPS else "Unchecked"))
+            ),
         })
     return out
 
 
 def stock_by_pcode(
     pcode: str = "", q: str = "", stock_category: str = DEFAULT_STOCK_CATEGORY,
+    *,
+    include_zero: bool = True,
 ) -> List[Dict[str, Any]]:
     from ..db import grey_db
 
     category = norm_category(stock_category)
 
     code = _norm(pcode)
-    vis = grey_db.printed_stock_visibility(code if code and not q else "")
+    # include_zero lists Item Master fabrics with no movements (visibility only; zeros don't change KPIs).
+    vis = grey_db.printed_stock_visibility(
+        code if code and not q else "", include_zero=bool(include_zero) and category != "grey",
+    )
     unchecked: Dict[str, float] = {}
-    location: Dict[str, str] = {}
     grey = _open(_grey_path())
     try:
         for r in _rows(
             grey,
-            """SELECT TRIM(fabric_code) AS c, SUM(qty) AS q FROM printed_fabric_stock
-               WHERE status='Unchecked' AND COALESCE(qty,0) > 0.001 GROUP BY TRIM(fabric_code)""",
+            """SELECT UPPER(TRIM(fabric_code)) AS uk, MAX(TRIM(fabric_code)) AS c, SUM(qty) AS q
+               FROM printed_fabric_stock
+               WHERE status='Unchecked' AND COALESCE(qty,0) > 0.001
+               GROUP BY UPPER(TRIM(fabric_code))""",
         ):
-            unchecked[str(r["c"])] = round(_f(r["q"]), 3)
+            unchecked[str(r["uk"] or "").upper()] = {
+                "code": str(r["c"] or ""),
+                "qty": round(_f(r["q"]), 3),
+            }
     finally:
         if grey is not None:
             grey.close()
@@ -818,10 +832,13 @@ def stock_by_pcode(
     needle = (q or code).strip().lower()
     for v in vis:
         fc = str(v["fabric_code"])
-        seen.add(fc)
+        uk = fc.upper()
+        seen.add(uk)
         if needle and needle not in fc.lower() and needle not in str(v.get("fabric_name") or "").lower():
             continue
-        unch = unchecked.get(fc, 0.0)
+        unch_info = unchecked.get(uk) or {}
+        unch = float(unch_info.get("qty") or 0) if isinstance(unch_info, dict) else float(unch_info or 0)
+        # total_stock already = checked free + reserved + opening; do not add opening again.
         checked_physical = round(_f(v["total_stock"]), 3)
         out.append({
             "pcode": fc,
@@ -835,13 +852,16 @@ def stock_by_pcode(
             "opening_pool": round(_f(v.get("opening_free")), 3),
             "location": "Checked" if checked_physical > _EPS and unch <= _EPS
             else ("Checked + Unchecked" if checked_physical > _EPS and unch > _EPS
-                  else ("Unchecked" if unch > _EPS else "—")),
+                  else ("Unchecked" if unch > _EPS else ("Zero" if include_zero else "—"))),
         })
-    for fc, unch in unchecked.items():
-        if fc in seen:
+    for uk, unch_info in unchecked.items():
+        if uk in seen:
             continue
-        if needle and needle not in fc.lower():
+        fc = unch_info.get("code") if isinstance(unch_info, dict) else uk
+        unch = float(unch_info.get("qty") or 0) if isinstance(unch_info, dict) else float(unch_info or 0)
+        if needle and needle not in str(fc).lower():
             continue
+        seen.add(uk)
         out.append({
             "pcode": fc, "name": "", "physical": unch, "checked": 0.0, "unchecked": unch,
             "so_allocated": 0.0, "advance_reserved": 0.0, "free": 0.0, "opening_pool": 0.0,
@@ -852,7 +872,28 @@ def stock_by_pcode(
         grey_codes = _grey_code_set(grey2)
         if category != "sfg":
             have = {r["pcode"].upper() for r in out}
-            out += [r for r in _grey_stock_rows(grey2, needle) if r["pcode"].upper() not in have]
+            out += [r for r in _grey_stock_rows(grey2, needle, include_zero=include_zero) if r["pcode"].upper() not in have]
+            if include_zero:
+                # Item Master GF parents with no grey stock rows yet.
+                try:
+                    from ..db.item_db import list_items
+                    for it in list_items(parent_only=True, limit=20000) or []:
+                        if str(it.get("item_type_code") or "").upper() != "GF":
+                            continue
+                        fc = str(it.get("item_code") or "").strip()
+                        if not fc or fc.upper() in have:
+                            continue
+                        if needle and needle not in fc.lower() and needle not in str(it.get("item_name") or "").lower():
+                            continue
+                        have.add(fc.upper())
+                        out.append({
+                            "pcode": fc, "name": it.get("item_name") or fc,
+                            "physical": 0.0, "checked": 0.0, "unchecked": 0.0,
+                            "so_allocated": 0.0, "advance_reserved": 0.0, "free": 0.0,
+                            "opening_pool": 0.0, "location": "Zero",
+                        })
+                except Exception:
+                    pass
     finally:
         if grey2 is not None:
             grey2.close()

@@ -264,10 +264,10 @@ export default function GreyFabric() {
   const [pfSkuQtyMap, setPFSkuQtyMap] = useState<Record<string, number>>({})
 
   // Planning / Allocation
-  const [planView, setPlanView] = useState<'tree' | 'allocate' | 'reallocate' | 'print-jo' | 'history' | 'report'>(() => {
+  const [planView, setPlanView] = useState<'tree' | 'allocate' | 'reallocate' | 'release' | 'print-jo' | 'history' | 'report'>(() => {
     try {
       const p = new URLSearchParams(window.location.search).get('plan')
-      const allowed = ['tree', 'allocate', 'reallocate', 'print-jo', 'history', 'report'] as const
+      const allowed = ['tree', 'allocate', 'reallocate', 'release', 'print-jo', 'history', 'report'] as const
       return (allowed.includes(p as typeof allowed[number]) ? p : 'tree') as typeof allowed[number]
     } catch {
       return 'tree'
@@ -284,6 +284,10 @@ export default function GreyFabric() {
   const [reallocForm, setReallocForm] = useState({
     reservation_id: '', from_so: '', from_sku: '', to_so: '', to_sku: '', printed_code: '', qty: '', reason: '',
   })
+  const [releaseFilter, setReleaseFilter] = useState({ fabric: '', so: '', closedJoOnly: false })
+  const [releaseSelected, setReleaseSelected] = useState<number[]>([])
+  const [releaseReason, setReleaseReason] = useState('')
+  const [releasePartial, setReleasePartial] = useState<Record<number, string>>({})
   const [planMsg, setPlanMsg] = useState('')
   const [advanceForm, setAdvanceForm] = useState({
     fabric_code: '', style_code: '', sku: '', qty: 0, reason: '', level: 'parent' as 'parent' | 'size',
@@ -520,6 +524,19 @@ export default function GreyFabric() {
     queryFn: () => api.get('/grey/planning/printed-allocations', { params: { status: 'Active' } }).then(r => r.data),
     enabled: tab === 'planning' && (planView === 'reallocate' || planView === 'allocate'),
   })
+  const { data: planReleaseRows = [] } = useQuery({
+    queryKey: ['grey-planning-pf-release', releaseFilter.fabric, releaseFilter.so, releaseFilter.closedJoOnly],
+    queryFn: () => api.get('/grey/planning/printed-allocations', {
+      params: {
+        status: 'Active',
+        kind: 'so',
+        fabric_code: releaseFilter.fabric || undefined,
+        so_number: releaseFilter.so || undefined,
+        closed_jo_only: releaseFilter.closedJoOnly || undefined,
+      },
+    }).then(r => r.data),
+    enabled: tab === 'planning' && planView === 'release',
+  })
 
   const invalidatePlanning = () => {
     qc.invalidateQueries({ queryKey: ['grey-planning-tree'] })
@@ -528,8 +545,11 @@ export default function GreyFabric() {
     qc.invalidateQueries({ queryKey: ['grey-planning-print-jo'] })
     qc.invalidateQueries({ queryKey: ['grey-planning-fg-report'] })
     qc.invalidateQueries({ queryKey: ['grey-planning-pf-alloc'] })
+    qc.invalidateQueries({ queryKey: ['grey-planning-pf-release'] })
     qc.invalidateQueries({ queryKey: ['printed-fabric-checked'] })
     qc.invalidateQueries({ queryKey: ['printed-ready-to-cut'] })
+    qc.invalidateQueries({ queryKey: ['fw-dash'] })
+    qc.invalidateQueries({ queryKey: ['fw-stock'] })
   }
 
   const greyAllocMut = useMutation({
@@ -546,6 +566,35 @@ export default function GreyFabric() {
     mutationFn: (b: object) => api.post('/grey/planning/reallocate-printed', b),
     onSuccess: () => { setPlanMsg('Reallocated (print history unchanged)'); invalidatePlanning() },
     onError: (e: any) => setPlanMsg(e?.response?.data?.detail || e?.message || 'Reallocate failed'),
+  })
+  const releaseOneMut = useMutation({
+    mutationFn: (b: { id: number; qty?: number; reason: string }) =>
+      api.post(`/grey/planning/release-printed/${b.id}`, {
+        reason: b.reason,
+        qty: b.qty,
+        user_name: '',
+      }),
+    onSuccess: () => {
+      setPlanMsg('Reservation released to Free Stock (physical unchanged)')
+      setReleaseSelected([])
+      invalidatePlanning()
+    },
+    onError: (e: any) => setPlanMsg(e?.response?.data?.detail || e?.message || 'Release failed'),
+  })
+  const releaseBulkMut = useMutation({
+    mutationFn: (b: { ids: number[]; reason: string }) =>
+      api.post('/grey/planning/release-printed-bulk', {
+        reservation_ids: b.ids,
+        reason: b.reason,
+        user_name: '',
+      }),
+    onSuccess: (res) => {
+      const d = res?.data
+      setPlanMsg(`Released ${d?.released ?? 0}; failed ${d?.failed ?? 0}`)
+      setReleaseSelected([])
+      invalidatePlanning()
+    },
+    onError: (e: any) => setPlanMsg(e?.response?.data?.detail || e?.message || 'Bulk release failed'),
   })
 
   const mrpCreateMut = useMutation({
@@ -1255,6 +1304,7 @@ export default function GreyFabric() {
                 ['tree', 'MRP Tree'],
                 ['allocate', 'Allocate'],
                 ['reallocate', 'Reallocate'],
+                ['release', 'Release SO'],
                 ['print-jo', 'Printing JO'],
                 ['report', 'FG Status'],
                 ['history', 'Audit Trail'],
@@ -1422,6 +1472,111 @@ export default function GreyFabric() {
                     <div key={r.id} className="font-mono">#{r.id} {r.fabric_code} → {r.sku}/{r.so_number} {r.qty}m</div>
                   ))}
                 </div>
+              </div>
+            </div>
+          )}
+
+          {planView === 'release' && (
+            <div className="bg-white rounded-xl border p-4 space-y-3">
+              <h3 className="text-sm font-semibold">Release SO Fabric Reservations</h3>
+              <p className="text-xs text-gray-600 max-w-3xl">
+                Use when fabric was already physically issued / Cutting JO is closed but Confirm Issue was not available.
+                Releases move reserved metres to <b>Free Stock</b> without changing physical stock or JO history.
+                Style advance holds stay on Printed Fabric → Advance Reservation.
+              </p>
+              <div className="flex flex-wrap gap-2 items-end text-xs">
+                <label>P-Code
+                  <input className="mt-1 block border rounded px-2 py-1.5" value={releaseFilter.fabric}
+                    onChange={e => setReleaseFilter(f => ({ ...f, fabric: e.target.value }))} placeholder="Filter fabric" />
+                </label>
+                <label>SO
+                  <input className="mt-1 block border rounded px-2 py-1.5" value={releaseFilter.so}
+                    onChange={e => setReleaseFilter(f => ({ ...f, so: e.target.value }))} placeholder="Filter SO" />
+                </label>
+                <label className="flex items-center gap-2 pb-1.5">
+                  <input type="checkbox" checked={releaseFilter.closedJoOnly}
+                    onChange={e => setReleaseFilter(f => ({ ...f, closedJoOnly: e.target.checked }))} />
+                  Closed Cutting JO only
+                </label>
+                <label className="flex-1 min-w-[200px]">Release reason *
+                  <input className="mt-1 w-full border rounded px-2 py-1.5" value={releaseReason}
+                    onChange={e => setReleaseReason(e.target.value)}
+                    placeholder="e.g. JO closed — fabric already issued physically" />
+                </label>
+                <button type="button"
+                  disabled={!releaseReason.trim() || releaseSelected.length === 0 || releaseBulkMut.isPending}
+                  onClick={() => releaseBulkMut.mutate({ ids: releaseSelected, reason: releaseReason.trim() })}
+                  className="px-3 py-1.5 bg-amber-700 text-white rounded text-xs disabled:opacity-50">
+                  Bulk release ({releaseSelected.length})
+                </button>
+              </div>
+              <div className="overflow-auto max-h-[28rem] border rounded">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 sticky top-0">
+                    <tr>
+                      <th className="px-2 py-1.5 text-left">
+                        <input type="checkbox"
+                          checked={releaseSelected.length > 0 && releaseSelected.length === (planReleaseRows as any[]).length}
+                          onChange={e => {
+                            if (e.target.checked) setReleaseSelected((planReleaseRows as any[]).map((r: any) => r.id))
+                            else setReleaseSelected([])
+                          }} />
+                      </th>
+                      <th className="px-2 py-1.5 text-left">ID</th>
+                      <th className="px-2 py-1.5 text-left">P-Code</th>
+                      <th className="px-2 py-1.5 text-left">SO</th>
+                      <th className="px-2 py-1.5 text-left">SKU</th>
+                      <th className="px-2 py-1.5 text-right">Qty</th>
+                      <th className="px-2 py-1.5 text-left">JO</th>
+                      <th className="px-2 py-1.5 text-left">Status</th>
+                      <th className="px-2 py-1.5 text-left">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(planReleaseRows as any[]).length === 0 && (
+                      <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-400">No active SO reservations for this filter</td></tr>
+                    )}
+                    {(planReleaseRows as any[]).map((r: any) => (
+                      <tr key={r.id} className="border-t hover:bg-amber-50/40">
+                        <td className="px-2 py-1.5">
+                          <input type="checkbox" checked={releaseSelected.includes(r.id)}
+                            onChange={e => setReleaseSelected(sel => e.target.checked ? [...sel, r.id] : sel.filter(x => x !== r.id))} />
+                        </td>
+                        <td className="px-2 py-1.5 font-mono">#{r.id}</td>
+                        <td className="px-2 py-1.5 font-mono">{r.fabric_code}</td>
+                        <td className="px-2 py-1.5">{r.so_number}</td>
+                        <td className="px-2 py-1.5 font-mono">{r.sku}</td>
+                        <td className="px-2 py-1.5 text-right tabular-nums">{r.qty}</td>
+                        <td className="px-2 py-1.5">
+                          {r.jo_number || '—'}
+                          {r.jo_closed ? <span className="ml-1 text-amber-700">(closed)</span> : null}
+                        </td>
+                        <td className="px-2 py-1.5">{r.status}{r.stage ? ` / ${r.stage}` : ''}</td>
+                        <td className="px-2 py-1.5">
+                          <div className="flex flex-wrap gap-1 items-center">
+                            <input className="w-16 border rounded px-1 py-0.5" placeholder="partial"
+                              value={releasePartial[r.id] || ''}
+                              onChange={e => setReleasePartial(m => ({ ...m, [r.id]: e.target.value }))} />
+                            <button type="button"
+                              disabled={!releaseReason.trim() || releaseOneMut.isPending}
+                              className="px-2 py-0.5 bg-[#002B5B] text-white rounded disabled:opacity-50"
+                              onClick={() => {
+                                const raw = (releasePartial[r.id] || '').trim()
+                                const qty = raw === '' ? undefined : Number(raw)
+                                if (raw !== '' && (!Number.isFinite(qty) || (qty as number) <= 0)) {
+                                  setPlanMsg('Partial qty must be a positive number')
+                                  return
+                                }
+                                releaseOneMut.mutate({ id: r.id, qty, reason: releaseReason.trim() })
+                              }}>
+                              Release
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
